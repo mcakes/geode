@@ -3,24 +3,17 @@ use super::tree::{Direction, DividerAddress, Orientation, Rect, TileId, Tree};
 use crate::actions::ActionId;
 use std::collections::BTreeMap;
 
-/// One workspace's complete layout state (dock-regions task): the i3-style
-/// split [`Tree`] for the main working set, the three fixed [`Docks`], and
-/// which of those regions currently holds focus. The navigation verbs live
-/// here rather than on `Tree` directly because every one of them must
-/// consult `region` first — the same keystroke means "move the tree's
-/// focus" or "adjust the focused dock" depending on where focus lives, and
-/// this struct is the single place that decision is made (the
-/// [`apply_workspace_action`] router below just names the verb).
+/// One workspace's main tree, three dock trees, and focused region.
+/// Region-aware verbs live here so the same action reaches the correct tree
+/// and preserves visibility/focus invariants. [`apply_workspace_action`] maps
+/// action IDs to these pure operations.
 #[derive(Debug, Default)]
 pub struct Workspace {
     tree: Tree,
     docks: Docks,
-    /// Where focus lives. Invariant: `Dock(side)` only while that dock is
-    /// **visible** (spec 2026-09-08 add-tile §8 — an empty visible dock
-    /// may hold focus so an add can fill it). Every verb that can hide a
-    /// dock re-derives this via [`Workspace::fallback_region`], and
-    /// session restore heals a region naming a hidden dock back to
-    /// `Main`.
+    /// The focused region. A focused dock must be visible, but may be empty
+    /// so a subsequent add can fill it. Hiding that dock selects a fallback;
+    /// restoration repairs references to hidden docks.
     region: FocusRegion,
 }
 
@@ -58,26 +51,16 @@ impl Workspace {
         self.tree.is_empty() && self.docks.tiles().next().is_none()
     }
 
-    /// The tile that currently has focus, wherever it lives — the tree's
-    /// focused tile while `region` is `Main`, the focused dock's own
-    /// tree's focused tile otherwise. `None` only on a workspace with
-    /// nothing focusable.
+    /// Focus in the selected region's tree. An empty focused region returns
+    /// `None` even when another region contains tiles.
     pub fn focused_tile(&self) -> Option<TileId> {
         self.tree_for(self.region).focused()
     }
 
-    /// The focused tile's pixel rect inside `area`, through the same
-    /// pure layout `render` paints from (`dock_layout` carves the visible
-    /// docks out of `area`; each region's own `Tree::layout` places its
-    /// tiles). `None` when nothing is focused — an empty tree, or focus
-    /// resting on an empty visible dock. `AddDirection::Auto`'s input
-    /// (spec 2026-09-08 add-tile §4.1); not called per frame.
-    ///
-    /// Under a fullscreen tile the layout returns that tile over the
-    /// whole tree area, so `Auto` reads the fullscreen shape, not the
-    /// tile's real slot; `Tree::split` exits fullscreen before splitting.
-    /// Accepted: a fullscreened tile being split is rare and the result
-    /// is still a valid split.
+    /// Find the focused tile's rectangle using dock and tree layout. Return
+    /// `None` for an empty focused region. `AddDirection::Auto` uses this shape.
+    /// When the main tree is fullscreen, it sees the fullscreen tile's rectangle
+    /// inside the dock-carved tree area, not the underlying split slot.
     pub fn focused_tile_rect(&self, area: Rect) -> Option<Rect> {
         let focused = self.focused_tile()?;
         let (tree_area, dock_rects) = super::docks::layout(&self.docks, area);
@@ -108,10 +91,7 @@ impl Workspace {
             .unwrap_or(FocusRegion::Main)
     }
 
-    /// The tree a region names: the main tree for `Main`, a dock's own
-    /// tree for `Dock(side)` (post-merge review cleanup 9 — the drop
-    /// verbs each restated this two-arm match per use; one accessor pair
-    /// keeps them saying *what* tree they mean, not how to reach it).
+    /// Select the main or named dock tree independently of current focus.
     fn tree_for(&self, region: FocusRegion) -> &Tree {
         match region {
             FocusRegion::Main => &self.tree,
@@ -127,15 +107,9 @@ impl Workspace {
         }
     }
 
-    /// Move focus into `region`, upholding the invariant every verb that
-    /// sends focus into a dock must pair with the assignment (post-merge
-    /// review cleanup 9 — previously each verb hand-paired `region = ...`
-    /// with its own `set_visible(true)`): the region field may only name
-    /// a dock while that dock is visible, so entering one auto-shows it.
-    /// Entering `Main` changes no visibility — hiding an emptied source
-    /// dock stays the leaving verb's own job (`remove_tile_anywhere`,
-    /// `move_to_dock`'s arms), because whether the source empties is
-    /// knowledge only the verb has.
+    /// Enter a region, showing a destination dock to keep focus visible.
+    /// Source-dock hiding belongs to the move/removal operation that knows
+    /// whether that source emptied.
     fn enter_region(&mut self, region: FocusRegion) {
         if let FocusRegion::Dock(side) = region {
             self.docks.get_mut(side).set_visible(true);
@@ -167,19 +141,10 @@ impl Workspace {
         }
     }
 
-    /// Click-to-focus on an EMPTY visible dock (2026-09-19, user ruling
-    /// "double-click should work on dock areas too"): the region moves to
-    /// the dock so an add — `mod+n`, `ctrl+k`, the empty-dock hint's own
-    /// double-click — lands in it, exactly the state [`toggle_dock`]'s
-    /// show arm leaves. Distinct from [`focus_dock`] on purpose: that is
-    /// the DIRECTIONAL target rule (an empty dock is never where `mod+l`
-    /// arrives), this the mouse's. Refused (false) on a hidden dock or
-    /// an occupied one — an occupied dock's click lands on a tile and
-    /// goes through [`focus_dock_tile`].
-    ///
-    /// [`toggle_dock`]: Self::toggle_dock
-    /// [`focus_dock`]: Self::focus_dock
-    /// [`focus_dock_tile`]: Self::focus_dock_tile
+    /// Focus a visible empty dock and exit main fullscreen so a subsequent
+    /// add lands there. Refuse hidden, occupied, or already-focused docks.
+    /// Directional navigation instead uses [`Self::focus_dock`], which requires
+    /// an occupied dock; tile clicks use [`Self::focus_dock_tile`].
     pub fn focus_empty_dock(&mut self, side: DockSide) -> bool {
         let dock = self.docks.get(side);
         if !dock.visible() || !dock.tree().is_empty() || self.region == FocusRegion::Dock(side) {
@@ -190,11 +155,8 @@ impl Workspace {
         true
     }
 
-    /// Click-to-focus on a specific tile inside a dock (dock-trees task —
-    /// the dock counterpart of [`Workspace::focus_main_tile`]): focus that
-    /// tile within the dock's own tree AND move the region there. Refused
-    /// (false) when the dock is hidden or the tile isn't in its tree —
-    /// a failed click must not move the region.
+    /// Focus a tile inside a visible dock and select that region. Refuse a
+    /// hidden dock or an ID absent from its tree without moving the region.
     pub fn focus_dock_tile(&mut self, side: DockSide, id: TileId) -> bool {
         if self.docks.get(side).visible() && self.docks.get_mut(side).tree_mut().focus(id) {
             self.region = FocusRegion::Dock(side);
@@ -204,20 +166,11 @@ impl Workspace {
         }
     }
 
-    /// Directional focus, region-aware. From `Main`, the tree's own
-    /// geometric navigation runs first; only at an edge (no neighbor) does
-    /// focus cross into the dock on that side — Left/Right into the
-    /// left/right dock, Down into the bottom one, Up never (the toolbar
-    /// owns the top). While a tree tile is fullscreen the docks are not
-    /// painted at all, so focus never crosses into them. From a dock, the
-    /// dock's *own* tree navigates first, exactly like the main tree
-    /// (dock-trees task); only when it has no neighbor that way does the
-    /// region cross — and region crossing stays edge-triggered and
-    /// inward-only: the direction back toward center lands on the tree's
-    /// focused tile, or — when the tree is empty — crosses straight
-    /// through to the opposite side dock if that is focusable (the bottom
-    /// dock has no opposite, so from it an inward Up over an empty tree
-    /// stays put). Every other direction at a dock tree's edge is a no-op.
+    /// Navigate within the current tree first. At a main-tree edge, enter the
+    /// visible occupied dock on that side; there is no upper dock, and main
+    /// fullscreen prevents crossing. At a dock edge, only the inward direction
+    /// crosses to main. If main is empty, left/right can cross to the opposite
+    /// occupied visible dock; bottom has no opposite. Other directions stop.
     pub fn focus_direction(&mut self, dir: Direction) {
         match self.region {
             FocusRegion::Main => {
@@ -269,13 +222,9 @@ impl Workspace {
         }
     }
 
-    /// Move-tile (`ctrl+alt+arrows`), region-aware (dock-trees task):
-    /// swap with the geometric neighbor within whichever tree holds focus
-    /// — the main tree while `Main` is focused, the focused dock's own
-    /// tree otherwise. A directional move never crosses regions: at the
-    /// dock tree's edge it is a no-op, exactly like the main tree at its
-    /// own edge (`dock::move_*` is the verb that moves tiles between
-    /// regions).
+    /// Move within the focused region's tree: swap a plain tile with its
+    /// neighbor or pop a stack member out. Directional moves do not cross
+    /// regions; [`Self::move_to_dock`] handles region transfers.
     pub fn move_direction(&mut self, dir: Direction) {
         match self.region {
             FocusRegion::Main => {
@@ -287,26 +236,13 @@ impl Workspace {
         }
     }
 
-    /// Resize, region-aware. While `Main` is focused this is exactly the
-    /// old behavior: move the divider adjacent to the focused tile by
-    /// [`RESIZE_STEP`]. While a dock is focused: dividers first, frame
-    /// fallback (dock-trees task) — the dock's own tree gets first claim
-    /// via its `move_divider`, so a split dock resizes internally exactly
-    /// like the main tree; only when no divider moves (a lone tile, no
-    /// split along that axis, or the step was clamped out by `MIN_RATIO` —
-    /// i.e. `move_divider` reported no change) does the *same press* fall
-    /// back to resizing the dock frame itself, adjusting the dock's
-    /// `size`. [`RESIZE_STEP`] is a fraction of the containing split there
-    /// and a fraction of the content area here, the same kind of unit, so
-    /// the one constant serves both (recorded choice: no separate dock
-    /// step). For the frame fallback the key names the direction the
-    /// dock's *inner* edge moves: the left dock grows on Right and shrinks
-    /// on Left, the right dock mirrors that, the bottom dock grows on Up
-    /// and shrinks on Down; the two arrows along the dock's own axis are
-    /// no-ops (a divider along that axis inside the dock tree still moves,
-    /// though — the fallback is per-press, not per-direction-class).
-    /// Clamping to the dock size range happens in
-    /// [`super::docks::Dock::set_size`].
+    /// Resize the focused tree's divider by [`RESIZE_STEP`]. In a dock, if no
+    /// internal divider moves, resize its frame on the same press. This fallback
+    /// also occurs when an internal divider refuses a step at its minimum.
+    ///
+    /// Frame resizing moves the inner edge: left grows rightward, right grows
+    /// leftward, and bottom grows upward. Directions along the frame's other
+    /// axis do nothing. The dock setter clamps size to its allowed range.
     pub fn resize(&mut self, dir: Direction) {
         match self.region {
             FocusRegion::Main => {
@@ -337,13 +273,9 @@ impl Workspace {
         }
     }
 
-    /// Drag one of the main tree's dividers to an absolute cursor position
-    /// (drag-splitters task): a thin forwarding verb to
-    /// [`Tree::drag_divider`], which owns all the validation and clamp
-    /// semantics. Lives here (like [`Workspace::resize`]) because the
-    /// tree field is private — but unlike `resize` it is NOT region-aware:
-    /// a drag names its divider by address, not by where keyboard focus
-    /// happens to live, and deliberately never moves focus or the region.
+    /// Drag a main-tree divider by structural address, using
+    /// [`Tree::drag_divider`]'s validation and clamping. Does not change focus
+    /// or select a region; keyboard focus does not determine the target.
     pub fn drag_main_divider(
         &mut self,
         address: &DividerAddress,
@@ -354,18 +286,9 @@ impl Workspace {
         self.tree.drag_divider(address, x, y, bounds)
     }
 
-    /// [`Workspace::drag_main_divider`]'s dock counterpart: drag a divider
-    /// *inside* one dock's own tree. `bounds` is that dock's laid-out
-    /// frame rect (the drag re-derives sub-rects from it, same as the main
-    /// tree from the tree area). Refused (`false`, tree untouched) while
-    /// the dock is hidden — review-round behavior change, recorded: the
-    /// first cut kept applying to a dock hidden mid-drag (ctrl+[ with the
-    /// button down), which contradicted the rule everywhere else that a
-    /// drag never silently resizes an invisible layout (the shell cancels
-    /// on fullscreen for exactly that reason, and [`Workspace::
-    /// drag_dock_edge`] already refused hidden docks). The dock keeps its
-    /// tree; the in-flight drag just no-ops until release, and nothing
-    /// already applied is undone. Focus and region stay untouched.
+    /// Drag a divider inside a visible dock using its frame as `bounds`.
+    /// A hidden dock refuses the drag without mutation. Focus and region stay
+    /// unchanged; already-applied resize steps are retained.
     pub fn drag_dock_divider(
         &mut self,
         side: DockSide,
@@ -381,21 +304,10 @@ impl Workspace {
         dock.tree_mut().drag_divider(address, x, y, bounds)
     }
 
-    /// Drag a dock's frame edge (the boundary between the dock and the
-    /// main area) to an absolute cursor position: projects the cursor onto
-    /// a size fraction of `area` (the content area `dock_layout` carves —
-    /// the same rect keyboard resize's `RESIZE_STEP` is a fraction of) via
-    /// [`super::dividers::dock_size_from_position`], then routes it
-    /// through [`super::docks::Dock::set_size`], which owns the
-    /// 0.10..=0.50 clamp — so dragging past the range pins at the clamp,
-    /// mirroring [`Tree::drag_divider`]'s clamp-not-fail behavior. `false`
-    /// (untouched) for a degenerate area/cursor or a hidden dock — a
-    /// hidden dock has no visible edge, so an edge drag reaching it can
-    /// only be stale. Also `false` when the clamped size equals the size
-    /// the dock already has (same no-change contract as
-    /// [`Tree::drag_divider`], review fix): a move pinned at a clamp the
-    /// dock is already sitting at must not read as a change, so callers
-    /// can key re-renders and dirty bookkeeping off the return directly.
+    /// Project an absolute cursor position to a dock size within `area`, then
+    /// clamp to the dock's allowed range. Refuse a hidden dock or invalid
+    /// projection. Return true only when size changes by at least 1e-6;
+    /// repeated positions at the clamp do not dirty the session.
     pub fn drag_dock_edge(&mut self, side: DockSide, x: f32, y: f32, area: Rect) -> bool {
         let Some(frac) = super::dividers::dock_size_from_position(side, x, y, area) else {
             return false;
@@ -413,14 +325,9 @@ impl Workspace {
         (dock.size() - before).abs() >= 1e-6
     }
 
-    /// Close the focused tile, wherever it lives. In `Main` this is the
-    /// tree's own close (refocus rule unchanged). In a dock it is the dock
-    /// tree's own close just the same (dock-trees task — the tree
-    /// refocuses a neighbor within the dock); only when that close empties
-    /// the dock's tree does the dock auto-hide and focus fall back per
-    /// [`Workspace::fallback_region`]. A no-op, region untouched, on a
-    /// focused dock that is already empty (spec 2026-09-08 add-tile §8 —
-    /// there is nothing to close, so nothing should hide or fall back).
+    /// Close focus in its region's tree. If removal empties a dock, hide it
+    /// and choose a fallback region. Closing an already-empty focused dock is
+    /// a no-op: its visible, empty focus remains available for adding a tile.
     pub fn close_tile(&mut self) {
         match self.region {
             FocusRegion::Main => self.tree.close(),
@@ -438,31 +345,25 @@ impl Workspace {
         }
     }
 
-    /// `stack::next`/`prev` (tile-stacks spec §4): cycle the focused
-    /// member in whichever tree holds focus. `false` when it is not a
-    /// member.
+    /// Cycle the focused region's stack member; return false for a plain tile.
     pub fn stack_step(&mut self, delta: i64) -> bool {
         let region = self.region;
         self.tree_for_mut(region).stack_step(delta)
     }
 
-    /// `stack::unstack` (spec §4): pop the focused member out beside its
-    /// stack. `false` when it is not a member.
+    /// Pop the focused member beside its stack; return false for a plain tile.
     pub fn unstack_focused(&mut self, orientation: Orientation) -> bool {
         let region = self.region;
         self.tree_for_mut(region).unstack_focused(orientation)
     }
 
-    /// `id`'s `(index, len)` in whichever of this workspace's trees holds
-    /// it as a member (spec §5.1's marker).
+    /// Find `id`'s member index and stack length across this workspace's trees.
     pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
         let region = self.region_of(id)?;
         self.tree_for(region).stack_position(id)
     }
 
-    /// Every member of `id`'s stack, in stack order (tile-stacks spec
-    /// §5.2) — the transient member list's source, over whichever of
-    /// this workspace's trees holds `id`.
+    /// Return ordered members of the stack containing `id` in any region.
     pub fn stack_members(&self, id: TileId) -> Option<Vec<TileId>> {
         let region = self.region_of(id)?;
         self.tree_for(region).stack_members(id)
@@ -480,10 +381,7 @@ impl Workspace {
         }
     }
 
-    /// Reorient the split around the focused tile, in whichever tree holds
-    /// focus (dock-trees task: orientations come with the tree — a dock's
-    /// stack of tiles can be turned into a row and back just like the main
-    /// tree's).
+    /// Reorient the split around focus in the selected region's tree.
     pub fn toggle_split_orientation(&mut self) {
         match self.region {
             FocusRegion::Main => {
@@ -498,19 +396,9 @@ impl Workspace {
         }
     }
 
-    /// Toggle one dock's visibility. Hidden→visible always works, even on
-    /// an empty dock, and takes focus (spec 2026-09-08 add-tile §8: it
-    /// shows, renders its "move a tile here" hint, and now also focuses
-    /// it, empty or not, so "ctrl+[ then Blotter: Split" fills the dock) —
-    /// exiting any main-tree fullscreen first (same precedent as
-    /// [`Workspace::move_to_dock`]'s `Main` arm), since fullscreen and a
-    /// focused dock is a combination `render` cannot paint (no docks
-    /// while a tile is fullscreen, no focus ring while the region isn't
-    /// `Main`) and [`Workspace::toggle_fullscreen`] refuses to undo while
-    /// a dock is focused. Visible→hidden keeps the dock's whole tree
-    /// parked — splits, ratios, and focus memory included (toggle back
-    /// and it's all still there); if the hidden dock held focus, focus
-    /// falls back per [`Workspace::fallback_region`].
+    /// Show a hidden dock, exit main fullscreen, and focus the dock even if
+    /// empty. Hide a visible dock while retaining its tree, ratios, and focus
+    /// memory; select a fallback only if that dock held the focused region.
     pub fn toggle_dock(&mut self, side: DockSide) {
         if self.docks.get(side).visible() {
             self.docks.get_mut(side).set_visible(false);
@@ -518,8 +406,7 @@ impl Workspace {
                 self.region = self.fallback_region();
             }
         } else {
-            // Showing focuses (spec 2026-09-08 add-tile §8): the next add
-            // lands in this dock's tree, empty or not.
+            // Showing focuses the dock so the next add lands in it.
             self.tree.exit_fullscreen();
             self.enter_region(FocusRegion::Dock(side));
         }
@@ -537,32 +424,13 @@ impl Workspace {
         }
     }
 
-    /// `dock::move_<side>` — move the currently focused tile (wherever it
-    /// lives) with respect to dock `side`. Dock-trees task: the old
-    /// "at most one tile per dock, occupied target swaps" rule is gone —
-    /// a dock holds a whole tree, so moves *insert*:
+    /// Transfer the focused tile to `side`, inserting at that dock's focus.
+    /// Left/right use horizontal insertion; bottom uses vertical. The target
+    /// shows and receives focus, and an emptied source dock hides.
     ///
-    /// - Focused in `Main`: the tile leaves the tree (the tree refocuses a
-    ///   neighbor exactly like close does — [`Tree::remove_focused`]) and
-    ///   enters dock `side`'s tree at that tree's focused leaf via
-    ///   [`Tree::split`] (which is precisely "insert at focus": becomes
-    ///   root on an empty tree, focus moves to the inserted tile),
-    ///   orientation per [`Workspace::dock_insert_orientation`]. The dock
-    ///   auto-shows and takes focus. A fullscreen tile exits fullscreen
-    ///   first (see [`Tree::exit_fullscreen`]).
-    /// - Focused in dock `side` already: the move is "send it back" — the
-    ///   dock tree's focused tile (only that one; repeated presses drain
-    ///   the dock one tile per press) re-enters the main tree at its
-    ///   focused leaf as a split, same orientation convention. The dock
-    ///   auto-hides only when its tree empties; focus follows the tile
-    ///   into `Main` either way.
-    /// - Focused in another dock: the source dock tree's focused tile
-    ///   moves dock-to-dock, inserted into the target's tree likewise; the
-    ///   source auto-hides only when it empties. The target auto-shows and
-    ///   takes focus.
-    /// - Nothing focused anywhere (empty workspace, or focus resting on a
-    ///   visible empty dock — spec 2026-09-08 add-tile §8): no-op, region
-    ///   untouched.
+    /// If already focused in `side`, send its focused tile back to main instead.
+    /// Main fullscreen clears when moving a tile into a dock. With no focused
+    /// tile, leave layout and region unchanged, including a visible empty dock.
     pub fn move_to_dock(&mut self, side: DockSide) {
         match self.region {
             FocusRegion::Main => {
@@ -583,9 +451,7 @@ impl Workspace {
             }
             FocusRegion::Dock(from) if from == side => {
                 let Some(moved) = self.docks.get_mut(side).tree_mut().remove_focused() else {
-                    // A visible, empty focused dock (spec 2026-09-08
-                    // add-tile §8): nothing to send back, and no reason to
-                    // move the region off it.
+                    // An empty focused dock has no tile to transfer; retain its region.
                     return;
                 };
                 self.tree.split(moved, Self::dock_insert_orientation(side));
@@ -597,9 +463,7 @@ impl Workspace {
             }
             FocusRegion::Dock(from) => {
                 let Some(moved) = self.docks.get_mut(from).tree_mut().remove_focused() else {
-                    // A visible, empty focused dock (spec 2026-09-08
-                    // add-tile §8): nothing to move, and no reason to move
-                    // the region off it.
+                    // An empty focused dock has no tile to transfer; retain its region.
                     return;
                 };
                 if self.docks.get(from).tree().is_empty() {
@@ -614,10 +478,8 @@ impl Workspace {
         }
     }
 
-    /// Which region's tree currently holds `id` as a leaf, if any
-    /// (tile-drag task). The drop verbs locate both ends of a drop this
-    /// way — by id, never by where keyboard focus happens to live — so a
-    /// stale gesture can only no-op, never apply to the wrong tree.
+    /// Locate `id` across main and dock trees, independent of keyboard focus.
+    /// Drop operations resolve their endpoints this way before mutation.
     pub fn region_of(&self, id: TileId) -> Option<FocusRegion> {
         if self.tree.contains(id) {
             return Some(FocusRegion::Main);
@@ -628,16 +490,10 @@ impl Workspace {
             .map(|(side, _)| FocusRegion::Dock(side))
     }
 
-    /// Remove `id` from whichever tree holds it (tile-drag task — the
-    /// shared "pick the tile up" half of every drop verb). The owning
-    /// tree's own removal rules apply ([`Tree::remove`]: collapse,
-    /// renormalize, neighbor-refocus if the removed tile was focused); a
-    /// dock tree emptied by the removal auto-hides (the existing rule).
-    /// `self.region` is deliberately NOT re-derived here even if it
-    /// pointed at the emptied dock — every caller ends by setting the
-    /// region to the drop's destination, so an intermediate fixup would be
-    /// dead work. Returns the region the tile was removed from, or `None`
-    /// (nothing touched) when no tree holds it.
+    /// Remove an ID from its owning tree and hide a dock emptied by removal.
+    /// Return its former region, or `None` without mutation if absent. Do not
+    /// repair the focused region here: drop callers finish by entering the
+    /// destination after reinserting the tile.
     fn remove_tile_anywhere(&mut self, id: TileId) -> Option<FocusRegion> {
         let region = self.region_of(id)?;
         match region {
@@ -655,27 +511,13 @@ impl Workspace {
         Some(region)
     }
 
-    /// Edge-zone drop (tile-drag task): move `dragged` out of whichever
-    /// tree holds it and split-insert it beside `target`, on the side
-    /// `edge` names — Left/Right land as a Horizontal split before/after
-    /// the target, Up/Down as a Vertical split before/after — in whichever
-    /// region the *target* lives (every source×destination combination:
-    /// main→dock-tile inserts into that dock's tree, dock→main into the
-    /// main tree, dock→other-dock likewise; a within-tree edge drop is
-    /// just a move). Focus and region follow the moved tile
-    /// ([`Tree::insert_at_leaf`] focuses it; the region is set to the
-    /// destination here), an emptied source dock auto-hides, a
-    /// destination dock auto-shows (drop targets only come from visible
-    /// layout, but the verb enforces the region invariant on its own
-    /// rather than trusting the caller), and inserting into the main tree
-    /// clears any stale fullscreen (mirrors [`Workspace::move_to_dock`]).
+    /// Move `dragged` beside `target` on the requested edge, within or across
+    /// regions. Focus follows the tile; an emptied source dock hides and a
+    /// destination dock shows. Self-drops and absent IDs return false.
     ///
-    /// Returns `true` iff the layout changed — so the caller can key
-    /// session-dirty bookkeeping off it directly. `false`, nothing
-    /// touched, for a self-drop (recorded choice: an edge drop onto the
-    /// dragged tile itself is a no-op like the center self-drop, since
-    /// removing the tile would leave no target to insert beside) or when
-    /// either id is not a current leaf anywhere.
+    /// Validate endpoints before removal and fall back to insertion at destination
+    /// focus if the target insertion refuses. Return true for an accepted move;
+    /// the result is not a structural equality check of the old and new layout.
     pub fn drop_split(&mut self, dragged: TileId, target: TileId, edge: Direction) -> bool {
         if dragged == target {
             return false;
@@ -690,16 +532,10 @@ impl Workspace {
         let Some(destination) = self.region_of(target) else {
             return false;
         };
-        // Same one-place-per-TileId pre-check as `drop_stack`'s cross-region
-        // arm (post-merge review BUG 5 — the defense was asymmetric): if
-        // the invariant is already broken and the DESTINATION tree holds
-        // a duplicate of `dragged`, `insert_at_leaf` below would refuse
-        // (`contains(new)`) and the never-lose-a-tile fallback `split()`
-        // would then insert a SECOND copy of the duplicated id. Refuse
-        // loudly BEFORE `remove_tile_anywhere` mutates anything —
-        // unreachable through live verbs and healed restores, so the
-        // debug_assert makes a future regression loud while release
-        // builds get an honest untouched no-op.
+        // Check destination uniqueness before removing anything. Otherwise a
+        // refused ID-based insertion followed by the plain-split fallback could
+        // add another copy. Assert the broken invariant in debug builds and
+        // return an untouched refusal in release builds.
         if destination != source && self.tree_for(destination).contains(dragged) {
             debug_assert!(
                 false,
@@ -736,14 +572,11 @@ impl Workspace {
         true
     }
 
-    /// Centre-zone drop (tile-stacks spec §6.2, replacing the swap):
-    /// move `dragged` out of whichever tree holds it and add it to
-    /// `target`'s stack, after `target` — a leaf target becomes a
-    /// two-member stack — in whichever region the target lives. Dropping
-    /// a member onto another member of its own stack reorders it. Focus
-    /// and region follow the dragged tile; an emptied source dock
-    /// auto-hides; a destination dock auto-shows. Returns `true` iff the
-    /// layout changed: a self-drop or an unknown id is `false`.
+    /// Move `dragged` after `target` in its stack, making a stack from a plain
+    /// target if needed. Members of the same stack are reordered. Focus follows
+    /// the tile; an emptied source dock hides and a destination dock shows.
+    /// Return false for a self-drop or absent ID; true means the operation was
+    /// accepted, even if reinsertion reproduces the previous member order.
     pub fn drop_stack(&mut self, dragged: TileId, target: TileId) -> bool {
         if dragged == target {
             return false;
@@ -777,21 +610,11 @@ impl Workspace {
         true
     }
 
-    /// Dock-background drop (tile-drag task): move `dragged` into dock
-    /// `side`'s tree at that tree's focused leaf, with the same
-    /// orientation convention as the keyboard's `dock::move_*`
-    /// ([`Workspace::dock_insert_orientation`]: Horizontal for left/right,
-    /// Vertical for bottom) — in practice the empty-dock hint area, since
-    /// an occupied dock's tiles cover its whole frame. Works from any
-    /// source region; an emptied source dock auto-hides; the target dock
-    /// auto-shows and takes focus+region (focus follows the moved tile,
-    /// via [`Tree::split`]).
-    ///
-    /// Returns `true` iff the layout changed. A tile dropped on the
-    /// background of the dock it already lives in is `false`, nothing
-    /// touched (recorded choice: it's already there — deliberately NOT
-    /// treated as the keyboard verb's "move back to main"), as is an
-    /// unknown id.
+    /// Move `dragged` into `side` at its focused slot, using horizontal
+    /// insertion for left/right and vertical for bottom. Show and focus the
+    /// destination, hiding a source dock emptied by removal. Refuse an absent
+    /// ID or a tile already in this dock; background drops do not send it back
+    /// to main. Return true for an accepted transfer.
     pub fn drop_to_dock(&mut self, dragged: TileId, side: DockSide) -> bool {
         let Some(source) = self.region_of(dragged) else {
             return false;
@@ -799,12 +622,8 @@ impl Workspace {
         if source == FocusRegion::Dock(side) {
             return false;
         }
-        // Same one-place-per-TileId pre-check as `drop_stack`/`drop_split`
-        // (post-merge review BUG 5): the unconditional `split()` below
-        // never refuses, so a duplicate of `dragged` already parked in
-        // the target dock's tree (a pre-broken invariant — `source` is
-        // some OTHER region, `region_of` returns the first claim) would
-        // gain a second copy. Refuse loudly before anything mutates.
+        // Refuse a duplicate destination claim before mutation. The plain-split
+        // insertion below assumes the incoming ID is absent from that tree.
         if self.docks.get(side).tree().contains(dragged) {
             debug_assert!(
                 false,
@@ -830,16 +649,10 @@ impl Workspace {
         true
     }
 
-    /// Heal duplicate tile claims across one workspace-or-app-wide set of
-    /// dock trees against an already-`claimed` list (dock-trees task —
-    /// shared by [`Workspace::from_parts`], which seeds `claimed` with its
-    /// own tree, and [`Workspaces::from_parts`], which seeds it with every
-    /// workspace's tree): docks are walked in [`DockSide::ALL`] order and
-    /// each dock's tiles in tree order, so "tree wins, then first claim
-    /// wins" stays deterministic. A duplicate leaf is *removed from the
-    /// dock's tree* (the tree-shaped generalization of the old "drop the
-    /// dock's claim"; [`Tree::remove`] collapses/renormalizes like close),
-    /// with `label` prefixing each warning ("" for the local pass).
+    /// Prune dock claims against `claimed`, visiting sides in [`DockSide::ALL`]
+    /// order and tiles in tree order. Callers seed claims with one workspace's
+    /// main tree or all main trees, so main wins and subsequent dock claims are
+    /// removed one at a time. Prefix each warning with `label`.
     fn heal_duplicate_dock_claims(
         docks: &mut Docks,
         claimed: &mut Vec<TileId>,
@@ -863,30 +676,17 @@ impl Workspace {
         }
     }
 
-    /// Reconstruct one workspace from raw session parts, healing what a
-    /// hostile/corrupted session file could break *locally* (cross-
-    /// workspace duplicate dock claims need the whole set and are healed
-    /// in [`Workspaces::from_parts`]): a dock-tree tile that also appears
-    /// in this workspace's own tree or an earlier of its own docks is
-    /// removed from the dock's tree (the tree/earlier dock wins — a
-    /// `TileId` lives in exactly one of the four trees), and a `region`
-    /// pointing at a dock that is hidden falls back to `Main` (spec
-    /// 2026-09-08 add-tile §8: an *empty* visible dock is a legal focus
-    /// target). Each healing step contributes a warning string; none is
-    /// ever an error.
+    /// Restore a workspace with local recovery: supply missing main-tree focus,
+    /// prune duplicate dock claims, and replace a hidden focused dock with a
+    /// fallback region. A visible empty dock can retain focus. Clear main
+    /// fullscreen when dock focus survives. Return recovery warnings; global
+    /// dock conflicts are handled by [`Workspaces::from_parts`].
     pub fn from_parts(tree: Tree, docks: Docks, region: FocusRegion) -> (Workspace, Vec<String>) {
         let mut warnings = Vec::new();
         let mut tree = tree;
         let mut docks = docks;
-        // Mirror `Dock::from_parts`'s focus heal for the main tree (review
-        // fix): a non-empty tree whose `focused` was healed away (dangling
-        // reference → `None` in `Tree::from_parts`) refocuses its first
-        // tile, silently — the verbs lean on "focused is Some whenever
-        // root is Some" (e.g. `move_to_dock`'s same-side arm removes a
-        // tile from a dock and hands it to this tree's `split`; without a
-        // focus, the split would have to fall back to its degenerate
-        // first-leaf anchor, and before that guard existed it silently
-        // dropped the tile).
+        // Give a nonempty main tree focus so region transfers can insert at it.
+        // This mirrors dock restoration and requires no warning.
         if tree.focused().is_none()
             && let Some(&first) = tree.tiles().first()
         {
@@ -907,23 +707,9 @@ impl Workspace {
             ));
             ws.region = ws.fallback_region();
         }
-        // Fullscreen-on-the-tree while focus lives in a dock is a
-        // contradiction no live path can produce (fullscreen blocks focus
-        // from crossing into docks, and `toggle_fullscreen` is a no-op
-        // while dock-focused) but a hand-edited session file can claim
-        // both — restored as-is it would render the fullscreen tile with
-        // no focus ring anywhere and leave mod+f dead until focus returned
-        // inward. Heal by clearing fullscreen and keeping the dock focus
-        // the file asked for (review should-fix). Checked after the
-        // region heal above so it only fires when the dock focus actually
-        // survives — a region that fell back to `Main` may keep its
-        // fullscreen, an ordinary state.
-        //
-        // `Workspaces::from_parts`'s cross-workspace pass cannot
-        // reintroduce this combination: its healing only ever drops dock
-        // claims and moves regions *toward* `Main` (and a fullscreen tree
-        // is by definition non-empty, so its fallback is always `Main`),
-        // so this local heal is the single seam that needs the check.
+        // Main fullscreen would hide the focused dock and disable its fullscreen
+        // toggle. Keep valid dock focus and clear fullscreen. Check after region
+        // recovery so a fallback to main can retain its fullscreen tile.
         if matches!(ws.region, FocusRegion::Dock(_)) && ws.tree.fullscreen().is_some() {
             warnings.push(
                 "fullscreen is set while focus is in a dock (contradictory); \
@@ -936,23 +722,18 @@ impl Workspace {
     }
 }
 
-/// The app-global workspace set (spec §3.6: workspaces are global; windows
-/// are viewports). Indices 1..=9; workspaces materialize lazily on first
-/// switch and persist (empty ones stay listed as empty).
+/// Workspace collection with indices 1–9 and a shared tile-ID allocator.
+/// Switching materializes an absent workspace; empty workspaces remain stored.
+/// Each shell owns its collection through `ShellServices`.
 #[derive(Debug)]
 pub struct Workspaces {
     spaces: BTreeMap<u8, Workspace>,
     active: u8,
     next_tile: u64,
-    /// Monotone count of actual workspace switches (post-merge review
-    /// finding 7). The shell's drag state pins this at mouse-down instead
-    /// of pinning `active` itself: comparing the INDEX alone lets a
-    /// switch-away-and-back that lands entirely between two renders look
-    /// like "never left" (the one-frame ABA), while an epoch comparison
-    /// can only pass when no switch happened at all. Bumped only on a
-    /// switch that actually changes `active` — re-selecting the current
-    /// workspace changes nothing on screen and must not void an
-    /// in-flight drag.
+    /// Generation of actual workspace switches. Drag state compares this
+    /// rather than only `active`, so switching away and back invalidates a
+    /// gesture even between renders. Selecting the current index does not
+    /// advance it.
     switch_epoch: u64,
 }
 
@@ -1011,18 +792,16 @@ impl Workspaces {
         true
     }
 
-    /// Allocate a tile id, unique across all workspaces for the app's life.
+    /// Allocate the next ID in this collection, shared by all its workspaces
+    /// and docks. The counter has no exhaustion check.
     pub fn alloc_tile(&mut self) -> TileId {
         self.next_tile += 1;
         TileId(self.next_tile)
     }
 
-    /// Split at the focus, wherever it lives (dock-trees task: a dock
-    /// holds a full tree, so an add while a dock is focused lands in that
-    /// dock's tree), allocating the new tile's id from the single app-wide
-    /// allocator and returning it — `ShellView::add_tile` records its
-    /// pending occupant request under exactly this id (spec 2026-09-08
-    /// add-tile §4.2). On an empty tree the new tile becomes the root.
+    /// Allocate a tile ID and split at focus in the active region, creating a
+    /// root if empty. The shell associates its pending occupant request with
+    /// the returned ID. All workspaces and docks share this allocator.
     pub fn split_active(&mut self, orientation: Orientation) -> TileId {
         let id = self.alloc_tile();
         let ws = self.active_mut();
@@ -1033,10 +812,8 @@ impl Workspaces {
         id
     }
 
-    /// `{Kind}: Stack` (tile-stacks spec §6.1): allocate a tile and add it
-    /// after the focused tile in that tile's stack, in whichever region
-    /// holds focus. `None` when nothing is focused — the caller then
-    /// falls back to the split path, since a stack of one is meaningless.
+    /// Allocate and stack a tile after focus in the active region. Return
+    /// `None` without focus so callers can use the split path instead.
     pub fn stack_active(&mut self) -> Option<TileId> {
         let focused = self.active().focused_tile()?;
         let id = self.alloc_tile();
@@ -1066,36 +843,21 @@ impl Workspaces {
             .collect()
     }
 
-    /// Every workspace's index and state, in index order (session save,
-    /// Task 3).
+    /// Stored workspace indices and state in index order, including empty ones.
     pub fn spaces(&self) -> impl Iterator<Item = (u8, &Workspace)> {
         self.spaces.iter().map(|(ix, ws)| (*ix, ws))
     }
 
-    /// Construct a `Workspaces` from raw parts (session restore, Task 3),
-    /// validating and healing what a hostile/corrupted session file could
-    /// break: `active` must be in 1..=9, else `Err`; any workspace index
-    /// outside 1..=9 present in `spaces` is silently dropped (workspace
-    /// indices are always 1..=9, same range `switch` enforces); the active
-    /// workspace is inserted empty if it was missing from `spaces`
-    /// (mirrors `new`'s own invariant that `active` is always a key).
+    /// Restore a workspace collection. Reject an active index outside 1–9,
+    /// filter other out-of-range indices, and materialize the active workspace
+    /// if missing. Prune duplicate dock claims against all main trees, then
+    /// prior docks in workspace/side/tree order, with warnings. Hidden focused
+    /// docks use a fallback; empty visible docks may retain focus.
     ///
-    /// Dock-regions task: dock claims are healed *across* workspaces here
-    /// (the per-workspace pass in [`Workspace::from_parts`] can only see
-    /// its own tree/docks) — a dock-tree tile that also appears in any
-    /// other workspace's main tree, or in an earlier (index, then side,
-    /// then tree order) dock claim, is removed from its dock's tree with a
-    /// warning, and a `region` left pointing at a no-longer-focusable dock
-    /// falls back. Healing, never failure: the `Ok` variant carries the
-    /// warnings.
-    ///
-    /// `next_tile` is computed to resume past the maximum `TileId` found
-    /// across every restored tree AND dock, so a subsequent `alloc_tile`
-    /// can never collide with a restored id — that's the whole reason this
-    /// constructor exists rather than just handing `spaces`/`active` to a
-    /// struct literal (the fields are private everywhere else for exactly
-    /// this reason: `next_tile` must never be set independently of the ids
-    /// actually present).
+    /// Seed allocation from the maximum restored tile ID. This does not check
+    /// plain duplicate IDs across main trees; callers should supply globally
+    /// unique live IDs. Allocation increments the stored maximum without an
+    /// exhaustion check.
     pub fn from_parts(
         spaces: BTreeMap<u8, Workspace>,
         active: u8,
@@ -1123,15 +885,8 @@ impl Workspaces {
                 &format!("workspace {ix}: "),
                 &mut warnings,
             );
-            // Defence in depth for a workspace that did not come through
-            // `Workspace::from_parts` (which heals this locally): only a
-            // *hidden* dock loses the region. A removed claim above can
-            // empty the dock the region pointed at, and an empty visible
-            // dock is a legal focus target (spec 2026-09-08 add-tile §8
-            // relaxed the invariant to "the region may name a dock only
-            // while that dock is VISIBLE") — healing on `focusable()`
-            // here used to warn and fall back on every launch after
-            // `ctrl+[` had focused an empty left dock.
+            // Also repair hidden focused docks for callers that bypass local
+            // workspace recovery. Empty visible docks remain valid focus targets.
             if let FocusRegion::Dock(side) = ws.region
                 && !ws.docks.get(side).visible()
             {
@@ -1159,10 +914,8 @@ impl Workspaces {
     }
 }
 
-/// Fraction of the containing split moved per direct resize keystroke
-/// (`shift+h/j/k/l`, spec/brief: resize is a direct binding, not a mode).
-/// Dock-regions task: also the per-keystroke dock resize step, as a
-/// fraction of the content area (see [`Workspace::resize`]).
+/// Resize step as a fraction of the enclosing split, or of the content area
+/// when resizing a dock frame. Used by direct resize actions.
 pub const RESIZE_STEP: f32 = 0.03;
 
 /// Route a shell action onto the tiling verbs. Returns true when the action
@@ -1187,10 +940,8 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
             ws.active_mut().focus_direction(Direction::Right);
             true
         }
-        // No split verbs: a new tile is *added* by kind through
-        // `ShellView::add_tile` (spec 2026-09-08 add-tile §3.1), which
-        // calls `Workspaces::split_active` directly — the router owns
-        // only the actions that need nothing but the tree.
+        // Adding a tile needs a module kind and is handled by `ShellView` via
+        // `Workspaces::split_active`; this router handles pure layout actions.
         "workspace::close_tile" => {
             ws.active_mut().close_tile();
             true
@@ -1317,10 +1068,8 @@ mod tests {
         assert_eq!(ws.active_index(), 5);
     }
 
-    /// Post-merge review finding 7: every actual switch bumps the epoch
-    /// (away-and-back is two bumps, never a return to the pinned value),
-    /// while a same-index re-select and an out-of-range refusal bump
-    /// nothing.
+    /// Switching away and back advances the epoch twice. Reselecting the
+    /// current index or refusing an invalid index leaves it unchanged.
     #[test]
     fn switch_epoch_counts_actual_switches_only() {
         let mut ws = Workspaces::new();
@@ -1496,7 +1245,7 @@ mod tests {
         );
     }
 
-    // --- Workspaces::from_parts (Task 3: session restore) --------------
+    // --- Workspace restoration ----------------------------------------
 
     #[test]
     fn from_parts_rejects_active_out_of_range() {
@@ -1569,12 +1318,8 @@ mod tests {
 
     #[test]
     fn from_parts_drops_a_dock_claim_duplicated_in_another_workspace() {
-        // Workspace 1's tree holds tile 7; workspace 2's left dock tree
-        // claims the same id. The tree wins; the duplicate leaf is removed
-        // from the dock's tree with a warning. Workspace 2's region keeps
-        // pointing at that now-empty dock: the dock is still *visible*,
-        // and spec 2026-09-08 add-tile §8 relaxed the invariant to
-        // "visible", so emptying it is no longer a reason to fall back.
+        // A main-tree claim wins over another workspace's dock claim. Removing
+        // the dock duplicate warns, but the now-empty visible dock keeps focus.
         let mut tree = Tree::default();
         tree.split(TileId(7), Orientation::Horizontal);
         let mut docks = Docks::default();
@@ -1595,7 +1340,7 @@ mod tests {
         assert_eq!(
             ws.active().region(),
             FocusRegion::Dock(DockSide::Left),
-            "an emptied but visible dock keeps the region (add-tile §8)"
+            "an emptied but visible dock keeps the region"
         );
     }
 
@@ -1673,13 +1418,8 @@ mod tests {
 
     #[test]
     fn workspace_from_parts_clears_fullscreen_when_a_dock_holds_focus() {
-        // Review should-fix: fullscreen-on-the-tree plus focus-in-a-dock is
-        // unreachable live (mod+f is a no-op while dock-focused; focus
-        // can't cross into docks under fullscreen) but a hand-edited
-        // session file can claim both. Restored as-is it renders the
-        // fullscreen tile with no focus ring anywhere and mod+f dead. The
-        // heal keeps the dock focus the user asked for and clears
-        // fullscreen, with a warning.
+        // Restoring main fullscreen with dock focus clears fullscreen and warns,
+        // so the selected dock stays visible and keyboard focus remains usable.
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         tree.toggle_fullscreen();
@@ -1719,12 +1459,7 @@ mod tests {
 
     #[test]
     fn workspace_from_parts_heals_a_missing_main_tree_focus_to_the_first_tile() {
-        // Review fix: `Tree::from_parts` heals a dangling `focused` to
-        // None while keeping the root — restored as-is, the main tree
-        // then violated "focused is Some whenever root is Some" and the
-        // move-back verb could drop a tile into `split`'s degenerate arm.
-        // The workspace-level heal mirrors `Dock::from_parts`: refocus
-        // the first tile, silently.
+        // Restore missing main-tree focus to the first tile without warning.
         let tree = Tree::from_parts(Some(Node::Leaf(TileId(3))), None, None).unwrap();
         assert_eq!(tree.focused(), None, "fixture sanity");
         let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
@@ -1738,12 +1473,9 @@ mod tests {
 
     #[test]
     fn move_back_after_a_hostile_restore_never_loses_the_tile() {
-        // Review repro: main-tree node with a dangling/missing `focused`,
-        // focus in an occupied left dock. The move-back chord removes the
-        // tile from the dock and hands it to the main tree's split —
-        // before the fixes that split silently dropped it. Both ends now
-        // guard: restore heals the main tree's focus, and even without
-        // focus, split anchors at the first leaf.
+        // A tile moved back from a dock must survive even when the restored main
+        // tree had no valid focus. Workspace recovery supplies focus; tree split
+        // also has a first-leaf fallback.
         let tree = Tree::from_parts(Some(Node::Leaf(TileId(1))), None, None).unwrap();
         let mut docks = Docks::default();
         let dock = docks.get_mut(DockSide::Left);
@@ -1819,7 +1551,7 @@ mod tests {
         ));
     }
 
-    // --- divider / dock-edge drags (drag-splitters task) ----------------
+    // --- Divider and dock-edge drags ----------------------------------
 
     #[test]
     fn drag_main_divider_moves_the_pair_without_touching_focus_or_region() {
@@ -1913,9 +1645,8 @@ mod tests {
             ws.active().docks().get(DockSide::Left).size(),
             DOCK_MAX_SIZE
         ));
-        // No-change contract (review fix): further moves pinned at the
-        // same clamp report false — the size didn't move, so callers must
-        // not re-render or latch dirty state off them.
+        // Repeated positions at the clamp report false so unchanged geometry
+        // does not trigger rendering or dirty bookkeeping.
         assert!(
             !ws.active_mut()
                 .drag_dock_edge(DockSide::Left, 950.0, 0.0, area)
@@ -1965,11 +1696,8 @@ mod tests {
             w: 250.0,
             h: 800.0,
         };
-        // Hide the dock mid-"drag": further applications must refuse and
-        // leave the hidden tree untouched (a drag never silently resizes
-        // an invisible layout — same rationale as the shell's fullscreen
-        // cancel and drag_dock_edge's own hidden-dock refusal; review
-        // round reconciled the two).
+        // Hiding a dock during a drag makes subsequent applications refuse
+        // without changing the retained hidden tree.
         apply_workspace_action(&mut ws, &act("dock::toggle_left"));
         assert!(!ws.active().docks().get(DockSide::Left).visible());
         let before = ws
@@ -2035,7 +1763,7 @@ mod tests {
         assert!(approx(ws.active().docks().get(DockSide::Left).size(), 0.40));
     }
 
-    // --- dock toggling (dock-regions task) ------------------------------
+    // --- Dock toggling ------------------------------------------------
 
     #[test]
     fn toggle_shows_then_hides_a_dock() {
@@ -2046,9 +1774,8 @@ mod tests {
         assert!(!ws.active().docks().get(DockSide::Left).visible());
     }
 
-    /// Spec `2026-09-08-geode-add-tile-design.md` §8: showing a dock
-    /// focuses it, empty or not, so "ctrl+[ then Blotter: Split" fills the
-    /// dock. Hiding it again falls back to `Main` exactly as before.
+    /// Showing even an empty dock gives it focus for the next add. Hiding it
+    /// selects the main tree in this fixture.
     #[test]
     fn toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty() {
         let mut ws = two_tiles();
@@ -2128,9 +1855,8 @@ mod tests {
         );
     }
 
-    /// Every verb must tolerate focus resting on a visible, empty dock
-    /// (the state §8 introduces): none may panic, and none may move the
-    /// region onto a hidden dock.
+    /// Layout verbs tolerate a visible empty focused dock without panicking
+    /// or leaving the focus region on a hidden dock.
     #[test]
     fn verbs_on_an_empty_focused_dock_are_no_ops_that_keep_the_region_valid() {
         let mut ws = two_tiles();
@@ -2547,11 +2273,8 @@ mod tests {
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     }
 
-    /// Directional focus never crosses into a HIDDEN dock, and — spec
-    /// 2026-09-08 add-tile §8 changes only what *toggling* a dock does,
-    /// never `focus_direction` — still never into a visible-but-EMPTY
-    /// one either: `Dock::focusable` (visible AND occupied) keeps
-    /// governing a directional-focus target.
+    /// Directional focus skips hidden and empty docks. Explicitly showing or
+    /// clicking an empty dock is a separate focus route.
     #[test]
     fn focus_does_not_enter_a_hidden_or_empty_dock() {
         let mut ws = two_tiles();
@@ -2719,9 +2442,7 @@ mod tests {
 
     #[test]
     fn resize_in_a_split_dock_moves_the_docks_own_divider_not_the_frame() {
-        // "Dividers, frame fallback" (dock-trees task), pinned: with a
-        // split inside the dock along the pressed axis, the press moves
-        // the dock tree's divider and leaves the frame size alone.
+        // An internal dock divider gets the resize press before frame resizing.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         ws.split_active(Orientation::Vertical); // vertical split inside
@@ -3132,7 +2853,7 @@ mod tests {
         assert_eq!(ws.active().region(), FocusRegion::Main);
     }
 
-    // --- drop verbs (tile-drag task) ------------------------------------
+    // --- Drop operations ----------------------------------------------
 
     /// Assert the one-place-per-TileId invariant plus focused-iff-root
     /// across all four trees of the active workspace.
@@ -3155,9 +2876,7 @@ mod tests {
                 seen.push(tile);
             }
         }
-        // The region invariant (spec 2026-09-08 add-tile §8): a focused
-        // dock is visible — not necessarily occupied, since an empty
-        // visible dock may hold focus so an add can fill it.
+        // A focused dock must be visible; it may be empty for the next add.
         if let FocusRegion::Dock(side) = workspace.region() {
             assert!(
                 workspace.docks().get(side).visible(),
@@ -3292,14 +3011,9 @@ mod tests {
         assert_tile_invariants(&ws);
     }
 
-    /// Post-merge review BUG 5: `drop_split` had no counterpart to
-    /// `drop_stack`'s pre-broken-duplicate defense — its
-    /// insert_at_leaf-refused fallback `split()` would insert a SECOND
-    /// copy of an id already duplicated into the destination tree. The
-    /// same pre-check must refuse (debug_assert loud) BEFORE
-    /// `remove_tile_anywhere` mutates anything. Broken state built via
-    /// module-private fields, the same technique the `drop_to_dock`
-    /// pre-broken-duplicate test below uses.
+    /// An edge drop must refuse a duplicate destination claim before removing
+    /// the source tile. Otherwise fallback insertion could duplicate it again.
+    /// Construct malformed state directly and check the debug assertion.
     #[test]
     #[should_panic(expected = "one-place-per-TileId")]
     fn drop_split_refuses_a_pre_broken_duplicate_id_before_mutating() {
@@ -3402,10 +3116,8 @@ mod tests {
         assert_eq!(ws.stack_position(TileId(99)), None);
     }
 
-    /// Post-merge review BUG 5, `drop_to_dock` arm: its unconditional
-    /// `split()` into the target dock's tree would likewise duplicate a
-    /// pre-broken id — same pre-check, same loud refusal before any
-    /// mutation.
+    /// A dock-background drop must refuse a duplicate destination claim before
+    /// source removal or unconditional split insertion.
     #[test]
     #[should_panic(expected = "one-place-per-TileId")]
     fn drop_to_dock_refuses_a_pre_broken_duplicate_id_before_mutating() {
@@ -3473,7 +3185,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("dock::move_left")); // 2 → left
         assert!(
             !ws.active_mut().drop_to_dock(TileId(2), DockSide::Left),
-            "recorded choice: already there — NOT the keyboard verb's move-back"
+            "a background drop into the source dock leaves the tile there"
         );
         assert_eq!(
             ws.active().docks().get(DockSide::Left).tree().tiles(),

@@ -1,22 +1,11 @@
-//! The Sources adapter (spec §8.3, §19.3) — `Domain::Sources`.
+//! Adapter for source definitions. Browse rows sort by dataset and source name; the
+//! source name remains the persistence identity.
 //!
-//! Every field is `Destination::Doc`; there is no presentation doc. The
-//! browse list is every dataset·source pair, flat — `prefix` is the
-//! dataset, painted first and the primary sort key — and `enter` opens
-//! the arguments directly. A write reaches the running data service
-//! through nothing new: the dialog's in-memory apply runs
-//! `apply_reload`, whose `sources` baseline comparison raises the
-//! existing restart-required stripe.
-//!
-//! This is also the first adapter with a genuinely editable `Text` row
-//! (`paths`, `poll_interval`, `pending_timeout`, `batch_pattern`, via
-//! `i` — Task 1's `text_editable`/`parse_text` machinery), and the first
-//! whose object can be created *idle* — `n` seeds only `dataset` and an
-//! empty `paths`, which the reader (`SourceSpec::from_doc`) accepts as a
-//! warning rather than an error (§19.3's ruling on `geode-core`'s own
-//! reader, `source_config.rs`), so a fresh source never blocks the
-//! confirm on the `Severity::Error` gate `apply::blocking_diagnostic`
-//! enforces.
+//! Directory and subscribed adapters expose their respective fields, all as user-layer
+//! definition edits. A copied inherited source therefore becomes a whole-object
+//! override. Validation round-trips the current object through the core source reader;
+//! warnings remain editable, while errors block queuing. Source changes can be saved
+//! here but require restart to rebuild ingestion.
 
 use super::{Destination, Draft, Field, FieldKind};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
@@ -28,24 +17,22 @@ use geode_core::source_config::{
 use std::time::Duration;
 
 pub const DOC: &str = "sources";
-/// Between globs in the `paths` text (§19.3). `;` is not reserved by
-/// either platform's filesystem — NTFS's own reserved set is `< > : " /
-/// \ | ? *` — the choice is unambiguous only in the common case: it is
-/// rare inside a glob and never one of glob's own metacharacters, while
-/// a space is legal in a path on both platforms and so cannot separate
-/// them. A glob that needs a literal `;` cannot be expressed in this
+/// Between globs in the `paths` text. `;` is not reserved by either platform's
+/// filesystem — NTFS's own reserved set is `< > : " / \ | ? *` — the choice is
+/// unambiguous only in the common case: it is rare inside a glob and never one of
+/// glob's own metacharacters, while a space is legal in a path on both platforms and so
+/// cannot separate them. A glob that needs a literal `;` cannot be expressed in this
 /// field.
 pub const PATH_SEPARATOR: char = ';';
 
 const READINESS: [&str; 2] = ["sentinel", "stable_mtime"];
 const PRIORITY: [&str; 3] = ["latest_risk", "latest_other", "backfill"];
 
-/// The browse row's muted second line: how many paths a source watches
-/// and which cold-start priority it claims — the two facts a trader
-/// scans the list for (§19.3). Read straight off the raw table, for the
-/// reason `views::summary` and `groupings::summary` both give for doing
-/// the same: a malformed source is exactly the one this dialog exists to
-/// fix, and the reader would drop it from the merged result entirely.
+/// The browse row's muted second line: how many paths a source watches and which
+/// cold-start priority it claims — the two facts a trader scans the list for. Read
+/// straight off the raw table, for the reason `views::summary` and `groupings::summary`
+/// both give for doing the same: a malformed source is exactly the one this dialog
+/// exists to fix, and the reader would drop it from the merged result entirely.
 pub fn summary(value: &toml::Value) -> String {
     let Some(table) = value.as_table() else {
         return "not a table".to_string();
@@ -61,8 +48,7 @@ pub fn summary(value: &toml::Value) -> String {
     format!("{n} path{} · {priority}", if n == 1 { "" } else { "s" })
 }
 
-/// The dataset a source feeds — the browse row's prefix (§19.3,
-/// `Domain::prefix_fn`).
+/// Dataset prefix for the source's browse label and primary sort key.
 pub fn prefix(value: &toml::Value) -> Option<String> {
     value
         .as_table()
@@ -103,20 +89,11 @@ fn choice(options: &[&str], current: &str) -> FieldKind {
     FieldKind::Choice { options, selected }
 }
 
-/// A directory source's nine fields, or a subscribed source's thirteen —
-/// `document`/`topics`/`coalesce`/`source_time` are appended only when
-/// `adapter != CSV_DIR_ADAPTER` (market-data-documents plan, Task 5),
-/// since they mean nothing for a directory source and would otherwise
-/// paint every existing directory source with four rows of noise. Or of
-/// no source at all when `object` names nothing (`n`'s empty draft,
-/// always the nine-field directory shape). `dataset` and `priority` are
-/// choices, `readiness`/`stable_polls` split the reader's one
-/// `readiness` key into a kind and its poll count, and the rest are
-/// text — but only `paths`/`poll_interval`/`pending_timeout`/
-/// `batch_pattern` are editable (§19.3's own list — `text_editable`);
-/// `adapter` and the four subscribed-only fields are read-only, painted
-/// so a subscribed source is at least visibly one rather than looking
-/// like an idle directory source missing its `paths`.
+/// Build nine fields for directory sources, adding document/topics/coalesce/
+/// source_time for other adapters. Missing objects use the directory defaults. Dataset
+/// and priority are choices; readiness splits kind from stable poll count. Only the
+/// supported paths, duration, and batch-pattern text fields are editable; adapter and
+/// subscribed-only text fields are read-only.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -230,14 +207,8 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         text("adapter", "Adapter", adapter.to_string()),
     ];
 
-    // The four subscribed-only fields (market-data-documents plan, Task
-    // 5) are read-only here — same reason as `adapter` above — and
-    // appended only for a subscribed source: they mean nothing for a
-    // directory source, and painting them unconditionally would add
-    // four rows of noise to every existing directory source. A real
-    // editing surface for these (a topic-pattern list, an adapter
-    // picker) is future work; this dialog's own vocabulary predates the
-    // adapter.
+    // Subscribed adapters display document, topics, coalescing, and source-time
+    // settings read-only. The source table retains these values during other edits.
     if subscribed {
         out.push(text(
             "document",
@@ -273,9 +244,9 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     out
 }
 
-/// `n` seeds the new source's dataset from the browse row under the
-/// cursor (§19.3), not the schema's first — the option is added when the
-/// schema lacks it, for the same reason `fields` keeps an object's own.
+/// `n` seeds the new source's dataset from the browse row under the cursor, not the
+/// schema's first — the option is added when the schema lacks it, for the same reason
+/// `fields` keeps an object's own.
 pub fn seed_dataset(draft: &mut Draft, dataset: &str) {
     if let Some(field) = draft.fields.iter_mut().find(|f| f.key == "dataset")
         && let FieldKind::Choice { options, selected } = &mut field.kind
@@ -298,10 +269,8 @@ pub fn text_editable(key: &str) -> bool {
     )
 }
 
-/// The inline refusals (§19.3): a duration the reader could not read, a
-/// regex that does not compile or has no `batch` capture. `paths` is
-/// normalised to the canonical `a; b` spelling; empty is legal — an idle
-/// source, the reader's own ruling (`source_config::IDLE_PATHS`).
+/// Refuse unreadable durations, invalid regexes, and malformed path lists before
+/// queuing. An empty path list remains valid as an idle source.
 pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
     let text = text.trim();
     match key {
@@ -400,17 +369,15 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     toml_edit::Item::Table(table)
 }
 
-/// Everything wrong with the draft as it stands (spec §7.2): the
-/// rendered table, parsed back and read by exactly the reader that
-/// decides which sources the scheduler and ingest runner see
-/// (`SourceSpec::from_doc`) — on the object being edited alone, wrapped
-/// in a document of its own, for the reason `views::validate` and
-/// `groupings::validate` both give for doing the same: validating the
-/// whole merged doc would report every other source's problems against
-/// this one. The reader errors on an undeclared dataset, so no
-/// cross-check of ours is needed — and an idle (empty `paths`) source is
-/// only ever a warning (`source_config::IDLE_PATHS`), never blocking `n`
-/// on `apply::blocking_diagnostic`'s error gate.
+/// Everything wrong with the draft as it stands: the rendered table, parsed back and
+/// read by exactly the reader that decides which sources the scheduler and ingest
+/// runner see (`SourceSpec::from_doc`) — on the object being edited alone, wrapped in a
+/// document of its own, for the reason `views::validate` and `groupings::validate` both
+/// give for doing the same: validating the whole merged doc would report every other
+/// source's problems against this one. The reader errors on an undeclared dataset, so
+/// no cross-check of ours is needed — and an idle (empty `paths`) source is only ever a
+/// warning (`source_config::IDLE_PATHS`), never blocking `n` on
+/// `apply::blocking_diagnostic`'s error gate.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     let doc = merge_docs(
         DOC,
@@ -438,9 +405,9 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 
 /// What each field means, for the edit footer's help line
-/// ([`Domain::help`](super::Domain::help)). Meaning and value grammar
-/// only — the keys are the hint rows' job — and under ~90 characters,
-/// since the slot is one line and never wraps (4c spec §22).
+/// ([`Domain::help`](super::Domain::help)). Meaning and value grammar only — the keys
+/// are the hint rows' job — and under ~90 characters, since the slot is one line and
+/// never wraps.
 ///
 /// `readiness`/`stable_polls` say out loud that `stable_mtime` is not
 /// implemented: the `Choice` offers it (`READINESS`) and discovery
@@ -559,11 +526,7 @@ mod tests {
         );
     }
 
-    /// A subscribed source's five adapter fields (market-data-documents
-    /// plan, Task 5) are painted, not silently dropped — so this dialog
-    /// never paints one as a directory source missing its `paths` — but
-    /// stay `!text_editable`: `to_table` never writes any of them back,
-    /// so an editable row here would look live and do nothing.
+    /// Subscribed-source adapter fields survive rendering and validation.
     #[test]
     fn subscribed_source_fields_are_painted_as_read_only_text() {
         let config = Config::load(&ConfigSources {
@@ -609,10 +572,8 @@ mod tests {
         }
     }
 
-    /// The reviewer's own regression (2026-09-13): the four
-    /// subscribed-only rows above must never paint on a directory
-    /// source — a directory source's field list is exactly the
-    /// pre-Task-5 eight fields plus `adapter`, nothing more.
+    /// Readiness, poll counts, durations, and path separators round-trip through the
+    /// same adapter fields used by the dialog.
     #[test]
     fn a_directory_source_paints_no_subscribed_only_rows() {
         let keys: Vec<String> = fields(&config(), Some("live"))

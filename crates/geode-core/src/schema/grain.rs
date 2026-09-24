@@ -1,6 +1,6 @@
-//! Measure grain (spec §3.2). Ord reads coarse < fine: a coarser grain's
-//! key is a prefix of every finer one's, which is what makes
-//! attributability decidable from the schema alone (spec §6.3).
+//! Measure grains ordered from coarse to fine. Their storage keys form a
+//! prefix chain. Attribution also uses each grain's dimension key: the pair
+//! grain's ordered pair identifiers do not carry underlying-dimension meaning.
 
 /// The identity columns a measure is keyed by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -59,19 +59,12 @@ impl Grain {
         }
     }
 
-    /// The key columns that carry their *dimension* meaning at this grain
-    /// — the ones a view may group or scope by directly.
-    ///
-    /// Every grain except the pair grain carries all of its key. The pair
-    /// grain's `underlying_ref` and `underlying2_ref` are the canonicalized
-    /// `(least, greatest)` of a pair (spec §3.3): a different column
-    /// wearing the same name. Treating them as the underlying dimension is
-    /// silently wrong in both directions — grouping the pair table by
-    /// `underlying_ref` shows only the underlying that sorts first in each
-    /// pair, and a scope `underlying_ref = 'SPX'` applied to it misses every
-    /// pair where SPX sorts second. On a worst-of over NDX/RUT/SPX that is
-    /// every pair. Spec §6.3 says the same thing from the attribution side:
-    /// cross gamma is non-attributable at an underlying-level grouping.
+    /// Key columns that retain dimension meaning for grouping and scope.
+    /// The pair grain stores canonical `(least, greatest)` underlying IDs;
+    /// filtering either as an ordinary underlying would miss pairs where that
+    /// underlying occupies the other position. Its dimension key therefore
+    /// stops at instrument, making pair measures non-attributable to an
+    /// underlying-level grouping.
     pub fn dimension_key_columns(self) -> &'static [&'static str] {
         match self {
             Grain::UnderlyingPair => &K_INSTRUMENT,
@@ -79,10 +72,9 @@ impl Grain {
         }
     }
 
-    /// The columns naming the entity a measure belongs to — a subset of
-    /// the key. `book` and `lhu` are containers, and `counterparty`
-    /// subdivides a position rather than naming it, so none of them
-    /// identify. This is what decides `DeterminedNonAdditive` (spec §6.3).
+    /// Entity-identifying columns used to determine non-additive values.
+    /// `book` and `lhu` are containers; `counterparty` subdivides a position.
+    /// They remain storage keys but do not identify the measured entity.
     pub fn identity_columns(self) -> &'static [&'static str] {
         match self {
             Grain::Position => &ID_POSITION,

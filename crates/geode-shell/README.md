@@ -21,14 +21,14 @@ surfaces that consume them.
 
 | Module | Holds |
 |---|---|
-| `tiling` | The tiling tree (`Node::Split`, `Node::Leaf`, `Node::Stack`), workspaces, the three fixed docks per workspace, divider and drop-zone geometry. `Tree::layout` is the single source of truth for where a tile is; hjkl navigation uses the same geometry. |
-| `keymap` | Keystroke parsing, context predicates, layered binding resolution, chords, sequences and counts, the sequence-aware matcher, and module keymap fragments (`fragments::check_fragment`). |
+| `tiling` | Split/leaf/stack trees, workspaces, docks, divider and drop-zone geometry. Rendering and navigation share tree geometry; see [tiling contracts](../../docs/current/tiling.md) for focus, transfer, resize, and restoration rules. |
+| `keymap` | Keystrokes, predicates, layered binding resolution, sequences, counts, and module fragments. See [keymaps and actions](../../docs/current/keymaps.md) for matching, filtering, and editor limitations. |
 | `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
 | `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, and the data and config generations, as one value every tile observes. |
 | `scopebar`, `commandline`, `palette_usage`, `listfilter`, `choice`, `vimnav`, `vimfind`, `dialogmode`, `footer` | The models behind the scope bar, the per-tile `:` line, palette ranking (frecency), filtered lists, choice-with-typeahead, vim-style list motion and `/` find, the two-mode dialog vocabulary, and dialog footer hints. |
 | `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap. |
 | `config_write`, `keymap_edit`, `log_persist`, `reload` | Ordered user-layer writes, comment-preserving keyed edits, log-level persistence, and reload detection/rejection. See the [configuration contract](../../docs/current/configuration.md#runtime-edits) for write guarantees and the limits of keep-last-good. |
-| `session`, `shell/session_io` | Session encoding, local recovery, module/frame restoration, periodic snapshots, and shutdown saves. See [session persistence](../../docs/current/shell.md#session-format) for recovery boundaries, unavailable modules, and write-failure behavior. |
+| `session` | Session encoding, local recovery, and atomic file replacement. Shell integration owns periodic snapshots and shutdown saves. See [session persistence](../../docs/current/shell.md#session-format) for recovery boundaries, unavailable modules, and write-failure behavior. |
 | `diagnostics` | Source health, generations, independent config/data diagnostics, section versions, cached status summary, and watched/explicit catalog demand. See the [diagnostics contract](../../docs/current/shell.md#diagnostics-state-and-demand). |
 | `perf` | The always-compiled frame-time histogram. |
 | `defaults` | The builtin action set and keymap, the Builtin config layer. |
@@ -39,6 +39,7 @@ surfaces that consume them.
 |---|---|
 | `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the choice dialog, the stack member list, which-key, hot reload, session I/O, and the colour doors (`chip`, `listrow`, `control`, `colours`, `scale`). Its tests live in `shell/tests/`. |
 | `module` | The module-hosting contract: `TileContent`, `ModuleFactory`, `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
+| `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced application/persistence. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
 

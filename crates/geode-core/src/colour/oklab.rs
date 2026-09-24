@@ -1,8 +1,6 @@
-//! sRGB ↔ OKLab ↔ OKLCH (spec §2.4). Pure arithmetic, no dependency,
-//! Björn Ottosson's published matrices. OKLCH is the space named colours
-//! interpolate in (§2.2): an HSL midpoint of a theme's yellow and blue is a
-//! mud of the wrong lightness, and an OKLab chord passes through lower
-//! chroma; OKLCH keeps lightness and chroma even along the arc.
+//! Pure sRGB, OKLab, and OKLCH conversions using Björn Ottosson's matrices.
+//! Named colours interpolate along OKLCH hue arcs to retain lightness and
+//! chroma, avoiding the chroma loss of a straight chord through OKLab.
 
 use super::Rgb;
 

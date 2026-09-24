@@ -41,6 +41,9 @@ computed once by `Tree::layout`; painting, directional focus, divider
 geometry, and drop targets use that answer rather than maintaining parallel
 geometry. Each workspace also owns left, right, and bottom dock trees.
 
+See [tiling and workspaces](tiling.md) for region crossing, empty-dock focus,
+insertion/removal rules, drag geometry, and restoration limits.
+
 A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
 focus cannot point at a hidden member. The shell sends each occupant a
@@ -59,6 +62,10 @@ palette. The keymap resolves layered bindings against an ordered stack of
 contexts and supports chords, sequences, and numeric counts. The focused
 surface contributes its context; module fragments extend the vocabulary
 without giving a feature access to `ShellView`.
+
+The [keymap contract](keymaps.md) defines precedence, immediate exact matches,
+sequence cancellation, count handling, and the limits of fragment filtering
+and binding-editor resolution.
 
 One logical command has one action or owner method. Keyboard bindings, palette
 rows, toolbar controls, and pointer handlers route to that command instead of
@@ -279,6 +286,10 @@ periodic save, so the last rename can leave an older snapshot on disk. Separate
 processes writing the same session path likewise have no ordering guarantee.
 
 ### Configuration writes and reloads
+
+The [configuration-dialog contract](configuration-dialogs.md) covers draft
+ownership, stages, validation, inherited objects, and the boundary between
+local application and successful persistence.
 
 Runtime configuration writes target only the user layer. `config_write` is
 the common door for ordered, atomic edits. Accepted writes to one directory

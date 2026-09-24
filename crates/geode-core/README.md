@@ -11,14 +11,16 @@ Its place in the dependency graph is described in
 [`docs/current/architecture.md`](../../docs/current/architecture.md).
 Layered document behavior is described in
 [`docs/current/configuration.md`](../../docs/current/configuration.md).
+Reader defaults, partial validation, and presentation rules are described in
+[typed configuration documents](../../docs/current/typed-documents.md).
 
 ## What lives here
 
 | Module | Holds |
 |---|---|
 | `config` | Builtin → Desk → User TOML loading, recursive merging with whole-object exceptions, and path provenance. File loading collects diagnostics; typed readers validate separately. `load_views` applies dataset and view presentation without rewriting definitions. TOML key order is preserved. |
-| `schema` | The declared shape of the desk's data (`datasets.toml`): datasets, families (`measure`, `document`, `series`), columns, roles and measure `grain`. Grain `Ord` reads coarse < fine. |
-| `scope` | What every tile is looking at: dimension selections, a text filter and a validated expression, composed with AND. `scope::expr` is the restricted WHERE grammar, parsed against the schema, never raw SQL. |
+| `schema` | Dataset families (`measures`, `document`, `series`), columns, roles, grains, and family-specific validation. Readers may retain corrected objects with diagnostics. Grain `Ord` reads coarse < fine. |
+| `scope` | Dimension selections, text, expressions, and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. |
 | `scopes` | Saved scopes (`scopes.toml`). |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
@@ -30,7 +32,7 @@ Layered document behavior is described in
 | `document` | The struct-of-arrays rows a parsed market-data document becomes, and the `DocumentKind` trait a parser implements. |
 | `source_config` | I/O-free source parsing: defaults, dataset-family routing, topic and timestamp-field validation, and field-addressed diagnostics. Source tables replace whole objects across layers. |
 | `format` | Number formatting (scale, precision, grouping, negative style) shared by the blotter and the market-data panel. |
-| `colour` | Named colours: a hue on a canonical wheel interpolated in OKLCH between theme anchors, with a 3:1 readability floor. Pure; callers hand in `Anchors`/`Tokens`. |
+| `colour` | Named colours from semantic tokens or OKLCH hue interpolation. Contrast correction targets 3:1 but may fall short for custom themes. Pure; callers supply `Anchors`/`Tokens`. |
 | `health` | The degradation vocabulary (`Ok`, `Pending`, `PendingTooLong`, `Degraded`, `Failed`). Roll up by `severity_rank`, never by the derived `Ord`. |
 | `log` | The in-process log ring every `tracing` layer feeds, `[log]` levels by `geode::*` target, and the runtime level control. |
 | `panic` | The thread-local marker that lets the process panic hook tell a contained panic from a fatal one. |

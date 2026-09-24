@@ -1,33 +1,16 @@
-//! Drop-zone geometry for mouse-driven tile movement (tile-drag task).
-//! Pure functions only — no gpui (spec §10.3), same as the rest of
-//! `tiling/`. While a mod+drag is in flight, the render pass and the
-//! mouse-up handler both need one question answered: *what would dropping
-//! here mean?* This module answers it from geometry the caller already has
-//! (or re-derives once, at drop time, through the same pure layout
-//! authorities the render pass uses — `dock_layout` + `Tree::layout`).
+//! Pure drop-target geometry shared by highlighting and release handling.
 //!
-//! **Zone model** (recorded choices from the approved design):
-//! - Each tile rect divides into five zones: an edge band on each side —
-//!   the outer 25% of the rect's extent along that axis
-//!   ([`DROP_EDGE_BAND`]) — and the remaining center (the middle 50%×50%).
-//! - A point falling in two bands at once (a corner) resolves to the
-//!   *nearest edge by absolute distance* — the edge the cursor has
-//!   penetrated deepest toward, measured in the caller's units (pixels in
-//!   the shell), not normalized per-axis; exact ties break in the fixed
-//!   order Left, Right, Top, Bottom. Absolute distance was chosen over
-//!   per-axis normalization so the visual meaning is stable ("the edge my
-//!   cursor is closest to"), even in very elongated tiles.
-//! - A cursor inside a visible dock's frame but not over any of its tiles
-//!   is the *dock background* target. Because a dock tree's layout tiles
-//!   the whole frame, this is in practice the empty-dock case (the "move a
-//!   tile here" hint area) — but the classification is geometric, not
-//!   state-aware, so it stays correct if dock chrome ever leaves gaps.
+//! Each tile has an outer 25% edge band on each axis and a central 50%×50%
+//! zone. Corners choose the nearest edge by absolute distance in the caller's
+//! units; ties prefer left, right, up, then down. Visible dock frames take
+//! priority over main-tree tiles. A point inside a dock but outside its tile
+//! rectangles targets the dock background, normally an empty dock.
 //!
-//! **Center-drop semantics (tile-stacks spec §6.2)**: a center drop adds
-//! the dragged tile to the target's stack, after the target — the
-//! meaning change the original tile-drag design accepted in advance.
-//! Keyboard `workspace::move_*` keeps its swap on a plain leaf and pops a
-//! member out of its stack.
+//! An edge drop inserts beside the target. A centre drop adds the dragged
+//! tile after the target in its stack. These are distinct from directional
+//! keyboard movement, which swaps plain tiles or pops a member out of its
+//! stack. [`resolve_drop_target`] works from existing geometry;
+//! [`locate_drop_target`] recomputes it from the current workspace.
 
 use super::docks::layout as dock_layout;
 use super::tree::{Direction, Rect, TileId};
@@ -136,34 +119,14 @@ pub fn drop_highlight_rect(rect: Rect, zone: DropZone) -> Rect {
     }
 }
 
-/// The one shared answer to "what would dropping here mean", over
-/// caller-supplied rects (post-merge review cleanup 8 — before this
-/// extraction the render pass's highlight closure and
-/// [`locate_drop_target`] each restated the dock-frame → dock-tile →
-/// dock-background → tree-tile resolution order, and two hand-kept
-/// copies of a targeting rule is exactly how a highlight ends up
-/// promising a drop the release won't perform). Both call sites now
-/// feed this core:
+/// Resolve a target and its rectangle from caller-supplied geometry. Check
+/// dock frames first, then main-tree tiles; inside a dock, a tile hit takes
+/// priority over the background. Half-open rectangles give shared edges one
+/// owner.
 ///
-/// - [`locate_drop_target`] wraps it with geometry re-derived from the
-///   live layout authorities, once per drop;
-/// - the render pass (`ShellView::render`'s drop-highlight closure)
-///   feeds it the dock cells and tree rects its single layout pass
-///   already computed — the core takes borrowed slices through a plain
-///   iterator precisely so that per-frame call allocates nothing
-///   (PHILOSOPHY.md: per-frame heap churn is a defect).
-///
-/// Returns the resolved target plus the rect it resolved in — the hit
-/// tile's rect, or the dock's frame rect for a background hit — because
-/// the render caller needs that rect to paint the zone highlight
-/// ([`drop_highlight_rect`] over it) and re-deriving it would mean a
-/// second hit test. Resolution order is part of the contract: dock
-/// frames are checked before the main tree's tiles (dock rects are
-/// carved OUT of the tree area so they never overlap it, but a dock
-/// frame containing the point must claim it even when no dock tile
-/// does), and within a dock a tile hit beats the background. A
-/// non-finite cursor falls out naturally — `rect_contains` is false for
-/// NaN/inf against every rect.
+/// Rendering supplies its existing rectangles to paint a matching highlight.
+/// [`locate_drop_target`] supplies fresh layout geometry at release. Borrowed
+/// slices let the render path share the rule without allocating another layout.
 pub fn resolve_drop_target<'a>(
     docks: impl IntoIterator<Item = (super::docks::DockSide, Rect, &'a [(TileId, Rect)])>,
     tree_tiles: &[(TileId, Rect)],
@@ -481,16 +444,8 @@ mod tests {
         assert_eq!(locate_drop_target(empty.active(), AREA, 500.0, 400.0), None);
     }
 
-    /// Post-merge review cleanup 8 parity pin: `locate_drop_target` (the
-    /// drop path) and the shared `resolve_drop_target` core fed with
-    /// render-style rects (dock frames + per-dock tile layouts + main
-    /// tree layout, exactly what `ShellView::render`'s single layout
-    /// pass computes) must agree at every cursor position — the two call
-    /// sites share one answer to "what would dropping here mean" by
-    /// construction now, and this grid sweep keeps any future divergence
-    /// loud. Swept at a 10px step over the whole area plus a margin
-    /// outside it, crossing every dock frame, tile boundary, and zone
-    /// band in the fixture.
+    /// The release helper and resolver supplied with render geometry must agree.
+    /// Sweep across dock frames, tile boundaries, edge bands, and outside margins.
     #[test]
     fn render_path_resolution_agrees_with_locate_drop_target_everywhere() {
         let ws = workspace_with_dock();

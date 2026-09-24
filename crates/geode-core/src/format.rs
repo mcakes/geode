@@ -1,13 +1,7 @@
-//! Number formatting (Phase 3 spec §6.2). Scale first, then precision,
-//! then grouping and the negative style; the sign is taken from the
-//! rounded value so `-0.001` at two places is a zero, not a red zero.
-//!
-//! It lives in core rather than in the blotter because two modules now
-//! paint numbers from a `ColumnFormat` — the blotter's cells and the
-//! market-data panel's matrix (market-data spec §8.2) — and modules
-//! never depend on each other. `geode_blotter::core::format` re-exports
-//! these three names, so the blotter's own call sites and its tests read
-//! unchanged.
+//! Shared numeric formatting for feature modules. Scale first, then round,
+//! then apply thousands grouping and the negative style. Sign follows the
+//! rounded value, so `-0.001` at two places displays as unsigned zero.
+//! NaN is labelled `NaN` with zero sign; infinities use `∞` and `-∞`.
 
 use crate::view::{ColumnFormat, Negative, Scale};
 

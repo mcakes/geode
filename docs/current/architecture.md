@@ -23,10 +23,12 @@ pure presentation: geode-chart, geode-widgets ───► geode-core
 wire formats: geode-documents ───────────────────► geode-core
 ```
 
-`geode-core` is shared vocabulary. It has no window, database, filesystem, or
-network ownership. Types shared across a forbidden dependency boundary live
-there: scopes, schema, query outcomes, snapshots, health, document rows,
-series requests, and pricing requests.
+`geode-core` is shared vocabulary without window, database, or network
+ownership. Typed interpretation and merging are I/O-free; its configuration
+loader reads disk documents through `Config::read_docs` and `Config::load`.
+Types shared across a forbidden dependency boundary live there: scopes,
+schema, query outcomes, snapshots, health, document rows, series requests,
+and pricing requests.
 
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
@@ -88,11 +90,14 @@ Configuration is TOML layered in this order:
 2. a shared desk directory;
 3. the user's configuration directory.
 
-Documents merge deeply and retain provenance. Invalid input produces
-diagnostics and the application keeps the last valid state. Runtime edits
-write only the user layer through an ordered, atomic write path. The session
-file is separate declarative state for layout, occupants, frame state, and
-palette usage.
+Documents merge recursively with whole-object exceptions and retain
+provenance. Reload retains the active configuration for errors collected
+before its acceptance decision; later typed-reader failures do not roll back
+the whole candidate. Runtime edits write the user layer through an ordered,
+atomic write path. The session file holds layout, occupants, frame state,
+and palette usage, with separate save ordering and recovery rules. See
+[configuration](configuration.md) and [session persistence](shell.md#session-format)
+for those boundaries.
 
 Configuration is a public interface. File order can carry meaning, action IDs
 and key bindings are user facing, and an existing database is not implicitly
@@ -139,6 +144,9 @@ as a limitation in the relevant current guide.
 
 - [The shell](shell.md): window state, tiles, input, focus, modules, dialogs,
   and session persistence.
+- [Tiling](tiling.md) and [keymaps](keymaps.md): pure layout and input contracts.
+- [Typed documents](typed-documents.md) and [configuration dialogs](configuration-dialogs.md):
+  validation, draft application, and persistence.
 - [The data path](data-path.md): ingestion, storage, querying, time travel,
   freshness, and health.
 - Crate READMEs: local module maps, commands, and narrow invariants.

@@ -1,103 +1,31 @@
-//! Applying a field edit without a save key: instant in the dialog,
-//! merged and persisted on one short timer behind it (spec §7.1).
+//! Configuration edits update the dialog draft immediately and reach the active
+//! configuration and user files after a shared debounce.
 //!
-//! ## Why there is no save key
+//! `commit_edit` records whole-object edits by document and object name. The latest
+//! timer promotes the accumulated batch through `Config::from_docs` and
+//! `hot_reload::apply_reload`, then submits file writes through `config_write`. Memory
+//! and disk use the same rendered object values. Creation and confirmed removal join
+//! the batch with zero delay; ordinary field edits wait 250 ms after the latest edit.
+//! Closing the dialog does not cancel a queued batch.
 //!
-//! The first build of these dialogs staged every field edit into a
-//! [`Draft`](super::Draft) and wrote nothing until `s`. That made the
-//! round trip *disk-shaped*: to see a value change, the app wrote a file,
-//! the 500 ms mtime watcher noticed it, and the loader read every layer
-//! back off disk to rebuild the same `Config` the app could have built
-//! from the documents it was already holding. A trader changing a config
-//! field should see it change; instead they pressed a key, waited half a
-//! second, and hoped.
+//! The merge and file writes have separate outcomes: a rejected merge still writes the
+//! files and reports that memory kept its previous configuration. A current write
+//! failure attempts to restore the batch's initial documents and rebuilds an open
+//! draft. Completion sequence checks prevent an older success or failure from clearing
+//! a newer batch or replacing its status. Files are written one at a time, so a batch
+//! can partially persist; restoration does not undo successful file writes. The watcher
+//! can subsequently reload that partial disk state.
 //!
-//! So an edit never travels through the disk to reach the screen.
-//! [`commit_edit`] records the keystroke in one pending batch, and when
-//! the [`WRITE_DEBOUNCE`] window closes [`promote`] writes the changed
-//! object into the in-memory user-layer `LayerDoc`, re-merges through
-//! `Config::from_docs` — **the loader's own merge, the only one that
-//! exists** — and hands the result to the same
-//! `hot_reload::apply_reload` the watcher hands its own reloads to. What
-//! differs between a watcher reload and a dialog edit is where the
-//! documents came from and when they are applied; the merge and the
-//! application are byte-identical code paths, so a dialog cannot apply a
-//! change the watcher would have applied differently.
+//! The watcher also observes successful dialog writes. Equal layered documents avoid
+//! the view-specific reload event, palette closure, and changed-document rebuilds, but
+//! every accepted reload still advances the frame's config revision and republishes
+//! chords. Removing an object from a nonexistent user document creates no in-memory
+//! document, while the file writer creates a version-only file; this difference can
+//! trigger additional changed-document work.
 //!
-//! ## What is instant, and what rides the timer
-//!
-//! **The dialog is instant. The rest of the world catches up on one
-//! timer.** A keystroke changes the [`Draft`](super::Draft), which is
-//! what the edit stage paints, so the trader sees their change with
-//! nothing in between. What it does *not* do is apply the merged config:
-//! `apply_reload` emits `ShellEvent::ConfigReloaded`, the app bridge
-//! turns that into fresh `ViewSpec`s, and every blotter tile requeries —
-//! a §7.1 <50 ms operation at 1M rows. Doing that per keystroke means
-//! doing it at the OS key-repeat rate under a held key.
-//!
-//! So the merge, the application and the file write all happen together
-//! when the [`WRITE_DEBOUNCE`] window closes ([`promote`]). They are one
-//! event — "the rest of the world catches up" — and they belong on one
-//! timer. The blotter updating a beat after the dialog is correct, not a
-//! compromise.
-//!
-//! Both halves are measured, not assumed (`docs/perf.md`, "Phase 4c";
-//! `cargo bench -p geode-shell -- config_edit`). A **keystroke** costs
-//! **37 µs** — toggle the row, revalidate, render the object, turn it
-//! into the value memory and the file both take — which is 0.46% of
-//! PHILOSOPHY's 8 ms pure-UI budget, and no merge appears in it. A
-//! **flush** pays **70 µs** to merge a builtin layer including the real
-//! keymap, plus **20 µs** for the `build_keymap` `apply_reload` runs
-//! unconditionally, once per 250 ms. An earlier build merged and applied
-//! per keystroke; the arithmetic was affordable and the behaviour was
-//! not, which is why the numbers are split the way the work is.
-//!
-//! Memory and disk both derive from the same rendered
-//! `toml_edit::Item` — [`object_value`] parses exactly the text
-//! [`super::object_text`] would write — so the write is a *copy* of the
-//! decision, never its source. Nothing about the write's completion
-//! updates memory. Its **failure** does: see [`revert_failed_write`].
-//!
-//! One consequence, stated rather than hidden: a quit inside the
-//! debounce window loses the pending batch **entirely** — not merely its
-//! write. Nothing has been merged or applied yet either, so the edit is
-//! gone rather than half-landed, which is the better of the two failures
-//! but is still a loss. The exposure is 250 ms of one object's fields,
-//! and closing it would mean either writing per keystroke (the thrash
-//! this exists to prevent) or a shutdown hook this shell does not have.
-//!
-//! ## The watcher will see our own write
-//!
-//! It will, and nothing here suppresses it. `apply_reload` decides what a
-//! reload changes by comparing the freshly loaded layered documents
-//! against the ones already in `services.config` (`docs_equal`), so what
-//! that reload costs depends on whether the file read back says exactly
-//! what memory already says.
-//!
-//! For a **value-setting** edit it does, by construction: the file on
-//! disk is `config_write::edit`'s read-modify-write of the same object
-//! value memory already holds, and a fresh user-layer document
-//! [`docs_with_object`] creates carries the same `config_version` stamp
-//! `edit` puts at the top of a file it creates — so every `changed(..)`
-//! predicate answers false, no `ConfigReloaded` is emitted, no tile
-//! requeries, no palette closes, and the frame is never touched. The
-//! reload assigns an identical `Config` and repaints.
-//!
-//! A **removal** against a doc the user layer has no file for is the one
-//! case where it does not, and it is stated rather than hidden:
-//! [`docs_with_object`] deliberately creates nothing in memory for a
-//! `None` value when there is no user doc to remove from, while
-//! `config_write::edit` read-or-**creates** and stamps it, so disk gains
-//! a `config_version`-only document memory does not have. `docs_equal`
-//! differs, and the watcher's next poll reports `changed(..)` for a write
-//! the app itself made. The cost is one spurious fan-out — the same
-//! merge over the same values, one extra time — never a wrong value.
-//!
-//! That is why the reload is left alone in both cases: suppressing it
-//! would mean keeping a "self-write" ledger that has to be right about
-//! every path a write can take (including the ones that fail after the
-//! ledger entry is made) to avoid missing a real external edit, and the
-//! reload cannot change a value either way.
+//! There is no shutdown flush for the debounce batch. Exiting before promotion loses
+//! all pending edits, potentially spanning several objects or files. An in-flight write
+//! is also best effort at process exit.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -110,77 +38,30 @@ use super::{Destination, Domain, Stage};
 use crate::config_write;
 use crate::shell::ShellView;
 
-/// How long a config write waits for the next keystroke before going to
-/// disk.
-///
-/// 250 ms, chosen against two clocks and one budget:
-///
-/// * it is more than twice macOS's default key-repeat period (~100 ms),
-///   so a held `shift+j` reordering a column produces **one** write
-///   rather than one per repeat — the thrash this exists to prevent;
-/// * it is half the watcher's own 500 ms poll
-///   (`hot_reload::RELOAD_POLL_INTERVAL`), so a flush and the poll that
-///   observes it never interleave with a second flush;
-/// * it delays the merge, the application and the file **together** —
-///   everything except the dialog itself, which paints from the
-///   [`Draft`](super::Draft) and so has already moved. Nothing a trader
-///   is looking at waits for this timer; the blotter and the rest of the
-///   app do, deliberately (see the module header).
-///
-/// Write-on-field-commit was the alternative and was rejected: the Views
-/// stage has no commit moment — `space` and `shift+j` act on a row and
-/// the cursor may never leave it — so "commit" would mean "when you
-/// close the dialog", which is a quarter of an hour of applied-looking
-/// edits that a crash loses. A quarter of a second is the whole exposure
-/// here.
+/// Quiet period after the latest field edit before merging, applying, and writing the
+/// pending batch. The draft itself already shows each change. Restarting this timer
+/// coalesces repeated steps and reorders into one application and one write per touched
+/// document. Creation and confirmed removal use zero delay.
 pub(crate) const WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 
-/// The status line for a flush whose in-memory merge was refused (§19.6):
-/// the file half of a flush (`run_writes`) and the memory half
-/// (`apply_in_memory` → `apply_reload`) are independent outcomes, and
-/// `reload::decide` rejecting the merge says nothing about whether the
-/// write itself succeeded — disk stays the arbiter (this module's own
-/// header), so the write still happens and the status line has to say
-/// both halves rather than picking one.
+/// Status for a successful disk write whose in-memory reload was rejected. Merge
+/// acceptance and file-write success are independent outcomes.
 pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge";
 
-/// One config document's user-layer copy of one object, as an edit leaves
-/// it: `Some(value)` to set it, `None` to remove it entirely.
-///
-/// `None` is not an optimisation, and it does **not** mean "empty" —
-/// [`object_value`] decides which renderings become one, and only an
-/// OVERLAY destination ([`Destination::Presentation`] or
-/// [`Destination::DatasetPresentation`]) ever can. A presentation table that
-/// matches the view's own doc in every respect renders **empty**
-/// (`views::presentation_table` omits an `order` equal to the doc's, an
-/// empty `hidden`, and every width the doc already declares), and writing
-/// an empty table would leave `[tree]` alone in `view_presentation.toml`
-/// — a table that says nothing, which is exactly the artefact seen in a
-/// user's file before this design. Under the old staged-save model that
-/// needed a save whose draft excluded nothing; under this one it is one
-/// keystroke away, every time a trader unhides the last hidden column.
-/// So an empty *overlay* rendering means "I have no personalisation of
-/// this object" and is written as an absence, in memory and on disk
-/// alike.
+/// Set one user-layer object with `Some(value)`, or remove it with `None`. Only empty
+/// presentation overlays render as removals: their absence means inherit presentation.
+/// An empty definition must not remove the user key, because that would restore an
+/// inherited object instead of keeping it empty.
 pub type ObjectEdit = Option<toml::Value>;
 
-/// What one rendered object does to its user-layer document — the return
-/// of [`object_value`], and the reason "empty" cannot mean the wrong
-/// thing at the wrong destination.
-///
-/// Three answers, not two, because removal and no-write are genuinely
-/// different acts in a layered config: removing the user's key means
-/// *inherit the layer beneath*, which is the opposite of what an emptied
-/// object asked for.
+/// The result of rendering one object. Removal inherits the layer below; `Nothing`
+/// leaves the existing user-layer entry unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjectWrite {
     /// Set the user-layer key to this value.
     Set(toml::Value),
-    /// Remove the user-layer key. Only an overlay destination
-    /// ([`Destination::Presentation`], or
-    /// [`Destination::DatasetPresentation`] — dataset-presentation spec
-    /// §4.1) ever renders this, where absence IS the state being
-    /// recorded.
+    /// Remove the user-layer key. Only empty `Presentation` or `DatasetPresentation`
+    /// overlays render this result.
     Remove,
     /// Touch nothing: neither memory nor disk gains or loses a key, and
     /// the object keeps whatever it already had.
@@ -211,48 +92,18 @@ pub(crate) struct PendingConfigWrite {
     revert: Vec<LayerDoc>,
 }
 
-/// What `object`'s user-layer entry in `dest`'s document should become.
+/// Render and parse the exact object text used for persistence, so memory and disk
+/// receive the same value.
 ///
-/// Goes through [`super::object_text`] — the exact text the file write
-/// produces — and parses it back, rather than converting
-/// `toml_edit::Item` to `toml::Value` field by field. One rendering,
-/// two destinations: memory cannot end up holding something the file
-/// would not have said. It is a parse of a few hundred bytes, and it is
-/// part of the keystroke rather than of the flush — measured inside that
-/// keystroke's 37 µs, against an 8 ms budget.
-///
-/// **`dest` is a parameter, not a convenience.** What an *empty*
-/// rendering means is not a property of the item — it is a property of
-/// the file it would be written to, and the files these dialogs write
-/// mean opposite things by an absent key:
-///
-/// * `view_presentation.toml` — and `dataset_presentation.toml`, which is
-///   the same kind of file one layer down (dataset-presentation spec
-///   §4.1) — is an **overlay** read over the object it
-///   names, so an absent key is "I have no personalisation of this
-///   object" (spec §16) — exactly what an empty rendering says, hence
-///   [`ObjectWrite::Remove`];
-/// * a domain's **own** doc is merged by layer, atomically at depth 1,
-///   so an absent user key means *inherit the layer beneath*. Removing it
-///   for an emptied object would silently restore the desk's copy of it —
-///   the trader asks for "this slot groups by nothing" and gets "revert
-///   to the desk's slot 3", with the edit stage still painting the empty
-///   chain they just cleared. So a Doc rendering never collapses to an
-///   absence, and the question cannot be reached from the wrong
-///   destination because no caller gets to answer it.
-///
-/// The other half of that rule lives in `Draft::step_selected`, which
-/// refuses the keystroke that would empty a `Destination::Doc` list at
-/// all: the states the config model cannot represent are not offered,
-/// so [`ObjectWrite::Nothing`] below is the inert answer to something
-/// that should never arrive rather than a behaviour anything relies on.
+/// An empty presentation overlay means no personalisation and removes the user entry.
+/// An empty definition returns `Nothing`: removing it would inherit an object the draft
+/// intended to empty. Unparseable renderings also return `Nothing`, never a destructive
+/// removal. List editing refuses a final untick where the definition cannot represent
+/// an empty list.
 pub fn object_value(object: &str, item: toml_edit::Item, dest: Destination) -> ObjectWrite {
     if item_is_empty(&item) {
         return match dest {
-            // `dataset_presentation.toml` joins `view_presentation.toml`
-            // for exactly the same reason (dataset-presentation spec
-            // §4.1): it is an overlay, so an absent table IS "I have no
-            // personalisation of this column".
+            // An absent overlay inherits presentation without removing the definition.
             Destination::Presentation | Destination::DatasetPresentation => ObjectWrite::Remove,
             Destination::Doc => ObjectWrite::Nothing,
         };
@@ -262,25 +113,15 @@ pub fn object_value(object: &str, item: toml_edit::Item, dest: Destination) -> O
         .parse::<toml::Table>()
         .ok()
         .and_then(|mut parsed| parsed.remove(object));
-    // A rendering that will not parse back is a bug in the renderer, not
-    // an instruction to delete the object: nothing, rather than the
-    // removal an `Option` return used to collapse this into.
+    // An invalid rendering must not become an instruction to delete the object.
     match parsed {
         Some(value) => ObjectWrite::Set(value),
         None => ObjectWrite::Nothing,
     }
 }
 
-/// Whether `item` carries nothing at all: an empty table (no keys, which
-/// `views::presentation_table` can render) or an empty array (every
-/// `dimensions` tick undone, which `groupings::to_table` could render if
-/// `Draft::step_selected` let a trader get there). What that *means* is
-/// [`object_value`]'s question, not this one's — this says only that the
-/// container is empty.
-///
-/// Any other value — a populated table, a populated array, a bare
-/// string or number — is never empty: no domain built so far renders a
-/// Doc write as a bare scalar, so there is nothing else this could mean.
+/// Whether the item is absent or an empty table, array, or array of tables. Scalars are
+/// nonempty. `object_value` interprets emptiness by destination.
 fn item_is_empty(item: &toml_edit::Item) -> bool {
     match item {
         toml_edit::Item::Table(t) => t.is_empty(),
@@ -290,19 +131,12 @@ fn item_is_empty(item: &toml_edit::Item) -> bool {
     }
 }
 
-/// `docs` with `object`'s entry in the **user layer's** copy of `doc` set
-/// to `value` (or removed when it is `None`).
+/// Set or remove an object in the user-layer document. New documents receive the same
+/// version stamp as `config_write::edit`, keeping their layered values equal when the
+/// watcher reads the resulting file.
 ///
-/// A user-layer document that does not exist yet is created, carrying the
-/// same `config_version` stamp `config_write::edit` writes at the top of
-/// a file it creates — without which the document memory holds and the
-/// document the watcher reads back a moment later would differ, and the
-/// self-write reload this module's header proves inert would stop being
-/// inert.
-///
-/// Appended at the end rather than inserted beside its siblings:
-/// `Config::from_docs` groups by name preserving order, and the user
-/// layer is last in every group's merge order anyway.
+/// A removal does not create a missing document. New user documents are appended;
+/// `Config::from_docs` preserves each document's layer order while grouping names.
 pub(super) fn docs_with_object(
     mut docs: Vec<LayerDoc>,
     user_dir: &Path,
@@ -377,28 +211,14 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
     out
 }
 
-/// Would applying the draft as it stands fork the object — write a
-/// [`Destination::Doc`] change into the user layer for an object the user
-/// layer does not already own?
+/// Whether a definition edit would copy an inherited object into the user layer.
+/// Whole-object replacement stops inheriting later changes to that definition;
+/// presentation-only edits do not fork it. Unconfigured grouping slots have no
+/// inherited object to fork.
 ///
-/// A fork *freezes*: a user-layer `views.toml` copy of a desk view stops
-/// receiving the column the desk adds next week (spec §4.1). It is
-/// applied on the keystroke like every other edit and *announced*
-/// ([`fork_notice`]) rather than asked about (user ruling 2026-09-14);
-/// `commit_edit` also reads it to record what the fork shadows (§19.6).
-/// Everything else — order, inclusion, width — is presentation and forks
-/// nothing.
-///
-/// It reads `services.config`, which the debounce leaves up to 250 ms
-/// behind, so two definitional edits inside one window each announce
-/// rather than the second seeing the first already applied. That is the safe
-/// direction — asking twice loses nothing — and it needs a `Choice`
-/// stepped twice inside a quarter second to happen at all.
-///
-/// `row.layer: None` (§18.4 — an unconfigured Groupings slot) forks
-/// nothing: there is no copy in any layer for a user-layer write to
-/// freeze anyone out of, so filling an empty slot is a plain write, not
-/// a fork.
+/// Reads the active config, which may trail the pending batch by the debounce interval.
+/// Multiple definition edits within that interval can therefore repeat the fork notice
+/// and sidecar entry.
 pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
     let Some(draft) = shell
         .object_dialog
@@ -420,16 +240,8 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))
 }
 
-/// What a fork says instead of asking (user ruling 2026-09-14: the
-/// confirm was "too distracting — tell the user what is happening but
-/// just do it"): the copy, the layer it shadows, and the verb that undoes
-/// it. Read before [`commit_edit`] moves the baseline — [`would_fork`] is
-/// answered from the draft's pending writes, which the commit empties.
-///
-/// `layer` is the shadowed layer's own name ([`super::shadow_of`]), so a
-/// builtin object is not called the desk's; with no shadow to name
-/// (unreachable when `would_fork` holds, since that is what it checks)
-/// the notice still says what happened and what undoes it.
+/// Announce the copy, its shadowed layer, and the revert verb. Read before
+/// `commit_edit` advances the draft baseline and empties its pending differences.
 pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
     let Some(name) = shell
         .object_dialog
@@ -448,21 +260,9 @@ pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
     }
 }
 
-/// The open draft's first error-severity diagnostic, formatted as the
-/// notice a refused commit shows — or `None` when nothing blocks it.
-///
-/// Spec §7.1's no-carry-forward rule: `reload::decide` rejects any
-/// config holding an error diagnostic, so an edit `Domain::validate`
-/// rated `Severity::Error` must never reach the batch — the merge would
-/// be refused a flush later while the file write still fired, leaving
-/// memory and disk disagreeing. `Severity::Warning` never matches: a
-/// desk renaming a column produces a warning by design (a stale name is
-/// meant to be ignorable, not fatal), and blocking on it would make a
-/// personal file unsaveable through the dialog built to manage it.
-///
-/// `Severity`, not "has any diagnostics", is the sole discriminator —
-/// see `an_edit_with_only_warnings_still_joins_the_batch` for the test
-/// that pins the difference.
+/// The first error-severity draft diagnostic, formatted as a refusal notice. Errors
+/// block value edits before they can enter the batch; warnings remain editable. This
+/// gate does not apply to removals that can clear invalid objects.
 pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
     let diagnostic = shell
         .object_dialog
@@ -475,40 +275,16 @@ pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
     Some(format!("not saved — {}", diagnostic.message))
 }
 
-/// Record the draft's change and put it on the debounced queue.
+/// Queue the draft's rendered changes without merging or applying them yet. The dialog
+/// already paints the draft; `promote` updates active configuration after the debounce.
+/// Returns a refusal notice or `None`.
 ///
-/// The keystroke's whole job. It does **not** merge and does **not**
-/// apply — [`promote`] does both when the window closes — because the
-/// dialog already shows the change (it is painted from the draft) and
-/// everything else the application would touch is expensive per
-/// keystroke. See this module's header.
-///
-/// Returns the notice the caller should show, or `None` when nothing
-/// changed. A missing user directory is a notice and **nothing queued** —
-/// the contract every persist path in this crate shares — so no flush is
-/// ever scheduled and the change is never applied: memory ahead of a
-/// disk that can never catch up is precisely the state hazard 1 exists
-/// to prevent. The draft keeps the value and stays **dirty** — its
-/// baseline only moves once the batch is queued — and the row still
-/// paints it, which is the honest picture of a shell with nowhere to
-/// write.
+/// Without a writable user directory, nothing is queued and the draft remains dirty.
+/// Its baseline advances only after validation and directory checks pass.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
-    // The actual gate: checked here, inside the one function every EDIT
-    // reaches before it can queue a batch, rather than trusted to each
-    // caller. `render::commit_or_confirm` also checks this early (see
-    // `blocking_diagnostic`'s own doc) so a fork is never announced over
-    // an edit that can never be saved — but that early check is a UX
-    // nicety, not the safety property. This one is: it covers
-    // `render::run_overwrite` (Scopes' `o`), which calls this function
-    // directly, and any future caller, without depending on anything
-    // about how keys are dispatched.
-    //
-    // A removal never reaches this function — see [`commit_removal`],
-    // which joins the same batch through a deliberately ungated path.
-    // An error-severity diagnostic on the object `d`/`r` is about to
-    // remove describes exactly the state those verbs exist to escape;
-    // a gate built to keep an unsaveable *value* off the batch must not
-    // also refuse the one action that clears it.
+    // Gate every value-edit caller, including overwrite, at the queue boundary. The
+    // renderer also checks early so it does not announce an unsaveable fork. Removals
+    // use `commit_removal`: an invalid object must remain removable.
     if let Some(notice) = blocking_diagnostic(shell) {
         return Some(notice);
     }
@@ -516,18 +292,9 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     if edits.is_empty() {
         return None;
     }
-    // §19.6: a Doc write onto an object the user layer does not own is a
-    // fork; record what it shadows, in THIS batch, so the entry cannot
-    // land without the fork nor before it. Stale entries ride along as
-    // removals — the one moment the sidecar is being written anyway.
-    //
-    // The stale removals are inserted BEFORE the fork's own entry below,
-    // and that order is load-bearing: at fork time the user layer does
-    // not yet hold the object, so `stale_override_keys` can list the
-    // very key being written here as stale. Both inserts share one
-    // `BTreeMap` key, so whichever runs second wins — the fresh `Some`
-    // entry below must be that one, not the stale `None` clearing it
-    // right back out.
+    // Record the inherited definition in the same batch as the fork. Clear stale
+    // sidecar keys first: the new fork's key can itself appear stale before its
+    // definition reaches the user layer, so the fresh entry must win.
     let domain = shell.object_dialog.as_ref().map(|s| s.domain);
     if let Some(domain) = domain
         && would_fork(shell, domain)
@@ -545,12 +312,8 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         );
     }
 
-    // **Before the baseline moves.** A shell with nowhere to write queues
-    // nothing, so nothing has been accounted for and the draft must stay
-    // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and the revert of a failed write (`revert_failed_write`)
-    // or a later successful commit would then treat a value that was
-    // never applied and never persisted as accounted for.
+    // Do not advance the baseline until there is somewhere to persist the edit. An
+    // unqueued change must remain dirty for a later attempt.
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };
@@ -572,43 +335,12 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     None
 }
 
-/// Record a confirmed `d`/`r`'s removal and put it on the exact batch a
-/// field edit would join — the same [`PendingConfigWrite`], the same
-/// [`promote`] → [`apply_in_memory`] → [`run_writes`] → [`finish_flush`],
-/// so a delete or revert is no longer invisible until the 500 ms watcher
-/// notices the write `spawn_removals` used to make on its own.
+/// Queue confirmed removals with zero delay, joining any pending field edits. The
+/// keys-only input cannot carry a value past the edit validation gate.
 ///
-/// Takes bare `(doc, object)` keys, not `edits` — **on purpose, and this
-/// is the property the rest of this doc leans on.** An earlier version
-/// took the same `BTreeMap<(&'static str, String), ObjectEdit>` shape
-/// [`commit_edit`] does and trusted `render::removal_edits` to fill
-/// every value with `None`; nothing in that signature stopped a future
-/// caller passing `Some(value)` instead, which would join the batch,
-/// flush at zero delay and skip [`blocking_diagnostic`] entirely — the
-/// exact hole Task 2 closed, reopened through the one door built not to
-/// need the gate. Building the `None`s here, from keys that carry no
-/// value at all, makes that unrepresentable rather than conventional: a
-/// caller cannot pass a value through this door because there is no
-/// parameter to put one in.
-///
-/// **Deliberately does not call [`blocking_diagnostic`].** That gate
-/// exists so an edit `Domain::validate` rated `Severity::Error` can never
-/// join the batch, because `reload::decide` would refuse the merge a
-/// flush later while the file write had already fired. A removal cannot
-/// hit that: it does not write a value the reader could reject, it
-/// erases the object carrying one. Gating a delete or revert on the very
-/// diagnostic it would resolve would trap a trader in the one dialog
-/// built to fix that state, refusing the only action that helps — see
-/// this crate's Task 3 report for the fuller reasoning.
-///
-/// **No debounce, unlike [`commit_edit`].** [`WRITE_DEBOUNCE`] exists to
-/// coalesce a keystroke *stream* — a held `shift+j`, a typed filter char
-/// — into one write; a removal is a single already-confirmed act (armed
-/// by `d`/`r`, answered by a second keystroke), so there is nothing to
-/// coalesce and nothing gained by waiting on the clock. It still goes
-/// through [`schedule_flush`] rather than applying inline, so an edit
-/// already mid-debounce on another object is folded into the same flush
-/// instead of racing it.
+/// Removals bypass draft errors because deleting or reverting the invalid object may
+/// resolve those errors. They still use the shared asynchronous flush so a pending edit
+/// on another object is included rather than raced.
 pub(super) fn commit_removal(
     shell: &mut ShellView,
     keys: impl IntoIterator<Item = (&'static str, String)>,
@@ -626,24 +358,10 @@ pub(super) fn commit_removal(
     None
 }
 
-/// Record a freshly named object (§18.2) — the third door onto the batch
-/// beside [`commit_edit`] and [`commit_removal`].
-///
-/// One `Destination::Doc` write, built here rather than by `edits_for`: a
-/// new draft's baselines are empty (`Draft::new_object`), so
-/// `writes_by_destination` would also name `Presentation` for an untouched
-/// column list and queue an empty overlay write that means "remove what is
-/// not there". Gated by [`blocking_diagnostic`] like an edit (a new object
-/// the reader rejects must not reach disk); flushed at `Duration::ZERO`
-/// like a removal (one decided act, nothing to coalesce) so the browse
-/// list the config derives shows the object on the next executor tick
-/// rather than 250 ms later.
-///
-/// `pub(crate)`, not `pub(super)`: `render`'s `create_from_name` — the `n`
-/// keybinding's `enter`, over [`Stage::Naming`](super::Stage::Naming) —
-/// is `render`'s production caller; `crate::shell::tests::objectdialog`
-/// also calls it directly, to pin this door's own contract apart from the
-/// keybinding that reaches it.
+/// Queue a newly named definition after validation, with zero delay. Render only
+/// `Destination::Doc`; a new draft's empty baselines would otherwise also report
+/// untouched presentation fields as changes. Refuse empty definitions and missing user
+/// directories before advancing the draft baseline.
 pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
     if let Some(notice) = blocking_diagnostic(shell) {
         return Some(notice);
@@ -674,18 +392,8 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     None
 }
 
-/// The tail [`commit_edit`] and [`commit_removal`] share once each has
-/// decided what belongs in `edits` **and** found somewhere to write it:
-/// capture the batch's revert baseline and schedule the flush that applies
-/// and writes it.
-///
-/// `user_dir` is a parameter rather than looked up here, and that is the
-/// whole point of the split: each caller has to resolve it *before* it
-/// commits to anything else (`commit_edit` moves the draft's baseline),
-/// and their two no-directory notices differ in wording anyway ("nothing
-/// was changed" vs. "nothing was removed"). Taking the directory as an
-/// argument means a caller cannot reach the queue without having answered
-/// that question first.
+/// Capture the batch's initial documents and schedule its accumulated edits. Callers
+/// resolve the writable directory before advancing any draft baseline.
 fn queue_batch(
     shell: &mut ShellView,
     edits: BTreeMap<(&'static str, String), ObjectEdit>,
@@ -703,28 +411,13 @@ fn queue_batch(
     schedule_flush(shell, user_dir, edits, revert, delay, cx);
 }
 
-/// Re-merge the documents with `edits` folded in, and hand the result to
-/// the same applier the watcher uses.
+/// Fold edits into the active layered documents, re-merge them, and use the same reload
+/// applier as the watcher.
 ///
-/// **The previous config's diagnostics deliberately do NOT travel with
-/// it.** An earlier build carried them forward, reasoning that nothing
-/// had been re-read so nothing new had been learned. That was true and
-/// the conclusion was still wrong: `reload::decide` rejects any config
-/// holding an error-severity diagnostic, so a single unparseable or
-/// unsupported `*.toml` sitting in the user's directory at startup made
-/// every dialog edit a silent no-op in memory — while the file write
-/// still fired, so memory and disk diverged, and nothing on screen said
-/// why. The trader most likely to open a config dialog is precisely the
-/// one whose config is broken.
-///
-/// The diagnostics are not lost so much as not applicable: they describe
-/// files that were **skipped**, which contributed no documents, so they
-/// are not diagnostics of the documents being re-merged here. Last-good
-/// still guards what it is for — `apply_reload` derives `mod_diags` and
-/// `keymap_diags` from the documents themselves, so an edit that really
-/// does produce a broken config is still rejected. And the watcher, woken
-/// by this flush's own write, re-reads the broken file and restores the
-/// `config: N error(s) — keeping last good` status within its next poll.
+/// Do not carry prior file-reading diagnostics into `Config::from_docs`: they can
+/// describe files that were skipped and contributed no documents. `apply_reload`
+/// recomputes its own acceptance diagnostics from the merged documents. A later watcher
+/// read can report unresolved disk-file errors again.
 fn apply_in_memory(
     shell: &mut ShellView,
     user_dir: &Path,
@@ -739,26 +432,12 @@ fn apply_in_memory(
     shell.apply_reload(config, cx);
 }
 
-/// The live config with the pending batch folded in — what memory WILL
-/// hold once the debounce closes — or `None` when nothing is pending and
-/// `services.config` is already that.
+/// Active documents with the pending batch folded in, without applying or writing them.
+/// `None` means no batch is pending.
 ///
-/// This exists for one reader, [`super::render::enter_edit_stage`], and
-/// closes a hole the digit jump (§18.8) made two keystrokes wide: a
-/// draft derived from `services.config` inside the [`WRITE_DEBOUNCE`]
-/// window paints the object as it stood BEFORE the tick just made,
-/// because the flush has not reached memory yet — and that stale draft
-/// then outlives the flush (nothing rebuilds an open draft when
-/// [`promote`] applies), so its next tick renders the whole object
-/// without the earlier one and writes that. Deriving from the folded
-/// documents instead makes the draft agree with the batch by
-/// construction; the flush, when it comes, changes nothing the draft does
-/// not already show.
-///
-/// The same fold [`apply_in_memory`] does, minus the apply: no
-/// `apply_reload`, no fan-out, no write — the batch keeps its own timer
-/// and its own debounce semantics. `Config::from_docs` over every layered
-/// document is the whole cost, the one `promote` pays on every flush.
+/// Stage entry uses this snapshot so reopening an object during the debounce sees its
+/// latest edits. A stale draft would otherwise outlive the flush and overwrite those
+/// edits when it next renders the whole object.
 pub(crate) fn config_with_pending(shell: &ShellView) -> Option<Config> {
     let pending = shell.pending_config_write.as_ref()?;
     let mut docs = shell.services.config.all_docs();
@@ -768,30 +447,13 @@ pub(crate) fn config_with_pending(shell: &ShellView) -> Option<Config> {
     Some(Config::from_docs(docs))
 }
 
-/// Fold `edits` into the pending batch and schedule the flush that will
-/// apply and write it, after `delay`.
+/// Merge edits into the pending batch and schedule a sequence-tagged timer. Only the
+/// latest sequence promotes the accumulated whole-object values; older timers return
+/// without work. Field edits debounce, while creations and confirmed removals use zero
+/// delay.
 ///
-/// Every keystroke or removal bumps the sequence and spawns a fresh
-/// timer; whichever task wakes holding the current sequence owns the
-/// whole accumulated batch, and every superseded task finds a newer
-/// sequence and returns. That is the coalescing: N keystrokes inside the
-/// debounce window produce N timers, **one** application, and one write
-/// per touched document.
-///
-/// `delay` is [`WRITE_DEBOUNCE`] for [`commit_edit`]'s keystrokes and
-/// `Duration::ZERO` for [`commit_removal`]'s single confirmed act. A
-/// zero-duration `timer` resolves as soon as it is polled rather than
-/// waiting on the clock (`Executor::timer`'s own short-circuit), so a
-/// removal needs no clock advance in a test and no wait in the running
-/// app, while still folding into — and being folded into by — whatever
-/// the pending batch already holds, exactly like a longer delay would.
-///
-/// The sequence guards both ends of the flush. [`promote`] checks it
-/// before doing the work, and [`finish_flush`] checks it before clearing
-/// the batch — the second check is not symmetry for its own sake: without
-/// it, an edit made while a write is in flight is folded into the batch
-/// that the completing write then erases, and it reaches neither memory
-/// nor disk.
+/// The batch remains available while writes run. Completion checks the sequence again
+/// so a write cannot discard newer edits that arrived while it was in flight.
 fn schedule_flush(
     shell: &mut ShellView,
     user_dir: PathBuf,
@@ -833,26 +495,12 @@ fn schedule_flush(
     .detach();
 }
 
-/// The debounce window has closed: apply the accumulated batch to memory
-/// through the one applier, and hand back the writes the file half owes
-/// plus, when the merge itself was refused, how many errors it carried
-/// (§19.6).
+/// Apply the current batch to memory and return its file writes plus the reload's
+/// rejection count, if any. Superseded sequences return `None`.
 ///
-/// `None` when a later keystroke has taken the batch over — that
-/// keystroke's own timer carries everything, including this one's edits,
-/// so doing the work twice would be one extra whole-app fan-out for
-/// nothing.
-///
-/// The batch stays on `ShellView` rather than being taken here, for two
-/// reasons: a failure still needs its `revert` documents to restore from,
-/// and an edit arriving during the write has to have somewhere to land.
-///
-/// The third element of the returned tuple is read right after
-/// `apply_in_memory` returns: that call runs `apply_reload`, which just
-/// set `self.last_reload` to whatever `reload::decide` answered for the
-/// merged config, so this is the first and only moment `promote` can
-/// learn whether the write about to happen is going to a config that
-/// memory actually took.
+/// Keep the batch on the shell while writing: failure needs its original documents, and
+/// later edits need to extend it. Capture `last_reload` immediately after apply so the
+/// completion reports this flush's memory outcome.
 #[allow(clippy::type_complexity)]
 fn promote(
     shell: &mut ShellView,
@@ -877,30 +525,12 @@ fn promote(
     Some((user_dir, edits, rejected))
 }
 
-/// The write is done, one way or the other.
+/// Finish only the current write sequence. An older success or failure must not clear
+/// newer edits, restore old documents, or replace the current status.
 ///
-/// **The sequence check on every completion is load-bearing.** Clearing
-/// the batch unconditionally erases any edit that arrived while this
-/// write was in flight: that edit was folded into the pending batch, its
-/// own flush then finds nothing, and it reaches neither memory nor disk —
-/// after which the watcher, woken by the write that *did* land, reverts
-/// memory to the older on-disk state and the change disappears with
-/// nothing on screen having said so. Only the flush that still owns the
-/// batch may clear it; a superseded one leaves it for its successor.
-///
-/// `rejected` (§19.6) is `promote`'s own reading of `shell.last_reload`
-/// right after it applied the merge — `Some(n)` when `reload::decide`
-/// kept last-good over `n` errors, `None` when the merge was applied (or
-/// when a superseded `promote` never ran at all, in which case this
-/// whole function is never reached for that flush). It says nothing
-/// about whether the FILE write below succeeded: the two are independent
-/// outcomes of the same flush, and a `Some` here only ever changes the
-/// success arm's own status line, never which branch of the `match` on
-/// `outcome` runs.
-///
-/// The test seam accepts explicit completion revisions so superseded successes
-/// and failures can be exercised deterministically against a real pending batch,
-/// independently of how the background executor schedules its completion tasks.
+/// `rejected` records this flush's in-memory reload outcome. Successful writes report
+/// that rejection separately; failed writes attempt restoration regardless of whether
+/// the proposed merge was accepted.
 pub(crate) fn finish_flush(
     shell: &mut ShellView,
     seq: u64,
@@ -917,10 +547,7 @@ pub(crate) fn finish_flush(
         Err(message) => revert_failed_write(shell, message, cx),
         Ok(()) => {
             shell.pending_config_write = None;
-            // §19.6: the file is on disk either way; what differs is
-            // whether memory took it. A rejected merge is said in the
-            // same status slot a failed write uses, and cleared by the
-            // next flush memory accepts.
+            // The write succeeded; separately report whether memory accepted its merge.
             match rejected {
                 Some(n) => {
                     shell.config_write_error = Some(format!(
@@ -929,10 +556,8 @@ pub(crate) fn finish_flush(
                     cx.notify();
                 }
                 None => {
-                    // A write that succeeds AND lands in memory clears
-                    // whatever the last failure (or rejection) left on
-                    // the status bar — the config on disk is current
-                    // again, and memory agrees with it.
+                    // A successful write and accepted merge clear the previous failure
+                    // status.
                     if shell.config_write_error.take().is_some() {
                         cx.notify();
                     }
@@ -981,33 +606,21 @@ fn run_writes(
     }
 }
 
-/// **Hazard 1.** The write failed, so memory is ahead of disk — a trader
-/// is looking at a value that is not persisted. Put memory back where the
-/// batch started, through the same applier, and say so.
+/// Attempt to restore the batch's initial documents through the reload applier and
+/// rebuild any open draft after a current write failure.
 ///
-/// The whole batch reverts, not the failing document alone: `revert` is
-/// one coherent set of documents, and reverting half of a two-file edit
-/// would leave a view's presentation describing columns the view no
-/// longer lists. If one document of a batch did land before another
-/// failed, the 500 ms watcher reconciles memory back toward whatever is
-/// actually on disk — disk stays the arbiter, which is the property that
-/// makes the revert safe to be approximate.
+/// Restoration covers the whole in-memory batch. Successful writes to other files are
+/// not rolled back, and the watcher may subsequently load that partial disk state. This
+/// is recovery from a write failure, not a transaction across files.
 fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<ShellView>) {
     tracing::warn!(target: "geode::config", "{message}");
     let Some(pending) = shell.pending_config_write.take() else {
         return;
     };
-    // Named apart from the apply path's own `config` on purpose: these
-    // two `apply_reload` calls are the only ones in this module, they
-    // differ only in which documents they carry, and a mutation entry
-    // that anchors on one must not silently land on the other. No
-    // carried diagnostics here either, for `apply_in_memory`'s reasons.
+    // Re-derive diagnostics from the restored documents, as in `apply_in_memory`.
     let restored = Config::from_docs(pending.revert);
     shell.apply_reload(restored, cx);
-    // The status bar, not just the dialog: `PendingConfigWrite` lives on
-    // `ShellView` exactly so a write survives the dialog that started it,
-    // so the commonest way to hit this path is with nothing of the
-    // dialog's left on screen to carry a notice.
+    // Keep the failure visible even when the dialog that queued the write is closed.
     shell.config_write_error = Some(format!("config not saved — reverted: {message}"));
     // The draft is the edit buffer the reverted value has to show through,
     // so it is rebuilt from the config that just went back — otherwise the
@@ -1018,31 +631,17 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
         let selected = draft.selected;
         let name = draft.name.clone();
         let mut rebuilt = state.domain.draft(&shell.services.config, &name);
-        // Part 2c §5.2: a rebuilt draft is the OBJECT's, with no column
-        // projection on it, so the stage has to come back with it — and
-        // so does the cursor. Left at `Column` the crumb would keep
-        // naming a column whose seven fields are no longer installed, the
-        // one thing on screen still claiming the projection this revert
-        // just dropped; and `selected` is an index into those seven,
-        // which against the view's own rows points wherever that number
-        // happens to land. Both are resolved the way `Draft::leave_column`
-        // resolves them: the stage steps back to the view, the cursor onto
-        // the column's own row, by NAME.
+        // The rebuilt draft has object fields, not a column projection. Return to the
+        // object stage and select the column by name rather than reusing an index into
+        // its seven presentation fields.
         match &state.stage {
             Stage::Column { object, column } => {
                 let (object, column) = (object.clone(), column.clone());
                 rebuilt.select_item_named(&column);
                 state.stage = Stage::Edit { object };
             }
-            // Scopes-editing spec §4: a rebuilt draft carries no Values
-            // projection either — its one field is the scope's own
-            // `dimensions`/`text`/`expression` set, not a single column's
-            // values — so the stage steps back the same way the column
-            // stage's own arm does. Unlike that arm there is no
-            // `select_item_named`-shaped call that also searches the
-            // AVAILABLE block (a failed write is rare enough that landing
-            // on row 0 rather than the exact dimension is an acceptable
-            // cost here).
+            // A rebuilt scope also has no Values projection. Return to its object stage
+            // and reset the cursor to the first row.
             Stage::Values { object, .. } => {
                 let object = object.clone();
                 rebuilt.selected = 0;
@@ -1093,10 +692,7 @@ mod tests {
             object_value("tree", item, Destination::Presentation),
             ObjectWrite::Remove
         );
-        // An empty array reaches the same answer for the same reason —
-        // `item_is_empty` widened beyond `Table::is_empty` for Groupings'
-        // bare-array object shape, and the widening is about the
-        // container, not about which file it is going to.
+        // Empty arrays have the same overlay-removal semantics as empty tables.
         let array = toml_edit::Item::Value(toml_edit::Array::new().into());
         assert_eq!(
             object_value("tree", array, Destination::Presentation),
@@ -1104,13 +700,8 @@ mod tests {
         );
     }
 
-    /// A populated array round-trips as a `toml::Value::Array` — exactly
-    /// the shape `GroupingSlots::from_doc` reads back — rather than the
-    /// `toml_edit::Table` fallback an unconditional `.as_table()` would
-    /// have produced (an empty table, silently erasing the slot).
-    /// Groupings is the first (and so far only) domain whose object is
-    /// ever a bare array rather than a table, so this is the one path
-    /// Views' own tests never exercise.
+    /// Grouping definitions use bare arrays. Their round trip must preserve that shape
+    /// rather than falling back to an empty table.
     #[test]
     fn a_populated_array_item_round_trips_as_a_toml_array() {
         let mut array = toml_edit::Array::new();

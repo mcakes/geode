@@ -1,17 +1,9 @@
-//! The `Domain::Views` adapter (spec §8.1): the doc views live in, and
-//! the one-line summary a view's browse row shows.
+//! Adapter for view definitions and presentation overlays.
 //!
-//! One module per domain, holding that domain's own functions and
-//! nothing else (spec §4) — the scaffold matches on `Domain` exactly
-//! once per function, so an adapter never learns about the stage
-//! machine, the key vocabulary or the markers, and the markers never
-//! learn about views.
-//!
-//! Views goes first on purpose (spec §14). It is the only domain whose
-//! edit stage has to split one list of columns across two destinations —
-//! order, inclusion and width to `view_presentation.toml`, the column
-//! set itself to `views.toml` — so building it first settles the
-//! vocabulary before three thinner adapters depend on it.
+//! Dataset selection and column membership write `views.toml`. Order, inclusion, label,
+//! width, and formatting write `view_presentation.toml`, preserving the view's
+//! inheritance from lower configuration layers. The adapter owns field destinations,
+//! validation, catalogue construction, and object rendering.
 
 use std::collections::BTreeMap;
 
@@ -75,7 +67,7 @@ pub fn summary(value: &toml::Value) -> String {
     out
 }
 
-/// The user-layer doc a view's *presentation* is written to (spec §5.6).
+/// The user-layer doc a view's *presentation* is written to.
 ///
 /// Separate from [`DOC`] on purpose, and the single most important fact
 /// in this file: order, inclusion and width land here, merged **over**
@@ -84,21 +76,18 @@ pub fn summary(value: &toml::Value) -> String {
 /// column the desk adds next week. Only [`Destination::Doc`] forks.
 pub const PRESENTATION_DOC: &str = "view_presentation";
 
-/// The fields of one view (spec §8.1), or of no view at all when
-/// `object` names nothing — an empty dataset choice and an empty column
-/// list, which is what a `Config` with no `views` doc has to produce
-/// rather than panicking.
+/// The fields of one view, or of no view at all when `object` names nothing — an empty
+/// dataset choice and an empty column list, which is what a `Config` with no `views`
+/// doc has to produce rather than panicking.
 ///
-/// Read through `load_views`, not `ViewSpec::from_doc`, so the view's own
-/// columns are listed in the order and with the hidden/width state the
-/// trader actually sees. Behind them, the field carries a second list
-/// (§18.7): every other column the chosen dataset has, the "available"
-/// catalogue a new or growing view adds from — `Some`, and possibly
-/// empty, because Views is a domain where a catalogue EXISTS even once
-/// the trader has added everything in it (`Draft::remove_selected`'s own
-/// doc has what depends on that). `Draft::source` keeps the raw
-/// pre-presentation table beside them, which is what a `Doc` write is
-/// rendered from.
+/// Read through `load_views`, not `ViewSpec::from_doc`, so the view's own columns are
+/// listed in the order and with the hidden/width state the trader actually sees. Behind
+/// them, the field carries a second list: every other column the chosen dataset has,
+/// the "available" catalogue a new or growing view adds from — `Some`, and possibly
+/// empty, because Views is a domain where a catalogue EXISTS even once the trader has
+/// added everything in it (`Draft::remove_selected`'s own doc has what depends on
+/// that). `Draft::source` keeps the raw pre-presentation table beside them, which is
+/// what a `Doc` write is rendered from.
 ///
 /// **Every entry of either list carries the `kind` a first-time
 /// `[[columns]]` write of it needs** ([`ListItem::kind`]): its own
@@ -179,11 +168,10 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         })
         .unwrap_or_default();
 
-    // The available catalogue (§18.2, §18.7): the chosen dataset's other
-    // columns, none of them the view's until `space` moves one across.
-    // `Some` even when the dataset is unknown or has nothing left to
-    // offer — the catalogue exists on this domain; it is merely empty.
-    // No derived dimensions in it — see this function's own doc for why.
+    // The available catalogue: the chosen dataset's other columns, none of them the
+    // view's until `space` moves one across. `Some` even when the dataset is unknown or
+    // has nothing left to offer — the catalogue exists on this domain; it is merely
+    // empty. No derived dimensions in it — see this function's own doc for why.
     let overlay = dataset_overlay(config, &current);
     let available = Some(match schema.dataset(&current) {
         Some(dataset) => dataset_catalogue(&items, dataset, &overlay),
@@ -208,46 +196,14 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     ]
 }
 
-/// Rebuild the `columns` field's available catalogue after the `dataset`
-/// field changes (spec §18.2): "changing the dataset empties Available
-/// and repopulates it; members that the new dataset lacks stay listed, as
-/// today, so the diagnostic can name them." The view's own columns are
-/// left exactly as they are — untouched, in place, `kind` included —
-/// because they are still the view's own regardless of what the new
-/// dataset has; [`validate`] is what tells the trader a column the new
-/// dataset lacks is now a problem. Only the catalogue is thrown away and
-/// rebuilt wholesale from the new dataset's columns, so a stale row from
-/// the old dataset can never linger behind the new one's.
+/// Rebuild the available catalogue after a dataset change, preserving the view's
+/// existing members and their kinds. Validation reports members the new dataset cannot
+/// provide. Refresh the dataset-presentation baseline at the same time.
 ///
-/// Called from `render::maybe_refresh_available`, after a `Toggle`/
-/// `ToggleBack` step on the `dataset` field itself — never from
-/// `Draft::step_selected`, which has no `Config` to read a schema from.
-///
-/// The cursor is preserved by IDENTITY (review round 1, finding 3), not
-/// by re-clamping its raw index: the caller only ever calls this with
-/// the cursor on the `dataset` field itself
-/// (`render::maybe_refresh_available`'s own `is_dataset_row` guard), and
-/// an index-based clamp — `draft.selected.min(new_len - 1)` — happened
-/// to keep landing on that same field only because [`Draft::visible_rows`]
-/// now sorts by row rather than by fuzzy score (review round 1, finding
-/// 2): the dataset field is always `rows()`'s very first entry, so
-/// whenever it matches the query at all it is unconditionally the first
-/// SURVIVING row too, index-clamp or not. `Draft::follow` is the general,
-/// correct primitive regardless — indexing is what this whole task's
-/// other two fixes replaced everywhere else a cursor had to survive a
-/// list changing under it, and this call site should not be the one
-/// spot still reasoning about a raw index.
-///
-/// The `None` arm below is narrower than it might look: it only fires
-/// when `cursor` (`draft.selected_row()`, read *before* the rebuild)
-/// could not resolve to a row at all, and clamps `selected` to the
-/// rebuilt list's last visible row. A row that *did* resolve but is gone
-/// *after* the rebuild takes the `Some` arm instead and calls
-/// `draft.follow`, which is not a clamp — a miss there leaves `selected`
-/// exactly where it was, potentially out of bounds against the shrunk
-/// list. That path is unreachable through today's one caller (the same
-/// identity argument above), but it is not this function's job to
-/// assume so, and no clamp runs there if it ever isn't.
+/// Preserve selection by row identity across the rebuild. If the old selection cannot
+/// resolve at all, clamp it to the new list. A resolved row that disappears uses
+/// `follow`'s no-match behavior; the production caller remains on the dataset field,
+/// which survives the rebuild.
 pub fn refresh_available(draft: &mut Draft, config: &Config) {
     let Some(current) = draft.choice("dataset").map(str::to_string) else {
         return;
@@ -278,31 +234,11 @@ pub fn refresh_available(draft: &mut Draft, config: &Config) {
     }
 }
 
-/// `dataset`'s columns that the view does not already have, each
-/// carrying the `kind` a first-time write of it needs
-/// ([`schema_role_kind`]) — the catalogue builder [`fields`] and
-/// [`refresh_available`] share, so a dataset switch cannot populate a
-/// different catalogue than opening the view fresh would have.
-///
-/// **Each row is seeded with the column's DATASET-level presentation**
-/// (`overlay`, this dataset's entries from `dataset_presentation.toml`),
-/// not the unset one, because `space` on a catalogue row hands the whole
-/// [`ListItem`] to the view's own list ([`Draft::step_selected`]'s
-/// `Available` arm moves it verbatim) and nothing re-derives it
-/// afterwards. Seeded unset, a column promoted and opened in the same
-/// draft lifetime paints seven fields at the KIND default while
-/// [`baseline_below`] — refreshed from the config — holds the trader's
-/// own dataset-level values: the first keystroke folds all seven and
-/// the writer emits every one of them as a view-level override
-/// contradicting the dataset level the trader set themselves.
-///
-/// A lookup by this dataset's name IS
-/// [`DatasetPresentationSpec::owner_of`]'s answer for these columns,
-/// since a catalogue is by construction the columns of exactly one
-/// dataset — the one whose schema declares them, which is what
-/// `owner_of` resolves to. `hidden` is never among the keys: the
-/// dataset overlay's reader refuses it outright (spec §2.1), membership
-/// and sequence belonging to a view.
+/// Available columns of this dataset, excluding current view members. Seed each
+/// candidate with its schema kind and dataset presentation because promotion moves the
+/// item directly into the view without re-deriving it. Otherwise a newly promoted item
+/// would write kind defaults over inherited dataset settings. Hidden state is
+/// view-specific and is not read from dataset presentation.
 fn dataset_catalogue(
     items: &[ListItem],
     dataset: &DatasetSpec,
@@ -340,17 +276,10 @@ fn dataset_overlay(config: &Config, dataset: &str) -> BTreeMap<String, ColumnPre
         .unwrap_or_default()
 }
 
-/// The `[[columns]]` `kind` string a schema role maps to, or `None` when
-/// no kind `ViewSpec::from_doc` recognises describes it honestly.
-///
-/// `ColumnRole::Key` and `ColumnRole::Attribute` have no such kind: the
-/// reader accepts only `"dimension"`, `"measure"` and `"derived"` (the
-/// last needing a `sql` expression this dialog cannot invent from a bare
-/// column name), and forcing either role into `"dimension"` or
-/// `"measure"` would mislabel it exactly the way a missing `kind` used to
-/// (silently, and only visible once the blotter comes back wrong or the
-/// column vanishes). `None` here is why such a column is not in the
-/// available catalogue at all — see [`fields`]'s own doc.
+/// Map supported schema roles to view-column kinds. Keys and attributes have no
+/// representable view kind here and are excluded from the available catalogue. A
+/// derived view column additionally needs an expression the catalogue cannot invent
+/// from a schema name.
 pub(super) fn schema_role_kind(role: &ColumnRole) -> Option<&'static str> {
     match role {
         ColumnRole::Dimension { .. } => Some("dimension"),
@@ -390,9 +319,8 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
     let table = match dest {
         Destination::Doc => doc_table(draft),
         Destination::Presentation => presentation_table(draft),
-        // The dataset overlay is the Schema door's destination alone
-        // (dataset-presentation spec §4.1); no Views field carries it,
-        // so this arm exists only to keep the match exhaustive.
+        // The dataset overlay is the Schema door's destination alone; no Views field
+        // carries it, so this arm exists only to keep the match exhaustive.
         Destination::DatasetPresentation => {
             unreachable!("Views has no DatasetPresentation-destined fields")
         }
@@ -472,76 +400,20 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
     out
 }
 
-/// The trader's personal view of the view, for `view_presentation.toml`
-/// (Part 2c §4.3): the column order, and one `[columns.<name>]` table per
-/// column whose presentation the trader has actually changed.
+/// Render the entire user view-presentation object from the draft's members. Write
+/// order only when it differs from the definition order this same save will produce,
+/// and write per-column values only when they differ from the baseline: view definition
+/// plus dataset presentation, resolved through kind defaults. This keeps an unrelated
+/// edit from freezing inherited formats into the overlay. Hidden columns are explicit
+/// per-view entries; available candidates are excluded.
 ///
-/// Rendered fresh from the draft rather than merged into whatever is on
-/// disk, because this table is replaced whole (see [`to_table`]). A
-/// column with nothing to say gets no table at all — a file that says
-/// nothing is easier to hand-edit than one full of empty `[...]`
-/// headers, and it is also what keeps a save from ever writing the
-/// LEGACY `hidden`/`width` spelling this function superseded: every key
-/// this writes lands inside `[columns.<name>]`, never a top-level
-/// `hidden` array or `width` table.
+/// Clearing a label or width means inherit. `fold_into` restores the baseline value
+/// before rendering, so the matching overlay key disappears. Empty column tables are
+/// omitted. The writer owns this overlay block completely: unmodelled keys and legacy
+/// top-level presentation spellings are not carried forward.
 ///
-/// **Only what the trader actually changed is written.** `order` and
-/// every per-column key arrive here off the *effective* presentation
-/// (`ListItem::presentation`), which already carries whatever
-/// `views.toml` declared — so writing every column's position and every
-/// declared format key back would pin the desk's layout for this trader
-/// against the desk's later changes. That is the same freeze
-/// [`Destination`] exists to prevent, one field-granularity down, and it
-/// would fire on the commonest edit there is: hiding one column would
-/// silently adopt the desk's order and every other column's format
-/// forever. Every key is therefore compared, one at a time, against
-/// [`baseline_below`] — the layers this file sits ON: what the SAME save
-/// leaves in `views.toml`, with the trader's own dataset level merged
-/// over it (dataset-presentation spec §5.1) — and omitted when it still
-/// matches. Reading the desk alone here would copy every dataset-level
-/// key into this view's overlay as a spurious per-view override, which
-/// is the same freeze one layer down. The five `ColumnFormat` keys compare
-/// RESOLVED (each side through [`kind_default`], §4.3's own definition of
-/// the baseline), which is what keeps a key the desk never declared and
-/// the trader never moved out of the file; the loop body has the full
-/// reasoning and the state that reaches it. `hidden` needs no such
-/// comparison:
-/// nothing but this file can ever set it, so a column is either
-/// unhidden (the universal desk default) or explicitly hidden here.
-///
-/// Each of the seven comparisons below is deliberately a nested `if <the
-/// two sides differ> { if let Some(v) = item.presentation.<key> { … } }`
-/// rather than clippy's preferred `if … && let Some(v) = … {}`
-/// single-line collapse: the mutation harness anchors two entries on an
-/// OUTER condition's own line, and collapsing the two would fold that
-/// line into a different one the moment a sibling key's comparison
-/// changed — `#[allow]` below, not the suggested rewrite. The five
-/// `ColumnFormat` keys spell that outer condition `effective.<key> !=
-/// below_format.<key>`, both sides resolved through [`kind_default`];
-/// `label` and `width` spell it `item.presentation.<key> != below.<key>`,
-/// having no kind default to resolve against.
-///
-/// **An item key `None` where the desk has `Some` still cannot arise
-/// here, and Part 2c is why that is now a guarantee rather than an
-/// accident.** The item is seeded from the *merged* presentation
-/// (`ListItem::presentation`'s own doc), so a key the desk sets is never
-/// `None` on the item unless something cleared it — and the column stage
-/// **is** that clear verb: an empty `label`, an `auto` width. What makes
-/// it safe is that a clear here means *stop overriding*, never *delete*
-/// — this overlay cannot remove a key `views.toml` sets — so
-/// [`fold_into`] resolves a cleared key to the DESK's own value and the
-/// comparison below simply finds them equal and writes nothing. Writing
-/// a literal `None` instead would omit the key and read back as "nothing
-/// to say", which is true only when the desk says nothing either; where
-/// the desk sets a label, it would swallow the clear whole.
-/// **This writer fully owns the overlay's `[view.columns.*]` block**
-/// (the final review's M-7). Every other adapter's `to_table` starts
-/// from `draft.source` and preserves what it does not model; this one is
-/// built from `items` instead, so anything a trader hand-wrote under a
-/// column's table that the vocabulary does not model is dropped on the
-/// next save. That matches the reader, which already drops unrecognised
-/// keys there, and the pre-2c behaviour of `order`/`hidden`/`width` —
-/// this doc is the statement of it, not a change to it.
+/// Keep each comparison on its own outer condition: mutation anchors target these
+/// lines. Label and width compare optional values; format keys compare resolved values.
 #[allow(clippy::collapsible_if)]
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
@@ -571,29 +443,9 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
             .get(item.name.as_str())
             .cloned()
             .unwrap_or_default();
-        // §4.3's baseline is "the kind's default with the layers BELOW
-        // this one applied" — the desk view's own format and label, then
-        // the trader's dataset level over it (dataset-presentation §5.1)
-        // — RESOLVED, not those layers' raw `Option`s, so the five
-        // format keys are compared through `ColumnFormat`
-        // and only `label`/`width`, which have no kind default to
-        // resolve against, compare as bare `Option`s.
-        //
-        // Resolving matters exactly where the two sides say the same
-        // thing in different words: a key the desk leaves unset and the
-        // item carries at the kind's own default. `views::fold_into`
-        // (Part 2c §5.2) produces that state on every keystroke in the
-        // column stage — it writes a `Some` for all five keys, since
-        // every field there was seeded with the value in force — and a
-        // raw-`Option` comparison called all five "different from the
-        // desk" and copied them into the trader's overlay. That is the
-        // freeze §4.3 names in so many words: "a trader who changes a
-        // precision does not copy the desk's scale into their file and
-        // freeze it against the desk's next change". The dataset level
-        // reaches the same trap from the other side: a scale the trader
-        // set once for the whole dataset would be copied into every view
-        // they touch a precision in, and their next dataset-level change
-        // would then reach every view BUT those.
+        // Compare both sides after applying kind defaults. Folding all seven fields
+        // makes implicit defaults explicit on the item; persisting those unchanged
+        // values would turn an unrelated edit into an override of inherited settings.
         let kind = kind_default(item);
         let below_format = kind.clone().with(&below);
         let effective = kind.with(&item.presentation);
@@ -680,35 +532,13 @@ fn doc_order(draft: &Draft) -> Vec<&str> {
     order
 }
 
-/// Each column's presentation **as the view's own doc already declares
-/// it** — one column, one `format` sub-table plus `label`/`width`, read
-/// directly off `draft.source`'s own `[[columns]]` tables (never through
-/// [`columns_for`]'s `toml_edit` rendering: a bare `toml_edit::Table`
-/// with no document to hang a header path off loses a nested table
-/// entirely when printed — `object_text`'s own doc comment has the same
-/// warning about `Table::to_string` — so a column's `format` sub-table
-/// would silently vanish on the very round trip meant to read it back).
-/// `draft.source` is already a plain `toml::Table`, which is exactly the
-/// shape [`ColumnPresentation`]'s readers want, so no conversion is
-/// needed at all.
+/// Definition-level presentation read directly from `draft.source` columns. Avoid
+/// rendering a detached `toml_edit::Table`: nested format tables need a DocumentMut
+/// header path to round-trip correctly.
 ///
-/// A column `columns_for` would synthesise fresh (one `wanted` names but
-/// `draft.source` does not yet have — a column just promoted out of the
-/// available catalogue) has no entry here, and [`presentation_table`]'s
-/// `.unwrap_or_default()` treats that exactly as "no desk baseline yet",
-/// which is correct: nothing has published a presentation for a column
-/// that does not exist in `views.toml` yet either.
-///
-/// `read_hidden: false`, always: `hidden` is never a view's own key —
-/// only the overlay this function's caller writes ever sets it — so a
-/// column's baseline `hidden` is always `None`, which is exactly why
-/// [`presentation_table`] compares `included` against the desk's default
-/// (unhidden) directly rather than against a baseline field for it. The
-/// `warn` callback is a no-op: a column's table here already passed
-/// through the loader once as `views.toml` itself, so a key it could not
-/// parse would already have been reported there — reporting it again
-/// while rendering a save would be noise about the SAME problem from a
-/// second place.
+/// Newly promoted columns absent from the source have no definition baseline. Hidden is
+/// excluded because it belongs to the overlay. Local diagnostic callbacks are silent;
+/// this helper derives a baseline, not a file diagnostic report.
 pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
     let noop_warn = |_: &str, _: String| {};
     let mut baseline = BTreeMap::new();
@@ -732,38 +562,15 @@ pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentatio
     baseline
 }
 
-/// The dataset-level entries this view's columns resolve to, by column
-/// (dataset-presentation spec §5.1): the `dataset_presentation` doc's
-/// tables for whichever dataset OWNS each column
-/// ([`DatasetPresentationSpec::owner_of`] — the view's own dataset
-/// first, then each join's in file order, the order the compiler
-/// resolves names in), read from the config the CALLER hands in.
+/// Dataset presentation for every declared column the view could use, including
+/// available candidates and joined datasets. Resolve column ownership first: the view
+/// dataset wins, then joins in order. A later dataset's overlay cannot stand in for an
+/// owning dataset that has no presentation entry.
 ///
-/// Every path that reaches a stage hands in the pending-aware config
-/// (`apply::config_with_pending`), never `services.config` alone: inside
-/// the 250 ms write debounce the latter is the doc as it stood before
-/// the last keystroke, so a layer read from it would be one tick stale
-/// and the stage would both hide that tick and, outliving the flush,
-/// write the column back without it.
-///
-/// **The candidates are every column the view's datasets declare, not
-/// only the ones it carries today.** A column PROMOTED out of the
-/// available catalogue joins the view's own list mid-draft
-/// ([`Draft::step_selected`]'s `Available` arm), and
-/// [`presentation_table`] compares it against [`baseline_below`] — this
-/// map — on that very keystroke, before any reload could widen it.
-/// Keyed off `view.columns` alone, that comparison found the dataset's
-/// own value on the promoted item and nothing under it, and wrote the
-/// trader's dataset-level opinion back as a view-level override on the
-/// keystroke that added the column.
-///
-/// A column no dataset of the view declares — a derived column — takes
-/// nothing from this layer, and so has no entry here at all; neither
-/// does one whose owner has no table for it, which is why the owner is
-/// resolved first and the overlay consulted second rather than the
-/// overlay simply being copied per dataset (a dataset that declares the
-/// column but says nothing about it still OWNS it, and a later join's
-/// table for the same name must not stand in).
+/// Use the supplied pending-aware config so a stage opened during debounce sees the
+/// latest queued settings. Include available columns so promoting one does not mistake
+/// its dataset presentation for a new view-level override. Derived columns without a
+/// dataset owner receive no dataset layer.
 pub(super) fn dataset_layer(
     config: &Config,
     view: &ViewSpec,
@@ -813,22 +620,10 @@ pub(super) fn dataset_layer_for(
         .unwrap_or_default()
 }
 
-/// The layer a VIEW-level key sits over (§5.1): the desk's own keys
-/// ([`desk_baseline`]) with the trader's dataset level merged over,
-/// per column.
-///
-/// **Both the fold and the writer read this**, which is the whole point.
-/// Compared against the desk ALONE, every key the trader set at the
-/// dataset level would read as a divergence from the view's baseline and
-/// be copied into `view_presentation.toml` as a spurious per-view
-/// override — pinning this view against their own next dataset-level
-/// change, which is the same freeze [`Destination`] exists to prevent,
-/// one layer down. Equal to the layer below means "I have no opinion
-/// here", and the writer emits nothing.
-///
-/// The dataset layer travels on the draft ([`Draft::dataset_layer`])
-/// rather than being read here, because `to_table` — the writer's own
-/// entry point — has no `Config` to read it from.
+/// Definition presentation with dataset presentation applied, by column. Both the fold
+/// and the writer use this baseline so inherited dataset values are not persisted as
+/// new view overrides. The dataset layer is captured on the draft because the writer
+/// receives no Config.
 pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
     let mut below = desk_baseline(draft);
     for (col, dataset) in &draft.dataset_layer {
@@ -837,36 +632,19 @@ pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentati
     below
 }
 
-/// The two layers below the view overlay under one column (§5.3), for
-/// the provenance chip and the fold notice — each as the keys that layer
-/// ITSELF sets, never merged, so a layer can be named.
-///
-/// The view overlay is NOT read here. The fields' own values are
-/// compared against `below_view()` at paint
-/// (`dataset_columns::provenance_of`), which is what makes a
-/// just-stepped field read `view` on the same frame rather than 250 ms
-/// later when the write lands — and what makes a field stepped BACK
-/// read the layer below on the same frame, which a captured overlay
-/// could not (the final whole-branch review's named risk 4).
-///
-/// [`ColumnLayers::below_view`]: super::ColumnLayers::below_view
+/// Unmerged definition and dataset keys for one column. Keep the layers separate to
+/// name provenance and clear fallbacks. View provenance is computed from the current
+/// field values against their merged baseline, so it changes immediately when a value
+/// is stepped away from or back to that baseline.
 pub(super) fn column_layers(draft: &Draft, column: &str) -> ColumnLayers {
     let desk = desk_baseline(draft).remove(column).unwrap_or_default();
     let dataset = draft.dataset_layer.get(column).cloned().unwrap_or_default();
     ColumnLayers { desk, dataset }
 }
 
-/// The Views door's [`ColumnContext`], whole — the one place it is built.
-///
-/// Three callers had a copy of this literal (the dialog's own
-/// `render::enter_column_stage` and two test openers that exist to
-/// mirror it), and a context is exactly the kind of value where a test
-/// that drifts from the door stops testing the door: a missing layer
-/// there is a fold that silently names the wrong one, with every
-/// assertion still green. `overlay_object` is empty and `item` is
-/// `Some`, both by the door's own definition — the view's list holds the
-/// item this stage folds into, so the scratch copy here is read only for
-/// the column's kind default.
+/// Construct the Views column context shared by production stage entry and tests. The
+/// parent list owns the editable item; the context's copy supplies its kind.
+/// `overlay_object` is empty because Views does not write the dataset overlay.
 pub(super) fn column_context(draft: &Draft, column: &str, item: ListItem) -> ColumnContext {
     ColumnContext {
         door: ColumnDoor::View,
@@ -915,20 +693,9 @@ pub(super) fn width_value(width: f32) -> toml_edit::Item {
     }
 }
 
-/// The default format a column's kind implies before any presentation is
-/// applied — [`ColumnFormat::TEXT`] for a dimension, [`ColumnFormat::
-/// MEASURE`] for everything else (a measure or a derived column).
-///
-/// Three readers, and the third is why this is more than a display
-/// nicety: [`column_summary`], so a member row states only what the
-/// trader has actually overridden; [`column_fields`], which seeds the
-/// column stage's rows with the value in FORCE rather than a raw
-/// `Option`; and [`presentation_table`], where it is half of the desk
-/// baseline (§4.3: "the kind's default with the desk's `format` and
-/// `label` applied"). So what `view_presentation.toml` ends up
-/// containing depends on this function — a column whose `kind` is read
-/// wrong here does not merely paint a wrong summary, it writes keys the
-/// trader never set, or omits ones they did.
+/// Base format by column kind: text for dimensions, measure for other kinds. The same
+/// default drives summaries, field values, and writer comparisons; disagreeing defaults
+/// would persist format overrides the user never made.
 pub fn kind_default(item: &ListItem) -> ColumnFormat {
     if item.kind.as_deref() == Some("dimension") {
         ColumnFormat::TEXT
@@ -937,10 +704,10 @@ pub fn kind_default(item: &ListItem) -> ColumnFormat {
     }
 }
 
-/// The compact summary painted after a member row's name (Part 2c §5.4):
-/// only the presentation keys that differ from `kind_default`, joined by
-/// " · ", or the empty string when the column carries no override at
-/// all — the common case, so most rows paint nothing here.
+/// The compact summary painted after a member row's name: only the presentation keys
+/// that differ from `kind_default`, joined by " · ", or the empty string when the
+/// column carries no override at all — the common case, so most rows paint nothing
+/// here.
 ///
 /// `width` and `label` are read off `p` directly rather than off the
 /// resolved format, because neither has a "default" a `ColumnFormat`
@@ -988,10 +755,9 @@ pub fn column_summary(kind_default: &ColumnFormat, p: &ColumnPresentation) -> St
     parts.join(" · ")
 }
 
-/// The seven keys of the column stage (Part 2c §5.3), in the order the
-/// stage paints them — which is also the order [`column_fields`] builds
-/// them in and the order a reader of `view_presentation.toml` meets
-/// them.
+/// The seven keys of the column stage, in the order the stage paints them — which is
+/// also the order [`column_fields`] builds them in and the order a reader of
+/// `view_presentation.toml` meets them.
 ///
 /// A constant rather than seven literals spread across the builder, the
 /// fold and the tests, because the fold matches on these strings: a key
@@ -1015,44 +781,20 @@ pub const COLUMN_KEYS: [&str; 7] = [
 /// box would read as an unset field they had failed to fill in.
 pub(super) const AUTO: &str = "auto";
 
-/// The largest width the stage will accept, and the smallest. A column
-/// narrower than `MIN_WIDTH` cannot show a header glyph and a column
-/// wider than `MAX_WIDTH` is wider than any window this shell opens, so
-/// both are refused (§5.3) rather than written and silently clamped by
-/// the table.
+/// The largest width the stage will accept, and the smallest. A column narrower than
+/// `MIN_WIDTH` cannot show a header glyph and a column wider than `MAX_WIDTH` is wider
+/// than any window this shell opens, so both are refused rather than written and
+/// silently clamped by the table.
 const MIN_WIDTH: i64 = 20;
 const MAX_WIDTH: i64 = 2000;
 
-/// One column's presentation as the seven fields the column stage paints
-/// (Part 2c §5.3).
+/// Build the same seven presentation fields for Views and Schema, with every field
+/// carrying the supplied overlay destination. Seed effective values using kind defaults
+/// rather than unset placeholders. The writer later omits values equal to its inherited
+/// baseline.
 ///
-/// **Every field carries `dest`**, which is the whole reason this stage
-/// never forks: there is no key here that could fork the desk's view, so
-/// `commit_change` never announces one from inside the stage — whichever
-/// overlay the door writes. The Views
-/// door passes [`Destination::Presentation`], the Schema door
-/// [`Destination::DatasetPresentation`] (dataset-presentation spec
-/// §4.1); the seven rows are otherwise identical, which is why one
-/// builder serves both.
-///
-/// Each field is seeded with the **effective** value — the kind default
-/// (`kind_default`) with the column's own presentation over it — not with
-/// the raw `Option` the overlay holds. A `Choice` seeded from a `None`
-/// would have to show some placeholder for "unset", and stepping it
-/// would then write whatever option happened to sit beside the
-/// placeholder; seeding the value in force means every step moves from
-/// what the trader is looking at. What that costs is that the fold
-/// writes a `Some` for every key ([`fold_into`]'s own doc), which
-/// [`presentation_table`] then compares against the desk before writing
-/// anything.
-///
-/// `colours` is the `colours` doc's own names, sorted, as the caller read
-/// them (`render::enter_column_stage`). The two built-in spellings lead;
-/// a colour named on the column but absent from the doc is appended
-/// rather than sorted in, so the `Choice` can always represent the value
-/// it is showing (Views' "keep the object's own value" rule, the same one
-/// [`fields`] keeps for a dataset the schema has dropped) while still
-/// reading as the odd name out rather than as one the doc defines.
+/// Named colours follow the built-in choices. Preserve an unknown configured colour as
+/// an extra option so the current value remains visible and repairable.
 pub fn column_fields(item: &ListItem, colours: &[String], dest: Destination) -> Vec<Field> {
     let p = &item.presentation;
     let effective = kind_default(item).with(p);
@@ -1186,73 +928,18 @@ fn negative_keys() -> Vec<String> {
     ["minus", "parens"].iter().map(|s| s.to_string()).collect()
 }
 
-/// The column stage's fields written back onto the item the view's own
-/// list holds (Part 2c §5.2) — the fold that makes the stage a
-/// projection rather than a second copy of the data.
+/// Fold current column fields into the item before validation and writing. Format
+/// fields become explicit values; the writer omits values equal to its baseline so this
+/// does not freeze inherited settings.
 ///
-/// Called on every changed value, from `render::revalidate`, BEFORE the
-/// validator and the write path read the list: both render from
-/// `ListItem::presentation`, so a fold that ran later would validate and
-/// write the keystroke before last.
+/// An empty label or auto width stops overriding and restores the value below, which
+/// may come from dataset presentation or the view definition. The caller reseeds those
+/// fields immediately to show what will read back. Return the cleared key so the caller
+/// can name its fallback layer.
 ///
-/// **Every key becomes `Some`**, because [`column_fields`] seeded each
-/// field with the value in force and a field therefore always has one to
-/// give back. What keeps that from freezing the layers below into the
-/// trader's overlay is [`presentation_table`], which compares each key
-/// against [`baseline_below`] — the desk view's own keys with the
-/// trader's dataset level merged over — and omits the ones that still
-/// match: the one place that decision is made for the whole file.
-///
-/// **The two `Text` keys are the clear verb, and `below` is what makes
-/// the clear honest.** An empty `label` and an [`AUTO`] `width` are how a
-/// trader says "I have nothing to say about this" — and what that means
-/// is *stop overriding*, never *delete*: this overlay cannot remove a key
-/// the layers under it set, it can only decline to override them. So a
-/// cleared key resolves to the value BELOW — `None` where nothing down
-/// there sets it, the dataset level's `label`/`width` where that sets
-/// one, the desk view's own where only it does — and
-/// [`presentation_table`] then sees equality and writes no key at all,
-/// which is exactly "this trader has no opinion here".
-///
-/// `below` is [`super::ColumnLayers::below_view`] on the stage path, the
-/// same merge [`baseline_below`] performs per column for the writer: the
-/// fold and the writer must measure a clear against the SAME thing, or
-/// one decides a key is unchanged while the other writes it.
-///
-/// Writing a literal `None` instead is the bug this signature exists to
-/// prevent, and it is silent in the worst way: the writer's `if key !=
-/// below.key { if let Some(v) = key { … } }` omits the key, the file
-/// reads back as "nothing to say", the layer below returns on the next
-/// rebuild, and the trader's clear has vanished with nothing said about
-/// it. The caller re-seeds the two fields from the item after the fold
-/// ([`super::Draft::fold_column`]), so that value is on screen coming
-/// back on the same keystroke rather than a blank that lies.
-///
-/// Returns the key the trader CLEARED this fold — the caller decides
-/// whether that is worth a notice, from what it fell to. Named whether
-/// or not `below` sets it (dataset-presentation spec §5.2): the caller
-/// holds the layers SEPARATELY ([`super::ColumnLayers`]) and is the only
-/// one that can say which of them a cleared key landed on, so deciding
-/// silence here from the merged value would hide a key that fell to the
-/// dataset level.
-///
-/// **What "cleared" is measured against is the ITEM, not the baseline.**
-/// A key is cleared when the field is empty (or [`AUTO`]) and the item
-/// still holds a value for it — which is exactly "this keystroke emptied
-/// it", since [`column_fields`] seeds both `Text`s from the item's own
-/// merged presentation. Measuring against `below` instead would report a
-/// clear on every fold of a column neither the field nor the item has a
-/// value for: the `width` arm runs after the `label` arm, so a genuinely
-/// cleared label would be overwritten by a `width` nobody touched, and
-/// the trader's notice would be about the wrong key or missing entirely.
-/// It is also what keeps at most one key cleared per fold — one
-/// keystroke types one field, so one key at a time can make that
-/// transition.
-///
-/// An unparseable width leaves the key untouched — `parse_text` refuses
-/// one on the way in, so the only way to reach this is a seed this file
-/// wrote, and silently clearing a width nobody asked to clear would be
-/// worse than ignoring a value that cannot arise.
+/// Detect clearing against the item's previous value, not the baseline: an already
+/// empty field is not a new clear and must not replace another key's notice. An
+/// unparseable width leaves its previous value intact.
 pub fn fold_into(
     item: &mut ListItem,
     fields: &[Field],
@@ -1317,24 +1004,14 @@ pub fn fold_into(
     cleared
 }
 
-/// May `i` open a value field on the Views row keyed `key` (§5.3)?
-///
-/// The column stage's two `Text` rows and nothing else: a view's own
-/// `dataset` is a `Choice` and its `columns` an `OrderedList`, so no key
-/// outside the stage can answer `true` here even in principle. That is
-/// why this is not gated on the stage being open — there is no row for it
-/// to wrongly enable. Whether the `i` chip is PAINTED is a narrower
-/// question still, asked per row rather than per object since 2026-09-13:
-/// [`Draft::selected_vocabulary`] routes a `Text` row here and answers
-/// `Types` only where this does.
-///
-/// [`Draft::selected_vocabulary`]: super::Draft::selected_vocabulary
+/// Permit typed editing only for label and width. Their field shapes are Text; other
+/// presentation rows use numeric or choice entry through shared routes.
 pub fn text_editable(key: &str) -> bool {
     matches!(key, "label" | "width")
 }
 
-/// Normalise a committed `Text` on Views, or refuse it with the reason
-/// the notice shows (§5.3).
+/// Normalise a committed `Text` on Views, or refuse it with the reason the notice
+/// shows.
 ///
 /// `width` is the one key with a grammar: [`AUTO`], or a whole pixel
 /// count inside `MIN_WIDTH..=MAX_WIDTH`. Refused rather than clamped, the
@@ -1390,16 +1067,14 @@ pub(super) fn colour_from_key(key: &str) -> Colour {
     }
 }
 
-/// Everything wrong with the draft as it stands (spec §7.2).
+/// Everything wrong with the draft as it stands.
 ///
-/// **The draft alone, never the merged result.** The table this renders
-/// is wrapped in a `MergedDoc` of its own and handed to `ViewSpec::
-/// from_doc` — the same reader the loader uses — so what comes back
-/// describes the object being edited and nothing else. Validating the
-/// merged doc instead would report every *other* broken view in the
-/// config against this dialog's one object, which is both noise and a
-/// lie about what the user is editing; anything the merge itself turns up
-/// is the reload's to report (spec §7.1).
+/// **The draft alone, never the merged result.** The table this renders is wrapped in a
+/// `MergedDoc` of its own and handed to `ViewSpec:: from_doc` — the same reader the
+/// loader uses — so what comes back describes the object being edited and nothing else.
+/// Validating the merged doc instead would report every *other* broken view in the
+/// config against this dialog's one object, which is both noise and a lie about what
+/// the user is editing; anything the merge itself turns up is the reload's to report.
 ///
 /// The rendered text is what is parsed, not an in-memory shortcut, so
 /// what is validated is byte-for-byte what the flush will write.
@@ -1436,10 +1111,10 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
                     draft.name
                 ),
                 // The one field this cross-check names is `dataset` —
-                // `ViewSpec::from_doc`'s own reader diagnostics land on
-                // this same key when it is missing (§19.5); this one
-                // lands there too, so `Draft::row_for_path` flags the
-                // same row whichever check found the problem.
+                // `ViewSpec::from_doc`'s own reader diagnostics land on this same key
+                // when it is missing; this one lands there too, so
+                // `Draft::row_for_path` flags the same row whichever check found the
+                // problem.
                 path: Some(format!("views.{}.dataset", draft.name)),
             });
         }
@@ -1460,8 +1135,8 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 
 /// What each field means, for the edit footer's help line
-/// ([`Domain::help`](super::Domain::help)); under ~90 characters, since
-/// the slot is one line (4c spec §22).
+/// ([`Domain::help`](super::Domain::help)); under ~90 characters, since the slot is one
+/// line.
 pub fn help(key: &str) -> &'static str {
     match key {
         "dataset" => "The dataset the view reads — it decides which columns are available below",
@@ -1472,12 +1147,7 @@ pub fn help(key: &str) -> &'static str {
     }
 }
 
-/// The column stage's seven presentation fields, explained — one table
-/// for both doors (Views and Schema open the same rows, dataset-
-/// presentation spec §4.1), which is why `label`'s sentence names the
-/// layer below generically: at the Views door an emptied label falls to
-/// the dataset level where one is set and the desk otherwise, at the
-/// Schema door to each view's own (`Fold`/`FellTo`). See [`help`].
+/// Shared help for the seven presentation fields in either column-stage domain.
 pub fn column_help(key: &str) -> &'static str {
     match key {
         "label" => "The header text — empty stops overriding what the desk or dataset level sets",
@@ -1499,11 +1169,10 @@ mod tests {
     use super::*;
     use geode_core::config::ConfigSources;
 
-    /// `enter_column` the way `render::enter_column_stage` does it: with
-    /// the Views door's [`ColumnContext`] installed, so the fold has a
-    /// baseline to be honest about (dataset-presentation spec §5.1).
-    /// A test that called `enter_column` alone would open a stage whose
-    /// fold does nothing, which is not the stage the dialog opens.
+    /// `enter_column` the way `render::enter_column_stage` does it: with the Views
+    /// door's [`ColumnContext`] installed, so the fold has a baseline to be honest
+    /// about. A test that called `enter_column` alone would open a stage whose fold
+    /// does nothing, which is not the stage the dialog opens.
     ///
     /// The context comes from [`column_context`], the door's own builder,
     /// rather than a literal here: a test opener with its own copy of
@@ -1613,14 +1282,13 @@ mod tests {
         ])
     }
 
-    /// §18.7: the view's own columns are `items`, in the view's own
-    /// order; the dataset's other columns are the `available` catalogue
-    /// behind them — a new or growing view has something to tick. Each
-    /// entry of either list carries the `kind` a first-time write would
-    /// need: `npv`'s own (already a `ViewColumn::Measure` in the view),
-    /// `book`'s schema role (`dimension`), `delta01`'s (`measure`) — and
-    /// `desk`, a *derived* dimension, appears in neither list at all
-    /// (`fields`'s own doc has the reasoning).
+    /// the view's own columns are `items`, in the view's own order; the dataset's other
+    /// columns are the `available` catalogue behind them — a new or growing view has
+    /// something to tick. Each entry of either list carries the `kind` a first-time
+    /// write would need: `npv`'s own (already a `ViewColumn::Measure` in the view),
+    /// `book`'s schema role (`dimension`), `delta01`'s (`measure`) — and `desk`, a
+    /// *derived* dimension, appears in neither list at all (`fields`'s own doc has the
+    /// reasoning).
     #[test]
     fn the_column_list_is_members_then_the_datasets_other_columns() {
         let config = tree_with_two_available_columns();
@@ -1642,9 +1310,8 @@ mod tests {
                 ("delta01".to_string(), false, Some("measure".to_string())),
             ]
         );
-        // The third row variant is what makes every consumer say what an
-        // available row means, rather than treating it as one of the
-        // view's own columns by omission (§18.7.1).
+        // The third row variant is what makes every consumer say what an available row
+        // means, rather than treating it as one of the view's own columns by omission.
         assert!(
             draft
                 .rows()
@@ -1815,10 +1482,9 @@ mod tests {
         }
     }
 
-    /// A trader adding several columns wants the cursor where their eye
-    /// is: on the next available row, not on the column that just left
-    /// for the view's own list (user ruling 2026-09-11). The added item
-    /// moves *earlier* in row order, so the set of rows ahead of the next
+    /// A trader adding several columns wants the cursor where their eye is: on the next
+    /// available row, not on the column that just left for the view's own list. The
+    /// added item moves *earlier* in row order, so the set of rows ahead of the next
     /// one is unchanged and its visible index is the old cursor plus one.
     #[test]
     fn adding_a_column_leaves_the_cursor_on_the_next_available_row() {
@@ -1943,12 +1609,11 @@ mod tests {
         ])
     }
 
-    /// Like `space`'s add, `x` leaves the cursor where the trader's eye
-    /// is — on the row that was next — rather than following the removed
-    /// column to the end of the available block (user ruling 2026-09-11).
-    /// The removed item moves *later* in row order, so the rows ahead of
-    /// the next one lose exactly one and the next one now sits at the old
-    /// visible index.
+    /// Like `space`'s add, `x` leaves the cursor where the trader's eye is — on the row
+    /// that was next — rather than following the removed column to the end of the
+    /// available block. The removed item moves *later* in row order, so the rows ahead
+    /// of the next one lose exactly one and the next one now sits at the old visible
+    /// index.
     #[test]
     fn x_leaves_the_cursor_on_the_next_row() {
         let config = tree_with_two_members();
@@ -2060,11 +1725,10 @@ mod tests {
         );
     }
 
-    /// §18.7.2: `shift+j`/`shift+k` move within the view's own columns
-    /// only. The available catalogue is unordered by construction —
-    /// nothing writes it and nothing reads its order — so a reorder there
-    /// is inert rather than a move painted in one list and written in
-    /// neither.
+    /// `shift+j`/`shift+k` move within the view's own columns only. The available
+    /// catalogue is unordered by construction — nothing writes it and nothing reads its
+    /// order — so a reorder there is inert rather than a move painted in one list and
+    /// written in neither.
     ///
     /// The fixture is `tree_with_two_members` rather than this module's
     /// usual one, and deliberately: an available row's index is a
@@ -2112,11 +1776,10 @@ mod tests {
         assert_eq!(draft.move_item(1), None);
     }
 
-    /// §18.2: "changing the dataset empties Available and repopulates it;
-    /// members that the new dataset lacks stay listed... so the
-    /// diagnostic can name them." Two datasets, neither sharing a column
-    /// name with the other, so the assertion cannot pass by an available
-    /// row surviving the switch by coincidence.
+    /// "changing the dataset empties Available and repopulates it; members that the new
+    /// dataset lacks stay listed... so the diagnostic can name them." Two datasets,
+    /// neither sharing a column name with the other, so the assertion cannot pass by an
+    /// available row surviving the switch by coincidence.
     #[test]
     fn refresh_available_repopulates_for_the_newly_chosen_dataset() {
         let config = config_from(&[
@@ -2200,14 +1863,8 @@ mod tests {
         assert_eq!(summary(&value("columns = []\n")), "no dataset · 0 columns");
     }
 
-    /// Review round 1, finding 3: `refresh_available` used to clamp
-    /// `selected` by raw index rather than re-find the cursor's own row
-    /// by identity. A dataset switch tears the available block down and
-    /// rebuilds it from scratch, so a query that matched the OLD
-    /// dataset's available column and not the new one's leaves the
-    /// Dataset row as the only survivor — this pins the cursor there by
-    /// identity (`Draft::follow`) rather than by an index that would
-    /// only coincidentally still be right.
+    /// After changing dataset under a filter, selection follows the dataset field's
+    /// identity as the available catalogue is rebuilt.
     #[test]
     fn refresh_available_preserves_the_cursor_on_the_dataset_field_by_identity() {
         let config = config_from(&[
@@ -2226,14 +1883,8 @@ mod tests {
             ),
         ]);
         let mut draft = Domain::Views.draft(&config, "v");
-        // The premise the accepted "an index clamp would be equivalent
-        // here" argument rests on (spec §18.6): `dataset` is `rows()`'s
-        // own first entry, so whenever it matches the query at all it is
-        // also the first SURVIVING row. Asserted rather than assumed —
-        // an adapter that grew a field above `dataset` would silently
-        // retire that equivalence, and this test would go on passing on
-        // `follow`'s strength alone while the spec's claim quietly went
-        // false.
+        // This fixture distinguishes the field from an available row that also matches
+        // the filter, so selection remains on the field after rebuilding the catalogue.
         assert_eq!(draft.rows()[0], EditRow::Field(0));
         assert_eq!(draft.fields[0].key, "dataset");
         // "at" matches "Dataset" (the field label) and "atom" (onedata's
@@ -2263,11 +1914,8 @@ mod tests {
         );
     }
 
-    /// Part 2c §4.3: the overlay writer emits one `[view.columns.<col>]`
-    /// table per column with an override, carrying only the keys that
-    /// differ from the desk's own baseline — never the legacy `hidden`
-    /// array or `width` table `presentation_table` wrote before this
-    /// task.
+    /// The overlay writer emits only changed per-column keys under `columns`; it does
+    /// not emit legacy top-level hidden or width entries.
     #[test]
     fn the_writer_emits_only_keys_that_differ_from_the_desk() {
         // desk: npv has scale k, precision 2; the trader sets precision 0 and a colour, and hides book.
@@ -2305,20 +1953,8 @@ mod tests {
         assert!(!text.contains("precision"), "{text}");
     }
 
-    /// Dataset-presentation spec §5.1: the view overlay's baseline is
-    /// desk + dataset, so a view field equal to the DATASET level writes
-    /// nothing at all — only the key the trader actually moved off that
-    /// baseline reaches `view_presentation.toml`.
-    ///
-    /// Compared against the desk alone (this task's whole point), every
-    /// dataset-level key would be copied into this view's overlay on the
-    /// first keystroke in the stage — a per-view override the trader
-    /// never made, pinned against their own next dataset-level change.
-    ///
-    /// Rendered through `object_text` rather than `Table::to_string`,
-    /// which prints a `toml_edit::Table`'s leaf values only and would
-    /// render this writer's sub-tables as the empty string (the same
-    /// departure `dataset_columns`'s writer tests record).
+    /// View overlays compare against definition plus dataset presentation. An edit to
+    /// one field must not copy inherited dataset values into per-view overrides.
     #[test]
     fn a_view_field_equal_to_the_dataset_level_writes_nothing() {
         // desk: npv width 50. dataset level: npv width 140, scale k.
@@ -2393,17 +2029,8 @@ mod tests {
         );
     }
 
-    /// §5.1 and §3.2: the dataset layer is looked up by the column's
-    /// OWNER — the view's own dataset first, then each join's in file
-    /// order, the order the compiler resolves names in — so a column a
-    /// view reaches through a join takes the JOIN's dataset-level entry.
-    ///
-    /// Read off only the view's own dataset (the obvious shortcut), a
-    /// joined column silently takes nothing from this layer: the trader's
-    /// `[ref.columns.sector]` label would paint in every view of `ref`
-    /// except the ones that reach it by join, and the writer's baseline
-    /// would then call the value in force a divergence and copy it into
-    /// that view's own overlay.
+    /// Resolve dataset presentation by column ownership across the view's dataset and
+    /// joins, rather than copying whichever overlay happens to define a name.
     #[test]
     fn a_joined_columns_dataset_layer_comes_from_the_join() {
         let config = config_from(&[
@@ -2449,19 +2076,8 @@ mod tests {
         assert!(!draft.dataset_layer.contains_key("book"));
     }
 
-    /// §5.1, the promotion case: a column moved out of the available
-    /// catalogue by `space` carries the trader's DATASET-level
-    /// presentation with it, so the column stage it opens next seeds
-    /// from that layer and the writer sees no divergence.
-    ///
-    /// Seeded unset, the promoted item paints seven fields at the KIND
-    /// default while the stage's baseline — refreshed from the config —
-    /// holds the dataset's values: the first keystroke folds all seven
-    /// and the overlay gains a view-level `scale = "none"` contradicting
-    /// the trader's own dataset level. The two halves are separate
-    /// defects and both are asserted here: the catalogue's seed (the
-    /// item and the field), and the baseline's reach over a column the
-    /// view did not carry when the draft was built (the writer).
+    /// A promoted candidate retains its dataset presentation without persisting those
+    /// inherited values as new view overrides.
     #[test]
     fn a_promoted_columns_stage_seeds_from_the_dataset_level() {
         let config = config_from(&[
@@ -2536,11 +2152,10 @@ mod tests {
         }
     }
 
-    /// Part 2c §5.4: [`kind_default`] answers [`ColumnFormat::TEXT`] only
-    /// for a dimension, and [`column_summary`] names only the keys the
-    /// trader actually overrode — nothing at all for an untouched column,
-    /// and both directions of `thousands` (a dimension turning it ON is
-    /// as much an override as a measure turning it off).
+    /// [`kind_default`] answers [`ColumnFormat::TEXT`] only for a dimension, and
+    /// [`column_summary`] names only the keys the trader actually overrode — nothing at
+    /// all for an untouched column, and both directions of `thousands` (a dimension
+    /// turning it ON is as much an override as a measure turning it off).
     #[test]
     fn column_summary_names_only_the_keys_in_force() {
         assert_eq!(
@@ -2584,11 +2199,10 @@ mod tests {
         );
     }
 
-    /// Part 2c §5.3: the column stage's seven fields, in the overlay's own
-    /// key order, every one `Destination::Presentation` (nothing here can
-    /// fork, so nothing here asks), and each seeded with the value the
-    /// trader currently SEES — the kind default with the column's own
-    /// presentation over it — rather than with the raw `Option` the
+    /// the column stage's seven fields, in the overlay's own key order, every one
+    /// `Destination::Presentation` (nothing here can fork, so nothing here asks), and
+    /// each seeded with the value the trader currently SEES — the kind default with the
+    /// column's own presentation over it — rather than with the raw `Option` the
     /// overlay happens to hold.
     #[test]
     fn column_fields_are_seven_presentation_rows_seeded_from_the_item() {
@@ -2642,10 +2256,9 @@ mod tests {
         );
     }
 
-    /// Part 2c §5.2: the fold is what carries a keystroke in the stage
-    /// back onto the item the overlay writer renders from. `auto` is a
-    /// value, not a blank — it clears the width rather than parsing as
-    /// one — and an empty label is the column's own name, so it clears
+    /// the fold is what carries a keystroke in the stage back onto the item the overlay
+    /// writer renders from. `auto` is a value, not a blank — it clears the width rather
+    /// than parsing as one — and an empty label is the column's own name, so it clears
     /// too.
     #[test]
     fn fold_into_writes_the_fields_back_and_auto_clears_the_width() {
@@ -2692,13 +2305,8 @@ mod tests {
         assert_eq!(item.presentation.label.as_deref(), Some("NPV"));
     }
 
-    /// Part 2c §5.3, the clear verb: an empty `label` means "stop
-    /// overriding", which resolves to the DESK's label — never a literal
-    /// `None`, which the writer would omit and the next rebuild would
-    /// read as "nothing to say" while the desk's label came back anyway,
-    /// silently swallowing the clear.
-    ///
-    /// Both directions: a desk that sets a label, and one that does not.
+    /// Clearing a view label stops overriding and immediately restores the value below;
+    /// the resulting equal overlay key is omitted.
     #[test]
     fn clearing_a_desk_label_falls_back_to_the_desk() {
         let with_desk_label = config_with_view(
@@ -2758,9 +2366,7 @@ mod tests {
         assert!(!text.contains("label"), "{text}");
     }
 
-    /// [`clearing_a_desk_label_falls_back_to_the_desk`]'s twin for
-    /// `width`, where the clear is spelled [`AUTO`] rather than an empty
-    /// string — the same ruling, the same failure if it wrote `None`.
+    /// Auto width inherits its lower-layer value just as a cleared label does.
     #[test]
     fn an_auto_width_falls_back_to_the_desk() {
         let with_desk_width = config_with_view(
@@ -2816,15 +2422,8 @@ mod tests {
         set_text_field(draft, key, "");
     }
 
-    /// Part 2c §4.3 against §5.2: one change in the column stage writes
-    /// ONE key.
-    ///
-    /// The fold gives every format key a `Some` (it has a field for each,
-    /// seeded with the value in force), so the writer's baseline
-    /// comparison is the only thing standing between a trader who steps
-    /// the scale and a file that has also adopted the kind's precision,
-    /// thousands, negative and colour — frozen against the desk's next
-    /// change, which is the exact freeze §4.3 forbids.
+    /// Changing one column field must not write unrelated kind defaults as new
+    /// overrides of inherited presentation.
     #[test]
     fn a_fold_of_untouched_keys_leaves_them_out_of_the_overlay() {
         let config = config_with_view(
@@ -2848,10 +2447,9 @@ mod tests {
         }
     }
 
-    /// Part 2c §5.3: `width` is a `Text` because `auto` is one of its
-    /// values; everything else it accepts is a pixel count inside the
-    /// range a table can actually lay out. `label` and `width` are the
-    /// only two keys `i` may open on Views.
+    /// `width` is a `Text` because `auto` is one of its values; everything else it
+    /// accepts is a pixel count inside the range a table can actually lay out. `label`
+    /// and `width` are the only two keys `i` may open on Views.
     #[test]
     fn width_text_is_auto_or_a_pixel_count_in_range() {
         assert_eq!(parse_text("width", " 120 ").unwrap(), "120");

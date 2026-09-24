@@ -99,14 +99,8 @@ pub fn dimension_note(values: &[String]) -> String {
     }
 }
 
-/// The scope's three fields (spec §3): its selected dimensions as a list
-/// (one item per non-empty selection, the other pickable columns
-/// available to join it), then `text` and `expression` as editable
-/// text — or of no scope at all when `object` names nothing, which is
-/// what a `Config` with no `scopes` doc, or a slot nothing defines, has
-/// to produce rather than panicking (spec §4 has `fields` serve the
-/// create path too, though Scopes has no create verb of its own — see
-/// this module's own doc comment).
+/// Build dimension selections, text, and expression fields. Missing objects use empty
+/// defaults so the same builder supports naming a new scope.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -120,10 +114,9 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// `Config` itself, the other freshly rendered from the frame's own
 /// scope.
 ///
-/// `pub(super)` rather than private: [`super::Domain::fields_from_source`]
-/// (scopes-editing spec §6) is `c`'s other caller, building the copy's
-/// fields straight from the table it just cloned rather than from a
-/// named object `config` has a row for yet.
+/// `pub(super)` rather than private: [`super::Domain::fields_from_source`] is `c`'s
+/// other caller, building the copy's fields straight from the table it just cloned
+/// rather than from a named object `config` has a row for yet.
 pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) -> Vec<Field> {
     let mut items = Vec::new();
     if let Some(dims) = table
@@ -190,11 +183,7 @@ pub(super) fn fields_from_table(config: &Config, table: Option<&toml::Table>) ->
     ]
 }
 
-/// The notice `shift+j`/`shift+k` answer on this domain (ruling 4, spec
-/// §3.2): a scope's selections have no meaningful order — the compiler
-/// reads them as a set, and `render.rs`'s `MoveItem` arm (Task 4) reads
-/// this — kept here so both the notice's wording and the rule that
-/// produces it live in one place.
+/// Scope selections have no meaningful order; reorder requests return this notice.
 pub const NO_ORDER_NOTICE: &str = "selections have no order";
 
 /// The draft rendered as `scopes.toml`'s own value for this object:
@@ -212,15 +201,13 @@ pub const NO_ORDER_NOTICE: &str = "selections have no order";
 /// own doc comment describes, taken all the way to its limit: here,
 /// nothing but `source` is ever rendered.
 ///
-/// `n`'s freshly named object (spec §6) has an EMPTY `source` —
-/// `Draft::new_object`'s own literal — which would otherwise render `{}`,
-/// giving the file no hint of the object's shape. Cloning `source` and
-/// defaulting the three keys in (never mutating the draft itself, which
-/// stays the single "what did the trader actually change" source of
-/// truth) is what makes a fresh scope's file entry show an empty
-/// `dimensions` table, `text = ""` and `expression = ""` on the very
-/// first write — a no-op for any table that already has them, which is
-/// every table but a brand new one.
+/// `n`'s freshly named object has an EMPTY `source` — `Draft::new_object`'s own literal
+/// — which would otherwise render `{}`, giving the file no hint of the object's shape.
+/// Cloning `source` and defaulting the three keys in (never mutating the draft itself,
+/// which stays the single "what did the trader actually change" source of truth) is
+/// what makes a fresh scope's file entry show an empty `dimensions` table, `text = ""`
+/// and `expression = ""` on the very first write — a no-op for any table that already
+/// has them, which is every table but a brand new one.
 pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     let mut source = draft.source.clone();
     source
@@ -235,22 +222,10 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     toml_edit::Item::Table(super::toml_table_to_edit(&source))
 }
 
-/// Everything wrong with the draft as it stands (spec §7.2): the
-/// rendered table, parsed back and read by exactly the reader that
-/// decides which saved scopes the palette's `scope::<name>` actions can
-/// reach (`saved_scopes_from_doc`) — `:scope load` reached the same
-/// reader until command-line locality closed that route 2026-09-20 — on
-/// the
-/// object being edited alone, wrapped in a document of its own, for the
-/// reason `views::validate` and `groupings::validate` both give for doing
-/// the same: validating the whole merged doc would report every other
-/// scope's problems against this one object.
-///
-/// `saved_scopes_from_doc` only ever produces `Severity::Warning`
-/// diagnostics (a scope naming an unknown column, or an unparseable
-/// expression, is dropped with a warning, never an error) — so this
-/// adapter's `o` can never be refused by `apply::blocking_diagnostic`,
-/// which only gates on `Severity::Error`.
+/// Validate only this rendered scope through `saved_scopes_from_doc`, avoiding other
+/// objects' diagnostics. That reader reports warnings, so these diagnostics do not trip
+/// the error-only batch gate. Typed expression entry separately refuses parse failures
+/// before changing the field.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     let table = rendered_doc_table(draft);
     let doc = merge_docs(
@@ -321,12 +296,9 @@ fn scope_table_as_toml(scope: &Scope) -> toml::Table {
         .unwrap_or_default()
 }
 
-/// `i`'s commit door (spec §5, [`super::Domain::parse_text`]): `text`
-/// trims; `expression` must parse — a broken expression is refused with
-/// the parser's own message rather than written for the loader to warn
-/// about and drop, since `saved_scopes_from_doc` only ever reports an
-/// unparseable expression as a warning and silently drops it, which
-/// would otherwise make a typo in this dialog look like it saved.
+/// Normalize text and parse expressions before committing typed entry. Invalid
+/// expressions remain in the open field with a refusal instead of reaching a reader
+/// that would later drop the scope with a warning.
 pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
     let text = text.trim();
     if key == "expression" && !text.is_empty() {
@@ -335,25 +307,13 @@ pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
-/// Fields → `source` (spec §3): the two text keys as typed, and
-/// `dimensions` retained to the columns the list still names. A kept
-/// selection's VALUES are never rewritten here — the Values stage owns
-/// them (`fold_values`, Task 3). Called from `render::revalidate` on
-/// every Scopes change, ahead of the validator and the writer.
+/// Fold text/expression fields and retained dimension names into `source` before
+/// validation and writing. Keep selected values unchanged here; the Values stage owns
+/// them through `fold_values`.
 ///
-/// **Known quirk:** `text` and `expression` are always installed fields
-/// while the edit stage (or a projection over it, like the Values stage)
-/// is open, so this runs — and writes `source.text`/`source.expression`
-/// — on the FIRST change of any kind, not only a change to those two
-/// keys. A scope's raw table that has neither key at all (a hand-written
-/// `scopes.toml`, or one from before this plan) therefore reads as
-/// "changed" — and gets rewritten with `text = ""`/`expression = ""` —
-/// after a single tick-then-untick on an unrelated dimension, even
-/// though the object it ends up saving is the same one, semantically,
-/// that it started as. Harmless (`scope_to_table`'s reader and this
-/// writer agree an absent key and an empty string mean the same thing),
-/// but worth knowing before treating "the file changed" as "the trader
-/// changed something they can see".
+/// The first change can add empty text/expression keys to a source that omitted them. A
+/// tick followed by an untick can therefore change file text even when the scope's
+/// effective selection returns to its starting value.
 pub fn fold(draft: &mut Draft) {
     let mut text = None;
     let mut expression = None;
@@ -392,9 +352,9 @@ pub fn fold(draft: &mut Draft) {
     }
 }
 
-/// The Values stage's one field before the data answers (spec §4): a
-/// display-only row, so the stage has a shape to paint and `escape` to
-/// leave by. Replaced whole by [`values_fields`] on delivery.
+/// The Values stage's one field before the data answers: a display-only row, so the
+/// stage has a shape to paint and `escape` to leave by. Replaced whole by
+/// [`values_fields`] on delivery.
 ///
 /// `render::enter_values_stage` seeds a fresh Values stage with this
 /// before the `Request::Distinct` round trip lands.
@@ -418,11 +378,9 @@ fn status_field(text: &str) -> Vec<Field> {
     }]
 }
 
-/// The Values stage's list (spec §4): one row per delivered `(value,
-/// count)` in the outcome's own order, ticked iff `saved` lists it, the
-/// count as its note; then every saved value the data does NOT hold,
-/// ticked, noted `not in data` (ruling 5) — visible and untickable,
-/// never silently dropped.
+/// Delivered values in outcome order, with counts and the draft's selected ticks.
+/// Append selected values missing from the data and mark them `not in data` so they
+/// remain visible and removable.
 pub fn values_fields(saved: &[String], values: &[(String, u64)]) -> Vec<Field> {
     let mut items: Vec<ListItem> = values
         .iter()
@@ -457,14 +415,13 @@ pub fn values_fields(saved: &[String], values: &[(String, u64)]) -> Vec<Field> {
     }]
 }
 
-/// The Values stage's fold (spec §4): the ticked values become
-/// `source.dimensions.<column>` — the key removed outright when none is
-/// ticked, since an empty array is never written — and the stashed
-/// parent's `dimensions` list follows: a first tick inserts the item
-/// (out of the available block), an emptied selection returns it there,
-/// a changed selection refreshes the note. Called from
-/// `render::revalidate` on every tick while [`Draft::values`] is `Some`;
-/// a no-op while the stage still shows its loading/failed row.
+/// The Values stage's fold: the ticked values become `source.dimensions.<column>` — the
+/// key removed outright when none is ticked, since an empty array is never written —
+/// and the stashed parent's `dimensions` list follows: a first tick inserts the item
+/// (out of the available block), an emptied selection returns it there, a changed
+/// selection refreshes the note. Called from `render::revalidate` on every tick while
+/// [`Draft::values`] is `Some`; a no-op while the stage still shows its loading/failed
+/// row.
 pub fn fold_values(draft: &mut Draft) {
     let Some(column) = draft.values().map(str::to_string) else {
         return;
@@ -523,12 +480,11 @@ pub fn fold_values(draft: &mut Draft) {
     });
 }
 
-/// The draft's scope as `saved_scopes_from_doc` would read it, with
-/// `minus`'s own selection removed — what the distinct request carries
-/// (spec §4), so a value's count answers "within the scope I am
-/// authoring". An unreadable draft (the reader warns and drops it)
-/// yields the empty scope: the counts are then dataset-wide, which is
-/// honest for a scope that does not yet parse.
+/// The draft's scope as `saved_scopes_from_doc` would read it, with `minus`'s own
+/// selection removed — what the distinct request carries, so a value's count answers
+/// "within the scope I am authoring". An unreadable draft (the reader warns and drops
+/// it) yields the empty scope: the counts are then dataset-wide, which is honest for a
+/// scope that does not yet parse.
 ///
 /// `render::enter_values_stage` is the one caller.
 pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
@@ -817,10 +773,9 @@ mod tests {
         );
     }
 
-    /// `n`'s brand new object (spec §6): `Domain::new_draft`'s `source` is
-    /// `toml::Table::new()`, empty — `to_table` still renders the three
-    /// keys a saved scope always has, so the very first write shows the
-    /// object's shape rather than a bare `{}`.
+    /// `n`'s brand new object: `Domain::new_draft`'s `source` is `toml::Table::new()`,
+    /// empty — `to_table` still renders the three keys a saved scope always has, so the
+    /// very first write shows the object's shape rather than a bare `{}`.
     #[test]
     fn to_table_defaults_the_three_keys_for_a_brand_new_object() {
         let config = config_with_scope("");
@@ -890,16 +845,8 @@ mod tests {
         assert_eq!(saved["mine"], frame_scope);
     }
 
-    /// The review's own named collision (Task 5 review round 1, MINOR):
-    /// `dimension_note` joins a dimension's values with `", "`, so a
-    /// single value that itself contains `", "` paints identically to
-    /// two separate values. If dirtiness were judged from the painted
-    /// `dimensions` field alone, overwriting `["BK001", "BK002"]` with
-    /// the single value `"BK001, BK002"` would look like no change at
-    /// all and `o` would silently fail to write. Pins that
-    /// `Draft::is_dirty` (and so `apply::commit_edit`) still sees it,
-    /// because dirtiness is judged from `source` — the actual object —
-    /// not its painted note.
+    /// Different scope selections can have the same truncated summary. Dirtiness must
+    /// compare source values as well as fields so an overwrite still persists.
     #[test]
     fn overwrite_with_is_seen_even_when_the_painted_summary_collides() {
         let config =

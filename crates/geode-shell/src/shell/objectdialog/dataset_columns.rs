@@ -1,13 +1,9 @@
-//! The Schema dialog's column stage — the dataset-level door into the
-//! same seven-field stage the Views dialog has (dataset-presentation
-//! spec §4). Pure: no gpui.
+//! Dataset-level column presentation for the Schema dialog. This pure adapter seeds a
+//! scratch column item, renders its dataset overlay, and supplies row summaries. Both
+//! Schema and Views use its provenance calculation.
 //!
-//! Three jobs, all of them about the ONE file this door writes,
-//! `dataset_presentation.toml`: seeding a scratch [`ListItem`] from the
-//! dataset's overlay table ([`item_for`]), rendering that table back with
-//! only the keys that differ from the column's kind default
-//! ([`table`], §4.5), and the summary a personalised Schema row carries
-//! ([`row_summary`], §4.7). [`provenance_of`] serves both doors.
+//! Writes target `dataset_presentation.toml`. They retain other columns of the same
+//! dataset because a user-layer dataset object replaces that object whole.
 
 use super::views;
 use super::{ColumnContext, ColumnDoor, Draft, Field, FieldKind, ListItem, Provenance};
@@ -20,24 +16,12 @@ use geode_core::view::{ColumnFormat, ColumnPresentation};
 /// `views::PRESENTATION_DOC` are the one spelling for theirs.
 pub const DOC: &str = geode_core::view::DATASET_PRESENTATION_DOC;
 
-/// The per-column values [`provenance_of`] needs that do not vary from
-/// field to field, computed **once per render** rather than once per
-/// field.
-///
-/// Both are allocating — `below_view` clones the desk layer and merges
-/// the dataset one over it (a `label` and a named `colour` are `String`s),
-/// and `kind_default` yields a `ColumnFormat` carrying a `Colour` — so
-/// building them inside `provenance_of` meant seven clones per painted
-/// frame of the column stage, per-frame heap churn on the render thread
-/// that the charter names a defect (review round 1's Minor).
+/// Per-column inputs shared by all seven provenance checks in one render. Compute
+/// allocating baseline merges and kind defaults once for the column.
 pub struct ProvenanceInputs<'a> {
     pub ctx: &'a ColumnContext,
-    /// The layers below the view overlay (desk + dataset) — `Some` for
-    /// the Views door alone. The Dataset door compares against the unset
-    /// presentation and never reads this, so it is not built there
-    /// either: a Schema column stage would otherwise pay `below_view`'s
-    /// clone-and-merge on every painted frame for a value nothing looks
-    /// at (fix round 1's Minor).
+    /// View definition with dataset presentation applied. Used only for the Views
+    /// stage; the Dataset stage compares against the unset presentation.
     pub below: Option<ColumnPresentation>,
     pub kind: ColumnFormat,
 }
@@ -59,22 +43,13 @@ impl<'a> ProvenanceInputs<'a> {
     }
 }
 
-/// Which layer's value `field` is showing (§5.3). Through the Views
-/// door: `View` when the field differs from the desk + dataset baseline
-/// — the writer never emits a view key equal to the layer below, so a
-/// stored equal key is unobservable and the next keystroke removes it,
-/// which is why the view overlay is not consulted at all (the final
-/// whole-branch review's named risk 4: a field stepped BACK to the
-/// value below still read `view` until the stage was reopened). Else
-/// `Dataset` / `Desk` by which layer sets the key, else `None`.
-/// Through the Schema door: `Dataset` when the field differs from the
-/// kind default, else `None` — there is no desk value to name (§4.3, a
-/// plan-level ruling over the spec's `user` badge).
+/// Provenance of the current draft value, recomputed at paint so it tracks an edit
+/// before persistence.
 ///
-/// Computed at paint from the draft's own context, never stored on the
-/// [`Field`]: a stored provenance goes stale the keystroke after a step,
-/// and the whole point of the chip is that a stepped field reads `view`
-/// on the same frame rather than 250 ms later when the write lands.
+/// In Views, a value differing from the definition-plus-dataset baseline is `View`;
+/// otherwise name the dataset or definition layer that sets the key. In Schema, a
+/// nondefault value or an explicitly stored dataset key is `Dataset`. Other fields have
+/// no badge.
 pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provenance> {
     let ctx = inputs.ctx;
     let kind = &inputs.kind;
@@ -143,12 +118,11 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
     }
 }
 
-/// The `[<dataset>]` table of `dataset_presentation.toml` as the config
-/// holds it (§4.5) — empty when there is none. Callers pass the
-/// pending-aware config (`apply::config_with_pending`), never
-/// `services.config` alone: inside the 250 ms write debounce the latter
-/// is the doc as it stood before the last keystroke, and a writer seeded
-/// from it would render the other columns as they were BEFORE that
+/// The `[<dataset>]` table of `dataset_presentation.toml` as the config holds it —
+/// empty when there is none. Callers pass the pending-aware config
+/// (`apply::config_with_pending`), never `services.config` alone: inside the 250 ms
+/// write debounce the latter is the doc as it stood before the last keystroke, and a
+/// writer seeded from it would render the other columns as they were BEFORE that
 /// keystroke and undo it.
 pub fn overlay_object(config: &Config, dataset: &str) -> toml::Table {
     config
@@ -159,33 +133,14 @@ pub fn overlay_object(config: &Config, dataset: &str) -> toml::Table {
         .unwrap_or_default()
 }
 
-/// The scratch item the Schema door's fields fold into: the column's
-/// kind from its schema role (`views::schema_role_kind`), its
-/// presentation from the overlay table's `columns.<col>` entry if any
-/// (§4.3). `None` for a column the dataset does not declare.
+/// Seed the Schema stage's scratch item from the dataset overlay alone. Return `None`
+/// for an undeclared column. The underlying view definitions do not supply values at
+/// this editing level, so unset fields use the kind default.
 ///
-/// The presentation is seeded from the overlay **alone** — not merged
-/// with any desk value — because there is no desk value at this level to
-/// merge: the desk's keys live on each view's own `[[columns]]` entry and
-/// sit BELOW this layer (§4.3). A field whose key the overlay does not
-/// set therefore seeds from the kind default, which is what
-/// `views::column_fields` does with an unset `ColumnPresentation`.
-///
-/// Diagnostics are dropped (`noop`): the reader has already reported
-/// every one of them against the file, with its path, and reporting them
-/// a second time from inside a keystroke would put a file-level warning
-/// on a stage that is about one column.
-///
-/// **A `key` or `attribute` column takes its kind from its TYPE**
-/// ([`kind_for_type`]). This door is open to every column the dataset
-/// declares — a trader wants a label and a width on `position_ref` as
-/// much as on `npv` — but `views::schema_role_kind` has no kind for
-/// those two roles (the view reader accepts only `dimension`, `measure`
-/// and `derived`), and a bare `None` makes `views::kind_default` answer
-/// `ColumnFormat::MEASURE`. That painted a `utf8` key column with
-/// Precision 2, Thousands on and a Colour, and stepping any of them
-/// wrote a real key into the overlay that every view carrying that
-/// column then merges (fix round 1's Important).
+/// Roles with a view kind retain it; key and attribute columns derive a formatting kind
+/// from their type so text columns use text defaults. Local parsing discards
+/// diagnostics because it is reading presentation for one column, not reporting the
+/// whole file.
 pub fn item_for(
     dataset: &DatasetSpec,
     column: &str,
@@ -201,8 +156,8 @@ pub fn item_for(
     {
         let noop = |_: &str, _: String| {};
         presentation.parse_format_keys(ct, &noop);
-        // `read_hidden: false`: membership belongs to a view, and the
-        // reader refuses `hidden` here for the same reason (§2.1).
+        // `read_hidden: false`: membership belongs to a view, and the reader refuses
+        // `hidden` here for the same reason.
         presentation.parse_column_keys(ct, false, &noop);
     }
     Some(ListItem {
@@ -239,37 +194,16 @@ fn kind_for_type(ty: ColumnType) -> Option<&'static str> {
     }
 }
 
-/// The whole `[<dataset>]` object (§4.5): every OTHER column's table
-/// copied verbatim from the overlay, the open column re-rendered from the
-/// fields with only the keys that differ from the kind default (label
-/// from the column's name → absent, width from `auto` → absent), and
-/// dropped when nothing differs. Empty when no column remains, which
-/// `apply::object_value` turns into a removal.
+/// Render the dataset's whole presentation object, preserving other columns verbatim
+/// and replacing the open column with its nondefault fields. Drop that column when no
+/// keys remain; an empty dataset object becomes an overlay removal.
 ///
-/// **The other columns are copied, not re-derived.** This doc is atomic
-/// at depth one (`config::merge::atomic_depth`), so a write replaces the
-/// dataset's whole table: rendering only the open column would erase
-/// every other personalised column of that dataset on the first
-/// keystroke.
+/// Only `columns` is retained at the dataset-object level. Unknown sibling keys are not
+/// preserved. Other columns must survive because this document merges whole dataset
+/// objects, so writing only the open column would erase them.
 ///
-/// **Sibling keys of `columns` are NOT carried through.** `[<dataset>]`
-/// holds one key in this vocabulary and `columns` is it — a hand-written
-/// `order`, or any unknown key, is already refused by
-/// `DatasetPresentationSpec::from_doc` with a warning naming
-/// `view_presentation.toml` (§2.1), so it has no effect on anything the
-/// app reads and nothing here is preserving state by keeping it. A write
-/// through this dialog therefore normalises the object to `columns`
-/// alone, which is the same thing the warning asks the trader to do by
-/// hand. Contrast the columns themselves, which ARE state and are copied
-/// verbatim above.
-///
-/// The fields are folded into a CLONE of the context's item first, so the
-/// writer sees the keystroke that is being committed rather than the one
-/// before it. `Draft::fold_column` has already folded the same fields
-/// into the context's own item by the time a real write reaches here
-/// (`render::revalidate` runs first), which makes this fold idempotent —
-/// but it is what lets a caller render the table without a draft that has
-/// been through the dialog's key path.
+/// Fold the current fields into a clone before rendering, making this operation correct
+/// even when the caller has not already folded the draft.
 pub fn table(draft: &Draft) -> toml_edit::Table {
     let mut out = toml_edit::Table::new();
     let Some(ctx) = draft.column_ctx.as_ref() else {
@@ -348,8 +282,8 @@ pub fn table(draft: &Draft) -> toml_edit::Table {
     out
 }
 
-/// The Schema row's suffix (§4.7): `" · k · 0 dp · delta"` when the
-/// dataset table sets anything for this column, `""` otherwise.
+/// The Schema row's suffix: `" · k · 0 dp · delta"` when the dataset table sets
+/// anything for this column, `""` otherwise.
 ///
 /// Guarded on the presentation being unset rather than on the summary
 /// being empty, because the two are different facts: a column whose
@@ -384,11 +318,7 @@ mod tests {
         }
     }
 
-    /// `view` is the trader's view-overlay entry. It is no longer a
-    /// [`ColumnLayers`] field — the chip asks whether the field differs
-    /// from desk + dataset, never whether the overlay holds a key — so
-    /// it reaches the stage only the way the door delivers it: merged
-    /// into the item the fields are built from.
+    /// A stepped view field reports its current provenance before any write lands.
     fn ctx(door: ColumnDoor, layers: ColumnLayers, view: &ColumnPresentation) -> ColumnContext {
         let merged = {
             let mut p = layers.below_view();
@@ -486,12 +416,8 @@ mod tests {
         assert_eq!(provenance(&c, &field(&c, "label")), None);
     }
 
-    /// The other half of `a_stepped_field_reads_view_before_its_write
-    /// _lands`: a field stepped BACK to the value the layer below gives
-    /// reads THAT layer on the same frame. The view overlay still holds
-    /// the key the write is about to remove, so a chip that read the
-    /// captured overlay said `view` until the stage was reopened (the
-    /// final whole-branch review's named risk 4).
+    /// Returning a view field to its baseline immediately restores the lower-layer
+    /// badge; provenance must not depend on a saved view-overlay key.
     #[test]
     fn a_field_stepped_back_to_the_layer_below_reads_that_layer() {
         let layers = ColumnLayers {
@@ -587,13 +513,8 @@ mod writer_tests {
         assert!(item_for(risk, "ghost", &overlay("")).is_none());
     }
 
-    /// Fix round 1's Important. `position_ref` is a `utf8` KEY column, a
-    /// role `views::schema_role_kind` has no kind for — and a bare `None`
-    /// there makes `views::kind_default` answer `ColumnFormat::MEASURE`,
-    /// so the stage painted a text column with Precision 2 and Thousands
-    /// on, and stepping either wrote a real key into the overlay that
-    /// every view carrying the column then merges. The type decides
-    /// instead, so the seven fields open at `ColumnFormat::TEXT`.
+    /// A text key column receives text defaults despite lacking a view-column role.
+    /// Numeric attributes retain numeric defaults without becoming aggregatable.
     #[test]
     fn a_key_column_takes_the_text_kind_from_its_type() {
         let schema = risk_schema();

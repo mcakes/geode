@@ -6,7 +6,7 @@ use crate::actions::ActionId;
 pub enum MatchResult {
     Matched {
         action: ActionId,
-        /// The count prefix typed before the binding, if any (§3.3).
+        /// The count prefix typed before the binding, if any.
         count: Option<u32>,
     },
     /// The keystrokes so far are a prefix of at least one binding — or a
@@ -15,17 +15,15 @@ pub enum MatchResult {
     NoMatch,
 }
 
-/// Four digits: more than any tree needs, and a held key cannot
-/// overflow anything.
+/// Maximum count prefix; further digits saturate at this value.
 pub const MAX_COUNT: u32 = 9999;
 
-/// Sequence-aware key matcher. One per focus target is unnecessary — the
-/// shell holds one and feeds it the active context stack per press.
+/// Sequence and count state for the shell's active context stack.
 ///
-/// Counts are the engine's, not a module's (Phase 3 §2.3): `ActionId`
-/// carries no argument, so `5j` has to be assembled here and handed to
-/// the action, or every module would end up reading raw digits — which
-/// is binding keys by another name.
+/// The caller supplies the current contexts on every press. An exact match fires
+/// immediately, even if a longer binding shares its prefix. A failed continuation
+/// clears both sequence and count without retrying the last key as a fresh start.
+/// There is no timeout in this engine; callers cancel pending input explicitly.
 #[derive(Debug, Default)]
 pub struct Matcher {
     pending: Vec<Keystroke>,

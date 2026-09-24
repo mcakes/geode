@@ -1,70 +1,27 @@
-//! Keymap fragments: a module ships its own default bindings (market-data
-//! documents spec §8.4).
+//! Default bindings contributed by module factories.
 //!
-//! The shell cannot depend on a module crate (CLAUDE.md layering), so for
-//! three phases the blotter's and the diagnostics tile's `[[bindings]]`
-//! lived in [`crate::defaults::BUILTIN_KEYMAP`] beside two mirrored
-//! `(id, title)` action tables, kept honest by a cross-crate test on each
-//! side. That was a copy of a module's vocabulary inside the shell, and a
-//! copy drifts: nothing but those mirror tests connected the two, and a
-//! new module could not ship a single default binding without an edit to
-//! the shell's own defaults.
+//! The app inserts fragments after shell builtin keymaps and before desk/user
+//! keymaps. Each fragment reports [`Layer::Builtin`] and a synthetic module file
+//! name, so ordinary keymap precedence, diagnostics, and reset behavior apply.
 //!
-//! A fragment inverts it. [`ModuleFactory::default_keymap`] hands the
-//! *app* a `[[bindings]]`-only keymap document and the app splices it
-//! into the layer stack it already passes to
-//! [`build_keymap`](crate::keymap::build_keymap): above the built-in
-//! keymap — the shell binds nothing into a module's context any more, so
-//! there is nothing there to conflict with — and below every layer a
-//! trader edits, so a desk or user keymap overrides a module's default
-//! exactly the way it overrides a shell one, through the same layer
-//! precedence and with the same `Layer` reported to the keybindings
-//! dialog.
-//!
-//! A fragment doc reports [`Layer::Builtin`], deliberately: to a trader
-//! it IS part of what the binary shipped (they cannot edit it, and it
-//! sits at the bottom of the precedence order beside the shell's own
-//! defaults), so the keybindings dialog's `r` restores it and `d` records
-//! a user-layer `"none"` shadow over it — no third layer kind, and no
-//! dialog branch that has to know a module exists.
-//!
-//! **A fragment can never shadow a shell binding or another module's, and
-//! [`check_fragment`] is the rule that delivers it: a fragment predicate
-//! must be a plain CONJUNCTION whose first identifier is one of its
-//! factory's own [`contexts`](crate::module::ModuleFactory::contexts).**
-//! The two halves are one promise. With `&&` as the only connective, a
-//! first identifier in `contexts` makes the whole predicate *require*
-//! that context, so the binding cannot fire outside the module's own
-//! tile — which is why `!`, `||` and `(` are refused anywhere in the text
-//! (`blotter || workspace` fires everywhere; `(!blotter)` fires
-//! everywhere but the blotter). Without the check a module could bind in
-//! `workspace` — or inside another module's context — from a layer that
-//! appears in no file the trader can open, which is exactly the invisible
-//! shadowing the layer order above exists to prevent.
-//!
-//! [`ModuleFactory::default_keymap`]: crate::module::ModuleFactory::default_keymap
+//! [`check_fragment`] restricts context spellings to a module's declared context
+//! names and rejects negation, disjunction, and parentheses. Modules should use a
+//! bare owning context followed by optional conjunctions, such as
+//! `blotter && mode == normal`. This keeps ordinary module defaults scoped to the
+//! tile that owns them without adding module dependencies to the shell.
 
 use geode_core::config::{Diagnostic, Layer, LayerDoc};
 use std::path::PathBuf;
 
-/// The `file` a fragment doc carries: not a path, because a fragment is
-/// compiled into a module crate and has no file — but the same `<…>`
-/// shape [`LayerDoc::builtin`] already uses for the compiled-in layer, so
-/// every diagnostic printer, the diagnostics tile's config section and
-/// the keybindings dialog name the module a binding came from without one
-/// of them learning a new case.
+/// Synthetic diagnostic source for a compiled-in fragment, `<module:kind>`.
+/// This identifies the contributing module without implying a disk file exists.
 pub fn fragment_file(kind: &str) -> PathBuf {
     PathBuf::from(format!("<module:{kind}>"))
 }
 
-/// Parse one module's fragment text into a `Builtin`-layer `keymap` doc.
-///
-/// `Err` is a malformed fragment — a compiled-in authoring mistake, so it
-/// can only ever be seen by whoever wrote the module — reported as one
-/// error diagnostic rather than a panic, for the same reason
-/// `Config::load` never panics on a bad file (spec §10.1): an app that
-/// refuses to start is strictly worse than one that starts with a
-/// module's keys missing and says so in the diagnostics tile.
+/// Parse fragment text as a builtin-layer keymap document.
+/// Malformed TOML returns an error diagnostic identifying the module. Context,
+/// key, and action validation happens separately.
 pub fn fragment_doc(kind: &str, text: &str) -> Result<LayerDoc, Diagnostic> {
     let table = text.parse::<toml::Table>().map_err(|e| {
         Diagnostic::error(
@@ -81,47 +38,18 @@ pub fn fragment_doc(kind: &str, text: &str) -> Result<LayerDoc, Diagnostic> {
     })
 }
 
-/// Drop every `[[bindings]]` entry that is not a plain conjunction naming
-/// one of `contexts` as its first identifier, with an error diagnostic
-/// each.
+/// Filter entries by the fragment context spelling restrictions.
 ///
-/// The kept doc is otherwise untouched: `build_keymap` still validates
-/// the keys, the actions and the predicate itself, and still reports its
-/// own diagnostics against the same `file`. This function answers exactly
-/// one question — *may this module bind here at all* — because that is
-/// the one question `build_keymap` cannot answer: it has never heard of a
-/// module.
+/// A context must be a string whose first scanned identifier belongs to
+/// `contexts`. Any `!`, `||`, or `(` anywhere in the text rejects the entry,
+/// including these characters inside quoted values and the `!` in `!=`.
+/// Each rejected entry produces an error diagnostic.
 ///
-/// **A fragment predicate may only be a conjunction** — `ctx`, or
-/// `ctx && key == value`, and nothing else. Any `!`, `||` or `(` anywhere
-/// in the text is refused outright, naming the token. That restriction IS
-/// the no-shadowing promise: with `&&` alone, a first identifier that is
-/// one of the module's own contexts makes the WHOLE predicate require
-/// that context, so the binding can only ever fire inside this module's
-/// own tile. Every other connective breaks that implication, and the
-/// first-identifier scan cannot see it:
-///
-/// * `blotter || workspace` — first identifier `blotter`, and
-///   `Predicate::Or` fires whenever `workspace` is on the stack, which it
-///   always is.
-/// * `(!blotter)` — a leading `(` hides the negation from any
-///   "starts with `!`" guard, and `Predicate::Not` then matches every
-///   context EXCEPT the module's own.
-/// * `(blotter) && mode == normal` — harmless in itself, refused by the
-///   same rule rather than by a parenthesis-aware special case: a
-///   textual check that tries to decide which parentheses are safe is
-///   exactly the check that got the two above wrong. Spell it without.
-///
-/// Refused on the text rather than on a parsed
-/// [`Predicate`](crate::keymap::Predicate) deliberately: the alternative
-/// is evaluating the compiled tree against probe stacks to see where it
-/// fires, which is a search over contexts this function does not know
-/// (any module's, any future shell context) and would answer "seems safe"
-/// rather than "is a conjunction".
-///
-/// An entry with no `context` at all is dropped for the same reason: a
-/// context-free binding applies in every context on the stack, the
-/// shell's own included.
+/// This is a textual check, not a proof that the parsed predicate requires a
+/// module flag: it does not verify that the first identifier is used as a flag
+/// rather than a comparison key. Authors must use `ctx` or `ctx && ...`.
+/// [`super::build_keymap`] subsequently validates accepted predicate syntax,
+/// keys, and actions. Non-array `bindings` values are left for that compiler.
 pub fn check_fragment(doc: LayerDoc, contexts: &[&str]) -> (LayerDoc, Vec<Diagnostic>) {
     let mut doc = doc;
     let mut diags = Vec::new();
@@ -170,16 +98,8 @@ pub fn check_fragment(doc: LayerDoc, contexts: &[&str]) -> (LayerDoc, Vec<Diagno
     (doc, diags)
 }
 
-/// The connective that makes `predicate` more than a conjunction, if it
-/// has one: `"!"`, `"||"` or `"("`, whichever appears first in the text.
-///
-/// A closing `)` is not listed: it cannot appear without an opening one in
-/// anything `parse_predicate` accepts, and `build_keymap`'s own
-/// `invalid context` diagnostic covers the unbalanced case. `&&` and
-/// `==`/`!=` are the whole of what remains — note that `!=` contains a
-/// `!`, so it is refused too: `mode != visual` inside a fragment is a
-/// negation of the same kind, and `mode == normal` says what a module
-/// actually means.
+/// First occurrence of `!`, `||`, or `(`, including inside quoted values.
+/// A stray closing parenthesis is handled by the predicate parser instead.
 fn non_conjunction_token(predicate: &str) -> Option<&'static str> {
     let mut found: Option<(usize, &'static str)> = None;
     for token in ["!", "||", "("] {
@@ -192,18 +112,9 @@ fn non_conjunction_token(predicate: &str) -> Option<&'static str> {
     found.map(|(_, token)| token)
 }
 
-/// The first identifier of a context predicate: `blotter` in
-/// `blotter && mode == normal`.
-///
-/// Deliberately a scan rather than a walk of the parsed
-/// [`Predicate`](crate::keymap::Predicate): a compiled predicate is a
-/// boolean tree with no notion of "the context this binding is about" —
-/// `blotter && mode == normal` and `mode == normal && blotter` are the
-/// same tree — while the fragment rule is about the spelling a module
-/// author wrote and a reader of the file sees first. Identifier
-/// characters match the predicate tokenizer's own rule (alphanumeric,
-/// `_`, `-`, so kebab-case context names work), so a name this returns
-/// is the same name `parse_predicate` reads there.
+/// Scan for the first ASCII letter or underscore, then consume identifier
+/// characters (ASCII alphanumeric, `_`, `-`). The context restriction is based
+/// on this source spelling; this helper does not parse a predicate.
 fn first_identifier(predicate: &str) -> Option<&str> {
     let start = predicate.find(|c: char| c.is_ascii_alphabetic() || c == '_')?;
     let rest = &predicate[start..];
@@ -213,19 +124,9 @@ fn first_identifier(predicate: &str) -> Option<&str> {
     Some(&rest[..end])
 }
 
-/// Builtin docs, then `fragments`, then every doc a trader edits.
-///
-/// `layered` is what `Config::layered_docs("keymap")` hands over, already
-/// in `Builtin → Desk → User` order; this is the one place a module's
-/// defaults enter that order, and it is a pure function over the two
-/// lists so the ordering can be tested without a config directory.
-/// Partitioning on [`Layer::Builtin`] rather than splicing at a fixed
-/// index is future-proofing, not a live case: exactly one compiled-in
-/// keymap doc exists today (`defaults::BUILTIN_KEYMAP` — `--demo`'s
-/// generated desk layer ships `app`, `datasets`, `dimensions`,
-/// `groupings`, `sources` and `views`, but no `keymap`). Should a second
-/// one ever ship, a fixed index would bury it under the fragments, where
-/// the partition keeps every builtin doc ahead of them by construction.
+/// Insert fragments after every builtin document and before all non-builtin
+/// documents. Relative order within each group and within `fragments` is retained.
+/// The caller supplies desk/user order; this function does not sort those layers.
 pub fn splice(layered: &[LayerDoc], fragments: &[LayerDoc]) -> Vec<LayerDoc> {
     let mut out = Vec::with_capacity(layered.len() + fragments.len());
     out.extend(
@@ -267,14 +168,8 @@ mod tests {
         assert_eq!(kept.file.to_string_lossy(), "<module:rec>");
     }
 
-    /// A module's kind and its key context need not be the same string —
-    /// the market-data panel's factory is kind `cvi` and context
-    /// `marketdata` (Task 6) — so the check is against `contexts()`, and
-    /// a fragment naming the KIND where the factory declares a different
-    /// context is dropped like any other foreign context. This is the
-    /// case a check written against `kind()` would wave through on every
-    /// module whose two names happen to agree and get wrong on the one
-    /// where they do not.
+    /// A factory's kind and declared contexts can differ. Only its declared
+    /// contexts authorize a fragment entry.
     #[test]
     fn a_fragment_naming_the_kind_rather_than_the_declared_context_is_dropped() {
         let text =
@@ -298,18 +193,8 @@ mod tests {
         assert_eq!(kept.table["bindings"].as_array().unwrap().len(), 1);
     }
 
-    /// Only a conjunction confines a binding to the context its first
-    /// identifier names, so every other connective is refused — each of
-    /// these spellings passes the first-identifier membership test and
-    /// binds OUTSIDE the module's own tile (or, for the last, is merely
-    /// parenthesised, and refused by the same rule rather than by a
-    /// parenthesis-aware special case that would have to get the first
-    /// two right too).
-    ///
-    /// `blotter || workspace`: `Predicate::Or` fires whenever `workspace`
-    /// is on the stack, which it always is. `(!blotter)`: the leading `(`
-    /// hides the negation from a "starts with `!`" guard, and
-    /// `Predicate::Not` then matches every context except the module's.
+    /// Negation, disjunction, and parentheses fail the fragment text check,
+    /// including otherwise harmless parentheses around the owning context.
     #[test]
     fn a_fragment_predicate_that_is_not_a_plain_conjunction_is_refused() {
         for (predicate, token) in [
@@ -416,11 +301,7 @@ mod tests {
         );
     }
 
-    /// Every compiled-in doc stays ahead of every fragment, whatever
-    /// order they arrive in. Future-proofing rather than a live case —
-    /// exactly one builtin keymap doc ships today — but a splice at a
-    /// fixed index would bury a second compiled-in keymap doc, should one
-    /// ever ship, under the fragments; the partition cannot.
+    /// All builtin documents precede fragments, even when there is more than one.
     #[test]
     fn splice_keeps_every_builtin_doc_ahead_of_every_fragment() {
         let a = LayerDoc {
@@ -457,8 +338,7 @@ mod tests {
         );
     }
 
-    /// No fragments is the identity: every shell-only build, every test
-    /// fixture and every module-less binary goes through this call.
+    /// Without fragments, an already ordered document stack is unchanged.
     #[test]
     fn splice_with_no_fragments_changes_nothing() {
         let docs = vec![

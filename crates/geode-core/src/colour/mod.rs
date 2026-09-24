@@ -1,10 +1,7 @@
-//! Named colours (Part 2c spec §2): a config doc of shared colours, each
-//! either a hue on a canonical wheel that the active theme transforms, or
-//! one of the theme's own semantic tokens. Pure: the caller (the shell's
-//! swatches, the blotter's cells) reads the theme's twelve base hues and
-//! its token colours into [`Anchors`]/[`Tokens`] and calls [`resolve`];
-//! nothing here knows a gpui type. A chart resolves a named colour the
-//! same way the blotter does, which is the whole point of the doc.
+//! Named colours are theme-relative hues or semantic tokens read from
+//! configuration. Callers provide RGB anchors and tokens; this module has no
+//! GPUI dependency. Interpolation, optional sign tinting, and contrast
+//! adjustment are shared by cells, swatches, and charts.
 
 pub mod oklab;
 
@@ -27,7 +24,7 @@ pub enum Tone {
     Light,
 }
 
-/// The theme colours a definition may name directly (spec §2.3).
+/// Theme colours a definition can reference directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Foreground,
@@ -153,10 +150,8 @@ pub struct NamedColours {
     by_name: BTreeMap<String, Definition>,
 }
 
-/// Pushes the "both `hue` and `token`" diagnostic and drops the colour.
-/// Its own helper because the message embeds three sets of single quotes
-/// around the name, `hue` and `token` — the mutation harness's anchor for
-/// this arm calls this one line rather than the fragile quoting inside.
+/// Report mutually exclusive `hue` and `token` fields. The caller skips
+/// the rejected definition after recording this diagnostic.
 fn refuse_both(diags: &mut Vec<Diagnostic>, at: &dyn Fn(&str) -> String, name: &str) {
     diags.push(Diagnostic {
         severity: Severity::Error,
@@ -324,7 +319,7 @@ impl NamedColours {
     }
 }
 
-/// red, yellow, green, cyan, blue, magenta — the canonical wheel (§2.2).
+/// Canonical wheel: red, yellow, green, cyan, blue, magenta.
 pub const ANCHOR_DEGREES: [f32; 6] = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0];
 
 /// A theme's twelve base hues, in `ANCHOR_DEGREES` order, per tone.
@@ -372,16 +367,10 @@ impl Tokens {
     }
 }
 
-/// The hue's two bracketing anchors in the requested tone, interpolated
-/// in OKLCH: lightness and chroma linearly, hue along the shorter arc
-/// (§2.2). `t == 0` returns the anchor itself, untouched — this
-/// function's own identity guarantee is unconditional and pure, with no
-/// theme background in sight. [`resolve`] is what a `hue` definition's
-/// outward contract actually lives on: an anchor hue resolves to the
-/// theme's own colour exactly — unless that colour is unreadable on the
-/// theme's background, in which case only its lightness moves (see
-/// [`readable_on`]). The arc/anchor tests below exercise this function
-/// directly so that guarantee keeps its old, unconditional meaning.
+/// Interpolate between bracketing anchors in OKLCH: lightness and chroma
+/// linearly, hue along the shorter arc. Exact anchor angles return the
+/// anchor unchanged. This function does not check background contrast;
+/// `resolve` applies `readable_on` afterward.
 pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     let ring = match tone {
         Tone::Normal => &anchors.normal,
@@ -405,23 +394,16 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     to_srgb_in_gamut(lch)
 }
 
-/// The WCAG contrast ratio every resolved `Base::Hue` must clear
-/// against the theme's background (spec §7), enforced by [`readable_on`].
+/// Target contrast ratio for generated colours against the theme background.
+/// `readable_on` may fall short if the supplied theme offers no reachable
+/// lightness with sufficient contrast.
 pub const READABLE_RATIO: f32 = 3.0;
 
-/// Pull `rgb`'s OKLCH lightness toward `toward`'s until it clears
-/// `READABLE_RATIO` against `background`, keeping hue and chroma (re-clipped
-/// to gamut). The smallest such move, found by bisection over `t` in
-/// `0..=1` (16 steps); `rgb` unchanged when it already clears.
-///
-/// When NO `t` in `0..=1` clears — `toward` and `background` on the same
-/// side of `rgb`'s lightness, or equal, so moving toward one never
-/// escapes the other — the bisection's `hi = 1.0` endpoint is returned
-/// **untested**: maximally moved, still unreadable. That is the deliberate
-/// fallback, not an oversight; no bundled theme reaches it
-/// (`every_bundled_theme_keeps_generated_hues_readable` asserts all 44 ×
-/// 24 pairs past the floor), so it is latent for a user-authored theme
-/// alone.
+/// Move OKLCH lightness toward `toward` to seek `READABLE_RATIO` against
+/// `background`, retaining hue and clipping chroma to the display gamut.
+/// Already-readable colours are unchanged; otherwise 16 bisection steps
+/// choose the adjustment. If no point on this lightness path clears the
+/// ratio, the endpoint is returned without a contrast guarantee.
 pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
     if contrast_ratio(rgb, background) >= READABLE_RATIO {
         return rgb;
@@ -447,17 +429,10 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
     at(hi)
 }
 
-/// A named colour's `hue`/`token` definition, resolved against a theme's
-/// [`Anchors`]/[`Tokens`]. §2.2's identity rule: an anchor hue resolves
-/// to the theme's own colour exactly — unless that colour is unreadable
-/// on the theme's background, in which case only its lightness moves,
-/// via [`readable_on`]. A `Base::Token` is never floored here: a token
-/// names one of the theme author's own deliberate semantic colours
-/// (danger, a chart series, …), not a generated point on the hue wheel
-/// that might land anywhere — the floor exists to guard the generated
-/// case, not to second-guess a theme's own design. (`tint_sign` is not
-/// read here; [`resolve_signed`] is where a tinted colour becomes a
-/// generated one.)
+/// Resolve a hue or token against a theme. Hues pass through `readable_on`;
+/// exact anchors stay unchanged when their contrast is sufficient. Tokens
+/// are returned unchanged as the theme's semantic colours. `tint_sign` is
+/// applied only by `resolve_signed`.
 pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     match &def.base {
         Base::Hue { degrees, tone } => readable_on(
@@ -469,20 +444,11 @@ pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     }
 }
 
-/// [`resolve`] for a cell holding a number of `sign`. Without
-/// `tint_sign` it IS [`resolve`], sign ignored. With it, the colour is a
-/// generated triad — the base for zero, the base shifted by [`tint`]
-/// for either sign — and all three go through the floor, base token or
-/// not: the floor guards what this module generates, and once the
-/// trader asked for a tint the whole triad is generated. Flooring only
-/// the two shifted variants would paint a faint token's zero cells and
-/// header dim beside floored-bright ± cells (ten bundled themes ship
-/// `warning` faint), a lightness split reading as a third state.
-///
-/// A grey token (`foreground` on most themes, often `muted`) has no
-/// hue to shift, so its tint is invisible: the triad is three of the
-/// same grey, floored. Deliberately not a diagnostic — the dialog's
-/// triad swatch shows it.
+/// Resolve a signed cell colour. Without `tint_sign`, the sign is ignored.
+/// With tinting, all three sign variants, including zero and token bases,
+/// pass through `readable_on` so zero/header cells do not bypass the contrast
+/// adjustment. Achievable contrast still depends on the theme's colours.
+/// Achromatic bases have no visible hue shift.
 pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     let base = resolve(def, anchors, tokens);
     if !def.tint_sign {
@@ -491,11 +457,8 @@ pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &
     readable_on(tint(base, sign), tokens.background, tokens.foreground)
 }
 
-/// How far [`tint`] rotates a hue, in OKLCH degrees: a hint of sign
-/// beside the colour's own identity, not a second colour. 40°, so the
-/// two variants sit 80° apart — 20° was invisible on a real display
-/// (user finding, 2026-09-20), and a full anchor step (60°) would read
-/// as two unrelated colours.
+/// Maximum sign-tint rotation in OKLCH degrees. Positive and negative
+/// variants move toward opposite poles while retaining the base identity.
 pub const TINT_DEGREES: f32 = 40.0;
 /// The warm pole of the OKLCH wheel (orange) a negative number moves
 /// toward, and the cool pole (azure) a positive one moves toward — one
@@ -707,15 +670,9 @@ mod tests {
             arc(got.h, red.h) < arc(magenta.h, red.h),
             "closer to red than magenta is: {got:?}"
         );
-        // The comparative check above is too weak on its own to pin the
-        // wrap correction down (the harness's "hue takes the shorter
-        // arc" mutation survived it: dropping the wrap still lands
-        // numerically closer to red than to magenta on this fixture,
-        // since these six anchors are not evenly spaced 60° apart in
-        // real OKLab hue). An absolute bound is airtight: t = 0.833 of
-        // the way from magenta to red along the ~58° short arc must
-        // land within a few degrees of red, never a wrong-way overshoot
-        // past it.
+        // The anchor hues are not evenly spaced in OKLab, so proximity alone
+        // cannot prove the direction of interpolation. Bound the result near red
+        // to exclude a long-arc overshoot as well as a distant midpoint.
         assert!(
             arc(got.h, red.h) < 0.3,
             "close to red, not overshooting past it the wrong way: {got:?}"
@@ -953,9 +910,8 @@ mod tests {
         ((a - b + 180.0).rem_euclid(360.0) - 180.0).abs()
     }
 
-    /// The step is large enough to SEE — the first cut's 20° read as no
-    /// difference on a real display (user finding, 2026-09-20) — and
-    /// small enough that the two variants still read as one family.
+    /// The maximum tint step preserves a visible separation between signs
+    /// while keeping both variants near the base hue.
     #[test]
     fn the_tint_step_is_forty_degrees() {
         assert_eq!(TINT_DEGREES, 40.0);
@@ -1051,12 +1007,8 @@ mod tests {
         assert_ne!(positive, negative);
     }
 
-    /// An untinted token is the theme author's own colour and is never
-    /// floored; a tinted one is a generated triad, and all THREE of it
-    /// are — the zero/header colour included, or a faint token would
-    /// paint its zero cells and header dim beside floored-bright ± cells
-    /// (review finding on the ten bundled themes whose `warning` is
-    /// faint).
+    /// Untinted semantic tokens remain unchanged. Tinted tokens apply contrast
+    /// adjustment to the entire sign triad, including the zero/header colour.
     #[test]
     fn a_tinted_token_is_floored_as_a_whole_triad_but_an_untinted_one_is_not() {
         let (a, mut t) = (anchors(), tokens());

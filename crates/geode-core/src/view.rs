@@ -1,10 +1,7 @@
-//! View definitions (spec §5.1, §6.1): dataset, joins, columns, derived
-//! columns, grouping and sort, declared as config. Users create views
-//! through the UI or by writing config; both produce the same file
-//! (PHILOSOPHY §5).
-//!
-//! A view is data, not code — it names columns and expressions, and the
-//! compiler (geode-data) turns it into one statement.
+//! View definitions: dataset, joins, columns, derived expressions, grouping,
+//! and sort read from configuration. `geode-data` compiles these values into
+//! queries. Presentation overlays are applied separately so personal display
+//! changes do not replace the desk's view definition.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -16,7 +13,7 @@ use crate::schema::{ColumnRole, Grain, SchemaSpec};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinSpec {
     pub dataset: String,
-    /// Join key columns, declared in schema config (spec §5.4).
+    /// Join key columns declared by the view.
     pub on: Vec<String>,
 }
 
@@ -58,13 +55,8 @@ pub enum Negative {
     Parens,
 }
 
-/// How a cell's text is coloured. `Sign` paints by sign with
-/// `chart_bullish`/`chart_bearish`; a name is a named colour (Part 2c
-/// §3), painting the header and every additive value. Not `Copy` — a
-/// name carries a `String`, so `ColumnFormat` (which embeds this) loses
-/// `Copy` too; callers that used to copy a `ColumnFormat` around now
-/// clone it or take it by value from a fresh source (a `const`, or an
-/// owned local).
+/// Cell text colour: `Sign` uses bullish/bearish theme colours; `Named`
+/// references a shared colour definition for headers and additive values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Colour {
     None,
@@ -73,7 +65,7 @@ pub enum Colour {
 }
 
 /// Divide before display: `k` by a thousand, `M` by a million.
-/// `precision` applies to the divided number (Phase 3 §6.2).
+/// `precision` applies to the divided number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scale {
     None,
@@ -100,8 +92,7 @@ impl Scale {
     }
 }
 
-/// A resolved format: every field decided (Phase 3 §6.2). Not `Copy` —
-/// `Colour` carries a `String` for a named colour.
+/// A resolved format with a value for every formatting property.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnFormat {
     pub precision: u8,
@@ -141,10 +132,8 @@ impl ColumnFormat {
     }
 }
 
-/// What a view says about how a column looks — each field optional, so
-/// a per-kind default fills the rest at plan time. Keyed by column name
-/// on the view rather than carried on `ViewColumn`, so the compiler's
-/// matching on that enum is untouched.
+/// Optional display properties keyed by column name on the view. Per-kind
+/// defaults fill properties left unset when the query plan is built.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ColumnPresentation {
     pub precision: Option<u8>,
@@ -154,29 +143,17 @@ pub struct ColumnPresentation {
     pub scale: Option<Scale>,
     pub label: Option<String>,
     pub width: Option<f32>,
-    /// Set only by `ViewPresentationSpec`'s `[view.columns.<col>]` table
-    /// (Part 2c §4) or its legacy `hidden` array — never by the views
-    /// reader itself (`parse_column_keys` is called with
-    /// `read_hidden: false` there). It lives here rather than on
-    /// `ViewColumn` — which spec §1.2 sketched — because `ViewColumn` is
-    /// an enum with no shared fields, while this struct is already
-    /// per-column, already carries `width`, and is already merged into
-    /// `ViewSpec.presentation`. A hidden column stays in
-    /// `ViewSpec.columns`: the compiler still selects it, so unhiding is
-    /// free and no query changes shape when a trader hides a column.
+    /// Set by view presentation only, through a column table or the supported
+    /// `hidden` array. A hidden column remains in `ViewSpec.columns` and in
+    /// the query result; hiding it changes visibility, not the query shape.
     pub hidden: Option<bool>,
 }
 
 impl ColumnPresentation {
-    /// `precision`, `thousands`, `negative`, `colour`, `scale` — from a
-    /// `format` sub-table (the views reader, `views.toml`) or directly
-    /// from a column's own table (the overlay's `[view.columns.<col>]`,
-    /// Part 2c §4: there is no nested `format` table there, since a
-    /// column's presentation IS the table). `warn` is called with the key
-    /// within `table` ("precision", "colour", …) and the message; each
-    /// caller decides how to turn that into a `Diagnostic` and where to
-    /// file it (the views reader prefixes `format.`, the overlay does
-    /// not, since its keys sit at the column table's own top level).
+    /// Read `precision`, `thousands`, `negative`, `colour`, and `scale`.
+    /// View definitions pass a nested `format` table; presentation overlays
+    /// pass the column table itself. `warn` receives a key relative to this
+    /// table, and the caller adds the document and column path.
     pub fn parse_format_keys(&mut self, table: &toml::Table, warn: &dyn Fn(&str, String)) {
         match table.get("precision") {
             None => {}
@@ -207,11 +184,9 @@ impl ColumnPresentation {
                 format!("'negative' must be \"minus\" or \"parens\" (got {other:?})"),
             ),
         }
-        // "none" and "sign" are the two built-in spellings; anything else
-        // is a name into `colours.toml` — the reader takes it on faith
-        // and `load_views`'s cross-check (§3, and its overlay-side
-        // counterpart, §4) warns if the name is not defined there, since
-        // this doc alone (no access to the `colours` doc) cannot tell.
+        // `none` and `sign` are built in. Other strings name entries in
+        // `colours.toml`; `config::load_views` checks those references because
+        // this reader has no colour document.
         match table.get("colour").or_else(|| table.get("color")) {
             None => {}
             Some(v) => match v.as_str() {
@@ -269,10 +244,8 @@ impl ColumnPresentation {
         }
     }
 
-    /// Merge `other` over `self`: every field `other` set wins, every
-    /// field it left `None` keeps `self`'s own value. Used to fold a
-    /// `[view.columns.<col>]` table over whatever the view itself already
-    /// declared for that column (Part 2c §4.4).
+    /// Merge `other` over `self` per property: each `Some` replaces the
+    /// existing value, and each `None` preserves it.
     pub fn merge_over(&mut self, other: &ColumnPresentation) {
         if other.precision.is_some() {
             self.precision = other.precision;
@@ -307,16 +280,13 @@ pub struct ViewSpec {
     pub dataset: String,
     pub joins: Vec<JoinSpec>,
     pub columns: Vec<ViewColumn>,
-    /// Ordered: each prefix is one level of the rollup tree (§6.3).
+    /// Ordered: each prefix is one level of the rollup tree.
     pub grouping: Vec<String>,
     pub sort: Vec<SortKey>,
     pub presentation: BTreeMap<String, ColumnPresentation>,
-    /// Set by a top-level `default = "<name>"` key in the views doc
-    /// (Phase 4b M6) — at most one view carries `true`. A tile that
-    /// doesn't restore a `view` from its session record picks this one;
-    /// with no `default` key at all, `from_doc` instead sorts every view
-    /// by name so "the first one" is at least deterministic across a
-    /// `toml` `preserve_order` file's own author-chosen order.
+    /// Set by a top-level `default = "<name>"` string when the named view
+    /// exists. At most one parsed view is marked. Without a string default,
+    /// `from_doc` sorts views by name for deterministic fallback selection.
     pub is_default: bool,
 }
 
@@ -347,13 +317,10 @@ impl ViewSpec {
         self.presentation.get(column).cloned().unwrap_or_default()
     }
 
-    /// Check the view against the schema it will compile against.
-    ///
-    /// Takes the derived dimensions because §6.8 names are not dataset
-    /// columns: `desk` is computed from `book` and is absent from every
-    /// CSV. Validating without them would report the feature's own
-    /// vocabulary as unknown, which is why this could not simply be wired
-    /// up as it stood.
+    /// Check dataset, join-dataset, selected-column, and grouping references.
+    /// Derived dimensions resolve through their source column in the primary
+    /// dataset. This does not validate derived SQL, sort keys, join keys, or
+    /// column roles; query compilation performs further checks.
     pub fn validate(&self, schema: &SchemaSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         let bad = |m: String| Diagnostic {
@@ -375,15 +342,9 @@ impl ViewSpec {
             }
         }
 
-        // A derived column may reference other view columns, so only
-        // dimension and measure columns are checked against the schema.
-        //
-        // A derived *dimension* (§6.8) is resolved here for the same
-        // reason it is in the grouping loop below: `desk` is computed from
-        // `book` and is in no CSV, so checking it against the dataset
-        // alone reports the feature's own vocabulary as unknown. Fixing
-        // only the grouping loop left a view that names `desk` in both
-        // places still rejected.
+        // Derived SQL is checked by the compiler. Other columns may come from
+        // the primary dataset or a join; a derived dimension must resolve to a
+        // source column in the primary dataset.
         for c in &self.columns {
             match c {
                 ViewColumn::Derived { .. } => {}
@@ -443,22 +404,9 @@ impl ViewSpec {
     pub fn from_doc(doc: &MergedDoc) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
         let mut diags = Vec::new();
-        // Phase 4b M6: a top-level `default = "<name>"` key names which
-        // view a tile with nothing restored should open on — captured
-        // ahead of the main loop below since (unlike every view itself)
-        // its value is a bare string, not a table.
-        //
-        // Phase 4b Task 1 fix round 1, MIN-3: the main loop below must
-        // only skip a `default` entry that is either the string header
-        // or a malformed non-table value already warned about here — a
-        // view literally named `default` (a natural name for the view a
-        // desk wants opened first) is a TABLE, not a string, so it must
-        // still reach the loop and parse as an ordinary `ViewSpec`. A
-        // non-string, non-table `default` value (a typo like
-        // `default = 3`) is neither a valid header nor a valid view — it
-        // warns here and is skipped below rather than tripping the main
-        // loop's own "not a table" diagnostic under the confusing name
-        // "view 'default'".
+        // A string `default` selects a view; a table named `default` is itself
+        // a view. Diagnose other value types once here, then skip them in the
+        // object loop so they do not also produce a misleading view error.
         let default_value = doc.value.get("default");
         let default_name = default_value.and_then(|v| v.as_str()).map(str::to_string);
         if let Some(v) = default_value
@@ -552,10 +500,8 @@ impl ViewSpec {
             }
 
             if let Some(cols) = table.get("columns").and_then(|v| v.as_array()) {
-                // `enumerate()` BEFORE filtering non-tables, so a
-                // diagnostic's index is the column's real position in the
-                // file (§19.5) — filtering first would renumber every
-                // column after a skipped non-table entry.
+                // Enumerate before skipping non-tables: diagnostic indices must match
+                // the original array positions, including malformed entries.
                 for (i, c) in cols.iter().enumerate() {
                     let Some(c) = c.as_table() else { continue };
                     let Some(col_name) = c.get("name").and_then(|v| v.as_str()) else {
@@ -597,18 +543,9 @@ impl ViewSpec {
                     view.columns.push(column);
 
                     let mut p = ColumnPresentation::default();
-                    // Every format/label/width diagnostic below carries
-                    // the column's own index so a reader flags the exact
-                    // row it named, not just the `columns` field header
-                    // (the mutation harness's "views reader: column
-                    // diagnostics carry the column index" entry pins this).
-                    // `warn` collects into `col_diags` (a `RefCell`,
-                    // rather than `diags` itself) purely so it can stay a
-                    // `Fn` and be handed to `parse_format_keys`/
-                    // `parse_column_keys` (which take `&dyn Fn`, shared
-                    // with both readers) without borrowing `diags`
-                    // mutably twice over; the collected diagnostics are
-                    // folded into `diags` right after.
+                    // Preserve the original column index in every presentation diagnostic.
+                    // The local `RefCell` lets both shared `Fn` callbacks collect warnings
+                    // without taking competing mutable borrows of `diags`.
                     let col_diags = RefCell::new(Vec::new());
                     let warn = |key: &str, m: String| {
                         col_diags.borrow_mut().push(bad(
@@ -651,13 +588,9 @@ impl ViewSpec {
             out.push(view);
         }
 
-        // Phase 4b M6: with no `default` key, sort by name so "the first
-        // view" (`BlotterTile::new`'s fallback when nothing is restored)
-        // is deterministic regardless of file order — `toml`'s
-        // `preserve_order` feature means that would otherwise be
-        // whatever order the author happened to write the views in. A
-        // `default` key makes that ordering moot (the fallback finds the
-        // flagged view directly), so file order is left alone instead.
+        // Without a string default, sort by name for deterministic fallback.
+        // An explicit name preserves file order, even if the name is unknown;
+        // in that case no view is marked and a warning is returned.
         match &default_name {
             Some(default_name) => match out.iter_mut().find(|v| &v.name == default_name) {
                 Some(v) => v.is_default = true,
@@ -676,15 +609,11 @@ impl ViewSpec {
     }
 }
 
-/// One view's personalisation: what order its columns are shown in, and
-/// everything else about how each one looks — hidden, width, and (Part
-/// 2c §4) the same format keys a view itself can set.
+/// A view's personal column order and display properties.
 ///
-/// Deliberately a *separate* doc from the view (spec §4.1): dragging a
-/// column's width is the commonest edit a trader makes, and writing it
-/// into `views.toml` would fork the desk's view — the desk adds a column
-/// next week and the trader never sees it. Merged over the view instead,
-/// only a definitional change (dataset, column set) forks anything.
+/// Kept in a separate document so a width, colour, or visibility edit does
+/// not replace the view's dataset and column definitions. Columns added to
+/// the desk view remain available after applying a personal overlay.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ViewPresentation {
     /// Column names, most significant first. Names the view lacks are
@@ -692,28 +621,15 @@ pub struct ViewPresentation {
     /// order behind the ones it names (`preserve_order` is on
     /// workspace-wide, so a view's file order is meaningful).
     pub order: Vec<String>,
-    /// One `[view.columns.<col>]` table per personalised column (Part 2c
-    /// §4.1) — every presentation key a view itself can set, plus
-    /// `hidden`. `from_doc` also folds the legacy top-level `hidden`
-    /// array and `width` table in here (§4.2), so this is the *only*
-    /// place a caller needs to look regardless of which spelling a given
-    /// `view_presentation.toml` still uses; a column set in both wins by
-    /// the table, with a warning.
+    /// Per-column display properties, including `hidden`. The reader folds
+    /// the supported top-level `hidden` array and `width` map into this map.
+    /// An explicitly set column-table property wins over its older spelling,
+    /// with a warning when both supply a value.
     pub columns: BTreeMap<String, ColumnPresentation>,
-    /// For each column whose `columns` entry was created by a LEGACY key
-    /// rather than by a `[view.columns.<col>]` table of its own, the
-    /// spelling it was read under — `"hidden"` or `"width"` (the final
-    /// review's M-4).
-    ///
-    /// It exists for one reader, [`ViewPresentationSpec::apply`]'s
-    /// "the view does not have that column" warning: a file still on
-    /// `hidden = ["ghost"]` was being told about
-    /// `view_presentation.<view>.columns.ghost`, and the trader went
-    /// looking for a `[<view>.columns.ghost]` table their file does not
-    /// have. Only the creating spelling is recorded — a column named by
-    /// both legacy keys keeps the first — and a column the `columns`
-    /// table itself names is absent from here entirely, which is the
-    /// `columns` answer by omission.
+    /// The spelling that first created a column entry from `hidden` or
+    /// `width`. `apply` uses it to report an unknown column at a key the file
+    /// actually contains. Entries created by a column table are absent here;
+    /// when both older spellings name a column, the first one is retained.
     pub legacy_keys: BTreeMap<String, &'static str>,
 }
 
@@ -840,12 +756,8 @@ impl ViewPresentationSpec {
                                     }
                                     entry.hidden = Some(true);
                                     if is_new {
-                                        // The final review's M-4: which
-                                        // spelling this column's entry
-                                        // came from, so `apply`'s
-                                        // "the view does not have it"
-                                        // warning names a key the file
-                                        // actually holds.
+                                        // Remember the source spelling so unknown-column warnings point to
+                                        // a key present in the file.
                                         p.legacy_keys.insert(col.to_string(), "hidden");
                                     }
                                 }
@@ -875,16 +787,9 @@ impl ViewPresentationSpec {
                                 ));
                                 continue;
                             }
-                            // Validated BEFORE the entry is created (the
-                            // final review's M-3): an `or_default()` up
-                            // here made an entry for a column this file
-                            // is about to be told is invalid, and `apply`
-                            // then warned a SECOND time that the view
-                            // does not have it — two diagnostics for one
-                            // mistake, the second of them about a key the
-                            // trader never wrote. The `hidden` loop below
-                            // has nothing to validate and so never had
-                            // this shape.
+                            // Validate before creating an entry. An invalid width must not leave
+                            // an empty column entry that produces a second unknown-column warning
+                            // when the overlay is applied.
                             match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
                                 Some(x) if x > 0.0 => {
                                     let is_new = !p.columns.contains_key(col);
@@ -916,13 +821,9 @@ impl ViewPresentationSpec {
         (spec, diags)
     }
 
-    /// Merge this over the views, in place.
-    ///
-    /// Called by `config::load_views` after the named-object merge, so
-    /// every `ViewSpec` a module is handed already reflects it (spec
-    /// §5.6). Every mismatch is a **Warning**, never an Error: a desk
-    /// renaming or dropping a column must not break a trader's personal
-    /// file, and the view itself is left exactly as the desk wrote it.
+    /// Apply order and per-column properties in place after the named-object
+    /// merge. Unknown views, unknown columns, and duplicate order entries
+    /// produce warnings and are ignored; valid entries still apply.
     pub fn apply(&self, views: &mut [ViewSpec]) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         for (view_name, p) in &self.views {
@@ -979,17 +880,12 @@ impl ViewPresentationSpec {
                 .map(|i| slots[i].take().expect("each index appears once"))
                 .collect();
 
-            // One merge per personalised column, regardless of which
-            // spelling `from_doc` read it from — `columns` already holds
-            // the legacy `hidden`/`width` keys folded in (§4.2).
+            // Apply each column once; `from_doc` has already folded the supported
+            // `hidden` and `width` spellings into this map.
             for (col, cp) in &p.columns {
                 if !view.columns.iter().any(|c| c.name() == col) {
-                    // Named under the spelling the key was READ under
-                    // (the final review's M-4) — a file still using
-                    // `hidden = ["ghost"]` has no `[<view>.columns.ghost]`
-                    // table to be sent to, and `from_doc` folding the
-                    // legacy keys into `columns` is an implementation
-                    // detail no trader can see in their own file.
+                    // Report the spelling used in the file, including `hidden` or `width`,
+                    // so a warning does not point to a nonexistent column table.
                     let (suffix, key) = match p.legacy_keys.get(col).copied() {
                         Some("hidden") => ("hidden".to_string(), "hidden"),
                         Some("width") => (format!("width.{col}"), "width"),
@@ -1013,16 +909,12 @@ impl ViewPresentationSpec {
     }
 }
 
-/// `dataset_presentation.toml`, user layer — one table per DATASET name,
-/// atomic at depth one like `view_presentation` (`config::merge::
-/// atomic_depth`), holding one `[<dataset>.columns.<col>]` table per
-/// personalised column: the seven presentation keys and nothing else.
-/// `hidden` and `order` belong to a view and are refused here with a
-/// warning naming `view_presentation.toml` (dataset-presentation spec
-/// §2.1). Merged into every view of that dataset BETWEEN the view's own
-/// `[[columns]]` keys and the trader's view overlay (§3.1), so the
-/// resolved order per key is kind default → desk view column →
-/// dataset-level → view-level.
+/// Dataset-wide column display properties from `dataset_presentation.toml`.
+/// Named dataset objects replace whole across configuration layers. Each
+/// `[<dataset>.columns.<col>]` table accepts label, width, and format keys;
+/// `hidden` and `order` belong in `view_presentation.toml` and warn here.
+/// Per-property precedence is kind default, view definition, dataset
+/// presentation, then view presentation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DatasetPresentationSpec {
     /// dataset → column → presentation
@@ -1095,15 +987,8 @@ impl DatasetPresentationSpec {
                                         .into(),
                                 );
                             }
-                            // Every key a column table can carry (§2.2).
-                            // `color` is `parse_format_keys`' own
-                            // American alias and `hidden` has its own
-                            // message just above; a key that is neither
-                            // is a typo (`precison`, `colour_`) that
-                            // would otherwise be accepted in silence —
-                            // and telling a trader where a key went is
-                            // this whole layer's value (the final
-                            // whole-branch review's Minor 2).
+                            // Warn on unknown column keys as well as malformed known values.
+                            // `color` is an accepted alias; `hidden` has its own warning above.
                             const COLUMN_KEYS: [&str; 9] = [
                                 "label",
                                 "width",
@@ -1136,10 +1021,9 @@ impl DatasetPresentationSpec {
         (spec, diags)
     }
 
-    /// The dataset whose schema declares `column` for this view: the
-    /// view's own dataset first, then each join's dataset in file order
-    /// — the order the compiler resolves names in (§3.2). `None` for a
-    /// column no dataset of the view declares (a derived column).
+    /// The first dataset declaring `column`: the primary dataset, then
+    /// joins in declaration order, matching compiler name resolution.
+    /// Returns `None` when none declares the name.
     pub fn owner_of<'a>(view: &'a ViewSpec, column: &str, schema: &SchemaSpec) -> Option<&'a str> {
         std::iter::once(view.dataset.as_str())
             .chain(view.joins.iter().map(|j| j.dataset.as_str()))
@@ -1150,12 +1034,10 @@ impl DatasetPresentationSpec {
             })
     }
 
-    /// Merge each dataset's column tables over the matching column of
-    /// every view that carries it (§3.1). Called by `load_views` AFTER
-    /// `ViewSpec::from_doc` (the desk's own keys are already in
-    /// `presentation`) and BEFORE `ViewPresentationSpec::apply` (the
-    /// view overlay must win). A dataset no schema declares, or a column
-    /// its dataset lacks, warns with its path and is skipped (§2.3).
+    /// Apply each dataset's properties to selected columns it owns.
+    /// `load_views` calls this after parsing view definitions and before
+    /// applying view presentation. Unknown datasets and columns warn and
+    /// are skipped; ownership uses `owner_of` to resolve duplicate names.
     pub fn apply(&self, views: &mut [ViewSpec], schema: &SchemaSpec) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         let warn = |path: String, m: String| Diagnostic {
@@ -1313,11 +1195,8 @@ grain = "instrument"
 
     #[test]
     fn views_with_no_default_key_come_out_sorted_by_name() {
-        // Phase 4b M6: file order is `b` then `a` — with `toml`'s
-        // `preserve_order` feature on, that would otherwise be the order
-        // `from_doc` returns them in, making "the first view" (a fresh
-        // tile's default) depend on where the author happened to write
-        // each view rather than on anything deliberate.
+        // File order is deliberately the reverse of name order to verify the
+        // deterministic fallback when no default is named.
         let text = r#"
 [b]
 dataset = "risk_snapshot"
@@ -1353,12 +1232,7 @@ dataset = "risk_snapshot"
 
     #[test]
     fn a_view_literally_named_default_is_not_silently_dropped() {
-        // Phase 4b Task 1 fix round 1, MIN-3: the top-level `default`
-        // key skip used to fire unconditionally on any doc entry named
-        // "default", table or not — a desk whose `[default]` view is a
-        // perfectly natural name for the view it wants opened first lost
-        // it outright, with no diagnostic and `default_name` staying
-        // `None` (a table is not a `str`).
+        // A table named `default` is an ordinary view, not the string header.
         let text = r#"
 [default]
 dataset = "risk_snapshot"
@@ -1373,11 +1247,7 @@ dataset = "risk_snapshot"
 
     #[test]
     fn a_non_string_default_value_warns_instead_of_being_silently_ignored() {
-        // Phase 4b Task 1 fix round 1, MIN-3: `default = 3` (a typo, or
-        // any non-string value) used to be silently skipped by the same
-        // unconditional `name == "default"` check — no warning, and the
-        // remaining views were sorted as if no `default` key existed at
-        // all.
+        // A malformed default header warns once and leaves name-sorted fallback.
         let text = r#"
 default = 3
 
@@ -1444,10 +1314,7 @@ dataset = "risk_snapshot"
 
     #[test]
     fn grouping_by_a_derived_dimension_is_not_an_unknown_column() {
-        // §6.8: `desk` is not in the CSVs — it is computed from `book`.
-        // Validation that only knows the dataset calls it unknown, so
-        // wiring validation up without the derived dimensions would reject
-        // every view the feature exists for.
+        // A derived dimension resolves through its source column during validation.
         let dims = dimensions("[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n");
         let (views, _) = ViewSpec::from_doc(&doc(
             "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"desk\"]\n\
@@ -1462,9 +1329,7 @@ dataset = "risk_snapshot"
 
     #[test]
     fn a_derived_dimension_is_accepted_as_a_column_not_only_as_a_grouping() {
-        // §6.8 was honoured in the grouping loop and not the columns loop,
-        // so a view naming `desk` in both — the ordinary way to group by a
-        // derived dimension and show it — was still rejected as unknown.
+        // Validate a derived dimension in both selected columns and grouping.
         let dims = dimensions("[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n");
         let (views, _) = ViewSpec::from_doc(&doc(
             "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"desk\"]\n\
@@ -1507,8 +1372,7 @@ dataset = "risk_snapshot"
 
     #[test]
     fn measure_grains_reports_the_distinct_grains_the_view_touches() {
-        // The compiler builds one aggregate subquery per grain (§6.3), so
-        // this is what decides how many it emits.
+        // Each distinct measure grain requires one aggregate subquery.
         let (views, _) = ViewSpec::from_doc(&doc(SAMPLE));
         let ds = schema();
         assert_eq!(
@@ -1701,16 +1565,8 @@ npv = 120
         assert_eq!(p.colour, Some(Colour::Named("delta".to_string())));
     }
 
-    /// M-3 (Part 2c final review): an invalid legacy `width` is ONE
-    /// diagnostic, not two.
-    ///
-    /// The fold used to create the `columns` entry before validating the
-    /// value, so a bad width for a column the view lacks was reported
-    /// twice — once honestly by the reader, and once by [`apply`] as
-    /// "'columns' names column 'ghost'", about a table the trader never
-    /// wrote and cannot find. Validating first is what keeps the reader's
-    /// refusal total: a value it rejected leaves no entry behind for
-    /// anything downstream to trip over.
+    /// An invalid width leaves no overlay entry. Applying that overlay must
+    /// not produce an additional unknown-column warning.
     #[test]
     fn an_invalid_legacy_width_on_an_unknown_column_is_one_diagnostic() {
         let (mut views, _) = ViewSpec::from_doc(&doc("[tree]\ndataset = \"risk_snapshot\"\n\
@@ -1734,17 +1590,8 @@ npv = 120
         );
     }
 
-    /// M-4 (Part 2c final review): the "the view does not have that
-    /// column" warning names the spelling the key was actually read
-    /// under.
-    ///
-    /// `from_doc` folds the legacy `hidden` array and `width` map into
-    /// `columns` (§4.2), which is an implementation detail no trader can
-    /// see in their own file — so a file still on `hidden = ["ghost"]`
-    /// was being sent to a `[tree.columns.ghost]` table that does not
-    /// exist. All three spellings are asserted, including the new one,
-    /// since "name the spelling" is only a property if the `columns`
-    /// answer is still reached by omission.
+    /// Unknown-column warnings preserve the spelling from the file, whether
+    /// it used a column table, the hidden array, or the width map.
     #[test]
     fn the_column_not_in_view_warning_names_the_spelling_it_was_read_under() {
         let view = "[tree]\ndataset = \"risk_snapshot\"\n\
@@ -1975,12 +1822,8 @@ npv = 120
         );
     }
 
-    /// A typo inside a column table used to be accepted in silence:
-    /// `parse_format_keys`/`parse_column_keys` report a key they
-    /// recognise and mis-read, never one they do not recognise at all
-    /// (the final whole-branch review's Minor 2). `color` is the one
-    /// American alias `parse_format_keys` itself reads, so it must NOT
-    /// warn.
+    /// Unknown column keys warn, while `color` remains an accepted alias.
+    /// Shared property readers alone only diagnose malformed known keys.
     #[test]
     fn dataset_presentation_warns_for_an_unknown_key_inside_a_column_table() {
         let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(

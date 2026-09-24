@@ -1,60 +1,18 @@
-//! The `Domain::Groupings` adapter (spec §8.2): the nine grouping slots
-//! `ctrl+1`..`ctrl+9` regroup a following blotter tile by (spec §4.2).
+//! Adapter for the nine numbered grouping slots used by `ctrl+1` through `ctrl+9`. Each
+//! object is a bare array of dimension names, such as `3 = ["book", "lhu"]`, rather
+//! than a table. The slot number is its identity and is displayed read-only; the dialog
+//! does not rename or move slots.
 //!
-//! ## The object's own value is not a table
+//! The editor shows the configured chain first, ticked and in chain order, then other
+//! groupable columns unticked. This vocabulary includes grain keys and other groupable
+//! dimensions; it differs from the categorical picker vocabulary. Ticking adds a
+//! dimension, and reordering changes chain order. The chain text field accepts slash or
+//! whitespace separators and validates names and duplicates.
 //!
-//! `groupings.toml` stores each slot as `3 = ["book", "lhu"]`
-//! (`geode-core`'s `groupings::GroupingSlots::from_doc`, whose own module
-//! doc says it plainly: "the top-level key IS the slot number"). The
-//! value is a bare array, never a `[3]` sub-table the way a view or a
-//! source is — every other domain built so far stores its object as a
-//! table, so this is the first adapter the scaffold's write pipeline had
-//! to generalise for: [`super::Domain::to_table`] returns a
-//! `toml_edit::Item` rather than a `toml_edit::Table`, and
-//! [`super::set_object`], [`super::object_text`] and
-//! `apply::object_value`/`apply::run_writes` all moved from `Table` to
-//! `Item` to carry either shape without knowing which one they were
-//! handed.
-//!
-//! ## `slot` is display-only
-//!
-//! The design spec sketches `slot` as an editable `Number`, 1–9, and
-//! `name` as a `Text` field. Neither survives contact with
-//! `GroupingSlots::from_doc`: there is no `name` at all — the object
-//! carries nothing but its dimension chain — and the slot number is the
-//! object's own **identity**, not a field inside it. Editing it would be
-//! a rename (move the array to a different top-level key), and a
-//! standing ruling on this plan forbids renames under instant-apply: a
-//! per-keystroke rename would write a table per prefix as the trader
-//! stepped a `Number` from 3 toward 9, orphaning slots 4 through 8 along
-//! the way.
-//!
-//! So `slot` here is a [`super::FieldKind::Text`] field: painted, never
-//! stepped (`Draft::step_selected` has no arm that changes a `Text`
-//! value, so `space` on this row is correctly "nothing changes with
-//! space"). Moving a grouping to a different slot number is a real want,
-//! but it is a move operation on an object — the same shape a rename is —
-//! and belongs with whatever later task builds renaming properly.
-//!
-//! ## Ticking and reordering is the whole edit
-//!
-//! Unlike Views' `columns`, whose `OrderedList` keeps the columns the
-//! view has and the ones it may gain in two lists, `dimensions` here is
-//! ONE list of **every** column [`crate::shell::groupable_columns`] would
-//! offer — the query compiler's own grouping vocabulary (every column
-//! some declared grain carries as a dimension: key columns like
-//! `position_ref` and `instrument_ref`, carried dimensions categorical or
-//! not, derived dimensions), NOT `mod+p`'s categorical-only picker list,
-//! which has no key columns and offers attributes no grain can group by:
-//! the slot's own chain, in chain order, ticked; every other groupable
-//! column after, unticked, in schema order. Ticking one on adds it to the
-//! chain; `shift+j`/`shift+k` reorder whichever items are ticked.
-//!
-//! So this domain's list has NO available catalogue at all — `available:
-//! None` (spec §18.7.1) rather than an empty one, which is a different
-//! statement and one `x` reads: there is nowhere here to promote a row
-//! from, so `x` refuses and names `space`, the verb that does the work
-//! (`super::Draft::remove_selected`'s own doc has the distinction).
+//! There is no separate available catalogue: `available: None` makes ticking the
+//! membership operation, and `x` refuses with guidance to use `space`. Every edit
+//! writes the grouping definition. The final dimension cannot be unticked because an
+//! empty grouping definition cannot express an active empty slot.
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
@@ -95,17 +53,9 @@ pub fn summary(value: &toml::Value) -> String {
     }
 }
 
-/// The fields of one slot (spec §8.2), or of no slot at all when `object`
-/// names nothing — an empty `dimensions` list ticking nothing, which is
-/// what a slot number nothing defines has to produce rather than
-/// panicking (spec §4 has `fields` serve the create path too).
-///
-/// The chain read for `object` comes straight off `config.doc(DOC)`'s raw
-/// value, not through `GroupingSlots::from_doc` — the reader drops a slot
-/// outright on one unknown column name, which would make the edit stage
-/// blind to the very content a trader opened it to fix (the same reason
-/// `views::fields` keeps a view's own dataset in its `Choice` even when
-/// the schema no longer has it).
+/// Build a slot's display-only identity and dimensions list. A missing slot uses empty
+/// configuration. Configured dimensions lead in chain order; other groupable columns
+/// follow unticked. All writable values target the definition.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let current: Vec<String> = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -174,9 +124,9 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// The `dimensions` field's key — the one list the chain field edits.
 const DIMENSIONS: &str = "dimensions";
 
-/// A chain separator: `/`, as [`GroupingSlots::label_of`] spells the
-/// chain everywhere it is shown, or any whitespace (user ruling
-/// 2026-09-12), so `book lhu desk` is as good as `book / lhu / desk`.
+/// A chain separator: `/`, as [`GroupingSlots::label_of`] spells the chain everywhere
+/// it is shown, or any whitespace, so `book lhu desk` is as good as `book / lhu /
+/// desk`.
 fn is_separator(c: char) -> bool {
     c == '/' || c.is_whitespace()
 }
@@ -204,10 +154,8 @@ fn completed_names(text: &str) -> Vec<String> {
     parse_chain(head)
 }
 
-/// [`Draft::visible_rows`] while the chain field is open (§18.8): the
-/// `dimensions` items whose name matches the trailing segment, minus
-/// every name already typed before it, in row (schema) order — never a
-/// field header, since a header is nothing `tab` could complete to.
+/// Visible chain completions ranked against the trailing typed segment, excluding names
+/// already entered. No field header participates in completion.
 pub fn chain_candidates(draft: &Draft) -> Vec<crate::listfilter::Ranked> {
     let rows = draft.rows();
     let labels: Vec<String> = rows.iter().map(|r| draft.row_label(*r)).collect();
@@ -225,11 +173,10 @@ pub fn chain_candidates(draft: &Draft) -> Vec<crate::listfilter::Ranked> {
 }
 
 impl Draft {
-    /// `i` (§18.8): open the chain field, seeded with the slot's current
-    /// chain in the spelling every other surface uses, so appending is a
-    /// separator and a name away. Pure — the mode switch that gives the
-    /// shared `Input` the keys is the handler's, and the sync writes the
-    /// field from `query` on its return (spec §16.1).
+    /// `i`: open the chain field, seeded with the slot's current chain in the spelling
+    /// every other surface uses, so appending is a separator and a name away. Pure —
+    /// the mode switch that gives the shared `Input` the keys is the handler's, and the
+    /// sync writes the field from `query` on its return.
     pub fn begin_chain_entry(&mut self) {
         let Some(field) = self.fields.iter().position(|f| f.key == DIMENSIONS) else {
             return;
@@ -302,9 +249,7 @@ impl Draft {
         {
             return Step::Refused(format!("'{}' is listed twice", twice.1));
         }
-        // Groupings has no catalogue (`available: None` — ticking IS
-        // membership, spec §18.7), so the chain is typed against `items`
-        // alone and the catalogue is deliberately not consulted.
+        // Groupings has one list with ticked membership, so chain entry edits `items`.
         let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
             return Step::Inert;
         };
@@ -368,14 +313,12 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     toml_edit::Item::Value(array.into())
 }
 
-/// Everything wrong with the draft as it stands (spec §7.2): the
-/// rendered array, parsed back and read by exactly the reader that
-/// decides what a following tile groups by (`GroupingSlots::from_doc`,
-/// the same one `hot_reload::rebuild_slots` calls) — on the object being
-/// edited alone, wrapped in a document of its own, for the reason
-/// `views::validate` gives for doing the same: validating the whole
-/// merged doc would report every other slot's problems against this
-/// one object.
+/// Everything wrong with the draft as it stands: the rendered array, parsed back and
+/// read by exactly the reader that decides what a following tile groups by
+/// (`GroupingSlots::from_doc`, the same one `hot_reload::rebuild_slots` calls) — on the
+/// object being edited alone, wrapped in a document of its own, for the reason
+/// `views::validate` gives for doing the same: validating the whole merged doc would
+/// report every other slot's problems against this one object.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     let table = rendered_doc_table(draft);
     let doc = merge_docs(
@@ -505,9 +448,7 @@ mod tests {
         );
     }
 
-    /// `fields` takes `Option<&str>` because spec §4 has it serve the
-    /// create path too, and a slot nothing defines has to come back as an
-    /// empty chain rather than a panic.
+    /// The optional object name supports both existing slots and an empty draft.
     #[test]
     fn an_object_that_does_not_exist_has_empty_fields_rather_than_panicking() {
         let config = config_with_slot("3 = [\"lhu\"]\n");
@@ -604,12 +545,8 @@ mod tests {
         );
     }
 
-    /// A key outside 1–9 is not this adapter's to police — the ruling
-    /// that dropped the sketched `Number` field means there is no bound
-    /// to check here at all. `GroupingSlots::from_doc` still catches it,
-    /// as a `Warning` (not an `Error`, so it never blocks a commit): this
-    /// pins that the adapter's `validate` faithfully surfaces that
-    /// reader's own diagnostic rather than silently accepting it.
+    /// Out-of-range slot keys are reported by the core reader as warnings. The adapter
+    /// exposes that diagnostic and does not add a separate bound check.
     #[test]
     fn an_out_of_range_slot_key_still_warns_through_validate() {
         let config = config_with_slot("10 = [\"book\"]\n");
@@ -622,15 +559,10 @@ mod tests {
         assert!(draft.diagnostics[0].message.contains("10"));
     }
 
-    // ---- Chain entry (§18.8) -------------------------------------------
+    // ---- Chain entry -------------------------------------------
 
-    /// Three groupable dimensions, so a chain can be reordered, extended
-    /// and completed against more than one candidate. `desk` is not a
-    /// built-in key column, so it has to name the grain that carries it
-    /// (Phase 4a's rule in `validate_dataset`) or the loader drops it;
-    /// the position-grain measure declares the grain the three are
-    /// carried by, and no key column is declared so exactly three names
-    /// are ever candidates.
+    /// Three groupable dimensions allow reorder, extension, and duplicate checks. The
+    /// fixture declares the grain key required for its dataset to remain valid.
     fn config_with_three_dims(groupings: &str) -> Config {
         let datasets = LayerDoc::builtin(
             "datasets",
@@ -666,9 +598,7 @@ mod tests {
             .collect()
     }
 
-    /// `/` and whitespace both separate (user ruling 2026-09-12: "might
-    /// want to allow space to be a separator too"), runs of either are
-    /// one separator, and a leading or trailing one names no segment.
+    /// Slash and whitespace both separate dimension names, preserving typed order.
     #[test]
     fn parse_chain_accepts_slash_and_space_separators() {
         for text in [
@@ -824,12 +754,10 @@ mod tests {
         assert!(!draft.is_dirty());
     }
 
-    /// An inert apply must not touch the list either: `shift+k` can put
-    /// an unticked item above a ticked one (every Groupings row is a
-    /// member, so `MoveItem` is live on all of them), and typing the same
-    /// chain back would otherwise re-sort the list into "typed names
-    /// first" — a dirty draft the handler was just told was inert
-    /// (the review's Minor 4).
+    /// An inert apply must not touch the list either: `shift+k` can put an unticked
+    /// item above a ticked one (every Groupings row is a member, so `MoveItem` is live
+    /// on all of them), and typing the same chain back would otherwise re-sort the list
+    /// into "typed names first" — a dirty draft the handler was just told was inert.
     #[test]
     fn an_inert_apply_leaves_a_non_canonical_list_order_alone() {
         let config = config_with_three_dims("3 = [\"book\"]\n");

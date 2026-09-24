@@ -1,6 +1,7 @@
-//! The declared shape of the desk's data (spec §3). Parsed from the
-//! `datasets` config doc; every parse failure degrades to a Diagnostic and
-//! skips the offending column, never panics (spec §5.7, config §8).
+//! Dataset declarations parsed from the merged `datasets` document.
+//! Readers return diagnostics alongside accepted data. Depending on the
+//! failed rule, they drop a column or dataset, clear a flag, or retain the
+//! value with a warning; parsing is not an all-or-nothing validation gate.
 
 mod column;
 mod grain;
@@ -10,21 +11,16 @@ pub use grain::Grain;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 
-/// Which of the two dataset families a dataset belongs to (market-data
-/// spec §3; roadmap ruling 7). The measure family is the grain
-/// vocabulary as it always was; the document family is keyed by a
-/// declared identity plus axes and has no grain at all. The two are
-/// side by side rather than one declared-key model because attribution
-/// rests on the grains forming a prefix chain, and nothing a document
-/// dataset does needs it.
+/// Dataset storage and query family. Measures use fixed grains for
+/// attribution; documents use declared identity and row axes; series use a
+/// fixed timestamped value schema. An omitted family defaults to measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Family {
     #[default]
     Measures,
     Document,
-    /// Timeseries spec §4: a fixed five-column, bitemporal, append-only
-    /// table per dataset. Declares no columns; `SERIES_COLUMNS` implies
-    /// them.
+    /// Fixed five-column, bitemporal series storage. Columns are implied by
+    /// `SERIES_COLUMNS` rather than declared individually.
     Series,
 }
 
@@ -39,18 +35,16 @@ impl Family {
     }
 }
 
-/// The series family's two retention windows (timeseries spec §4.7).
-/// `retention` bounds superseded rows by `received_at`; `history`
-/// bounds every row by `ts`. `None` is unbounded.
+/// Series retention windows: `retention` bounds superseded rows by
+/// `received_at`; `history` bounds all rows by `ts`. `None` is unbounded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SeriesRetention {
     pub retention: Option<std::time::Duration>,
     pub history: Option<std::time::Duration>,
 }
 
-/// The series family's storage and projection order (timeseries spec
-/// §4.3): the one list `store::series` DDL, `append_series` and Part 2's
-/// query compiler share, so no two can disagree about a column's position.
+/// Series storage and projection order shared by DDL, append, and query
+/// paths so they agree on column positions.
 pub const SERIES_COLUMNS: [&str; 5] = ["source", "series_id", "ts", "received_at", "value"];
 
 #[derive(Debug, Clone, Default)]
@@ -58,18 +52,14 @@ pub struct DatasetSpec {
     pub name: String,
     pub columns: Vec<ColumnSpec>,
     pub family: Family,
-    /// Document family: the identity key, in declared order. One document
-    /// per distinct key tuple; the batch a publish replaces (spec §4.1).
-    /// Empty for the measure family.
+    /// Document identity key, in declared order. A publish replaces one
+    /// document identified by the key tuple. Empty for other families.
     pub key: Vec<String>,
-    /// Document family: the row identity within a document, in declared
-    /// order — also the order a document request sorts by (spec §7).
-    /// Empty for the measure family.
+    /// Row identity within a document, in declared order; document requests
+    /// sort by this sequence. Empty for other families.
     pub axes: Vec<String>,
-    /// The app itself is this dataset's writer (`Request::Publish`); no
-    /// `[sources]` entry may feed it, and the bridge does not bump the
-    /// frame's data version when it publishes (line-pricer spec §7.2).
-    /// Document family only.
+    /// Application-written document dataset. Source declarations cannot feed
+    /// it, and publishes do not advance the frame's external-data version.
     pub local: bool,
     /// Series family only: its retention windows. `None` on every other
     /// family, `Some` (possibly both unbounded) on a series dataset.
@@ -122,12 +112,10 @@ impl DatasetSpec {
         self.columns.iter().filter(|c| c.textual)
     }
 
-    /// Whether `grain` carries `column` as a dimension (spec §3.3): one
-    /// of the grain's dimension keys, or a carried dimension whose
-    /// declaring grain's key is contained in this grain's dimension key
-    /// — which is how "every finer grain" is defined, and why the pair
-    /// grain (dimension key = the instrument key) carries an
-    /// instrument-grain dimension while the position grain does not.
+    /// Whether `grain` carries a dimension: its dimension key names the
+    /// column, or contains the entire key of the column's declared carried
+    /// grain. The pair grain carries instrument dimensions, but not ordinary
+    /// underlying dimensions.
     pub fn carries(&self, grain: Grain, column: &str) -> bool {
         if grain.dimension_key_columns().contains(&column) {
             return true;
@@ -154,29 +142,18 @@ impl DatasetSpec {
         out
     }
 
-    /// Every declared column a view or a grouping slot may group by. For
-    /// measure datasets, in schema order: the ones some *declared* grain
-    /// ([`Self::grains`] — the grains a measure or attribute gives a table
-    /// to) [`Self::carries`] as a dimension. That is a grain's key columns
-    /// and every carried dimension, categorical or not; never an attribute
-    /// or a measure. A measure dataset declaring no grain has no table to
-    /// scan and offers nothing. For document datasets, every Dimension
-    /// column in schema order; axes are row identity within a document
-    /// (market-data spec §3.3) and never a frame grouping key. This is the
-    /// query compiler's own rule (`carries_all` over `finest_carrying`),
-    /// and the one place it is spelled out — the Groupings dialog and the
-    /// blotter's `:group` completion both read it.
+    /// Available grouping columns in schema order. Measures expose columns
+    /// carried by a declared measure/attribute grain; without such a grain,
+    /// there is no table to query. Documents expose identity dimensions,
+    /// excluding row axes. Series expose none. Grouping editors and column
+    /// completion share this vocabulary.
     pub fn groupable_columns(&self) -> Vec<&str> {
         if self.is_series() {
-            // Timeseries spec §4.3: no scope or grouping reaches a series;
-            // the series query takes no scope at all.
+            // Series requests have no scope or grouping.
             return Vec::new();
         }
         if self.is_document() {
-            // No grain carries anything here; the identity dimensions are
-            // the whole grouping vocabulary and an axis is row identity
-            // *within* a document, never something the frame groups by
-            // (market-data spec §3.3).
+            // Documents group by identity dimensions, not by axes within each document.
             return self
                 .columns
                 .iter()
@@ -192,11 +169,9 @@ impl DatasetSpec {
             .collect()
     }
 
-    /// The document family's storage and projection order (market-data
-    /// spec §3.1, §7): key in declared order, axes in declared order,
-    /// then values and attributes in schema order. `ddl::
-    /// create_document_table_sql` and the document request both read
-    /// this, so the two can never disagree about column positions.
+    /// Document storage/projection order: keys, axes, values, then attributes.
+    /// Keys and axes follow their declared arrays; values and attributes each
+    /// follow schema order. DDL and document queries share this sequence.
     pub fn document_columns(&self) -> Vec<&ColumnSpec> {
         let mut out: Vec<&ColumnSpec> = Vec::with_capacity(self.columns.len());
         out.extend(self.key.iter().filter_map(|k| self.column(k)));
@@ -218,8 +193,7 @@ impl DatasetSpec {
             .collect()
     }
 
-    /// Columns interned as ENUMs at ingest, pickable, and matched by
-    /// dictionary in the text filter (spec §3.3).
+    /// Columns marked for interning, pickers, and dictionary text matching.
     pub fn categorical_columns(&self) -> Vec<&str> {
         self.columns
             .iter()
@@ -336,18 +310,9 @@ impl SchemaSpec {
                 series_retention: None,
             };
             if family == Family::Series {
-                // Every way a declared window can fail to become one is an
-                // error diagnostic here and `None` (unbounded) in the spec,
-                // because both silent forms were reachable and neither is
-                // visible downstream. A non-string (`retention = 30`, an
-                // easy TOML mistake) read through `as_str()` alone is
-                // indistinguishable from an absent key; a value whose
-                // microseconds do not fit an `i64` (`parse_duration`
-                // accepts `y`, so `"300000000y"` parses) reaches
-                // `store::series::cutoff` as unrepresentable and sweeps
-                // NOTHING. With this check "an unrepresentable window
-                // sweeps nothing" is only reachable by a hand-built
-                // `DatasetSpec` (timeseries spec §4.10).
+                // Invalid retention values report errors and leave that window unbounded.
+                // Require a duration string representable as signed microseconds; an
+                // unrepresentable cutoff would otherwise silently disable pruning.
                 let mut window = |field: &str| -> Option<std::time::Duration> {
                     let value = ds_value.get(field)?;
                     let parsed = match value.as_str() {
@@ -403,22 +368,14 @@ impl SchemaSpec {
                     }
                 }
             }
-            // Both paths fall through to `validate_dataset` and the guard
-            // below. An early `push`-and-`continue` here is what let a
-            // document dataset with no `[columns]` table reach the schema
-            // never having met `validate_document` at all, contradicting
-            // the guard's own comment: a columnless document dataset has
-            // no key column, no axis column and no value, so it can be
-            // neither stored nor queried, and it must be dropped by the
-            // same rule that drops a refused one.
+            // Always run family validation, including when the columns table is absent.
+            // A document without columns cannot supply its required identity and values.
             match ds_value.get("columns").and_then(|v| v.as_table()) {
                 None if family != Family::Series => diags.push(note(
                     format!("datasets.{ds_name}"),
                     format!("dataset '{ds_name}': no [columns] table"),
                 )),
-                // The series family implies its columns (timeseries spec
-                // §4.3); declaring none is the correct, and only sane,
-                // shape, not an omission worth a diagnostic.
+                // Series columns are implied, so an absent columns table is expected.
                 None => {}
                 Some(cols) => {
                     for (col_name, col_value) in cols {
@@ -434,13 +391,8 @@ impl SchemaSpec {
             }
             diags.extend(validate_dataset(&mut dataset));
             if dataset.is_document() && dataset.columns.is_empty() {
-                // `validate_document` empties a dataset it refused, and a
-                // dataset that declared no `[columns]` table arrives here
-                // empty already — never push a document dataset with no
-                // columns, it could not be stored or queried. A measure
-                // dataset with no columns is still pushed: it declares no
-                // grain, so it owns no table and nothing reads it, which
-                // is inert rather than broken.
+                // Rejected or columnless documents cannot be stored or queried. Empty
+                // measure datasets remain inert because they declare no storage grain.
                 continue;
             }
             out.datasets.push(dataset);
@@ -449,23 +401,17 @@ impl SchemaSpec {
     }
 }
 
-/// Column names the storage layer adds to every table of **both** families
-/// (spec §4.2, §4.3). A dataset declaring one of these would generate DDL
-/// with a duplicate column and fail at table creation with a raw engine
-/// error.
-///
-/// Not the whole reserved set for a document dataset: its table carries a
-/// `book` column too (`ddl::create_document_table_sql`, market-data spec
-/// §4.5), because no grain key supplies one there. `book` cannot join this
-/// list — it is a legal grain key column on the measure side — so that one
-/// name is refused by `validate_document` instead, per family.
+/// Names reserved for storage metadata on measure and document tables.
+/// Declaring them produces a warning here; this list does not itself remove
+/// the column. Documents additionally reserve `book` for partition metadata,
+/// which `validate_document` treats as a dataset-dropping error. Measures
+/// allow `book` as a grain key.
 pub const RESERVED_COLUMNS: &[&str] = &["batch", "source_file_id", "gen_id", "source_time"];
 
-/// Checks that can only be made once every column is parsed. Each failure
-/// is a Diagnostic, never a panic — bad config degrades (spec §5.7).
-/// Returns the diagnostics; a bare dimension outside every built-in key is
-/// also dropped from `ds.columns` in the process, so it cannot reach the
-/// query path referencing a table that does not exist.
+/// Validate relationships after column parsing, then apply family-specific
+/// rules. Some errors remove invalid columns or clear unsupported flags;
+/// missing measure keys and reserved metadata names only warn. Document
+/// validation can clear the dataset, which `from_doc` then omits.
 fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
@@ -508,9 +454,8 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         return diags;
     }
 
-    // Document vocabulary on a measure dataset (market-data spec §3.2):
-    // refused per column, never guessed at. The document family has the
-    // mirror rule in `validate_document`.
+    // Drop document-only column roles from measure datasets. Document
+    // validation applies the corresponding restriction on measure-only roles.
     let foreign: Vec<String> = ds
         .columns
         .iter()
@@ -634,10 +579,9 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     ds.columns
         .retain(|c| !uncarriable.iter().any(|(name, _)| name == &c.name));
 
-    // `textual` needs a grain that can evaluate the column: a dimension
-    // some grain carries, or a measure/attribute declared at a grain.
-    // Found by measurement (spec §7): one unroutable textual column
-    // fails every text-filtered query on the dataset.
+    // Require a measure/attribute grain or a dimension carriable by any built-in
+    // grain. This does not ensure that the dataset declares a carrying table;
+    // query routing additionally checks the dataset's actual storage grains.
     let routable =
         |c: &ColumnSpec| c.grain().is_some() || Grain::ALL.iter().any(|g| ds.carries(*g, &c.name));
     let unroutable: Vec<String> = ds
@@ -668,11 +612,9 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
-/// The document family's load-time rules (market-data spec §3.2). Every
-/// failure is a diagnostic with `path` set. A document dataset has no
-/// grain, so none of `validate_dataset`'s grain-key checks apply — this
-/// validates the key/axes/value shape instead and returns in place of
-/// them.
+/// Validate document key, axes, roles, and supported payload types. Column
+/// errors drop individual columns; identity/shape errors clear the dataset
+/// for `from_doc` to omit. Diagnostics identify the affected fields.
 fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let err = |message: String, path: String| Diagnostic {
@@ -711,12 +653,8 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // A value is a per-row fact that is not identity (spec 2026-09-19
-    // §4.1, ruling 7): a number, a date or text — a dividend's amount,
-    // its ex date, its status. `timestamp`/`bool` are refused because
-    // `geode_core::document::Column`/`Value` — the shapes a parsed
-    // document arrives in — carry neither, so such a column could be
-    // declared but never filled.
+    // Values may contain numbers, dates, or text. Reject timestamp and bool
+    // because the document payload types cannot carry them.
     let non_value: Vec<String> = ds
         .columns
         .iter()
@@ -737,19 +675,9 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !non_value.contains(&c.name));
 
-    // `geode_core::document::Column` and `Value` — the shapes a parsed
-    // document actually arrives in — cover f64, i64, utf8 and date and
-    // nothing else, and `DocumentRows::validate` compares each column's
-    // own type against the declared one. So a `timestamp` or `bool` axis
-    // or attribute is a column no feed could ever fill: every publish
-    // would be refused for a type mismatch and reported as a source
-    // health failure, pointing at the feed rather than at the config
-    // line that is actually wrong. Refused here instead, where the
-    // diagnostic can name the key. A value is already held to the same
-    // four-type rule above (spec 2026-09-19 §4.1, ruling 7) and is
-    // deliberately not re-checked, so a `timestamp` value is reported
-    // once, not twice. Part 2 widens `Column`/`Value` if a document ever
-    // needs a timestamp axis; this rule moves with them.
+    // Document payloads support f64, i64, utf8, and date. Reject unsupported
+    // axis/attribute types here so the error identifies configuration rather
+    // than a later feed publication. Invalid values were already removed above.
     let unsupported: Vec<String> = ds
         .columns
         .iter()
@@ -954,11 +882,9 @@ fn validate_document(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
-/// The series family's load-time rules (timeseries spec §4.3): the
-/// family implies its columns, so any declared column is refused and
-/// dropped, and `key`/`axes` are refused and cleared. The dataset itself
-/// is always kept — there is nothing a trader can get wrong that makes
-/// its five-column table unbuildable.
+/// Drop declared columns and clear key/axes arrays on series datasets,
+/// reporting errors. The fixed series schema remains available after these
+/// corrections; earlier parsing can still reject a malformed dataset.
 fn validate_series(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
     let name = ds.name.clone();
@@ -1422,7 +1348,7 @@ grain = "underlying"
         assert!(ds.carries(Grain::Instrument, "currency"));
         assert!(ds.carries(Grain::Underlying, "currency"));
         assert!(ds.carries(Grain::UnderlyingPair, "currency"));
-        // Key dimensions are carried exactly where they were before.
+        // Key dimensions remain carried by their declared storage grains.
         assert!(ds.carries(Grain::Position, "book"));
         assert!(!ds.carries(Grain::Position, "underlying_ref"));
         assert!(ds.carries(Grain::Underlying, "underlying_ref"));
@@ -1792,8 +1718,7 @@ role = "attribute"
 
     #[test]
     fn every_key_column_must_be_a_dimension() {
-        // Make the key column an attribute: no longer scopeable, so no
-        // longer a legal identity (spec §3.2).
+        // An attribute cannot serve as a document identity dimension.
         let (schema, diags) = cvi_with(
             "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"",
             "[cvi_params.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"attribute\"",
@@ -1823,10 +1748,8 @@ role = "attribute"
 
     #[test]
     fn an_unsupported_value_column_is_dropped_and_the_dataset_kept() {
-        // Only value column gone → the "at least one value" rule fires
-        // next, so add a second numeric value to isolate this rule. `bool`
-        // is refused; date and utf8 are legal values now (spec 2026-09-19
-        // §4.1, ruling 7) — see `a_document_value_may_be_a_date_or_text`.
+        // Keep a valid value to isolate the bool-type rejection from the separate
+        // requirement that documents contain at least one value.
         let text = CVI.replace(
             "[cvi_params.columns.param]\ntype = \"f64\"",
             "[cvi_params.columns.param]\ntype = \"bool\"",
@@ -1838,10 +1761,8 @@ role = "attribute"
         error_with_path(&diags, "datasets.cvi_params.columns.param.type");
     }
 
-    /// Spec 2026-09-19 §4.1 (ruling 7): a value is "a per-row fact that
-    /// is not identity" and may be a date or text — a dividend's ex date
-    /// and status. `timestamp`/`bool` stay refused: `document::Column`
-    /// carries neither.
+    /// Document values can be dates or text; timestamp and bool remain
+    /// unsupported by document payload types.
     #[test]
     fn a_document_value_may_be_a_date_or_text() {
         let text = CVI.to_string()
@@ -2055,11 +1976,8 @@ role = "attribute"
         error_with_path(&diags, "datasets.cvi_params.columns.book");
     }
 
-    /// Minor 4: the no-`[columns]` early return used to push the dataset
-    /// before `validate_dataset` ever ran, so a document dataset with no
-    /// columns at all reached the schema — contradicting the guard's own
-    /// claim that a refused document dataset is never pushed. Both paths
-    /// now run the guard.
+    /// Columnless documents must pass family validation and be omitted from
+    /// the accepted schema.
     #[test]
     fn a_document_dataset_with_no_columns_table_is_not_pushed() {
         let text = "[cvi_params]\nfamily = \"document\"\nkey = [\"u\"]\naxes = [\"term\"]\n";
@@ -2074,8 +1992,7 @@ role = "attribute"
                 .any(|d| d.message.contains("no [columns] table")),
             "{diags:?}"
         );
-        // And the measure family is unchanged: a columnless measure
-        // dataset is still pushed, exactly as before.
+        // A columnless measure dataset has no storage grain and remains inert.
         let (schema, _) = SchemaSpec::from_doc(&doc("[empty]\nfamily = \"measures\"\n"));
         assert!(schema.dataset("empty").is_some());
     }
@@ -2126,10 +2043,8 @@ role = "attribute"
         );
     }
 
-    /// Minor 8: the document side's `textual` clearing had no test at all.
-    /// `textual` routes through a dimension; a value column is not one, so
-    /// the flag is an error and is cleared — the column itself stays, the
-    /// same judgement the measure side makes.
+    /// Document text search routes through identity dimensions. A textual value
+    /// produces an error and has its flag cleared; the value column remains.
     #[test]
     fn textual_on_a_document_value_is_an_error_and_textual_is_cleared() {
         let (schema, diags) = cvi_with(
@@ -2170,7 +2085,7 @@ role = "attribute"
         );
     }
 
-    // --- the series family (timeseries spec §4.2, §4.3) --------------------
+    // --- series family --------------------------------------------------
 
     fn series_schema(text: &str) -> (SchemaSpec, Vec<Diagnostic>) {
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);

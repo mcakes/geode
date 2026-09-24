@@ -14,6 +14,10 @@ Current documentation is authoritative:
 - `docs/current/architecture.md` — crate boundaries and runtime ownership.
 - `docs/current/configuration.md` — layered documents, validation, writes, and
   reload.
+- `docs/current/typed-documents.md` and `docs/current/configuration-dialogs.md` —
+  typed readers, draft validation, overrides, and persistence.
+- `docs/current/keymaps.md` and `docs/current/tiling.md` — binding resolution,
+  layout, structural focus, and movement.
 - `docs/current/data-path.md` — ingestion, storage, query, freshness, and
   health.
 - `docs/current/shell.md` — tiles, input, focus, frame state, dialogs, and
@@ -48,8 +52,9 @@ CI runs formatting, Clippy, tests, benchmark compilation, and the shell
 
 ## Dependency and ownership rules
 
-- `geode-core` is shared vocabulary and pure logic. It opens no file, socket,
-  database, or window.
+- `geode-core` is shared vocabulary and pure logic. Keep typed interpretation
+  and merging free of I/O; its existing `Config::read_docs` and `Config::load`
+  entry points read configuration files. It owns no socket, database, or window.
 - `geode-shell` and `geode-data` never depend on each other or on feature
   modules.
 - Feature modules do not depend on sibling features. They implement

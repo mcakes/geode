@@ -1,21 +1,10 @@
-//! The read-only schema inspector (spec §9, §19.4) — `Domain::Schema`.
+//! Schema inspection and dataset-level presentation editing.
 //!
-//! Not an editor **of the schema**: a schema is the desk's contract with
-//! the data, a `datasets` change is restart-required, and the edit and
-//! its effect would be far apart. The other adapters read this doc to
-//! build their `Choice`s and catalogues; this dialog makes that
-//! vocabulary inspectable. Every field is a display-only `Text` and
-//! every row carries the layer it came from.
-//!
-//! It **writes only the dataset overlay, from its column stage**
-//! (dataset-presentation spec §4): `enter` — or a click — on a column row
-//! opens the same seven-field stage the Views dialog has, writing
-//! `dataset_presentation.toml` through [`Destination::DatasetPresentation`]
-//! and `dataset_columns::table`. Everywhere else `Domain::writable(stage)`
-//! answers `false`, so the scaffold refuses every verb with
-//! `READ_ONLY_NOTICE` in one place — the gate is stage-aware (§4.2), not
-//! domain-wide, and `to_table` below branches on the destination for the
-//! same reason: a column-stage edit must never render the `datasets` doc.
+//! Dataset fields and derived-dimension descriptions are read-only. Enter or a click on
+//! a declared column opens its seven presentation fields and writes
+//! `dataset_presentation.toml`; it never edits `datasets.toml`. Derived rows do not
+//! open that stage. All write gates use the current stage so the inspector remains
+//! read-only outside this presentation editor.
 
 use super::{Destination, Draft, Field, FieldKind, dataset_columns};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
@@ -74,16 +63,9 @@ fn aggregate_name(aggregate: Aggregate) -> &'static str {
     }
 }
 
-/// One column, one line: type, role, the grain where the role has one,
-/// then whichever of `required`/`textual`/`categorical` hold.
-///
-/// A measure names its `aggregate` in the role clause itself
-/// (`measure (sum) · grain instrument`) rather than as a trailing flag:
-/// spec §19.4's inspector exists to show what the other dialogs build on,
-/// and how a measure aggregates is the most consequential fact about it
-/// — a trader deciding whether a rollup is additive reads this before
-/// anything else on the row. `source_name` stays dropped; it is an
-/// ingest-time rename with nothing for a config dialog to act on.
+/// Summarize type, role, applicable grain, and required/textual/categorical flags.
+/// Measures include their aggregate in the role description. The ingest-only source
+/// rename is omitted because this inspector cannot edit it.
 pub fn describe_column(column: &ColumnSpec) -> String {
     let mut out = format!("{} · ", type_name(column.ty));
     match &column.role {
@@ -100,9 +82,9 @@ pub fn describe_column(column: &ColumnSpec) -> String {
         ColumnRole::Attribute { grain: Some(g) } => {
             out.push_str(&format!("attribute · grain {}", g.short()))
         }
-        // The document family's vocabulary (market-data spec §3): a
-        // grainless attribute is document-level, and an axis or a value
-        // has no grain to name at all — a document dataset declares none.
+        // The document family's vocabulary: a grainless attribute is document-level,
+        // and an axis or a value has no grain to name at all — a document dataset
+        // declares none.
         ColumnRole::Attribute { grain: None } => out.push_str("attribute"),
         ColumnRole::Axis => out.push_str("axis"),
         ColumnRole::Value => out.push_str("value"),
@@ -119,22 +101,12 @@ pub fn describe_column(column: &ColumnSpec) -> String {
     out
 }
 
-/// One display-only `Text` per column of `object`, in schema (file)
-/// order, then one per derived dimension whose `from` is a column of
-/// this dataset. `layer` is `Config::explain` on the dataset (atomic at
-/// depth 1, so every column of one dataset carries that dataset's
-/// layer) and on the `dimensions` doc for a derived row, which can
-/// differ. Keys are `columns.<name>` / `derived.<name>` so §19.5's
-/// path matching lands a `datasets.<ds>.columns.<name>.type` diagnostic
-/// on its column's row — and so `Draft::enter_column` can recognise a
-/// column row by its key alone (dataset-presentation spec §4.1).
+/// Read-only fields in schema column order, followed by derived dimensions whose source
+/// belongs to this dataset. Dataset rows use the dataset's provenance; derived rows use
+/// their dimension definition's provenance. Keys distinguish `columns.<name>` and
+/// `derived.<name>` for diagnostics and stage entry.
 ///
-/// A column the trader has personalised carries
-/// `dataset_columns::row_summary`'s suffix after its type/role text
-/// (§4.7): `f64 · measure (sum) · grain instrument · k · 0 dp`. The
-/// dataset's overlay table is read ONCE for the whole list rather than
-/// per column, since it is one `toml::Table` clone and there are as many
-/// columns as a dataset has.
+/// Read the dataset overlay once and append each column's presentation summary.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let Some(name) = object else {
         return Vec::new();
@@ -185,8 +157,8 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     out
 }
 
-/// What this domain writes, by destination — and the branch is the whole
-/// safety property (dataset-presentation spec §4.5).
+/// What this domain writes, by destination — and the branch is the whole safety
+/// property.
 ///
 /// [`Destination::DatasetPresentation`] is the column stage's own, and it
 /// renders the dataset's `[<ds>]` table of `dataset_presentation.toml`.
@@ -251,11 +223,8 @@ mod tests {
     use super::*;
     use geode_core::config::{Config, ConfigSources, Layer, LayerDoc};
 
-    // `required` defaults to true and `categorical` to true for a
-    // dimension (`schema::parse_column`), so the expected strings below
-    // carry both flags for `book` and neither for `note`. `npv` is the
-    // one measure — review round 1's ruling that `describe_column` must
-    // name a measure's aggregate, which needs a fixture measure to pin.
+    // The fixture includes a dimension and a measure with an aggregate so schema
+    // summaries exercise both roles.
     const DATASETS: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
                             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
                             [risk.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\ngrain = \"position\"\nrequired = false\n\
@@ -291,12 +260,8 @@ mod tests {
         assert_eq!(summary(&value), "4 columns · 1 measure · 1 dimension");
     }
 
-    // Column order is FILE order, not alphabetical — the workspace-wide
-    // `preserve_order` ruling (CLAUDE.md: "a schema's column order is
-    // file order everywhere it is iterated") — so `book`, `position_ref`,
-    // `note`, `npv` here matches `DATASETS`'s own declaration order, and
-    // the `note`/`npv` descriptors this test pins are at indices 2 and 3,
-    // not 1 and 2.
+    // Preserved TOML order determines schema column order; alphabetical order would
+    // change the sequence the inspector is meant to show.
     #[test]
     fn fields_are_one_read_only_text_per_column_then_the_derived_dimensions() {
         let fields = fields(&config(), Some("risk"));
@@ -317,9 +282,7 @@ mod tests {
         assert!(
             matches!(&fields[2].kind, FieldKind::Text(t) if t == "utf8 · attribute · grain position")
         );
-        // Review round 1's ruling: a measure names its aggregate in the
-        // role clause itself, since how it aggregates is the most
-        // consequential fact about it.
+        // Measure summaries include their aggregate.
         assert!(
             matches!(&fields[3].kind, FieldKind::Text(t) if t == "f64 · measure (sum) · grain instrument · required")
         );
@@ -331,10 +294,10 @@ mod tests {
         assert_eq!(fields[4].label, "region (derived)");
     }
 
-    /// §4.7: a column the dataset overlay personalises says so on its own
-    /// row, after the type/role text every column carries. `npv` alone is
-    /// personalised here, so the assertion that `book`'s row is unchanged
-    /// is what keeps this from passing on a suffix appended to every row.
+    /// a column the dataset overlay personalises says so on its own row, after the
+    /// type/role text every column carries. `npv` alone is personalised here, so the
+    /// assertion that `book`'s row is unchanged is what keeps this from passing on a
+    /// suffix appended to every row.
     #[test]
     fn a_personalised_column_row_carries_its_summary() {
         let config = Config::load(&ConfigSources {
@@ -382,9 +345,8 @@ mod tests {
 
     #[test]
     fn schema_is_the_one_domain_that_is_not_writable() {
-        // Outside the column stage, which is Schema's one writable
-        // surface (dataset-presentation spec §4.2) — the browse stage is
-        // what this inspector's own rows live in.
+        // Outside the column stage, which is Schema's one writable surface — the browse
+        // stage is what this inspector's own rows live in.
         let stage = super::super::Stage::Browse;
         assert!(!Domain::Schema.writable(&stage));
         assert!(Domain::Views.writable(&stage));

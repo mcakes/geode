@@ -1,99 +1,32 @@
-//! Keymap rebind persistence: comment-preserving edits to the *user* layer
-//! keymap document (`<user_dir>/keymap.toml`) — never `app.toml`, since key
-//! bindings are the keymap doc's own concern (spec §3.1/§3.4), and never the
-//! builtin or desk layers (this crate's contract: only the user layer is
-//! ever written from inside the running app).
+//! Persist keymap edits in `<user_dir>/keymap.toml` through
+//! [`crate::config_write`]. Builtin and desk documents are read-only. Writes become
+//! active through the ordinary configuration load/reload path; a successful write
+//! does not establish that the resulting binding wins at dispatch.
 //!
-//! This is the write half of the keybinding dialog (Part B fills in the UI
-//! that calls it); reads/resolution still go entirely through the ordinary
-//! `keymap::build_keymap` layered-merge path — this module only ever adds
-//! or edits `[[bindings]]` entries in the user document, then leaves the
-//! next config load (or the hot-reload watcher's next ~500ms tick — the
-//! write lands inside a directory `reload::scan` polls, and the target
-//! filename is `keymap.toml`, which is *not* `session.toml` and so is not
-//! excluded from that poll; that pickup is intended, not a bug to guard
-//! against) to pick the change up like any other on-disk edit.
+//! Rebind/unbind operations use the first entry matching the raw context string
+//! and the supplied key spelling, creating the entry when needed. Rebinding writes
+//! the new key, then removes a displaced user key or shadows a lower-layer key
+//! with `"none"`. A same-key rebind skips displacement. A missing old user key is
+//! reported in the successful outcome, so callers can warn about stale state.
+//! Removing a user key exposes any lower-layer binding on that key.
 //!
-//! `toml_edit`, not the plain `toml` crate, for the same reason
-//! `theme::persist_to_user_config` gives: a hand-written `keymap.toml` can
-//! carry comments and unrelated `[[bindings]]` entries/tables this write
-//! knows nothing about, and only a format-preserving editor can touch just
-//! the one entry/key involved without clobbering the rest of the document.
+//! Reset removes the named overrides from every matching context entry. Reset all
+//! removes the entire user `bindings` array, including hand-written entries.
+//! Other document fields remain. Later duplicate context entries can still shadow
+//! a rebind written into the first entry; context matching does not normalize
+//! predicate spellings.
 //!
-//! ## Semantics
+//! The editor preserves unrelated text and existing key decorations. Malformed
+//! TOML and unsupported top-level `bindings` shapes return errors before writing.
+//! The reader accepts an inline array of bindings, but these editors require
+//! `[[bindings]]`; inline `keys` tables inside entries are supported. A missing
+//! or non-table `keys` value is replaced by an empty table before the edit.
+//! No action, predicate, or keystroke validation occurs here.
 //!
-//! [`apply_rebind`] locates (or creates) the `[[bindings]]` entry whose
-//! `context` exactly matches [`Rebind::context`] (`None` means the
-//! no-`context` entry — the one every non-workspace binding in
-//! `defaults::BUILTIN_KEYMAP` uses), then:
-//!
-//! 1. Sets `keys.<new_key> = action` in that entry — the new binding. This
-//!    step always succeeds (it's an unconditional table write), so a
-//!    successful `apply_rebind` always means `new_key` is bound.
-//! 2. Displaces the old binding, *unless* `old_key == Some(new_key)` (a
-//!    same-key "rebind" — see the note below): if [`Rebind::
-//!    old_key_is_user_layer`], removes `old_key` from that same entry's
-//!    `keys` table outright (it was the user's own prior override for this
-//!    action; deleting it reverts to whatever the lower layers say, rather
-//!    than leaving a redundant `"none"` in a table this write already
-//!    owns). Otherwise, `old_key`'s current effective binding comes from a
-//!    layer this module can never touch (builtin or desk) — so it's
-//!    *shadowed* instead, by setting `keys.<old_key> = "none"` in the user
-//!    entry (`keymap::UNBOUND_ACTION`), the documented way a higher layer
-//!    silences a lower one; this branch is an unconditional write too (a
-//!    fresh `"none"` shadow is correct whether or not `old_key` already had
-//!    a value in this entry), so it always succeeds.
-//!
-//! Unlike step 1's write and the shadow branch of step 2, the *removal*
-//! branch of step 2 (`old_key_is_user_layer: true`) can fail to find
-//! anything to remove — the caller's belief that `old_key` lives in this
-//! exact matched/created entry can be wrong (a stale read, a mismatched
-//! `context`). Silently treating that as success (`keys.remove` is a no-op
-//! on a missing key) would leave the caller believing the old binding was
-//! displaced when it wasn't — the action could still be reachable from
-//! wherever `old_key` actually lives. [`apply_rebind`] therefore returns a
-//! [`RebindOutcome`] whose [`Displacement`] distinguishes this
-//! (`OldKeyNotFound`) from an actual removal (`Displaced`) and from there
-//! being nothing to displace at all (`NotRequested`) — see [`Displacement`]
-//! for the exact rule per case. The write still completes in every case
-//! (an `Err` from this function only ever means the *file* operation
-//! failed — see "Corrupt file / atomicity" below — never a displacement
-//! miss); the caller (Part B) is expected to warn the user on
-//! `OldKeyNotFound` rather than silently trusting the rebind was clean.
-//!
-//! **Same-key edge case**: when `old_key_is_user_layer` is true and the
-//! caller passes `old_key == Some(new_key.clone())` (rebinding an action to
-//! the very key it's already bound to in the user layer, or any other
-//! caller-side reason the two happen to coincide), step 2 must not run at
-//! all — the `old_key_is_user_layer` remove-branch would delete the exact
-//! `keys` entry step 1 just wrote (both live at the same TOML key), and the
-//! shadow-branch would equally clobber it by immediately overwriting that
-//! same key with `"none"`. Guarded by one explicit `old_key != new_key`
-//! check that skips *all* of step 2, not just the risky branch, reporting
-//! [`Displacement::NotRequested`] — see
-//! `same_key_rebind_does_not_clobber_the_new_binding` below.
-//!
-//! ## Corrupt file / atomicity
-//!
-//! An existing file that fails to parse returns `Err` and is left byte-for-
-//! byte untouched — a user's hand-edited `keymap.toml`, however broken,
-//! must never be destroyed by a UI-driven rebind. A missing file is created
-//! fresh with `config_version = 1` at the top, matching every other config
-//! document in this codebase.
-//!
-//! `config_write::try_edit` holds the complete read, validation, mutation and
-//! atomic write under one directory lock. [`ensure_bindings`] adds the
-//! keymap-specific shape check; an error leaves the original file untouched.
-//!
-//! Phase 4c collapsed the three `write_atomic` copies (this module's,
-//! `theme`'s and `session`'s) into that one door. The earlier note here
-//! recorded not sharing them as a deliberate scoping choice; the reason
-//! it gave — that a fourth copy was cheaper than editing reviewed
-//! modules — stopped holding once the config dialogs would have made it
-//! ten. The write is still atomic (unique temp file in `user_dir`,
-//! `fsync`, rename) and the temp filename still ends in `.tmp`, not
-//! `.toml`, so `reload::scan`'s `*.toml` glob never observes a partial
-//! write mid-flight.
+//! Writes use the shared serialized read/edit/temporary-file/rename transaction.
+//! The temporary file has a `.tmp` extension so the reload scanner cannot read it
+//! as a configuration document. See [`crate::config_write`] for write-failure
+//! and durability limits.
 
 use std::path::Path;
 
@@ -101,14 +34,10 @@ use crate::keymap::UserOverride;
 use geode_core::config::Layer;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, value};
 
-/// The layered config document this module writes: `<user_dir>/keymap.toml`
-/// — never `app.toml`, since key bindings are the keymap doc's own concern
-/// (spec §3.1/§3.4). Named once here so the write, the parse and the error
-/// messages can never drift onto different files.
+/// The user-layer document name, resolved to `<user_dir>/keymap.toml`.
 const KEYMAP_DOC: &str = "keymap";
 
-/// One rebind to apply to the user keymap document. See the module doc for
-/// the full write semantics.
+/// One rebind to persist; the caller supplies validated binding/action spelling.
 #[derive(Debug, Clone)]
 pub struct Rebind {
     /// The `[[bindings]]` entry's `context` to write into (exact string
@@ -130,26 +59,17 @@ pub struct Rebind {
     pub old_key_is_user_layer: bool,
 }
 
-/// What happened to [`Rebind::old_key`] during an [`apply_rebind`] call. See
-/// the module doc's "Semantics" section for the full reasoning.
+/// What happened to the old key while writing a replacement binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Displacement {
-    /// Nothing needed displacing: `old_key` was `None` (the action had no
-    /// prior binding), or `old_key == new_key` (the same-key edge case —
-    /// displacement is deliberately skipped so it can't clobber the
-    /// binding `apply_rebind`'s step 1 just wrote).
+    /// No old key was supplied, or it equals the new key and must remain bound.
     NotRequested,
     /// `old_key` was found and displaced: removed outright
     /// (`old_key_is_user_layer: true`) or shadowed with `"none"`
     /// (`old_key_is_user_layer: false`).
     Displaced,
-    /// `old_key_is_user_layer` was `true`, but `old_key` was not actually
-    /// present in the matched/created entry's `keys` table, so there was
-    /// nothing to remove — the caller's belief about where the old binding
-    /// lives was wrong. The rebind still completed (`new_key` is bound),
-    /// but the caller should treat this as a warning: the old key may still
-    /// be effectively bound to the same action from wherever it actually
-    /// lives.
+    /// The requested old user key was absent from the first matching entry.
+    /// The new entry was written, but another entry may still bind the old key.
     OldKeyNotFound,
 }
 
@@ -159,13 +79,10 @@ pub struct RebindOutcome {
     pub displacement: Displacement,
 }
 
-/// Apply one [`Rebind`] to `<user_dir>/keymap.toml`. See the module doc for
-/// the full semantics (entry lookup/creation, displacement, the same-key
-/// edge case, and the corrupt-file/atomicity guarantees). An `Err` here
-/// only ever means the file read/parse/write itself failed — a displacement
-/// that couldn't find its target is reported through `Ok`'s
-/// [`RebindOutcome`] instead (see [`Displacement::OldKeyNotFound`]), since
-/// `new_key` still gets bound either way.
+/// Write a replacement binding and displace the old key when distinct.
+/// Read, parse, unsupported document shape, and write failures return `Err`.
+/// A missing old user key is reported through [`RebindOutcome`] after the new
+/// key is written. Effective resolution is determined on the next load.
 pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
@@ -177,8 +94,7 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
 
         set_key(keys, rebind.new_key.as_str(), value(rebind.action.as_str()));
 
-        // Same-key edge case (module doc): skip displacement entirely when it
-        // would touch the key `new_key` just wrote.
+        // Displacing the same spelling would remove or overwrite the new binding.
         let displacement = match &rebind.old_key {
             Some(old_key) if old_key != &rebind.new_key => {
                 if rebind.old_key_is_user_layer {
@@ -209,40 +125,22 @@ pub struct Unbind {
     pub context: Option<String>,
     /// The rendered keystroke to silence, e.g. `"ctrl+k"`.
     pub key: String,
-    /// Whether the binding being silenced was itself set by a user-layer
-    /// entry. `true` removes the key outright; `false` shadows a
-    /// builtin/desk binding by writing [`crate::keymap::UNBOUND_ACTION`].
-    ///
-    /// Getting this backwards is the dangerous case, not a cosmetic one: a
-    /// wrong `true` deletes whatever the user *did* have on that key, and a
-    /// wrong `false` leaves a redundant `"none"` shadowing the user's own
-    /// entry so the key stays dead. See [`Rebind::old_key_is_user_layer`]
-    /// for the identical rule stated the other way round.
+    /// Whether to remove a user entry (`true`) or shadow a lower-layer
+    /// binding with `"none"` (`false`). Removing exposes lower layers; the
+    /// caller must retain the binding's original layer and key spelling.
     pub is_user_layer: bool,
 }
 
-/// What [`apply_unbind`] did. `removed` is false for a shadow write, and
-/// also for a removal that found nothing to remove — the caller's belief
-/// about where the binding lives can be stale, which is a warning rather
-/// than a failure (the same contract [`Displacement::OldKeyNotFound`]
-/// keeps for a rebind).
+/// Whether a user key was removed. `false` can mean either a successful
+/// shadow write or a removal miss; interpret it with [`Unbind::is_user_layer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnbindOutcome {
     pub removed: bool,
 }
 
-/// Silence one binding in `<user_dir>/keymap.toml`. `Err` only ever means
-/// the file read/parse/write itself failed; the file is left untouched on
-/// a parse error, exactly as [`apply_rebind`] leaves it.
-///
-/// This is precisely [`apply_rebind`]'s step 2 (displacement) performed on
-/// its own, with no step 1 new-binding write first: locate (or create) the
-/// `[[bindings]]` entry matching `unbind.context` via the same
-/// [`keys_table_for`] helper, then either remove `unbind.key` from its
-/// `keys` table (`is_user_layer: true`) or shadow it with
-/// [`crate::keymap::UNBOUND_ACTION`] (`is_user_layer: false`) — see the
-/// module doc's "Semantics" section and [`Unbind::is_user_layer`]'s own
-/// doc for why getting that branch backwards is the dangerous case.
+/// Remove a user key or write a `"none"` shadow in the first matching context
+/// entry. Removal exposes lower layers. A removal miss still succeeds with
+/// `removed = false`; read, parse, shape, or write failures return `Err`.
 pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
@@ -268,28 +166,19 @@ pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, S
     })
 }
 
-/// What [`apply_reset`]/[`apply_reset_all`] did: how many keys were
-/// actually removed. A reset that finds fewer than it was asked for is the
-/// same stale-belief case as [`UnbindOutcome::removed`] `false` — warned
-/// about, not failed.
+/// Number of keys actually removed. Callers can compare this with the
+/// requested override set to detect stale state; duplicate context entries can
+/// produce more than one removal for a single requested key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetOutcome {
     pub removed: usize,
 }
 
-/// Remove every key `overrides` names from `<user_dir>/keymap.toml` in one
-/// write — the reset of one action (`keybindings_view`'s `r`), whose
-/// override set is [`crate::keymap::user_overrides_for`]'s answer: a
-/// rebind's new key AND its `"none"` shadow over the old, or a bare shadow
-/// a `d` left. `Err` only ever means the file read/parse/write itself
-/// failed; the file is left untouched then, as every write here leaves it.
-///
-/// Unlike [`apply_unbind`], this never creates a `[[bindings]]` entry: a
-/// removal has nothing to write into a missing one, so a context with no
-/// entry is simply a key not found. Every entry whose `context` matches is
-/// searched (a hand-written file may spell the same context twice;
-/// `keys_table_for` stops at the first). Entries emptied by the removal
-/// are left in place — a hand-written entry's comments are its owner's.
+/// Remove the specified overrides in one transaction, searching every entry
+/// with each raw context string. Resetting an action normally removes both its
+/// replacement bindings and its `"none"` shadows so lower layers become visible.
+/// Missing entries are skipped and empty entries remain to preserve their comments.
+/// Read, parse, unsupported `bindings` shape, or write failures return `Err`.
 pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
@@ -315,15 +204,10 @@ pub fn apply_reset(user_dir: &Path, overrides: &[UserOverride]) -> Result<ResetO
     })
 }
 
-/// Drop every `[[bindings]]` entry from `<user_dir>/keymap.toml` — the
-/// user layer's whole say over key bindings, dialog-written and
-/// hand-written alike (there is no way to tell them apart, and the user
-/// ruling of 2026-09-19 was that "reset all" means all). Everything else
-/// in the file — `config_version`, the `mod` alias, comments outside the
-/// entries — is preserved; the desk and builtin layers are never touched
-/// by anything in this module. `removed` counts the keys that were bound
-/// in those entries. `Err` only ever means the file read/parse/write
-/// itself failed, with the file left untouched.
+/// Remove the entire user `bindings` array, including hand-written entries.
+/// Other fields and their comments remain; builtin and desk layers are untouched.
+/// The outcome counts keys in table-like `keys` values. Read, parse, unsupported
+/// `bindings` shape, or write failures return `Err`.
 pub fn apply_reset_all(user_dir: &Path) -> Result<ResetOutcome, String> {
     crate::config_write::try_edit(user_dir, Layer::User, KEYMAP_DOC, |doc| {
         ensure_bindings(user_dir, doc)?;
@@ -344,24 +228,10 @@ pub fn apply_reset_all(user_dir: &Path) -> Result<ResetOutcome, String> {
     })
 }
 
-/// Validate the document inside [`crate::config_write::try_edit`]
-/// (which reads it if it exists, or starts a fresh document stamped with
-/// `config_version = 1` when it doesn't, and refuses an unparseable one
-/// without touching it), then ensure `bindings` is ready to index into as
-/// an [`ArrayOfTables`]. Shared by [`apply_rebind`] and [`apply_unbind`],
-/// so this one check protects both.
-///
-/// `bindings = [ { ... } ]` is a *legal* keymap document —
-/// `keymap::build_keymap`/`build.rs` read `bindings` as a plain TOML array
-/// and don't care whether it round-trips through `toml_edit` as
-/// `ArrayOfTables` or as a bare `Value::Array` of inline tables — but only
-/// the former is exposed by `as_array_of_tables`/`as_array_of_tables_mut`.
-/// Treating "present but the wrong shape" the same as "missing entirely"
-/// would silently replace it with an empty `ArrayOfTables`, and the write
-/// that follows would then destroy every binding the file had — exactly
-/// the corruption the module doc's "Corrupt file / atomicity" guarantee
-/// promises never happens. So this case is `Err`, same as a parse failure,
-/// and the file is left byte-for-byte untouched.
+/// Require an array of tables or create an empty one when `bindings` is absent.
+/// A plain array of inline tables is readable by the keymap compiler but is not
+/// editable here. Reject it before writing instead of discarding existing bindings.
+/// This guard applies to rebind, unbind, reset, and reset-all transactions.
 fn ensure_bindings(user_dir: &Path, doc: &mut DocumentMut) -> Result<(), String> {
     let path = crate::config_write::doc_path(user_dir, Layer::User, KEYMAP_DOC)?;
 
@@ -379,21 +249,10 @@ fn ensure_bindings(user_dir: &Path, doc: &mut DocumentMut) -> Result<(), String>
     Ok(())
 }
 
-/// Find the `[[bindings]]` entry whose `context` exactly matches `context`
-/// (`None` matching the no-`context` entry — see the module doc's
-/// "Semantics" section), creating one if none exists, and return that
-/// entry's `keys` table as a [`TableLike`], creating it too if necessary.
-/// Shared by [`apply_rebind`] and [`apply_unbind`] — both only ever need to
-/// reach the same `keys` table before writing or removing one entry in it.
-///
-/// `TableLike`, not the concrete `Table`: `keys = { "ctrl+k" = "..." }` (an
-/// inline table) is just as legal a keymap document as `[bindings.keys]`
-/// — `Item::is_table_like` is true for both — but `Item::as_table_mut`
-/// returns `None` for the inline case, so returning `&mut Table` here
-/// forced every caller through an `.expect()` that could panic on a file
-/// this crate itself never writes but happily reads back. Only
-/// `as_table_like_mut` covers both shapes, so this is the one place that
-/// must.
+/// Return the first context-matching entry's keys table, creating either when
+/// absent. Matching uses `as_str`, so a non-string context also matches `None`.
+/// Both ordinary and inline keys tables are editable through [`TableLike`].
+/// An existing non-table keys value is replaced with an empty table.
 fn keys_table_for<'a>(
     bindings: &'a mut ArrayOfTables,
     context: Option<&str>,
@@ -423,17 +282,9 @@ fn keys_table_for<'a>(
         .expect("just ensured 'keys' is table-like")
 }
 
-/// Set `keys[key] = item`, the way every write in this module needs to:
-/// preserving an already-present key's own comment and quoting, exactly
-/// as the module doc's comment-preserving promise requires.
-///
-/// `TableLike::insert`'s occupied-entry branch calls
-/// `entry.key_mut().fmt()`, which resets that key's own representation —
-/// stripping a leading comment and reverting custom quoting (e.g.
-/// `'mod+h'`) to a plain double-quoted key — even though only the *value*
-/// was meant to change. `get_mut` touches only the value slot when the
-/// key already exists, leaving its decor untouched; `insert` is used only
-/// on the vacant path, where there is no existing decor to lose.
+/// Replace only the value of an existing key, preserving its key spelling and
+/// leading decoration. Inserting over an occupied entry would reformat the key;
+/// insertion is reserved for new keys. Replaced value decorations are not retained.
 fn set_key(keys: &mut dyn TableLike, key: &str, item: Item) {
     if let Some(existing) = keys.get_mut(key) {
         *existing = item;
@@ -838,11 +689,8 @@ context = \"workspace\"
 
     #[test]
     fn temp_file_used_during_write_does_not_end_in_toml() {
-        // Regression for the reload-watcher interplay documented at the top
-        // of this file: the write targets keymap.toml (which IS watched,
-        // intentionally), but the intermediate temp file must never look
-        // like a *.toml file to reload::scan's glob, or a reader could
-        // observe a partial write mid-rename.
+        // After a successful write, only the final keymap document remains;
+        // no temporary `.toml` document may be visible to the reload scanner.
         let dir = tempfile::tempdir().unwrap();
         apply_rebind(dir.path(), &rebind(None, "ctrl+k", "palette::toggle")).unwrap();
 
@@ -868,14 +716,7 @@ context = \"workspace\"
         );
     }
 
-    // --- round-trip through the real production path -----------------------
-    //
-    // The tests above only prove `apply_rebind`'s output is self-consistent
-    // TOML (parseable via toml_edit). These prove the file it writes is
-    // consumable by the actual reader this app uses in production —
-    // `geode_core::config::LayerDoc` + `keymap::build_keymap` — with zero
-    // diagnostics, both for a freshly created file and for an edit to an
-    // existing one.
+    // Round-trip persisted files through the production compiler as well as TOML parsing.
 
     fn registry_with(action_id: &str) -> ActionRegistry {
         let mut reg = ActionRegistry::default();
@@ -1099,17 +940,8 @@ context = \"workspace\"
         );
     }
 
-    /// `bindings = [ { ... } ]` is a *legal* keymap document — `build.rs`
-    /// reads `bindings` as a plain TOML array and does not care whether it
-    /// round-trips through `toml_edit` as `ArrayOfTables` or as a bare
-    /// `Value::Array` of inline tables — but `toml_edit`'s own
-    /// `as_array_of_tables` only recognises the former. Treating "present
-    /// but the wrong shape" the same as "absent" would silently replace it
-    /// with an empty `ArrayOfTables` and then write that back out,
-    /// destroying every binding the file had. This must be `Err`, and the
-    /// file must come back byte-for-byte unchanged — "returned Err" and
-    /// "did not destroy the file" are different claims, so both are
-    /// checked.
+    /// The compiler accepts inline binding arrays, but editing rejects that
+    /// shape without discarding the existing file.
     #[test]
     fn bindings_as_a_plain_array_is_rejected_without_touching_the_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1138,14 +970,7 @@ context = \"workspace\"
         );
     }
 
-    /// `keys = { "ctrl+k" = "..." }` (an inline table) is just as legal a
-    /// keymap document as `[bindings.keys]` — `build.rs` reads through the
-    /// same generic TOML value either way — but `Item::is_table_like` is
-    /// true for an inline table while `Item::as_table_mut` returns `None`
-    /// for one, so the old `.expect("just ensured 'keys' is a table")`
-    /// panicked on exactly the input its own guard claimed to have
-    /// handled. A panic here is reachable from a keystroke once Task 4
-    /// wires `d` to `apply_unbind`, which PHILOSOPHY forbids outright.
+    /// An inline keys table remains editable through the same TableLike interface.
     #[test]
     fn keys_as_an_inline_table_does_not_panic_and_stays_editable() {
         let dir = tempfile::tempdir().unwrap();
@@ -1290,15 +1115,8 @@ context = \"workspace\"
         assert_eq!(read(dir.path()), original);
     }
 
-    /// Overwriting an already-present key must preserve that key's own
-    /// comment and quoting. Round 1's index-to-insert conversion
-    /// regressed this: `TableLike::insert`'s occupied-entry branch calls
-    /// `entry.key_mut().fmt()`, which resets the key's own formatting —
-    /// stripping a leading comment and reverting custom quoting (e.g.
-    /// `'mod+h'`) to a plain double-quoted key — while indexing
-    /// assignment (what round 1 replaced) touched only the value slot.
-    /// This fires on real paths: overwriting a binding the user already
-    /// has, and the same-key rebind edge case.
+    /// Replacing a key's value preserves its leading comment and custom
+    /// quoting. Both rebind and lower-layer unbind use the same write helper.
     #[test]
     fn overwriting_an_existing_key_preserves_its_comment_and_quoting() {
         let dir = tempfile::tempdir().unwrap();

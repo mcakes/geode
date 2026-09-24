@@ -1,10 +1,8 @@
-//! The expression filter's grammar (spec §4.1, §6.2): a restricted WHERE
-//! clause, parsed and validated against the schema — **not** raw SQL.
-//!
-//! The grammar has no statement separator, no comment syntax, no function
-//! calls and no subqueries, so hostile input fails at the parser rather
-//! than reaching the database. Literals still bind as parameters (§6.2);
-//! the grammar is defence in depth, not the defence.
+//! Expression-filter grammar: column comparisons, membership, boolean
+//! operators, and parentheses. Parsing is schema-free; `Scope::validate`
+//! checks references separately. The data compiler binds literals as query
+//! parameters. Statements, comments, function calls, and subqueries are not
+//! part of this grammar.
 //!
 //! Precedence, loosest first: `or`, `and`, `not`, comparison.
 
@@ -112,13 +110,8 @@ impl CompareOp {
 }
 
 impl std::fmt::Display for Literal {
-    /// A string is single-quoted, doubling any `'` inside it (Phase 4b
-    /// M10) — the standard SQL escaping convention, which `Parser::
-    /// parse_literal` now accepts back (`''` inside a string literal is
-    /// one literal `'`, not the closing quote). `Num` uses `f64`'s own
-    /// `Display`, which already omits a trailing `.0` on a whole number
-    /// (`100.0` prints `100`) — exactly the spelling `parse_literal`'s
-    /// `f64::from_str` accepts back.
+    /// Strings are single-quoted with internal quotes doubled, matching
+    /// `parse_literal`. Numbers use `f64` display syntax.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Literal::Str(s) => {
@@ -170,7 +163,7 @@ impl std::fmt::Display for Expr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
-    /// Byte offset the caret points at, for inline reporting (spec §10.1).
+    /// Byte offset for the caret in an inline error display.
     pub caret: usize,
 }
 
@@ -357,13 +350,8 @@ impl<'a> Parser<'a> {
         }
         if self.rest().starts_with('\'') {
             self.pos += 1;
-            // Phase 4b M10: `''` inside the string is one literal `'`
-            // (the SQL escaping convention `Display for Literal` now
-            // writes), not the closing quote — so this can no longer
-            // slice the source directly (`self.src[start..self.pos]`)
-            // the way the no-escape version did; an escaped literal
-            // needs its own owned `String` with the doubled quotes
-            // collapsed.
+            // Doubled quotes represent one literal quote. Build an owned string
+            // so the result contains decoded characters rather than raw escapes.
             let mut text = String::new();
             loop {
                 match self.rest().chars().next() {
@@ -427,7 +415,7 @@ mod tests {
 
     #[test]
     fn parses_the_specs_own_example() {
-        // spec §4.1's worked example.
+        // Comparisons, membership, and grouping in one expression.
         let e = parse("model_code = 'EURP' and underlying_ref = 'SPX'");
         assert!(matches!(e, Expr::And(_, _)));
         let mut cols = e.columns();
@@ -541,10 +529,7 @@ mod tests {
 
     #[test]
     fn a_quote_inside_a_string_literal_escapes_as_a_doubled_quote_and_round_trips() {
-        // Phase 4b M10: `Display for Literal` used to have no in-string
-        // quote escape at all — a literal containing `'` rendered
-        // unquoted-broken text the parser could not read back. `''` is
-        // the SQL convention: one literal `'`, not the closing quote.
+        // Quoted strings round-trip through doubled internal quotes.
         let e = parse_expr("book = 'O''Neil'").unwrap();
         assert_eq!(
             e,

@@ -78,6 +78,9 @@ entry points do read files. Consumers derive runtime state from the loaded
 documents; modules do not reopen configuration files. File loading does not
 run every typed reader, and the reload rejection boundary is described below.
 
+The [typed-document reference](typed-documents.md) describes each reader's
+accepted values, defaults, validation scope, and partial-result behavior.
+
 `load_views` resolves each presentation property in this order: kind default,
 view definition, dataset presentation, then view presentation. It checks named
 colour references at each definition site before overlays can hide an invalid
@@ -181,8 +184,11 @@ writers using the same directory path, not other processes or symlink aliases.
 
 Dialogs edit typed drafts rather than TOML text. The draft owns validation and
 dirty state; a shared `InputState` is only the active field editor.
-`sync_dialog_text` moves text and focus between them. A successful save writes
-the user layer and allows normal reload to install the result.
+`sync_dialog_text` moves text and focus between them. Object dialogs queue
+valid drafts without a Save action, apply them to the shell after a debounce,
+then persist to the user layer. Memory acceptance and disk success are
+separate outcomes. See [configuration dialogs](configuration-dialogs.md) for
+inherited objects, presentation routing, reload interaction, and write failures.
 
 An inherited object can be edited by creating a user override. Deleting that
 override reveals the lower-layer value again. `overrides.toml` records accepted
@@ -264,19 +270,25 @@ responsible for replacing the current config-diagnostics batch.
 
 Action IDs are the stable vocabulary shared by configuration, the command
 palette, tooltips, and dispatch. Builtin bindings load first, module fragments
-extend them, and user entries override or unbind them. Context predicates keep
-the same keystroke available to different focused surfaces.
+extend them, then desk and user entries override or unbind them. The keymap
+compiler consumes original layer documents rather than the generic merged
+array. Context predicates make bindings conditional; among matching exact
+sequences, the last binding wins without a separate specificity priority.
 
 The primary `mod` alias defaults to Alt and may be set to Command. `ctrl` is
 refused as the alias because it collides with shipped literal Control
-bindings. Binding syntax is validated as a whole assembled keymap so an
-unspellable module binding is diagnosed before the window opens.
+bindings. Invalid entries are diagnosed and skipped; unknown actions warn.
+Compilation errors participate in reload rejection. Parsing a key name does
+not establish whether a platform can deliver it. See [keymaps and actions](keymaps.md)
+for syntax, sequences, counts, module restrictions, and edit/reset behavior.
 
 ## Theme, time, and logging
 
 A theme name selects a complete light or dark theme; there is no independent
-mode toggle. Named data colours resolve from theme anchors in OKLCH and enforce
-the readability floor described by their type.
+mode toggle. Named data colours resolve from theme anchors in OKLCH and seek
+a 3:1 contrast ratio. Custom themes can prevent the available lightness range
+from reaching that target; untinted semantic tokens retain their exact colour.
+See [colour resolution](typed-documents.md#colours-and-numeric-formatting).
 
 `[time]` configures the trader-facing IANA time zone and start/end-of-day
 presets. Displayed times use `geode_core::clock::Clock`; crates do not read

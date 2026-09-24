@@ -13,15 +13,11 @@ pub struct Binding {
     pub predicate: Option<Predicate>,
     pub action: ActionId,
     pub layer: Layer,
-    /// Global definition order across all layers. Informational: the matcher resolves ties by iteration order of Keymap::bindings(), which this mirrors — do not reorder bindings and rely on index alone.
+    /// Definition order across all input documents. Informational only: the
+    /// matcher resolves ties by list order, not by this field.
     pub index: usize,
-    /// The raw `context` string from the source doc, pre-parse (`None` for
-    /// the no-context entry) — kept alongside the compiled `predicate`
-    /// because a compiled `Predicate` has no `Display`/round-trip back to
-    /// the exact source spelling. This is the seam the keybinding dialog
-    /// (Part B) uses to build a `keymap_edit::Rebind::context` that will
-    /// exactly re-match the `[[bindings]]` entry a given effective binding
-    /// actually came from — a `Predicate` alone can't do that.
+    /// Original context spelling, retained so persistence can find the source
+    /// entry by exact string equality. `None` denotes an absent context.
     pub context_source: Option<String>,
     /// The raw key spelling from the source doc (`"mod+h"`, not the
     /// parsed keystrokes rendered back). A user-layer removal is
@@ -54,10 +50,14 @@ impl Keymap {
     }
 }
 
-/// Compile keymap docs (unmerged, in Builtin → Desk → User order) into a
-/// flat binding list. Bad entries are skipped with a diagnostic — a typo in
-/// a user keymap must never take down the keymap (spec §10.1).
-/// Within one [bindings.keys] table, TOML key uniqueness is by spelling, so two spellings that normalize to the same sequence (e.g. "alt+h" and "mod+h" when mod=alt) can coexist; they are iterated alphabetically, so which wins is determined by spelling, not declaration order. This is sorted explicitly below rather than relied on from `toml::Table`'s own iteration order: `geode-core`'s `preserve_order` feature (Phase 4 §3.3, for schema column declaration order) is workspace-wide by Cargo feature unification, so every crate's `toml::Table` — this one included — iterates in file order, not sorted order, unless a consumer sorts for itself.
+/// Compile unmerged keymap documents in the supplied order into a flat list.
+/// Callers supply builtin, module, desk, then user documents. Invalid entries
+/// produce errors and are skipped; unknown actions produce warnings and are
+/// skipped. The special action `"none"` needs no registry entry.
+///
+/// Entries retain their array order. Within each keys table, keys are sorted by
+/// source spelling: aliases that normalize to the same sequence therefore tie
+/// by spelling, independently of TOML's preserved declaration order.
 pub fn build_keymap(
     layered: &[LayerDoc],
     mod_alias: Modifiers,
@@ -118,12 +118,8 @@ pub fn build_keymap(
                 ));
                 continue;
             };
-            // Sorted explicitly by spelling (see the doc comment above):
-            // `toml::Table` iterates in file order under `preserve_order`,
-            // and the ambiguous-alias tie-break this loop's push order
-            // decides (`matcher.rs` keeps the *last* pushed binding) must
-            // stay keyed on spec spelling, not on where a spec happens to
-            // sit in the source file.
+            // Sort alias spellings explicitly: TOML preserves declaration order,
+            // but the matcher must resolve equivalent spellings alphabetically.
             let mut sorted_keys: Vec<(&String, &toml::Value)> = keys.iter().collect();
             sorted_keys.sort_by_key(|(a, _)| *a);
             for (spec, action_value) in sorted_keys {
@@ -173,43 +169,14 @@ pub fn build_keymap(
     (Keymap { bindings }, diags)
 }
 
-/// Resolve `action`'s effective binding within `bindings` (`keymap.
-/// bindings()`'s own layer-then-declaration order), or `None` if unbound.
+/// Find the latest binding for `action` that is not shadowed by a later
+/// binding of any action, including `"none"`, on the same sequence.
 ///
-/// Scans candidates whose `action` matches, **most recently declared
-/// first**; a candidate only counts as effective if no *later* binding in
-/// the full list — declared after it, any action, including `"none"` —
-/// shares its exact keystroke sequence AND carries a context that would
-/// apply whenever the candidate's own does. A shadowed candidate is
-/// skipped in favor of an earlier one for the same action (which may in
-/// turn be shadowed by something else); if every candidate is shadowed (or
-/// there are none), the action is unbound. This mirrors the real
-/// `Matcher::press`'s own keystroke-keyed last-wins rule (spec §3.4): for
-/// one keystroke, the *last* matching entry across the whole document
-/// stack wins, regardless of which action it names — a plain "last binding
-/// for this action id" search (the pre-review-round version of this
-/// function) missed exactly this: a bare `"mod+h" = "none"` unbind (no
-/// replacement key) never carries the real action id, so an action-id-only
-/// search skips it and reports the old binding as if still live.
-///
-/// **Context approximation, stated honestly**: the real `Matcher` decides
-/// "would this later binding actually apply" by evaluating a compiled
-/// `Predicate` against a live context stack; this free function has no
-/// such stack (there is no notion of "the current UI context" for a
-/// dialog listing every action at once), so it approximates with the
-/// *source spelling* of `context_source` instead: a later same-keystroke
-/// binding shadows the candidate when its `context_source` is `None` (a
-/// no-context entry is always active, so it always shadows) or is
-/// string-equal to the candidate's own (the common real case — a rebind
-/// shadowing its own prior entry within the same context, `keymap_edit`'s
-/// own documented assumption). This is exact for every shape this crate's
-/// own tooling ever writes. It can only drift from the real predicate
-/// evaluation for a hand-written keymap pairing two *different but
-/// overlapping* context strings on the same keystroke (e.g. `"workspace"`
-/// and `"workspace && !modal"`) — string comparison would under-mark that
-/// as not-shadowing even though the predicates do overlap at runtime.
-/// Accepted as a documented approximation for a display-only resolution,
-/// not the authoritative dispatch path (`Matcher::press` remains that).
+/// This is a display approximation without a live context stack. A later entry
+/// shadows a candidate only when its context is absent or its raw context string
+/// is identical. Equivalent or overlapping predicates written differently can
+/// therefore remain visible here even when dispatch chooses another binding.
+/// [`super::Matcher`] evaluates predicates against the actual stack at dispatch.
 pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Option<&'a Binding> {
     bindings
         .iter()
@@ -220,30 +187,14 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
         .map(|(_, b)| b)
 }
 
-/// Every user-layer entry that overrides `action` — what a reset of that
-/// action removes so the layers beneath show through again. Two kinds:
+/// Collect user entries to remove when resetting `action`: bindings naming
+/// the action, plus `"none"` entries covering its live lower-layer bindings.
 ///
-/// 1. a user binding whose action IS `action` (a rebind's new key, or a
-///    binding the user added themselves);
-/// 2. a user `"none"` shadow ([`UNBOUND_ACTION`]) on a keystroke that a
-///    lower layer binds to `action` — and binds LIVE among the lower
-///    layers: a desk entry that re-purposed a builtin key to another
-///    action is what the shadow silences, so the shadow is the desk
-///    action's override, not the builtin action's, and lifting it from
-///    the builtin action's row would undo the user's `d` on a different
-///    action while leaving this one exactly as unbound as before. Both
-///    tests are the same context-equality approximation
-///    [`effective_binding`] states (a no-context shadow silences
-///    everything; a contexted one only its own string).
-///
-/// A rebind of a builtin writes both kinds at once (`keymap_edit::
-/// apply_rebind`: the new key, then the `"none"` shadow over the old), and
-/// a reset that removed only the first left the action *unbound* rather
-/// than restored — the defect this function exists to close. Desk-layer
-/// entries are never returned: the app only ever writes the user layer.
-///
-/// Sorted by `(context_source, key)`, deduplicated, so the same shadow
-/// covering two lower bindings is one removal.
+/// A lower-layer binding already shadowed by a later lower-layer entry does not
+/// make an unbind belong to its old action. This prevents resetting one action
+/// from restoring a key that the desk assigned to another. Context coverage uses
+/// [`effective_binding`]'s source-string approximation. Results retain original
+/// key spellings and are sorted and deduplicated by context and key.
 pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOverride> {
     let lower: Vec<&Binding> = bindings.iter().filter(|b| b.layer != Layer::User).collect();
     let mut out: Vec<UserOverride> = Vec::new();
@@ -271,22 +222,16 @@ pub fn user_overrides_for(bindings: &[Binding], action: &ActionId) -> Vec<UserOv
     out
 }
 
-/// True if some binding declared AFTER `bindings[index]` (`candidate`)
-/// shares its exact keystroke sequence and carries a context that would
-/// apply whenever `candidate`'s own would — see [`effective_binding`]'s
-/// doc comment for the full reasoning and the stated context-equality
-/// approximation.
+/// Whether a later binding shadows this candidate under the display approximation.
 fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool {
     bindings[index + 1..]
         .iter()
         .any(|later| shadows(later, candidate))
 }
 
-/// Whether `later`, declared after `candidate`, would take `candidate`'s
-/// keystroke wherever `candidate` applies: the same keystrokes under a
-/// context that is `None` (always active) or string-equal to the
-/// candidate's. The one spelling of the approximation, shared by
-/// [`is_shadowed`] and [`user_overrides_for`].
+/// Compare exact sequences and raw contexts for display/reset resolution.
+/// An absent later context covers every candidate context; otherwise the context
+/// strings must be equal. This does not evaluate logical predicate implication.
 fn shadows(later: &Binding, candidate: &Binding) -> bool {
     later.keystrokes == candidate.keystrokes
         && (later.context_source.is_none() || later.context_source == candidate.context_source)
@@ -343,13 +288,8 @@ mod tests {
 
     #[test]
     fn ambiguous_aliases_in_one_keys_table_resolve_by_spelling_not_file_position() {
-        // "mod+h" (with mod=alt) and "alt+h" normalize to the same
-        // keystroke, so both are legal keys of one [bindings.keys] table
-        // (spec: TOML key uniqueness is by spelling). Declared in file
-        // order mod+h, then alt+h — the *opposite* of alphabetical order —
-        // so a regression back to raw `toml::Table` iteration order
-        // (file order, under `preserve_order`) would push alt+h last and
-        // flip which action wins.
+        // The aliases normalize to the same key. Reverse alphabetical source
+        // order proves resolution is independent of TOML declaration order.
         let d = doc(
             Layer::User,
             "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_right\"\n\"alt+h\" = \"workspace::focus_left\"\n",
@@ -449,10 +389,8 @@ mod tests {
 
     #[test]
     fn a_rebind_of_a_builtin_yields_both_halves_of_the_pair() {
-        // `apply_rebind` on a builtin `mod+h` → `mod+j` writes the new
-        // binding AND a `"none"` shadow over the old key. Both are the
-        // user's override of this action; removing only the first (what
-        // `r` did before) leaves the action unbound instead of reset.
+        // Reset must remove both the replacement binding and the shadow over
+        // the original key, or the lower-layer binding remains disabled.
         let builtin = doc(
             Layer::Builtin,
             "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",
@@ -505,10 +443,8 @@ mod tests {
 
     #[test]
     fn a_shadow_in_a_different_context_is_not_this_actions_override() {
-        // The shadow only silences the builtin where its context applies;
-        // a shadow under another context string never reaches it, so it
-        // is not an override of this action (the same context-equality
-        // approximation `effective_binding` states).
+        // Different context strings are treated as independent by display/reset
+        // resolution, even though predicates can overlap during dispatch.
         let builtin = doc(
             Layer::Builtin,
             "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n",

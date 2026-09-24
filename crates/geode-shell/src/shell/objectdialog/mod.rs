@@ -48,33 +48,22 @@ pub enum Domain {
     Views,
     Groupings,
     Scopes,
-    /// Read-only (§9, §19.4): the datasets the other adapters build their
-    /// choices from.
+    /// Read-only: the datasets the other adapters build their choices from.
     Schema,
-    /// The ingest feeds, one object per source (§8.3, §19.3).
+    /// The ingest feeds, one object per source.
     Sources,
-    /// The shared colour vocabulary a column's `colour` field and a
-    /// chart series can name — one object per named colour, a hue (with
-    /// its tone) or a theme token (Part 2c §6.1).
+    /// The shared colour vocabulary a column's `colour` field and a chart series can
+    /// name — one object per named colour, a hue (with its tone) or a theme token.
     Colours,
 }
 
-/// Which stage of the scaffold is on screen.
-///
-/// `Edit` is what makes the `escape` ladder's
-/// [`crate::dialogmode::EscapeStep::PreviousStage`] rung reachable — this
-/// dialog is the design's first consumer of that rung, and
-/// [`ObjectDialogState::has_previous_stage`] is written against this enum
-/// rather than against a literal `false` so constructing the variant is
-/// all it took to turn the rung on.
+/// The current stage. Nested stages give Escape a previous stage to return to; mutable
+/// fields and selection remain on `ObjectDialogState` and `Draft`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
     Browse,
-    /// The browse list with the filter row replaced by a *name* field
-    /// (§18.2): `n` enters it, `enter` creates, `escape` returns to
-    /// `Browse` with nothing written. A stage rather than a flag on
-    /// `Browse` so `has_previous_stage` turns the escape ladder's third
-    /// rung on by construction, the same way `Edit` did.
+    /// Naming an object: Enter creates it and Escape returns to browsing without a
+    /// write. The shared input holds the proposed name.
     Naming,
     /// Editing one object's fields. The draft itself lives in
     /// [`ObjectDialogState::draft`] rather than in here, because the
@@ -84,41 +73,24 @@ pub enum Stage {
     Edit {
         object: String,
     },
-    /// Editing one column's presentation — a **projection** over the same
-    /// [`Draft`] (Part 2c §5.2), not a draft of its own: `enter` on a
-    /// member row stashes the view's fields and installs the column's
-    /// seven, every change folds back onto the item
-    /// ([`Draft::fold_column`]), and `escape` restores the view with the
-    /// cursor on the column.
-    ///
-    /// It carries both names for the same reason [`Stage::Edit`] carries
-    /// one: the pair is what `escape` steps back through and what the
-    /// crumb reads (`tree › npv`). Everything mutable about the column
-    /// lives on the draft, as it does for `Edit`.
+    /// One column's presentation projected over the same draft. Parent fields are
+    /// stashed while its seven presentation fields are installed; each edit folds back
+    /// into the column, and Escape restores the parent selection by name.
     Column {
         object: String,
         column: String,
     },
-    /// Ticking one dimension's values for a saved scope (scopes-editing
-    /// spec §4) — a projection over the same [`Draft`] in
-    /// [`Stage::Column`]'s mould: `enter` on a `dimensions` row stashes
-    /// the scope's fields and installs one list of the column's distinct
-    /// values; `escape` restores the scope with the cursor on the column.
+    /// One saved-scope dimension's distinct values projected over the same draft.
+    /// Escape restores the scope's fields and selects that dimension.
     Values {
         object: String,
         column: String,
     },
 }
 
-/// What `enter` in [`Stage::Naming`] creates (scopes-editing spec §6):
-/// the domain's empty object (`n`), a verbatim copy of a named one
-/// (`c`), or the frame's own current scope (`render::open_save_scope` —
-/// the `scope::save_current` palette action and the scope bar's `save`
-/// chip, spec §6's amendment). Recorded by NAME when armed — the browse
-/// cursor is an index, and a reload can re-rank the list under it (the
-/// same reason `confirm_target` records one; `FromFrame` needs no name
-/// of its own to record, since its source is frame state rather than
-/// another row).
+/// Source for a newly named object: the domain's defaults, a named saved scope, or
+/// current frame scope. Copy targets are recorded by name because a reload can reorder
+/// the browse list before creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NameSeed {
     Empty,
@@ -126,13 +98,8 @@ pub enum NameSeed {
     FromFrame,
 }
 
-/// One named object as the browse list shows it.
-///
-/// `layer`, `overridden` and `drifted` are the three provenance markers
-/// spec §5 defines; they exist because whole-object override is invisible
-/// otherwise — a user who overrode a desk view sees their copy and no
-/// hint that a desk version exists underneath it, nor that it has since
-/// moved on.
+/// A browse row with its effective layer, user override status, and recorded drift from
+/// the inherited definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRow {
     pub name: String,
@@ -154,31 +121,24 @@ pub struct ObjectRow {
     /// on a view only the user layer defines, that would delete the view
     /// outright rather than restore anything. See [`derive_rows`].
     pub overridden: bool,
-    /// The layer this row overrides has changed since it was forked
-    /// (spec §5.2, §19.6). `overrides.toml` (`OVERRIDES_DOC`) records the
-    /// shadowed layer's canonical text at fork time, keyed by
-    /// [`override_key`]; `derive_rows` compares that text against the
-    /// shadow's CURRENT text. `false` whenever there is no recorded
-    /// entry — an override that predates this sidecar, or a stale entry
-    /// (see [`stale_override_keys`]) — never a guess made by comparing
-    /// the user's copy against the desk's current one, which would mark
-    /// every deliberate customisation as drifted (exactly backwards).
+    /// Whether the inherited definition differs from its recorded value at fork time.
+    /// Missing or stale `overrides.toml` entries report no drift. Comparing the user's
+    /// edited definition against the current inherited one would incorrectly flag
+    /// deliberate customisations.
     pub drifted: bool,
-    /// A grouping key painted before the name, dimmed (§19.3): the
-    /// dataset a source feeds. `Some` only on Sources; the primary sort
-    /// key when present, part of `searchable_text`, never the identity —
-    /// the doc key is still `name`, so a dataset with two sources is two
-    /// rows and every click handler and selector stays keyed by `name`.
+    /// A grouping key painted before the name, dimmed: the dataset a source feeds.
+    /// `Some` only on Sources; the primary sort key when present, part of
+    /// `searchable_text`, never the identity — the doc key is still `name`, so a
+    /// dataset with two sources is two rows and every click handler and selector stays
+    /// keyed by `name`.
     pub prefix: Option<String>,
 }
 
 impl ObjectRow {
-    /// What the browse row paints as its label (§19.3): `"<prefix> ·
-    /// <name>"` for a prefixed row, the bare name otherwise. The one
-    /// spelling of that join, shared by the painted label
-    /// (`render.rs`'s browse painter) and [`searchable_text`], so a hit
-    /// inside the prefix ranks and highlights against the exact text on
-    /// screen.
+    /// What the browse row paints as its label: `"<prefix> · <name>"` for a prefixed
+    /// row, the bare name otherwise. The one spelling of that join, shared by the
+    /// painted label (`render.rs`'s browse painter) and [`searchable_text`], so a hit
+    /// inside the prefix ranks and highlights against the exact text on screen.
     pub fn display_name(&self) -> String {
         match &self.prefix {
             Some(p) => format!("{p} · {}", self.name),
@@ -244,30 +204,13 @@ impl Domain {
         }
     }
 
-    /// The presentation doc this domain's objects can be personalised
-    /// through without forking (spec §4.1), if it has one at all.
-    ///
-    /// `None` for a domain none of whose fields carry
-    /// [`Destination::Presentation`] — Groupings, whose `dimensions` is
-    /// entirely [`Destination::Doc`] (`groupings.rs`'s module doc has the
-    /// reasoning) — so [`derive_rows`]'s "personalised without
-    /// overriding" check, and `render::run_confirmed`'s removal list,
-    /// both have either a real doc name to look for or nothing to look
-    /// for, rather than a name that could never correspond to a file. Also
-    /// `None` for Schema, which has no user-facing overlay of any kind —
-    /// [`Domain::writable`] is `false` for it, so there is nothing to
-    /// personalise without forking in the first place.
+    /// The overlay document used to personalise this domain without copying its
+    /// definition. Only Views has this object-level overlay. Schema column editing uses
+    /// `DatasetPresentation` separately; other domains write definitions.
     fn presentation_doc(self) -> Option<&'static str> {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
-            // Scopes and Sources have no presentation doc for the same
-            // reason Groupings does not: every field either domain has is
-            // `Destination::Doc` (`scopes.rs`'s and `sources.rs`'s own
-            // module docs). Schema joins them for the reason this
-            // method's own doc comment gives. Colours joins for the same
-            // "every field is `Destination::Doc`" reason (`colours.rs`'s
-            // own module doc) — there is nothing to personalise about a
-            // shared colour without forking it.
+            // These domains have no view-presentation overlay.
             Domain::Groupings
             | Domain::Scopes
             | Domain::Schema
@@ -276,20 +219,9 @@ impl Domain {
         }
     }
 
-    /// The names a domain's browse list always shows, configured or not.
-    /// `Some` only for Groupings (§18.4): the nine `ctrl+1..9` slots are
-    /// a fixed keyboard, so an unfilled slot is a row that reads `empty`
-    /// rather than a row that does not exist — and there is no `n`,
-    /// because nothing can be created that is not already on the list.
-    /// Slot `0` is not here: `ctrl+0` is `frame::slot_clear`, the view's
-    /// own grouping, and `GroupingSlots` is nine wide (user ruling
-    /// 2026-09-10).
-    ///
-    /// A separate question from [`Domain::writable`], which follows right
-    /// below: this is "can anything be created that is not already
-    /// listed", not "can this domain be written to at all" — Schema
-    /// answers `None` here (nothing fixes its list; it simply lists
-    /// whatever `datasets.toml` declares) and `false` to `writable`.
+    /// Always-listed names, including unconfigured slots. Groupings reserves 1–9 and
+    /// therefore offers no creation verb. Slot 0 restores a view's own grouping and is
+    /// not a configurable slot. This is separate from write permission.
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
@@ -299,32 +231,24 @@ impl Domain {
         }
     }
 
-    /// `false` for [`Domain::Schema`] outside its column stage (§19.4,
-    /// dataset-presentation spec §4.2): the create gate, the footer hints
-    /// and every mutating verb — `space`, `shift+space`, `i`, `d`, `r`,
-    /// `x`, `n`, `o`, `shift+j`/`shift+k`, a tick click, a drop — read
-    /// this, so a read-only surface refuses in one place rather than by
-    /// each verb forgetting. Schema's ONE writable surface is
-    /// [`Stage::Column`], whose fields write the dataset overlay, never
-    /// the datasets doc. The Groupings roster gate
-    /// (`roster().is_some()`) is a separate question ("can anything be
-    /// created that is not already listed") and stays beside it.
+    /// Whether this stage permits mutation. Schema is writable only in its column
+    /// stage, where edits target dataset presentation rather than the schema doc.
+    /// Creation additionally requires a domain without a fixed roster.
     pub fn writable(self, stage: &Stage) -> bool {
         !matches!(self, Domain::Schema) || matches!(stage, Stage::Column { .. })
     }
 
-    /// May `c` copy an object under a new name? Scopes alone for now
-    /// (scopes-editing spec §6); the mechanism is generic.
+    /// May `c` copy an object under a new name? Scopes alone for now; the mechanism is
+    /// generic.
     pub fn duplicable(self) -> bool {
         self == Domain::Scopes
     }
 
-    /// The text painted before an object's name, if this domain groups
-    /// its objects (§19.3). `None` on every domain but Sources — a
-    /// source's row leads with the dataset it feeds
-    /// (`sources::prefix`), painted dimmed ahead of the name and used as
-    /// the primary sort key in [`derive_rows`]; every other domain's
-    /// objects are already uniquely named with nothing to group them by.
+    /// The text painted before an object's name, if this domain groups its objects.
+    /// `None` on every domain but Sources — a source's row leads with the dataset it
+    /// feeds (`sources::prefix`), painted dimmed ahead of the name and used as the
+    /// primary sort key in [`derive_rows`]; every other domain's objects are already
+    /// uniquely named with nothing to group them by.
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
             Domain::Sources => Some(sources::prefix),
@@ -336,20 +260,9 @@ impl Domain {
         }
     }
 
-    /// Every named object in this domain, with its provenance markers.
-    ///
-    /// **Deliberately not a `match`.** The `layer`/`overridden`
-    /// derivation is the dangerous computation on this whole surface
-    /// (see [`ObjectRow::overridden`]: a wrong `overridden` makes the
-    /// edit stage offer a destructive `Revert to desk`), so every domain
-    /// must share the one tested walk. A per-domain `match` here would
-    /// merely *discourage* an adapter from doing its own walk and
-    /// diverging; an unconditional call makes that unrepresentable — the
-    /// only things a domain decides are its doc name, its summary line,
-    /// its optional row prefix and (optionally) its presentation doc, and
-    /// all four arrive through the small matches above. Part 2 adds three
-    /// more adapters onto this exact seam, which is why the hole stays
-    /// closed as they arrive.
+    /// Derive every domain's rows through the shared layer/override walk. Adapters
+    /// supply document, summary, prefix, roster, and presentation metadata; they do not
+    /// independently decide whether a destructive revert is valid.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
         derive_rows(
             config,
@@ -361,46 +274,10 @@ impl Domain {
         )
     }
 
-    /// Is `name` already spoken for in this domain (spec §18.2's "a name
-    /// any layer already holds is refused")?
-    ///
-    /// **Wider than [`Domain::objects`] on purpose, and that is the
-    /// whole reason it exists.** The rows are what the browse list can
-    /// show — `doc`'s layered keys plus the roster — but a name can also
-    /// be held by the user's presentation overlay alone
-    /// ([`personalised_names`]): the desk dropped a view the trader had
-    /// hidden a column on, so `view_presentation.toml` still names it
-    /// while no layer of `views.toml` does. Creating over that name made
-    /// a fresh user view that silently inherited the orphaned overlay's
-    /// `hidden`/`order`/`width`, and — being user-only — `r` then
-    /// refused it, so no dialog verb could clear it. A row-based check
-    /// cannot see that name at all, which is why the refusal reads this
-    /// union rather than the list.
-    ///
-    /// The names this domain refuses outright, reserved by a grammar
-    /// outside its own doc (Part 2c §6.1) — `Colours`: a column's
-    /// `colour` field already spells `none` and `sign` itself, so a
-    /// named colour object by either name would be unreachable through
-    /// that field and confusing everywhere else. `Scopes` reads
-    /// [`geode_core::scopes::RESERVED_NAMES`] — `save_current`, the
-    /// `scope::save_current` palette action's own id, since a saved
-    /// scope by that name would collide with it in the palette (two rows
-    /// reading "Scope: Save current…"/"Scope: save_current") and shadow
-    /// it from `input.rs`'s `scope::<name>` dispatch arm besides. The
-    /// list was shared with `Frame::save_scope` (historically, `:scope
-    /// save` on a tile's command line reached that door directly, with
-    /// no dialog in between) rather than duplicated here — a review
-    /// finding after this dialog's own copy shipped: refusing only at
-    /// the dialog left `:scope save save_current` free to write an
-    /// unfixable `scopes.toml` entry that panicked the app at the next
-    /// start. The `:scope save` route closed on 2026-09-20 (command-line
-    /// locality spec §5): `:scope` is a refusal on every tile now, and
-    /// `Frame::save_scope` has no production caller left — the
-    /// palette's `Scope: Save current as…` action opens this dialog's
-    /// own naming prompt (`objectdialog::render::open_save_scope`,
-    /// `NameSeed::FromFrame`) and is refused right here, by this same
-    /// list, on the dialog's own create path.
-    /// Empty for every other domain, which has no such collision.
+    /// Names reserved by syntax outside the domain's own document. Colours excludes
+    /// `none` and `sign`, which already mean built-in formatting choices. Scopes
+    /// excludes the `save_current` action name to avoid ambiguous palette dispatch.
+    /// Other domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colours => &geode_core::colour::RESERVED_NAMES,
@@ -409,8 +286,10 @@ impl Domain {
         }
     }
 
-    /// `config_version` never reaches here: `check_object_name` refuses
-    /// it before the caller asks.
+    /// Whether a name is already present in a definition, fixed roster, or user
+    /// presentation overlay. Include orphaned overlays so a new object cannot silently
+    /// inherit their old personalisation. `config_version` is rejected separately by
+    /// `check_object_name`.
     pub fn name_taken(self, config: &Config, name: &str) -> bool {
         if self.reserved_names().contains(&name) {
             return true;
@@ -456,11 +335,9 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
         .unwrap_or_default()
 }
 
-/// The drift sidecar (spec §5.2, §19.6): `overrides.toml`, user layer
-/// only, one entry per forked object keyed `"<doc>.<object>"`, holding
-/// the shadowed layer and the shadowed object's canonical TOML text at
-/// fork time. A sidecar rather than a key inside the object, because an
-/// atomic doc's reader treats an unknown key as a diagnostic.
+/// User-layer `overrides.toml` records inherited definitions at fork time. Entries are
+/// keyed by document and object name and contain canonical object text for later drift
+/// comparison.
 pub const OVERRIDES_DOC: &str = "overrides";
 
 /// The sidecar's own key for `object` in `doc` — `"<doc>.<object>"`, the
@@ -469,10 +346,10 @@ pub fn override_key(doc: &str, object: &str) -> String {
     format!("{doc}.{object}")
 }
 
-/// The entry recorded when `object` is forked over `shadowed`'s copy.
-/// The canonical text, not a hash: `DefaultHasher` is not stable across
-/// Rust versions, a crypto dependency is unjustified, and keeping the
-/// text makes a real diff free if it is ever wanted (§5.2).
+/// The entry recorded when `object` is forked over `shadowed`'s copy. The canonical
+/// text, not a hash: `DefaultHasher` is not stable across Rust versions, a crypto
+/// dependency is unjustified, and keeping the text makes a real diff free if it is ever
+/// wanted.
 pub fn override_entry(shadowed: Layer, object: &str, value: &toml::Value) -> toml::Value {
     let mut table = toml::Table::new();
     table.insert(
@@ -530,9 +407,9 @@ pub(super) fn has_override_entry(config: &Config, doc: &str, object: &str) -> bo
     override_entries(config).contains_key(&override_key(doc, object))
 }
 
-/// Entries that describe nothing any more (§19.6): the user layer no
-/// longer holds the object, or no layer beneath shadows it. Ignored by
-/// `derive_rows` and pruned by the next overrides write.
+/// Entries that describe nothing any more: the user layer no longer holds the object,
+/// or no layer beneath shadows it. Ignored by `derive_rows` and pruned by the next
+/// overrides write.
 pub fn stale_override_keys(config: &Config) -> Vec<String> {
     override_entries(config)
         .keys()
@@ -550,10 +427,9 @@ pub fn stale_override_keys(config: &Config) -> Vec<String> {
         .collect()
 }
 
-/// The gate [`derive_rows`] applies to compute [`ObjectRow::drifted`]:
-/// drift is provable only from the sidecar's recorded text, so no entry
-/// means not drifted, never a guess from the shadow's current copy
-/// (§19.6).
+/// The gate [`derive_rows`] applies to compute [`ObjectRow::drifted`]: drift is
+/// provable only from the sidecar's recorded text, so no entry means not drifted, never
+/// a guess from the shadow's current copy.
 fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name: &str) -> bool {
     match (entry, shadow) {
         (Some((_, recorded)), Some(value)) => {
@@ -563,57 +439,18 @@ fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name
     }
 }
 
-/// Every object named in `doc`'s layered documents, plus every name
-/// `roster` fixes as always-listed (§18.4 — Groupings' nine slots), one
-/// row each, sorted by name.
+/// Build browse rows from layered object definitions and the optional fixed roster.
+/// Skip `config_version`. Unconfigured roster entries have no layer and an `empty`
+/// summary; configured entries use the last defining layer.
 ///
-/// A rostered name no doc defines gets a row with `layer: None` and
-/// `summary: "empty"` — seeded before the layered walk below so a name
-/// the walk does touch overwrites that placeholder in place, and a name
-/// it never touches is left exactly as seeded. `roster: None` (every
-/// domain but Groupings) seeds nothing, so those domains list only what
-/// their docs actually define, as before.
+/// `overridden` requires an inherited definition plus a user definition or user
+/// presentation overlay. That inherited definition ensures reverting has something to
+/// restore. Drift compares the recorded fork baseline with the current inherited
+/// definition, not with the user's edited copy.
 ///
-/// `Config::layered_docs` hands back the per-layer documents in Builtin →
-/// Desk → User order, so a single ordered walk answers both markers
-/// (spec §5.1 — "no new machinery"):
-///
-/// - `layer` is the **last** layer whose doc contains the name, which is
-///   also the copy that takes effect: every doc these dialogs edit is
-///   atomic at depth 1, so a later layer's table replaces the earlier
-///   one whole;
-/// - `overridden` is the user layer containing it **and** some earlier
-///   layer containing it too. The second half is what stops the edit
-///   stage offering `Revert to desk` on a view no desk ever had —
-///   reverting there would delete the user's own view rather than
-///   restore anything (`render::arm_revert` gates on exactly this).
-///
-/// "The user layer containing it" spans `presentation_doc` as well as
-/// `doc`, when the domain has one, and that is not a refinement: §4.1's
-/// whole design is that hiding a column writes `view_presentation.toml`
-/// and forks nothing, so the commonest user override there leaves
-/// `doc`'s user layer empty. Reading the markers off `doc` alone
-/// answered `r` with "no user override to revert" while the file `r`
-/// would have removed sat on disk. The `some earlier layer` half is
-/// still read off `doc` only — that is the half that guarantees
-/// reverting leaves an object behind. A domain with no presentation doc
-/// at all (`presentation_doc: None`) simply has nothing this half can
-/// add.
-///
-/// Sorted by name by default, kept rather than left in file order: rows
-/// come from up to three documents, so "file order" would mean one
-/// file's order followed by whatever names the next file added, which is
-/// neither the user's nor the desk's order and shifts as soon as
-/// anything is overridden. Alphabetical is the one ordering that stays
-/// put — and the `BTreeMap` walk below already produces it for free. A
-/// domain with a `prefix` (Sources, §19.3) sorts by `(prefix, name)`
-/// instead: the dataset a source feeds is the grouping a trader scans
-/// by, so its rows cluster by dataset with by-name order only breaking a
-/// tie inside one dataset — a second, explicit sort over the by-name
-/// output, since the `BTreeMap`'s own key is still the bare name.
-///
-/// `config_version` is skipped — it is the schema stamp every layered
-/// doc carries, not an object.
+/// Rows sort by name, or by `(prefix, name)` for Sources so sources cluster by dataset.
+/// Presentation-only names affect override status but do not create browse rows without
+/// a definition.
 fn derive_rows(
     config: &Config,
     doc: &str,
@@ -697,9 +534,9 @@ fn derive_rows(
         .map(|(layers, mut row, shadow)| {
             let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());
             row.overridden = mine && layers.iter().any(|l| *l < Layer::User);
-            // §19.6: drift is "the shadowed copy moved since the fork" —
-            // provable only from the sidecar's recorded text, so no
-            // entry means not drifted, never a guess.
+            // drift is "the shadowed copy moved since the fork" — provable only from
+            // the sidecar's recorded text, so no entry means not drifted, never a
+            // guess.
             row.drifted = row.overridden
                 && drift_of(
                     entries.get(&override_key(doc, &row.name)),
@@ -719,38 +556,20 @@ fn derive_rows(
 // The edit stage: fields, destinations, and the draft
 // ---------------------------------------------------------------------
 
-/// Which user-layer document one field's value is written to (spec §4.1).
+/// The user-layer document a field edits. Definition changes replace the whole named
+/// object and stop inheriting changes from lower layers. View presentation changes
+/// retain that inheritance by writing a separate overlay.
 ///
-/// **This enum is the whole reason the Views dialog is safe to use.**
-/// Dragging a column's width is the commonest edit a trader makes, and
-/// writing it into `views.toml` would fork the desk's view — a forked
-/// view is frozen, so when the desk adds a column next week the trader
-/// never sees it. Order, inclusion and width therefore carry
-/// [`Destination::Presentation`] and land in `view_presentation.toml`,
-/// which `config::load_views` merges *over* the view; only a
-/// definitional change (the dataset, the column *set*) carries
-/// [`Destination::Doc`] and forks anything.
-///
-/// It is an enum on the field rather than a rule inside the adapter so
-/// the split is mechanical: [`Draft::writes_by_destination`] groups by
-/// it, and the flush makes one `config_write::edit` call per group
-/// without knowing what either file is for. Exactly two places in the
-/// scaffold know `view_presentation.toml` exists — [`Destination::doc`]
-/// and [`Domain::presentation_doc`], the same answer asked two ways
-/// ("which file does this destination write" and "does this domain have
-/// an overlay file at all") — and both route to the Views adapter's own
-/// `PRESENTATION_DOC` constant rather than spelling the name again.
-///
-/// `Ord` because the groups are collected into a `BTreeMap`, so a flush
-/// writes its files in a fixed order rather than a hash-random one.
+/// Dataset selection and column membership are definitional. Order, inclusion, width,
+/// and formatting are presentation. Schema's column stage writes dataset presentation.
+/// `writes_by_destination` groups changed fields for the flush.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Destination {
     /// The domain's own doc, user layer.
     Doc,
     /// `view_presentation.toml`, user layer.
     Presentation,
-    /// `dataset_presentation.toml`, user layer — the Schema dialog's
-    /// column stage (dataset-presentation spec §4.1).
+    /// `dataset_presentation.toml`, user layer — the Schema dialog's column stage.
     DatasetPresentation,
 }
 
@@ -760,10 +579,10 @@ impl Destination {
         match (self, domain) {
             (Destination::Doc, domain) => domain.doc(),
             (Destination::Presentation, Domain::Views) => views::PRESENTATION_DOC,
-            // Every Groupings field is `Destination::Doc` (spec §8.2 —
-            // there is nothing presentational about a dimension chain),
-            // so this arm exists only to keep the match exhaustive as
-            // domains are added, not because anything can reach it.
+            // Every Groupings field is `Destination::Doc` there is nothing
+            // presentational about a dimension chain), so this arm exists only to keep
+            // the match exhaustive as domains are added, not because anything can reach
+            // it.
             (Destination::Presentation, Domain::Groupings) => {
                 unreachable!("Groupings has no Presentation-destined fields")
             }
@@ -804,30 +623,12 @@ impl Destination {
     }
 }
 
-/// One entry of an [`FieldKind::OrderedList`].
+/// An ordered-list member or available candidate. Its containing list determines
+/// membership; `included` determines the tick state within that list.
 ///
-/// A deliberately fixed, bounded shape rather than general nesting (spec
-/// §3.1): a view's columns and a grouping's dimensions are the only
-/// ordered lists in the config model and both fit it, while arbitrary
-/// sub-fields would make the edit stage recursive for no reader.
-///
-/// **Membership is not a field here** (§18.7): which of a field's two
-/// lists an item sits in IS its membership, so the same `ListItem` shape
-/// describes one of the object's own entries and one of the catalogue
-/// entries it may gain. Where the two differ is what
-/// [`FieldKind::OrderedList`] documents, and nothing has to keep a flag
-/// and a position agreeing with each other.
-///
-/// `presentation` is the column's presentation as the trader sees it —
-/// the kind default with the desk's and the overlay's keys applied, i.e.
-/// `ViewSpec::presentation_of` after `load_views` (Part 2c §4.3) — not a
-/// bare `width` (the shape this field carried before Part 2c): a
-/// picker's `column_summary` needs precision, colour and scale too, and
-/// carrying the whole `ColumnPresentation` is what lets it read them off
-/// one value rather than growing a field per format key. A domain with
-/// no presentation concept at all (Groupings' `dimensions`) carries
-/// `ColumnPresentation::default()`, which is indistinguishable from "no
-/// override of anything" — exactly what such a domain means to say.
+/// View items carry effective presentation keys from the definition and overlays;
+/// formatting resolves remaining unset keys through the column-kind default. Domains
+/// without column presentation use an empty `ColumnPresentation`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListItem {
     pub name: String,
@@ -860,29 +661,19 @@ pub struct ListItem {
     pub note: Option<String>,
 }
 
-/// The closed vocabulary an object's fields are built from (spec §3.1).
-///
-/// Closed on purpose: validation is then by construction — a `Choice`
-/// offers only datasets that exist, an `OrderedList` only columns the
-/// view has — which is what makes most of the loader's old diagnostics
-/// unreachable from these dialogs.
-///
-/// Two variants have no key in this task and say so rather than
-/// pretending: [`FieldKind::Text`] needs in-place editing behind `i`,
-/// and [`FieldKind::MultiChoice`] needs a per-option row for `space` to
-/// tick. Views uses neither; both arrive with the Part 2 adapter that
-/// first needs one, which is also when a test can see them.
+/// The supported field shapes. Adapters supply choices, bounds, and validation. Options
+/// can retain stale configured values so users can inspect and repair them. Text
+/// editing is separately permitted by the domain; not every displayed text field is
+/// writable.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
     Text(String),
-    /// `step` is the distance one `space` moves; `wrap` makes the range
-    /// circular — a hue, say — so a step past `max` lands at
-    /// `min + overshoot` rather than pinning at `max` (spec §5.4). Every
-    /// `Number` this crate builds today is `step: 1, wrap: false` (the
-    /// only one live is Sources' `stable_polls`; Groupings' `slot` is
-    /// display-only and a [`FieldKind::Text`], not a `Number`, per
-    /// `groupings.rs`'s own doc) — a future field that steps by more than
-    /// one, or wraps, is what this pair exists for.
+    /// `step` is the distance one `space` moves; `wrap` makes the range circular — a
+    /// hue, say — so a step past `max` lands at `min + overshoot` rather than pinning
+    /// at `max`. Every `Number` this crate builds today is `step: 1, wrap: false` (the
+    /// only one live is Sources' `stable_polls`; Groupings' `slot` is display-only and
+    /// a [`FieldKind::Text`], not a `Number`, per `groupings.rs`'s own doc) — a future
+    /// field that steps by more than one, or wraps, is what this pair exists for.
     Number {
         value: i64,
         min: i64,
@@ -899,36 +690,21 @@ pub enum FieldKind {
         options: Vec<String>,
         ticked: BTreeSet<String>,
     },
-    /// The object's own ordered list, and — for a list a trader can add
-    /// to — the catalogue of what may join it (spec §18.7). `items` is
-    /// the only list that is ordered, written, counted or reorderable.
+    /// The object's ordered items and an optional catalogue of candidates. Only `items`
+    /// contributes to writes. `available: None` means ticking controls membership
+    /// within one list, as in Groupings. `Some`, even when empty, means items can be
+    /// promoted from or demoted into a separate catalogue.
     ///
-    /// `available` is `None` where ticking IS membership and there is no
-    /// catalogue to promote out of (Groupings' `dimensions`, whose
-    /// unticked rows are already in `items`), and `Some` — possibly
-    /// EMPTY — where one exists (Views' `columns`, whose catalogue empties
-    /// out once the trader has added every column the dataset offers).
-    /// The distinction is load-bearing rather than tidy: `x` demotes into
-    /// a catalogue that exists and refuses where none does, so reading
-    /// "is this list catalogue-less" off `available.is_empty()` would make
-    /// `x` go dead on a fully-added Views list — the exact regression
-    /// `remove_selected`'s own doc records. `available` is unordered by
-    /// construction: nothing writes it and nothing reads its order.
-    ///
-    /// Two lists rather than one list and a flag, so the
-    /// members-before-available rule four mutators used to maintain by
-    /// hand is not a rule at all.
+    /// The distinction keeps `x` usable after all available view columns are added; an
+    /// empty catalogue still accepts a removed member.
     OrderedList {
         items: Vec<ListItem>,
         available: Option<Vec<ListItem>>,
     },
 }
 
-/// Which layer's value a column-stage field is showing (dataset-
-/// presentation spec §5.3): the trader's own view-level override, their
-/// dataset-level setting, or the desk view's own key. `None` when the
-/// kind default is in force. Painted as a lowercase chip in the slot the
-/// Schema rows' layer badge uses — the two never appear together.
+/// The layer supplying a column-stage value: per-view override, dataset presentation,
+/// or the view definition. No badge means the kind default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
     Desk,
@@ -946,28 +722,18 @@ impl Provenance {
     }
 }
 
-/// Which door opened the column stage (§4.1, §5): the Views dialog's
-/// member row (the fields write the view overlay over a desk + dataset
-/// baseline) or the Schema dialog's column row (the fields write the
-/// dataset overlay over the kind default).
+/// Which door opened the column stage: the Views dialog's member row (the fields write
+/// the view overlay over a desk + dataset baseline) or the Schema dialog's column row
+/// (the fields write the dataset overlay over the kind default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnDoor {
     View,
     Dataset,
 }
 
-/// The two layers BELOW the view overlay under one column, each as the
-/// keys that layer itself sets — NOT merged — so provenance and the fold
-/// can name a layer (§5.1–§5.3).
-///
-/// The view overlay itself is deliberately absent. It had exactly one
-/// reader, `dataset_columns::provenance_of`'s View arm, and reading it
-/// there was the defect: a field stepped BACK to the value the layer
-/// below already gives still read `view`, because the captured overlay
-/// still held a key the write was about to remove. The chip now asks
-/// only whether the field differs from desk + dataset, which is a
-/// question the field's own value answers (the final whole-branch
-/// review's named risk 4).
+/// Definition and dataset presentation keys kept separately for provenance and clear
+/// notices. View provenance compares current fields with their merged baseline rather
+/// than consulting a possibly stale saved overlay key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnLayers {
     pub desk: ColumnPresentation,
@@ -975,8 +741,8 @@ pub struct ColumnLayers {
 }
 
 impl ColumnLayers {
-    /// desk with the dataset level merged over — what a cleared VIEW key
-    /// falls to, and what the view writer compares against (§5.1).
+    /// desk with the dataset level merged over — what a cleared VIEW key falls to, and
+    /// what the view writer compares against.
     pub fn below_view(&self) -> ColumnPresentation {
         let mut p = self.desk.clone();
         p.merge_over(&self.dataset);
@@ -990,10 +756,9 @@ impl ColumnLayers {
 pub struct ColumnContext {
     pub door: ColumnDoor,
     pub layers: ColumnLayers,
-    /// The Schema door only: the `[<dataset>]` table of
-    /// `dataset_presentation.toml` as it stands (empty when absent), so
-    /// the writer can render the dataset's OTHER personalised columns
-    /// verbatim beside the one being edited (§4.5).
+    /// The Schema door only: the `[<dataset>]` table of `dataset_presentation.toml` as
+    /// it stands (empty when absent), so the writer can render the dataset's OTHER
+    /// personalised columns verbatim beside the one being edited.
     pub overlay_object: toml::Table,
     /// The Schema door only: the scratch item the fields fold into,
     /// where the Views door folds into its parent list's item.
@@ -1003,18 +768,16 @@ pub struct ColumnContext {
 /// One editable property of one object.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
-    /// The TOML key within the object (`dataset`, `columns`). Also what a
-    /// diagnostic's key path is matched against once readers carry one
-    /// (spec §8.5 — see [`Draft::diagnostics`]).
+    /// The TOML key within the object (`dataset`, `columns`). Also what a diagnostic's
+    /// key path is matched against once readers carry one see [`Draft::diagnostics`]).
     pub key: String,
     pub label: String,
     pub kind: FieldKind,
     pub dest: Destination,
-    /// The layer this row's value came from, painted as a badge on the
-    /// row when `Some` (§19.4). Filled by the Schema adapter from
-    /// `Config::explain`; every writable domain leaves it `None`, since
-    /// the object-level badge in the header already says whose copy is
-    /// on screen and a second badge per row would only repeat it.
+    /// The layer this row's value came from, painted as a badge on the row when `Some`.
+    /// Filled by the Schema adapter from `Config::explain`; every writable domain
+    /// leaves it `None`, since the object-level badge in the header already says whose
+    /// copy is on screen and a second badge per row would only repeat it.
     pub layer: Option<Layer>,
 }
 
@@ -1042,19 +805,8 @@ pub enum EditRow {
     },
 }
 
-/// What the row under the cursor answers to — the footer's whole
-/// question (user ruling 2026-09-13, "when we're highlighting a row that
-/// is text based, show the `press i` helper text; when it's on something
-/// we cycle, show the space/shift+space etc").
-///
-/// Derived from the row rather than from the domain, which is the point:
-/// a footer that named `space` on a read-only `Text`, or `i` on a
-/// `Choice`, would teach a key that is inert on the row the trader is
-/// actually looking at — the defect class this interaction model exists
-/// to remove. Answered by [`Draft::selected_vocabulary`], which is the
-/// same match [`Draft::step_selected`] and [`super::render::
-/// open_text_field`] make, in the same order, so the footer cannot
-/// promise a key those two would refuse.
+/// Operations available on the selected row. Footers and value buttons use this same
+/// vocabulary so they advertise only actions the row can perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowVocabulary {
     /// Nothing on this row changes and nothing types: a display-only
@@ -1076,18 +828,15 @@ pub enum RowVocabulary {
     Available,
 }
 
-/// What a dragged list row carries (4c §18.9.1): the field's key, which
-/// block it came from, and the item's NAME — never an index. The keyboard
-/// stays live during a drag, so a keystroke can reorder or remove between
-/// the grab and the drop; a payload resolved by name at drop time lands on
-/// the row the trader picked up, or on nothing, never on whichever column
-/// now holds the grabbed index.
+/// What a dragged list row carries: the field's key, which block it came from, and the
+/// item's NAME — never an index. The keyboard stays live during a drag, so a keystroke
+/// can reorder or remove between the grab and the drop; a payload resolved by name at
+/// drop time lands on the row the trader picked up, or on nothing, never on whichever
+/// column now holds the grabbed index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowDrag {
     pub field: String,
-    /// `true` for an [`EditRow::Item`], `false` for an
-    /// [`EditRow::Available`] — §18.7.1's variant distinction carried onto
-    /// the wire.
+    /// Whether this payload names an object member or an available candidate.
     pub own: bool,
     pub name: String,
 }
@@ -1107,17 +856,9 @@ pub struct RowDrag {
 pub enum Confirm {
     Delete,
     Revert,
-    /// `o` on a saved scope the user layer already owns (`Domain::Scopes`
-    /// only): overwrite its contents with whatever the frame currently
-    /// holds. Armed only there, because only there is something lost —
-    /// with no desk copy underneath, the scope's previous selection is
-    /// gone for good. On a desk- or builtin-owned scope `o` writes at
-    /// once and says so instead (`render::overwrite_scope`): nothing is
-    /// lost, the desk's copy is still there and `r` restores it, and the
-    /// fork it makes is announced rather than asked about, exactly as a
-    /// field edit's is (user ruling 2026-09-14). There used to be a
-    /// `Fork` confirm for those field edits and a `forks` payload here
-    /// so one prompt could disclose the fork; both went with that ruling.
+    /// Confirm replacement of a user-owned saved scope with current frame scope. An
+    /// inherited scope instead receives an announced user-layer fork without a
+    /// confirmation, leaving the lower-layer definition available to revert.
     Overwrite,
 }
 
@@ -1139,13 +880,8 @@ impl Confirm {
     }
 }
 
-/// What the rows below an open field are (spec 2026-09-19 §3.2). `None`
-/// is a plain value field: the rows stay the edit rows, unfiltered, with
-/// the edited one highlighted (§19.1). `Chain` is Groupings' chain field
-/// (§18.8): the rows are the dimensions that complete the segment being
-/// typed. `Choice` is a `Choice` row's typeahead: the rows are the
-/// field's own options, ranked by the query, painted from
-/// [`Draft::choice`] in the row list's place.
+/// Rows shown under an open field. Plain entry retains unfiltered field rows; Chain
+/// shows dimension completions; Choice shows options for typeahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Completions {
     None,
@@ -1153,41 +889,19 @@ pub enum Completions {
     Choice,
 }
 
-/// A value field open in the filter row's place (§19.1): the shared
-/// `Input` seeded with a row's value, `enter` applying it down the tick's
-/// own path and `escape` cancelling. The chain field (§18.8) is the case
-/// with `completions: Completions::Chain` — the rows below are then
-/// [`groupings::chain_candidates`] rather than the edit rows. The `Choice`
-/// row's typeahead (§3.2) is `completions: Completions::Choice` — the
-/// rows below are [`Draft::choice`]'s ranked options instead.
-///
-/// `row` is an [`EditRow`], not a field index, so a future item-level
-/// text (a column's width, Part 2c) is one more arm and not a second
-/// mechanism; nothing in this plan opens it on anything but
-/// `EditRow::Field`.
+/// An open value field using the shared input. Enter validates/applies and Escape
+/// cancels typed text. `completions` selects plain, chain, or choice routing; `row`
+/// identifies the edited draft row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextEntry {
     pub row: EditRow,
     pub completions: Completions,
 }
 
-/// One object being edited.
-///
-/// The edit **buffer**, and what the edit stage actually paints: a
-/// keystroke changes a field here — so the trader sees it at once — and
-/// [`apply::commit_edit`] puts that change on the pending batch the next
-/// flush merges, applies and writes (spec §7.1). The buffer also carries
-/// the cursor, the confirm and the row structure, and it is what the
-/// difference against [`Draft::baseline`] is taken from — that difference
-/// is precisely "what this keystroke changed", which is what decides the
-/// files a flush touches.
-///
-/// An earlier build staged here and wrote only on `s`, reasoning that a
-/// write per keystroke would fire the 500 ms watcher mid-edit and reload
-/// a half-finished object. What actually removes that hazard is that the
-/// change never travels through the disk to reach the screen: the flush
-/// merges the documents already in hand, and the watcher's reload of our
-/// own write is a no-op (see [`apply`]).
+/// The object's edit buffer and the source of the painted field values. Changed fields
+/// appear immediately; `apply::commit_edit` queues their rendered objects for the
+/// shared flush. Baselines track changes already queued, not disk acknowledgement.
+/// Column and Values stages project over this same draft.
 #[derive(Debug, Clone)]
 pub struct Draft {
     pub name: String,
@@ -1209,57 +923,33 @@ pub struct Draft {
     /// comparison and nothing else, so a keystroke that puts a value back
     /// where it started changes nothing and writes nothing.
     baseline: Vec<Field>,
-    /// `source` as it stood at the same moment `baseline` did. For every
-    /// domain but Scopes this never diverges from `source` after
-    /// construction — nothing else in this scaffold mutates `source`
-    /// directly — so it costs those domains nothing. Scopes' `o`
-    /// (`scopes::overwrite_with`) is the one verb that replaces `source`
-    /// wholesale while leaving the *painted* fields free to describe it
-    /// however a summary function likes; comparing only `fields` against
-    /// `baseline` would then make dirtiness depend on two summary
-    /// strings never colliding, which is not a property `selects_summary`
-    /// promises to keep as it grows. Comparing `source` directly closes
-    /// that by construction: the actual object decides whether anything
-    /// changed, not its rendering.
+    /// Source at the same point as the field baseline. Compare it directly as well as
+    /// fields: different scope selections can produce identical summary strings, so
+    /// visible equality does not establish that the persisted object is unchanged.
     baseline_source: toml::Table,
-    /// Cursor over [`Draft::visible_rows`] (§18.3) — the FILTERED list,
-    /// not [`Draft::rows`] — the same convention
-    /// `ObjectDialogState::selected` holds for the browse stage. One
-    /// cursor per stage, never both live at once.
+    /// Cursor over [`Draft::visible_rows`] — the FILTERED list, not [`Draft::rows`] —
+    /// the same convention `ObjectDialogState::selected` holds for the browse stage.
+    /// One cursor per stage, never both live at once.
     pub selected: usize,
-    /// The edit stage's filter (§18.3), mirrored from the shared `Input`
-    /// by `ObjectDialogState::set_query` exactly as the browse query is.
-    /// Lives on the draft rather than beside it because `selected`
-    /// indexes the FILTERED list and both must move together.
+    /// The edit stage's filter, mirrored from the shared `Input` by
+    /// `ObjectDialogState::set_query` exactly as the browse query is. Lives on the
+    /// draft rather than beside it because `selected` indexes the FILTERED list and
+    /// both must move together.
     pub query: String,
-    /// [`Domain::validate`]'s output for the draft as it stands, refreshed
-    /// on every change (spec §7.2).
-    ///
-    /// Shown on the header AND on the field row it names (§19.5): every
-    /// reader across `geode-core` now fills `Diagnostic::path` with the
-    /// key it was looking at, and [`Draft::row_for_path`] turns that path
-    /// back into the [`EditRow`] it describes — [`Draft::flagged_rows`] is
-    /// what `render.rs` reads to paint the row glyph, while the header
-    /// list (this field, read directly) stays the text of record for
-    /// every diagnostic, matched or not.
+    /// Current adapter diagnostics, refreshed after changes. The header displays all of
+    /// them; diagnostics with resolvable paths also mark their field rows. Error
+    /// severity blocks value edits, while warnings remain editable.
     pub diagnostics: Vec<Diagnostic>,
-    /// A text field is open (§19.1). While it is, `query` holds the text
-    /// being typed rather than a filter — the shared `Input` mirrors into
-    /// it exactly as a filter does, so there is no second text buffer —
-    /// and, for the chain field's `completions: Completions::Chain`,
-    /// [`Draft::visible_rows`] is the completion list. A field on the
-    /// draft beside `confirm` rather than a `Stage`, because the stage is
-    /// what the escape ladder and the browse cursor restore key on, and
-    /// both must still read `Edit` here.
+    /// An open field makes `query` its typed buffer rather than the stage filter.
+    /// Closing it clears that buffer; no previous filter is restored.
     pub text_entry: Option<TextEntry>,
     /// The typeahead list while a `Choice` row's field is open
     /// (`text_entry.completions == Completions::Choice`), `None`
     /// otherwise. Owns the ranking and the highlight; `selected` stays on
     /// the field's own row throughout, as it does for a plain field.
     pub choice: Option<crate::choice::ChoiceList>,
-    /// The object's OWN fields, while [`Stage::Column`] has swapped
-    /// `fields` out for one column's seven (Part 2c §5.2). `None`
-    /// everywhere else.
+    /// The object's OWN fields, while [`Stage::Column`] has swapped `fields` out for
+    /// one column's seven. `None` everywhere else.
     ///
     /// The view's list has to stay reachable while the stage is open,
     /// because the write path renders the whole object on every
@@ -1275,36 +965,18 @@ pub struct Draft {
     /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
     /// exactly when `parent_fields` is; [`Draft::column`] is the read.
     column: Option<String>,
-    /// Which column [`Draft::parent_fields`] was stashed for by the
-    /// VALUES stage (scopes-editing spec §4). `Some` exactly when
-    /// `parent_fields` is and `column` is `None`; the two stages share
-    /// the stash and can never both be open.
+    /// Which column [`Draft::parent_fields`] was stashed for by the VALUES stage.
+    /// `Some` exactly when `parent_fields` is and `column` is `None`; the two stages
+    /// share the stash and can never both be open.
     values: Option<String>,
-    /// What the door that opened [`Stage::Column`] knows and the seven
-    /// fields do not (dataset-presentation spec §4.1, §5.1): which door
-    /// it was, the three layers under the column, and — the Schema door
-    /// — the overlay table and the scratch item the fold writes into.
-    /// `None` off the column stage, set by the door and dropped by
-    /// [`Draft::leave_column`].
+    /// Column-stage destination, baseline layers, and fold target. Views edits its
+    /// parent list item; Schema edits a scratch dataset item and overlay object.
     pub column_ctx: Option<ColumnContext>,
-    /// The trader's DATASET-level presentation for this object's
-    /// columns, by column name (dataset-presentation spec §5.1) — the
-    /// layer between the desk view's own keys and this view's overlay.
-    ///
-    /// It lives on the draft because the writer's entry point,
-    /// [`Domain::to_table`], has no `Config` to read it from, and the
-    /// writer is exactly where getting it wrong is silent: compared
-    /// against the desk alone, every dataset-level key reads as a
-    /// divergence and is copied into `view_presentation.toml` as a
-    /// per-view override the trader never made
-    /// ([`views::baseline_below`]).
-    ///
-    /// **Filled for `Domain::Views` alone**, by [`Domain::draft`] from
-    /// the config it is handed and refreshed by
-    /// `render::enter_column_stage` from the pending-aware one. Empty
-    /// for every other domain — none of them has a view whose columns a
-    /// dataset could speak for, and the Schema door's own layer is the
-    /// one it writes, carried on [`ColumnContext`] instead.
+    /// Dataset presentation by column for a Views draft. The writer has no Config
+    /// parameter, so this captured layer is needed to avoid copying inherited dataset
+    /// values into a view overlay as new overrides. Stage entry refreshes it from the
+    /// pending-aware config. Other domains leave this map empty; Schema carries its
+    /// editable overlay on `ColumnContext`.
     pub dataset_layer: BTreeMap<String, ColumnPresentation>,
 }
 
@@ -1345,10 +1017,9 @@ impl Step {
     }
 }
 
-/// What a cleared column-stage key fell to (dataset-presentation spec
-/// §3.3, §4.4, §5.2): the desk view's own key, the dataset level, or —
-/// from the Schema door — whatever each view says. `None` means nothing
-/// below sets the key, so there is nothing to tell the trader.
+/// What a cleared column-stage key fell to: the desk view's own key, the dataset level,
+/// or — from the Schema door — whatever each view says. `None` means nothing below sets
+/// the key, so there is nothing to tell the trader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FellTo {
     Desk,
@@ -1364,9 +1035,8 @@ pub struct Fold {
 }
 
 impl Draft {
-    /// The rows the edit stage paints, in order: every field, each
-    /// ordered list's own items directly under it, then that list's
-    /// available catalogue (§18.7.1).
+    /// The rows the edit stage paints, in order: every field, each ordered list's own
+    /// items directly under it, then that list's available catalogue.
     pub fn rows(&self) -> Vec<EditRow> {
         let mut out = Vec::new();
         for (i, field) in self.fields.iter().enumerate() {
@@ -1409,43 +1079,20 @@ impl Draft {
         }
     }
 
-    /// The rows the edit stage shows: every row whose [`Draft::row_label`]
-    /// [`crate::listfilter::rank`] matches the query, in ROW order —
-    /// never score order. `Ranked::row` indexes [`Draft::rows`].
-    ///
-    /// This is where the edit stage's own filtering deliberately parts
-    /// ways with the browse list's (review round 1): browse's rows are
-    /// an unordered catalogue, so ranking by match quality is a pure
-    /// improvement, but the edit stage's row order **is the data** — a
-    /// view's column order, a grouping slot's chain order — and
-    /// reordering it out from under a filter would be actively
-    /// misleading rather than merely surprising. Two reasons, both still
-    /// standing after §18.1 gave each block a header and each row of the
-    /// object's own list a grip. First, the order is a value the trader
-    /// is editing and
-    /// `shift+j`/`shift+k` are how they edit it: neither can mean
-    /// anything coherent against a list whose painted order `shift+j`
-    /// does not control. Second, a section header marks where its block
-    /// BEGINS — it says nothing about a row that a score sort has thrown
-    /// into the middle of the wrong block, so under score order the
-    /// header would be actively wrong rather than merely absent. So
-    /// `rank` is used only to decide which rows survive the query;
-    /// `sort_by_key` afterwards restores row order among the survivors,
-    /// discarding nothing but the score-derived ordering.
+    /// Rows matching the query, in original row order. Fuzzy ranking determines
+    /// membership only: the order itself is editable data, and section boundaries must
+    /// stay intact. Each returned `Ranked::row` indexes `Draft::rows`.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
-        // §19.1: while any field is open, `query` is the value being
-        // typed into IT, not a filter over the rows — so the rows below
-        // must not be narrowed by it. The chain field (§18.8) is the one
-        // case where the rows really are a search: its own `query` is
-        // the chain being typed and the rows are its completions. A
-        // plain field's rows stay every edit row, unfiltered and in row
-        // order, so the trader sees the row they are editing highlighted
-        // in place (spec §19.1: "the rows below stay the edit rows with
-        // the edited one highlighted"). An edit-stage filter that was
-        // applied before `i` is lost the moment the field opens (the
-        // seed overwrites `query`) — the same rule the chain field
-        // already has (§18.8) — so there is nothing left to apply here
-        // even if this branch tried to.
+        // while any field is open, `query` is the value being typed into IT, not a
+        // filter over the rows — so the rows below must not be narrowed by it. The
+        // chain field is the one case where the rows really are a search: its own
+        // `query` is the chain being typed and the rows are its completions. A plain
+        // field's rows stay every edit row, unfiltered and in row order, so the trader
+        // sees the row they are editing highlighted in place ("the rows below stay the
+        // edit rows with the edited one highlighted"). An edit-stage filter that was
+        // applied before `i` is lost the moment the field opens (the seed overwrites
+        // `query`) — the same rule the chain field already has — so there is nothing
+        // left to apply here even if this branch tried to.
         if let Some(entry) = self.text_entry {
             return match entry.completions {
                 Completions::Chain => groupings::chain_candidates(self),
@@ -1481,9 +1128,9 @@ impl Draft {
         self.fields.get(field).map(|f| f.key.as_str())
     }
 
-    /// The row the cursor is on, if the cursor is in range — indexed
-    /// through [`Draft::visible_rows`], so every verb acts on the row the
-    /// trader is actually looking at, filtered or not (§18.3).
+    /// The row the cursor is on, if the cursor is in range — indexed through
+    /// [`Draft::visible_rows`], so every verb acts on the row the trader is actually
+    /// looking at, filtered or not.
     pub fn selected_row(&self) -> Option<EditRow> {
         let rows = self.rows();
         self.visible_rows()
@@ -1491,24 +1138,19 @@ impl Draft {
             .and_then(|m| rows.get(m.row).copied())
     }
 
-    /// What the row under the cursor answers to (user ruling
-    /// 2026-09-13) — see [`RowVocabulary`] for why the footer asks the
-    /// row rather than the domain.
+    /// What the row under the cursor answers to — see [`RowVocabulary`] for why the
+    /// footer asks the row rather than the domain.
     ///
-    /// Groupings is the one domain whose footer must NOT take `i` from
-    /// this answer: there `i` reaches past the selected row to the
-    /// slot's whole chain (§18.8), so it is live on every row including
-    /// the display-only `slot`. That exception lives at the two call
-    /// sites in `render` — the edit footer and `actions()`, the `i`
-    /// button (spec §20.3) — not here, because it is a fact about the
-    /// domain's `i` and not about any row.
+    /// Groupings is the one domain whose footer must NOT take `i` from this answer:
+    /// there `i` reaches past the selected row to the slot's whole chain, so it is live
+    /// on every row including the display-only `slot`. That exception lives at the two
+    /// call sites in `render` — the edit footer and `actions()`, the `i` button — not
+    /// here, because it is a fact about the domain's `i` and not about any row.
     pub fn selected_vocabulary(&self, domain: Domain) -> RowVocabulary {
         self.vocabulary_of(self.selected_row(), domain)
     }
 
-    /// [`selected_vocabulary`](Self::selected_vocabulary) for any row —
-    /// what the value chip asks per painted row (spec §20.3), so the chip
-    /// and the footer can never disagree about whether a row steps.
+    /// Row vocabulary for any displayed row, shared by selection hints and buttons.
     pub fn vocabulary_of(&self, row: Option<EditRow>, domain: Domain) -> RowVocabulary {
         match row {
             None => RowVocabulary::Inert,
@@ -1536,18 +1178,9 @@ impl Draft {
         }
     }
 
-    /// Re-point the cursor at `row`'s own position in the FILTERED list,
-    /// after a verb has changed which row that is — the identity-based
-    /// replacement for the arithmetic `self.selected = self.selected -
-    /// item + end` used to do when `selected` indexed the unfiltered
-    /// [`Draft::rows`] directly. Leaves `selected` where it is if `row`
-    /// is no longer visible under the current query, which none of its
-    /// callers can actually produce (moving an item never changes its
-    /// own label), but is the honest fallback for a future
-    /// one that might. Neither an *add* nor a *removal* calls this — the
-    /// cursor stays behind on the row that was next rather than following
-    /// the item from one list into the other (`step_selected`'s and
-    /// `remove_selected`'s own comments have the ruling).
+    /// Move selection to this row's position in the filtered list. Leave selection
+    /// unchanged if it is no longer visible. Reorders follow the item; adds and
+    /// removals separately keep the cursor at the next visible row.
     fn follow(&mut self, row: EditRow) {
         let rows = self.rows();
         if let Some(position) = self
@@ -1584,10 +1217,9 @@ impl Draft {
         self.fields != self.baseline || self.source != self.baseline_source
     }
 
-    /// The column whose presentation is open, if [`Stage::Column`] is
-    /// (Part 2c §5.2). The one question `render::revalidate` asks before
-    /// folding, and the reason the fold is a property of the draft rather
-    /// than of the stage the gpui side happens to be painting.
+    /// The column whose presentation is open, if [`Stage::Column`] is. The one question
+    /// `render::revalidate` asks before folding, and the reason the fold is a property
+    /// of the draft rather than of the stage the gpui side happens to be painting.
     pub fn column(&self) -> Option<&str> {
         self.column.as_deref()
     }
@@ -1597,39 +1229,20 @@ impl Draft {
         self.values.as_deref()
     }
 
-    /// Open the column stage over `column` (Part 2c §5.2): stash the
-    /// object's fields, install `fields` (the column's seven —
-    /// `views::column_fields`), and start the stage clean.
-    ///
-    /// `false`, changing nothing, when `column` is not one of the
-    /// object's own members. The check is the whole safety property here:
-    /// [`Draft::fold_column`] finds its item BY NAME in the stashed list,
-    /// so a stage opened over a name that list does not hold would take
-    /// every keystroke and fold none of them — a stage that silently
-    /// discards work, which is worse than one that never opens. An
-    /// AVAILABLE row is a non-member by exactly this test, which is what
-    /// keeps 2b's notice on it rather than opening a stage over a column
-    /// the view does not have.
-    ///
-    /// `baseline` becomes the installed fields, so the first keystroke in
-    /// the stage is the first difference — and so `writes_by_destination`
-    /// compares seven column fields against seven, never against the two
-    /// it replaced. `query`, `selected`, `text_entry` and `confirm` all
-    /// reset for the same reason [`ObjectDialogState::enter_edit`] resets
-    /// its own: a filter or a half-open field belonging to the list
-    /// behind would be live against rows that no longer exist.
+    /// Open a column projection by stashing parent fields and installing the seven
+    /// presentation fields with a fresh baseline. Refuse re-entry and names that are
+    /// neither a Views member nor a declared Schema column. Otherwise the fold would
+    /// have no target and silently lose edits. Reset draft input and selection; the
+    /// render transition separately resets dialog mode and confirmation.
     pub fn enter_column(&mut self, column: &str, fields: Vec<Field>) -> bool {
-        // Re-entry would be the end of the object (the final review's
-        // M-1): the membership test below passes THROUGH
-        // `field_by_key`'s parent fallback, so from an already-open
-        // stage it would stash the seven installed column fields as
-        // `parent_fields` and drop the view's own list forever — after
-        // which `list_items("columns")` answers `None` and the write
-        // path renders a view with no columns at all. Unreached today
-        // (this stage installs no `EditRow::Item` rows, and
-        // `commit_selected_row` gates on `column().is_none()` besides),
-        // so this line is what makes it unrepresentable rather than
-        // merely unreached.
+        // Re-entry would be the end of the object: the membership test below passes
+        // THROUGH `field_by_key`'s parent fallback, so from an already-open stage it
+        // would stash the seven installed column fields as `parent_fields` and drop the
+        // view's own list forever — after which `list_items("columns")` answers `None`
+        // and the write path renders a view with no columns at all. Unreached today
+        // (this stage installs no `EditRow::Item` rows, and `commit_selected_row` gates
+        // on `column().is_none()` besides), so this line is what makes it
+        // unrepresentable rather than merely unreached.
         //
         // The Values stage shares this same stash (`Draft::values`'s own
         // doc), so it is refused here too — entering over an open Values
@@ -1638,10 +1251,9 @@ impl Draft {
         if self.column.is_some() || self.values.is_some() {
             return false;
         }
-        // Membership is what the door lists: the Views door's `columns`
-        // list, or — the Schema door — a parent field keyed
-        // `columns.<col>`, which is how `schema::fields` names a column
-        // row (dataset-presentation spec §4.1).
+        // Membership is what the door lists: the Views door's `columns` list, or — the
+        // Schema door — a parent field keyed `columns.<col>`, which is how
+        // `schema::fields` names a column row.
         let listed = self
             .list_items("columns")
             .is_some_and(|items| items.iter().any(|i| i.name == column));
@@ -1656,47 +1268,19 @@ impl Draft {
         self.query.clear();
         self.selected = 0;
         self.text_entry = None;
-        // `choice` is `Some` exactly while `text_entry.completions ==
-        // Choice` (plan invariant) — cleared here for the same reason
-        // `text_entry` is: entering the column stage can only happen
-        // with no field open, so this is a no-op in practice, but the
-        // invariant should hold by construction rather than by every
-        // caller happening to have closed the field first.
+        // Clear choice completion together with text entry so neither retains indices
+        // into the parent fields after the column projection is installed.
         self.choice = None;
         true
     }
 
-    /// Write the installed column fields back onto the item the object's
-    /// own list holds (Part 2c §5.2) — the projection's whole mechanism.
+    /// Fold installed column fields before validation or rendering a write. Views
+    /// updates the parent list item against definition plus dataset values; Schema
+    /// updates its scratch item against kind defaults. No context means no fold.
     ///
-    /// Called from `render::revalidate`, so it runs on every changed
-    /// value BEFORE the validator and the write path read the list. A
-    /// no-op outside the stage, and a no-op for a column the stashed list
-    /// no longer holds, which [`Draft::enter_column`]'s membership check
-    /// makes unreachable.
-    ///
-    /// **The baseline goes in and the two `Text` fields come back out.**
-    /// A cleared `label` or an `auto` width means "stop overriding this",
-    /// which resolves to whatever the layers BELOW this door say
-    /// (`views::fold_into` has the full statement, and why writing `None`
-    /// there would silently swallow the clear). The fold then re-seeds
-    /// those two fields from the item, so that value is on screen on the
-    /// same keystroke rather than a blank the next rebuild contradicts.
-    /// Re-seeding is a no-op for every other value, since the field and
-    /// the item already agree.
-    ///
-    /// Returns the key that was cleared and the layer it fell to, for the
-    /// caller's notice — see `views::fold_into` on why at most one key
-    /// can be cleared per fold.
-    ///
-    /// **Which door opened the stage decides both the baseline and the
-    /// fold target**, read off [`Draft::column_ctx`] rather than assumed
-    /// (dataset-presentation spec §5.1; the final review's M-5, now
-    /// answered): the Views door folds into the item its own `columns`
-    /// list holds, over desk + dataset; the Schema door folds into the
-    /// context's own scratch item, over the kind default, since a dataset
-    /// has no view list to project into. A stage whose door left no
-    /// context folds nothing — there is no baseline to be honest about.
+    /// Cleared label and width fields inherit the baseline. Reseed them immediately so
+    /// the draft shows the value that persistence will read back. Return the cleared
+    /// key and its inherited layer for the caller's notice.
     pub fn fold_column(&mut self) -> Option<Fold> {
         let name = self.column.clone()?;
         // Both doors install one; a stage without it folds nothing, which
@@ -1745,9 +1329,8 @@ impl Draft {
         };
         let key = cleared?;
         let to = match door {
-            // §4.4: below the dataset level is the desk view's own key,
-            // which varies per view — so the honest answer is "each
-            // view", not one layer's name.
+            // below the dataset level is the desk view's own key, which varies per view
+            // — so the honest answer is "each view", not one layer's name.
             ColumnDoor::Dataset => Some(FellTo::EachView),
             ColumnDoor::View => {
                 let set = |p: &ColumnPresentation| match key {
@@ -1755,8 +1338,8 @@ impl Draft {
                     "width" => p.width.is_some(),
                     _ => false,
                 };
-                // §5.2: the dataset level sits ABOVE the desk view, so a
-                // cleared view key meets it first.
+                // the dataset level sits ABOVE the desk view, so a cleared view key
+                // meets it first.
                 if set(&layers.dataset) {
                     Some(FellTo::Dataset)
                 } else if set(&layers.desk) {
@@ -1785,8 +1368,8 @@ impl Draft {
         }
     }
 
-    /// Close the column stage (Part 2c §5.2): fold one last time, restore
-    /// the object's fields, and leave the cursor on the column's own row.
+    /// Close the column stage: fold one last time, restore the object's fields, and
+    /// leave the cursor on the column's own row.
     ///
     /// The final fold is not belt-and-braces — it is what makes leaving
     /// without having pressed anything since the last change still
@@ -1832,11 +1415,7 @@ impl Draft {
         // cleared anyway because its `EditRow` indexes the fields being
         // replaced, and a stale one would point into the restored list.
         self.text_entry = None;
-        // `choice` beside it, same reasoning: it can only be `Some`
-        // while `text_entry` is too (plan invariant, "`choice` is
-        // `Some` exactly while `completions == Choice`"), so this holds
-        // by construction rather than by the invariant never having
-        // been checked here.
+        // Clear choice completion with text entry before restoring parent selection.
         self.choice = None;
         self.selected = 0;
         if let Some(column) = column {
@@ -1844,11 +1423,10 @@ impl Draft {
         }
     }
 
-    /// Open the Values stage (scopes-editing spec §4): stash the object's
-    /// fields, install `fields` (the one values list) as a clean
-    /// baseline. Refused while any projection is already open, for
-    /// `enter_column`'s reason — a second stash would drop the object's
-    /// own fields for good.
+    /// Open the Values stage: stash the object's fields, install `fields` (the one
+    /// values list) as a clean baseline. Refused while any projection is already open,
+    /// for `enter_column`'s reason — a second stash would drop the object's own fields
+    /// for good.
     pub fn enter_values(&mut self, column: &str, fields: Vec<Field>) -> bool {
         if self.column.is_some() || self.values.is_some() {
             return false;
@@ -1901,14 +1479,12 @@ impl Draft {
     /// [`Draft::leave_column`] and `apply::revert_failed_write`, whose
     /// rebuilt draft has the same problem for the same reason.
     ///
-    /// The field fallback is exactly [`Draft::enter_column`]'s own
-    /// membership rule read backwards (dataset-presentation spec §4.1):
-    /// the Schema door's column rows are `Field`s keyed `columns.<col>`,
-    /// not list items, so without it `escape` out of a column stage on a
-    /// thirty-column dataset would land the cursor back at the top of the
-    /// list rather than on the column just edited. No other domain can
-    /// reach it — a view's own list field is keyed `columns`, never
-    /// `columns.<something>`.
+    /// The field fallback is exactly [`Draft::enter_column`]'s own membership rule read
+    /// backwards: the Schema door's column rows are `Field`s keyed `columns.<col>`, not
+    /// list items, so without it `escape` out of a column stage on a thirty-column
+    /// dataset would land the cursor back at the top of the list rather than on the
+    /// column just edited. No other domain can reach it — a view's own list field is
+    /// keyed `columns`, never `columns.<something>`.
     pub(in crate::shell::objectdialog) fn select_item_named(&mut self, name: &str) {
         self.selected = 0;
         let target = self
@@ -1936,8 +1512,8 @@ impl Draft {
         }
     }
 
-    /// Replace the object's own fields with a freshly derived set and
-    /// treat them as applied (dataset-presentation spec §4.7).
+    /// Replace the object's own fields with a freshly derived set and treat them as
+    /// applied.
     ///
     /// `render::leave_column_stage` uses it on the Schema door alone: the
     /// column row it returns to carries the dataset overlay's summary in
@@ -1992,14 +1568,13 @@ impl Draft {
     /// The object's own items of the ordered-list field named `key` —
     /// what is written, counted and reorderable.
     ///
-    /// Read through [`Draft::field_by_key`], which falls back to the
-    /// object's stashed fields, and that fallback is load-bearing rather
-    /// than tidy: the column stage (Part 2c §5.2) swaps `fields` out for
-    /// one column's seven, while the write path still renders the WHOLE
-    /// object on every keystroke — `views::presentation_table` and
-    /// `views::doc_table` both read this — and the item being folded into
-    /// lives in that stashed list. Without the fallback, a keystroke in
-    /// the column stage would render a view with no columns at all.
+    /// Read through [`Draft::field_by_key`], which falls back to the object's stashed
+    /// fields, and that fallback is load-bearing rather than tidy: the column stage
+    /// swaps `fields` out for one column's seven, while the write path still renders
+    /// the WHOLE object on every keystroke — `views::presentation_table` and
+    /// `views::doc_table` both read this — and the item being folded into lives in that
+    /// stashed list. Without the fallback, a keystroke in the column stage would render
+    /// a view with no columns at all.
     pub fn list_items(&self, key: &str) -> Option<&[ListItem]> {
         self.field_by_key(key).and_then(|f| match &f.kind {
             FieldKind::OrderedList { items, .. } => Some(items.as_slice()),
@@ -2054,15 +1629,9 @@ impl Draft {
             .is_some_and(|entry| entry.completions == Completions::Chain)
     }
 
-    /// The write half of the query mirror for this draft —
-    /// `ObjectDialogState::set_query` routes an edit- or column-stage
-    /// keystroke here. A filter keystroke resets the cursor to the top
-    /// match, because the list just re-ranked and the old index points at
-    /// an unrelated row. An open PLAIN text field is not a filter: its rows
-    /// stay unfiltered with the edited row highlighted (§19.1), so the
-    /// cursor stays on that row. The chain field's rows ARE its completions
-    /// and keep the reset (§18.8). Found on a display 2026-09-13: every
-    /// keystroke after `i` sent the highlight back to the first row.
+    /// Mirror input text into the draft. Filtering resets selection to the first match;
+    /// plain text entry keeps its edited row highlighted because the rows remain
+    /// unfiltered. Chain and choice entry update their completion selection.
     pub fn set_query(&mut self, query: String) {
         self.query = query;
         match self.text_entry {
@@ -2088,30 +1657,12 @@ impl Draft {
         }
     }
 
-    /// `i` on a `Text` or `Number` row (§19.1): open the field seeded with
-    /// the row's value, so appending is one keystroke away. Pure — the
-    /// mode switch that hands the shared `Input` the keys is the
-    /// handler's, and the sync writes the seed into the field on its
-    /// return. `Step::Inert` off any other row: the caller says which
-    /// verb (if any) that row has.
+    /// Open a text or numeric field seeded from its value. The caller checks domain
+    /// permission and owns the input mode/focus transition. `Changed` here means the
+    /// field opened, not that a value is ready for validation or persistence.
     ///
-    /// Whether a `Text` row is *editable* is the domain's call
-    /// (`Domain::text_editable`), checked by the caller before this —
-    /// Groupings' `slot` and Scopes' two summaries are `Text` rows that
-    /// must stay read-only, and the draft has no domain to ask.
-    ///
-    /// `follow(row)` after setting `text_entry`, not before: once the
-    /// field is open, [`Draft::visible_rows`] answers with every row
-    /// unfiltered rather than the query-filtered list `selected` indexed
-    /// a moment ago, so `row`'s position there can differ from
-    /// `self.selected`'s old value — that is exactly what leaves the
-    /// edited row unhighlighted if this is skipped.
-    ///
-    /// The `Step::Changed` this returns means only that the field
-    /// OPENED, never that a value changed — nothing routes it into
-    /// [`Self::revalidate`] or `apply::commit_or_confirm`, which read a
-    /// step from a tick or a text commit, not from opening the field
-    /// that will produce one.
+    /// Follow the row after installing `text_entry`: the displayed list becomes
+    /// unfiltered, so its old filtered index can identify a different row.
     pub fn begin_text_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
@@ -2130,13 +1681,11 @@ impl Draft {
         Step::Changed
     }
 
-    /// `i` on a `Choice` row (spec 2026-09-19 §3.2): open the shared
-    /// `Input` as a typeahead over the field's options — EMPTY, since the
-    /// current value is already the highlighted row and a seed would
-    /// have to be deleted before typing — with the highlight placed on
-    /// the current option. `Step::Inert` off any other row, and on a
-    /// one-option `Choice` (`step_selected`'s own guard, mirrored: there
-    /// is nothing to choose between).
+    /// `i` on a `Choice` row: open the shared `Input` as a typeahead over the field's
+    /// options — EMPTY, since the current value is already the highlighted row and a
+    /// seed would have to be deleted before typing — with the highlight placed on the
+    /// current option. `Step::Inert` off any other row, and on a one-option `Choice`
+    /// (`step_selected`'s own guard, mirrored: there is nothing to choose between).
     pub fn begin_choice_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
@@ -2180,8 +1729,7 @@ impl Draft {
         self.choice.as_ref().map(|l| l.ranked_highlighted())
     }
 
-    /// A click on painted row `row` is `tab` on that row (§18.9's rule
-    /// for the chain field's completion click).
+    /// Clicking a choice row selects it and performs the same completion as Tab.
     pub fn choice_click(&mut self, row: usize) -> bool {
         let Some(list) = self.choice.as_mut() else {
             return false;
@@ -2318,31 +1866,11 @@ impl Draft {
         outcome
     }
 
-    /// Shared body of [`Draft::toggle_selected`] and
-    /// [`Draft::toggle_selected_back`]: change the value under the
-    /// cursor one step in `direction`, recording it in the draft.
-    /// [`Step::Inert`] when the row has no value to change, or when the
-    /// step would be a no-op (a `Number` already at the end `direction`
-    /// points toward).
-    ///
-    /// **One step is refused rather than inert: emptying a
-    /// [`Destination::Doc`] list.** Absence of a user-layer key in a
-    /// domain's own doc means *inherit the layer beneath*, so an object
-    /// rendered empty there cannot be written as "empty" and cannot be
-    /// written as an absence either (`apply::object_value` has the full
-    /// statement of that asymmetry). `GroupingSlots::set` refuses an
-    /// empty chain and `GroupingSlots::from_doc` warns "slot N is empty;
-    /// ignored", so the state is not representable in the model at all —
-    /// and a state the model cannot hold must not be reachable by
-    /// keystroke. Unticking a slot's last dimension is therefore declined
-    /// here, at the one place both `space` and `shift+space` pass
-    /// through, with `render::refuse_step` naming the verb (`d`/`r`) that
-    /// does what the trader meant.
-    ///
-    /// An overlay list (`Destination::Presentation` — Views' `columns`)
-    /// has no such rule: hiding every column of a view is a perfectly
-    /// representable personalisation, and an empty overlay rendering IS
-    /// an absence.
+    /// Step the selected value, or return `Inert` when there is no change. Refuse the
+    /// final untick of a definition list that cannot represent emptiness; removing its
+    /// user key would inherit the lower object instead. Values-stage lists may become
+    /// empty to drop that dimension's constraint. Presentation lists may hide every
+    /// column.
     fn step_selected(&mut self, direction: StepDirection) -> Step {
         let Some(row) = self.selected_row() else {
             return Step::Inert;
@@ -2381,14 +1909,9 @@ impl Draft {
                         step,
                         wrap,
                     } => {
-                        // A value outside [min, max] can arise entirely
-                        // outside this dialog's own bounds — Sources' reader
-                        // accepts any positive `stable_mtime` while the
-                        // dialog's picker caps display at 100 — and clamping
-                        // it here would write a number the trader never
-                        // typed. Refuse the step instead (§19.1's
-                        // refuse-don't-clamp ruling); `i` still reaches a
-                        // value in range.
+                        // A hand-edited seed can be outside the editor's bounds. Refuse
+                        // stepping it instead of clamping away the original value;
+                        // typed entry can replace it with a deliberate valid value.
                         if *value < *min || *value > *max {
                             return Step::Refused(format!(
                                 "{label} is {value}, outside {min}–{max} — type a value with i"
@@ -2447,19 +1970,16 @@ impl Draft {
                 let mut entry = available.remove(item);
                 entry.included = true;
                 items.push(entry);
-                // The cursor does NOT follow the item into the object's
-                // own list: a trader adding several columns wants it on
-                // the next available row, where their eye already is
-                // (user ruling 2026-09-11). The added item moved
-                // *earlier* in row order and its label is unchanged,
-                // so the rows ahead of the next visible one are the
-                // same set, merely reordered — its visible index is
-                // the old cursor plus one. When the added item was the
-                // catalogue's last row there is no next, and the same
-                // index now holds the row that preceded it (the
-                // previous available column, or the object's own last
-                // item when there is none left), which is where the
-                // cursor stays rather than running off the end.
+                // The cursor does NOT follow the item into the object's own list: a
+                // trader adding several columns wants it on the next available row,
+                // where their eye already is. The added item moved *earlier* in row
+                // order and its label is unchanged, so the rows ahead of the next
+                // visible one are the same set, merely reordered — its visible index is
+                // the old cursor plus one. When the added item was the catalogue's last
+                // row there is no next, and the same index now holds the row that
+                // preceded it (the previous available column, or the object's own last
+                // item when there is none left), which is where the cursor stays rather
+                // than running off the end.
                 let last = self.visible_rows().len().saturating_sub(1);
                 self.selected = (self.selected + 1).min(last);
                 Step::Changed
@@ -2476,9 +1996,8 @@ impl Draft {
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
-                // The Values stage may empty its list — that is "drop this
-                // dimension" (scopes-editing spec §4), folded by the
-                // adapter; the guard is a Groupings/Views rule.
+                // The Values stage may empty its list — that is "drop this dimension",
+                // folded by the adapter; the guard is a Groupings/Views rule.
                 if included
                     && dest == Destination::Doc
                     && self.values.is_none()
@@ -2493,8 +2012,8 @@ impl Draft {
         }
     }
 
-    /// The payload a list row drags (§18.9.1); `None` for a field row,
-    /// which is neither a drag source nor a drop target.
+    /// The payload a list row drags; `None` for a field row, which is neither a drag
+    /// source nor a drop target.
     pub fn row_drag(&self, row: EditRow) -> Option<RowDrag> {
         let (field, own, item) = match row {
             EditRow::Item { field, item } => (field, true, item),
@@ -2537,34 +2056,15 @@ impl Draft {
         })
     }
 
-    /// A drop (§18.9.3): `src` takes `dst`'s index. One method decides
-    /// every case, and it is the only place they are enumerated:
+    /// Resolve both payloads by name, then apply the drop within their shared field.
     ///
-    /// - Item → Item: reorder (`remove(src)`, `insert(dst_index)`), so
-    ///   downward lands after the target's old position, upward before.
-    /// - Available → Item: add at index — `space`'s add, placed rather
-    ///   than appended; `included = true`.
-    /// - Item → Available: remove, the same act as `x`; the catalogue is
-    ///   unordered so the target index is ignored.
-    /// - Available → Available: `Inert` — the catalogue has no order.
-    /// - Same row, different fields, or a name that no longer resolves:
-    ///   `Inert`, nothing written.
+    /// - Item to item: remove the source and insert at the target's old index.
+    /// - Available to item: promote the candidate at that index, included.
+    /// - Item to available: demote it; catalogue order is not persisted.
+    /// - Available to available, same row, different fields, or missing names: inert.
     ///
-    /// After a change the cursor follows the dropped item, so the next
-    /// keystroke acts on the thing the trader just placed (unlike `space`
-    /// and `x`, whose cursor rulings are about a *run* of adds/removes).
-    ///
-    /// A drop can never reach `remove_selected`'s own
-    /// `Step::Refused("space unticks here")` — that wording fires when a
-    /// trader asks to demote a row on a catalogue-less list, but there is
-    /// no available row to drop such a demotion *onto* in the first
-    /// place: `dst` claiming a catalogue that does not exist fails to
-    /// `locate` and the whole drop is `Inert` before the per-case match
-    /// below ever runs. The `(true, false)` **and** `(false, true)` arms'
-    /// own `available.as_mut()` guards are therefore unreachable in
-    /// practice — safety nets, not a second path to that refusal:
-    /// whichever of `src`/`dst` resolved to an `Available` row already
-    /// proved `available` was `Some` inside `locate`.
+    /// After a change, follow the moved item. A catalogue-less list cannot resolve an
+    /// Available target, so it cannot reach a demotion.
     pub fn drop_row(&mut self, src: &RowDrag, dst: &RowDrag) -> Step {
         let (Some(src_row), Some(dst_row)) = (self.locate(src), self.locate(dst)) else {
             return Step::Inert;
@@ -2627,18 +2127,16 @@ impl Draft {
         Step::Changed
     }
 
-    /// `shift+j` / `shift+k`: move the item under the cursor past the next
-    /// VISIBLE item in that direction within the object's own list
-    /// (§18.3) — under a filter that is what reordering means, and the
-    /// count of hidden rows jumped over is returned so the notice can say
-    /// so. `None` at either end of that list, and on a row that is not
+    /// `shift+j` / `shift+k`: move the item under the cursor past the next VISIBLE item
+    /// in that direction within the object's own list — under a filter that is what
+    /// reordering means, and the count of hidden rows jumped over is returned so the
+    /// notice can say so. `None` at either end of that list, and on a row that is not
     /// one of its items.
     ///
-    /// An [`EditRow::Available`] row is one of those: the catalogue is
-    /// unordered by construction (§18.7.2), so there is no order there to
-    /// change and a "move" would be painted and never written. It is
-    /// declined here rather than represented — which is also why the
-    /// object's own last item has nowhere further down to go, even with a
+    /// An [`EditRow::Available`] row is one of those: the catalogue is unordered by
+    /// construction, so there is no order there to change and a "move" would be painted
+    /// and never written. It is declined here rather than represented — which is also
+    /// why the object's own last item has nowhere further down to go, even with a
     /// catalogue painted below it.
     pub fn move_item(&mut self, delta: i32) -> Option<usize> {
         let (field, item) = match self.selected_row()? {
@@ -2679,28 +2177,10 @@ impl Draft {
         Some(skipped)
     }
 
-    /// `x`: take the item under the cursor out of the object (§18.2) —
-    /// the definitional twin of `space`'s hide.
-    ///
-    /// Whether a list has a separate membership at all is whether it HAS
-    /// a catalogue (§18.7.2), never whether that catalogue happens to be
-    /// empty right now, and never a `dest`. A Views draft with every
-    /// available column already added still has one — an empty one — so
-    /// `x` still removes there; a Groupings `dimensions` list has none at
-    /// all (ticking IS membership) and refuses. Deciding by emptiness
-    /// (which is what scanning one flat list's flags amounted to, in the
-    /// build before this one) made `x` go dead on that first case: the moment a
-    /// trader added the view's last available column, the list looked
-    /// catalogue-less and `x` started refusing a removal it had done a
-    /// keystroke earlier.
-    ///
-    /// [`Step::Refused`] rather than [`Step::Inert`] for both declined
-    /// cases, so the footer says why: on a catalogue-less list, `space` is
-    /// the verb that already unticks; on an available row, `space` is the
-    /// verb that adds it — `x` has nothing to remove from a row that is
-    /// not there yet. Neither reason names `d`/`r` the way `space`'s own
-    /// "must keep at least one entry" refusal does, so `render` routes
-    /// these straight to the footer rather than through `refuse_step`.
+    /// Remove the selected member into its available catalogue. Refuse an available row
+    /// because it is not a member, and refuse a list without a catalogue because
+    /// ticking controls membership there. An empty existing catalogue still permits
+    /// removal. Return a notice-bearing refusal rather than silently doing nothing.
     pub fn remove_selected(&mut self) -> Step {
         let (field, item) = match self.selected_row() {
             Some(EditRow::Item { field, item }) => (field, item),
@@ -2729,17 +2209,15 @@ impl Draft {
         entry.note = None;
         available.push(entry);
         let last = available.len() - 1;
-        // The cursor does NOT follow the item to the end of the
-        // catalogue, for the same reason `space`'s add leaves it behind
-        // (user ruling 2026-09-11): a trader removing several columns
-        // wants it on the row that was next. The removed item moved
-        // *later* in row order with its label unchanged, so the visible
-        // rows ahead of the next one lost exactly one — the next row now
-        // sits at the old index and `selected` is already right. The one
-        // exception is a removal with nothing visible after it: the item
-        // lands at the end, which is where it already was, so the old
-        // index would still be on it — step back to the previous row
-        // instead, the way `dd` on a buffer's last line does.
+        // The cursor does NOT follow the item to the end of the catalogue, for the same
+        // reason `space`'s add leaves it behind: a trader removing several columns
+        // wants it on the row that was next. The removed item moved *later* in row
+        // order with its label unchanged, so the visible rows ahead of the next one
+        // lost exactly one — the next row now sits at the old index and `selected` is
+        // already right. The one exception is a removal with nothing visible after it:
+        // the item lands at the end, which is where it already was, so the old index
+        // would still be on it — step back to the previous row instead, the way `dd` on
+        // a buffer's last line does.
         let moved = EditRow::Available { field, item: last };
         let rows = self.rows();
         let under_cursor = self
@@ -2752,20 +2230,9 @@ impl Draft {
         Step::Changed
     }
 
-    /// Which files this draft's changes have to be written to, and which
-    /// field keys sent them there — the grouping a flush turns into one
-    /// `config_write::edit` call per destination, never a write per field.
-    ///
-    /// A clean field contributes nothing, which is what keeps a
-    /// presentation-only edit out of `views.toml` entirely.
-    ///
-    /// An ordered list contributes to its own destination **and** to
-    /// [`Destination::Doc`] when its item *names* change, because which
-    /// entries an object HAS is definitional however the list is
-    /// presented:
-    /// adding a column the view did not have changes the view, not its
-    /// presentation (spec §8.1). Reordering, hiding and resizing never
-    /// reach that branch, which is the split this whole design exists for.
+    /// Group changed fields by persistence destination. Clean fields contribute
+    /// nothing. A changed ordered-list member set additionally writes the definition;
+    /// reordering, hiding, and resizing alone remain presentation changes.
     pub fn writes_by_destination(&self) -> BTreeMap<Destination, Vec<String>> {
         let mut out: BTreeMap<Destination, Vec<String>> = BTreeMap::new();
         for (i, field) in self.fields.iter().enumerate() {
@@ -2836,27 +2303,13 @@ impl Draft {
         }
     }
 
-    /// The row a reader's diagnostic path names (§19.5), or `None` for a
-    /// path that is not this object's or names no row — those stay on the
-    /// header. The grammar is `<doc>.<object>.<field>[.<index>[...]]`: a
-    /// field matches by `key`; a list field's next segment, when it is an
-    /// index into the array, resolves through [`Self::resolve_list_index`]
-    /// to the item that array position currently names (never an
-    /// available row — the object has no diagnostic about a column it
-    /// does not have).
+    /// Map a diagnostic path to an installed row; unmatched paths remain header-only.
+    /// `<doc>.<object>.<field>[.<index>...]` names a field or one of its members. List
+    /// indices resolve through source names before locating the current item.
     ///
-    /// **In the column stage (Part 2c §5.5) the grammar is narrower**,
-    /// because the rows are one column's format keys rather than the
-    /// object's fields: the path must be `columns.<i>.[format.]<key>`,
-    /// its index must resolve — by name, the same 2b rule — to the OPEN
-    /// column, and `<key>` must be one of the installed fields. A path
-    /// naming another column lands nowhere while this stage is open (its
-    /// row is not on screen to carry the glyph), and so does a path
-    /// naming the object itself (`views.tree.dataset`); both stay on the
-    /// header, where every diagnostic's text is of record regardless.
-    /// The `format.` segment is optional because `label` and `width` sit
-    /// on the column's own table while the other five sit under its
-    /// `format` sub-table — one grammar, both spellings.
+    /// A column stage accepts only paths for its open column and installed format,
+    /// label, or width fields. Diagnostics for other columns or object-level fields
+    /// remain in the header while those rows are hidden.
     pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
         let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
         if let Some(column) = self.column.as_deref() {
@@ -2905,27 +2358,11 @@ impl Draft {
         })
     }
 
-    /// A reader's diagnostic index is the position in `Draft::source`'s
-    /// OWN array for this field — for Views that is `views.toml`'s
-    /// definitional column order (`views::columns_for` reads
-    /// `draft.source["columns"]` the same way to write the file back),
-    /// which is unrelated to `items`' order once `ViewPresentation::
-    /// apply` has permuted it by a trader's personal drag order, or once
-    /// the source has since dropped a column `items` still remembers
-    /// (review round 1's Important-2 finding: without this indirection,
-    /// a reordered or shortened presentation makes `row_for_path` flag
-    /// the wrong column entirely). Resolved by NAME — `source[key][raw_
-    /// index]`'s own `name`, whether that entry is a table (Views'
-    /// `[[columns]]`) or a bare string (a hypothetical future list shaped
-    /// like Groupings' own array-of-strings, `dimensions` in this crate,
-    /// though that field's diagnostics never carry an index today: see
-    /// `groupings.rs`'s own doc on why) — found in `items` by NAME, never
-    /// by position, since `items`' order is exactly what may have moved.
-    /// `None` when `source[key]` has no entry at that index, or that
-    /// entry's name is no longer among `items` at all; the caller falls
-    /// back to the raw index in either case (harmless for Groupings,
-    /// whose `source` is always empty — its object is a bare array, not
-    /// a table, so `Domain::draft` never populates one).
+    /// Resolve a diagnostic's source-array index to the current member by name.
+    /// Definition order and presentation order can differ, so using the raw index would
+    /// flag another column after a reorder. Accept table entries with `name` or string
+    /// entries. Return `None` when the source or current item cannot be resolved; the
+    /// caller can fall back to its raw-index rule.
     fn resolve_list_index(&self, key: &str, index: usize, items: &[ListItem]) -> Option<usize> {
         let entry = self.source.get(key)?.as_array()?.get(index)?;
         let name = match entry {
@@ -2985,35 +2422,18 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 }
 
 impl Domain {
-    /// The one-line explanation of the field keyed `key` on this domain,
-    /// painted in the edit footer for the row under the cursor
-    /// (2026-09-19, spec §22). Computed at paint from `(domain, stage,
-    /// key)` rather than stored on [`Field`], so no constructor has to
-    /// carry it and the sentence is data in one table per adapter. A
-    /// list item or an available row asks with its LIST's key
-    /// ([`Draft::selected_field_key`]), so a column row explains the
-    /// columns list.
-    ///
-    /// **The column stage answers from `views::column_help` whatever the
-    /// domain**: Views and Schema open the same seven rows (dataset-
-    /// presentation spec §4.1), so one table serves both. Empty for a key
-    /// no table knows — the footer keeps the slot and paints nothing —
-    /// and `every_field_on_every_domain_has_help` sweeps every adapter's
-    /// rows so a new field cannot ship silent.
-    ///
-    /// Copy rule: the field's MEANING and its value grammar (`30s`,
-    /// `k`/`M`, a hue 0..360), never the keys — the hint rows beside it
-    /// already say which keys act on the row.
+    /// Selected-field help by domain, stage, and key. List members use their list's
+    /// key; column stages share the Views presentation-help table. Describe value
+    /// meaning and grammar here; key hints are rendered separately. Unknown keys return
+    /// an empty sentence while retaining the footer slot.
     pub fn help(self, stage: &Stage, key: &str) -> &'static str {
         if matches!(stage, Stage::Column { .. }) {
             return views::column_help(key);
         }
-        // Scopes-editing spec §4: the Values stage's one row is always
-        // keyed `values`, so this answers the same as the general
-        // `Domain::Scopes` arm below would — stated explicitly, ahead of
-        // it, so a future domain that grows a Values-shaped stage of its
-        // own cannot silently fall through to its OWN `help` table
-        // instead.
+        // the Values stage's one row is always keyed `values`, so this answers the same
+        // as the general `Domain::Scopes` arm below would — stated explicitly, ahead of
+        // it, so a future domain that grows a Values-shaped stage of its own cannot
+        // silently fall through to its OWN `help` table instead.
         if matches!(stage, Stage::Values { .. }) {
             return scopes::help("values");
         }
@@ -3027,25 +2447,10 @@ impl Domain {
         }
     }
 
-    /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
-    /// Groupings and Colours — Groupings' `slot` is a display-only
-    /// `Text`; Colours has no `Text` row at all (`hue` is a `Number`,
-    /// `tone`/`token` are `Choice`), so `i` never reaches this door for
-    /// it. Sources (§19.3) was the first `true`, for
-    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
-    /// (`sources::text_editable`); Views answers `true` for the column
-    /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
-    /// and for nothing else it has. **Scopes answers `true` for `text`
-    /// and `expression` alone** (2026-09-19, `scopes.rs`'s own module
-    /// doc) — its `dimensions` row is an `OrderedList`, not a `Text`, and
-    /// `i` never reaches this door for it either.
-    ///
-    /// **Schema shares the Views answer** (dataset-presentation spec
-    /// §4.1): its column stage paints the very same seven rows, so `i`
-    /// must open the same two. Its rows OUTSIDE that stage are keyed
-    /// `columns.<name>` / `derived.<name>`, which `views::text_editable`
-    /// answers `false` for — it matches `label | width` and nothing else
-    /// — so routing here does not make one read-only schema row typeable.
+    /// Whether a text field permits typed editing. Sources permits its supported
+    /// free-text settings; Scopes permits text and expression; Views and Schema permit
+    /// column label and width. Groupings' slot stays read-only, and Colours has no text
+    /// field. Numeric and choice entry use their own field paths.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
             Domain::Groupings | Domain::Colours => {
@@ -3058,13 +2463,9 @@ impl Domain {
         }
     }
 
-    /// The adapter's door for a committed `Text` (§19.1): normalise the
-    /// typed text, or refuse it with the reason the notice shows. Trims
-    /// by default; an adapter with a real grammar (a duration, a regex, a
-    /// path list) overrides its own keys — Sources was the first
-    /// (`sources::parse_text`), Views the second (the column stage's
-    /// `width`, Part 2c §5.3), Scopes the third (`scopes::parse_text`,
-    /// which also refuses a broken `expression`).
+    /// Normalize committed text through the domain's parser, or return its refusal.
+    /// This validates duration, regex, width, and expression grammars before
+    /// committing.
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
             // Colours joins for the same reason `text_editable` gives
@@ -3100,13 +2501,12 @@ impl Domain {
         }
     }
 
-    /// The fields a `c`-copied object opens with, built straight from the
-    /// table `create_from_name` just copied rather than from a named
-    /// object `config` has a row for yet — the copy has not been written
-    /// when this runs (§6). Only [`Domain::duplicable`] needs the real
-    /// answer: every other domain falls back to `self.fields(config,
-    /// None)`, its own empty-object shape, since nothing else can reach
-    /// this door.
+    /// The fields a `c`-copied object opens with, built straight from the table
+    /// `create_from_name` just copied rather than from a named object `config` has a
+    /// row for yet — the copy has not been written when this runs. Only
+    /// [`Domain::duplicable`] needs the real answer: every other domain falls back to
+    /// `self.fields(config, None)`, its own empty-object shape, since nothing else can
+    /// reach this door.
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
             Domain::Scopes => scopes::fields_from_table(config, Some(table)),
@@ -3145,11 +2545,11 @@ impl Domain {
             column: None,
             values: None,
             column_ctx: None,
-            // §5.1: Views alone. Reloading the views a second time here
-            // (`fields` above already did once) is the price of the
-            // scaffold's one-`Domain`-match-per-function rule — the
-            // alternative is a `fields` that returns two things, which
-            // every other adapter would then have to answer for.
+            // Views alone. Reloading the views a second time here (`fields` above
+            // already did once) is the price of the scaffold's
+            // one-`Domain`-match-per-function rule — the alternative is a `fields` that
+            // returns two things, which every other adapter would then have to answer
+            // for.
             dataset_layer: match self {
                 Domain::Views => views::dataset_layer_for(config, object),
                 _ => BTreeMap::new(),
@@ -3159,15 +2559,9 @@ impl Domain {
         draft
     }
 
-    /// The draft `n` opens after a name is committed (§18.2): the
-    /// adapter's empty-object fields — `fields(config, None)`, which every
-    /// adapter already answers — over an empty source, validated once.
-    /// `n` creates an EMPTY object (scopes-editing spec §6, reversing the
-    /// earlier "Scopes' `n` saves the frame's scope" behaviour) — `c`'s
-    /// copy is a separate path (`create_from_name`'s `NameSeed::CopyOf`
-    /// arm, over [`Domain::fields_from_source`]) that replaces this
-    /// result's fields and source once the name is committed, so the pure
-    /// core still never reads a `Frame`.
+    /// Create a validated draft from the adapter's default fields and empty source.
+    /// Copying a scope or saving current frame scope replaces these initial fields
+    /// through its separate naming seed before committing creation.
     pub fn new_draft(self, config: &Config, name: &str) -> Draft {
         let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
@@ -3192,9 +2586,8 @@ impl Domain {
         }
     }
 
-    /// Everything wrong with the draft as it stands (spec §7.2), run on
-    /// every field change, synchronously, with no debounce — it is a
-    /// parse of a few hundred bytes.
+    /// Everything wrong with the draft as it stands, run on every field change,
+    /// synchronously, with no debounce — it is a parse of a few hundred bytes.
     pub fn validate(self, draft: &Draft, config: &Config) -> Vec<Diagnostic> {
         match self {
             Domain::Views => views::validate(draft, config),
@@ -3311,11 +2704,7 @@ fn toml_value_to_value(value: &toml::Value) -> toml_edit::Value {
 pub struct ObjectDialogState {
     pub domain: Domain,
     pub stage: Stage,
-    /// Index into the **filtered** list ([`visible_rows`]), not the full
-    /// one — the palette's convention, shared by every list surface in
-    /// this crate and the `len` bound `vimnav::apply` moves within
-    /// (wrapping a bare ±1, clamping a larger or counted step — spec
-    /// §20.5).
+    /// Selection index in the filtered browse list, bounded by its visible length.
     pub selected: usize,
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// that field's `InputEvent::Change` subscription. The `Input` owns
@@ -3349,45 +2738,26 @@ pub struct ObjectDialogState {
     /// state this dialog stores rather than derives — deliberately, since
     /// it is also what the edit stage paints; see [`Draft`].
     pub draft: Option<Draft>,
-    /// The destructive keystroke waiting on a second one, if any — the
-    /// dialog's ONE open question, in whichever stage it was asked. It
-    /// replaces the stage's action bar while armed, so the row list above
-    /// it never changes length, and it owns the keys and the mouse until
-    /// answered (spec §20.1).
-    ///
-    /// On the state rather than on [`Draft`] (where it lived until
-    /// 2026-09-19) because the browse stage arms it too — `d`/`r` on the
-    /// selected row, with no draft in existence — and the keybindings
-    /// dialog already keeps its own confirm on its state. What the
-    /// question is ABOUT is not stored beside it: `render::target_object`
-    /// answers the stage's object in `Edit`/`Column` and the selected
-    /// browse row in `Browse`, and neither can move while the question
-    /// is open (every other key is claimed and dropped, and a row click
-    /// is dropped too) — except a config reload, which is what
-    /// [`Self::confirm_target`] exists for. Every stage transition clears
-    /// both through [`Self::disarm`].
+    /// The dialog's pending destructive question, available in browse and edit. It
+    /// replaces the action bar and blocks unrelated input until answered. Record its
+    /// object separately in `confirm_target` so a reload cannot silently redirect the
+    /// answer by reordering the browse list. Stage transitions disarm both.
     pub confirm: Option<Confirm>,
-    /// The object [`Self::confirm`] was asked about, as `render::
-    /// target_object` resolved it at arming time. Meaningful only while
-    /// `confirm` is `Some`, and written only beside it (`render::
-    /// arm_confirm`): the answer is carried out only if the target still
-    /// resolves to this name, since a reload can re-rank the browse list
-    /// under an index cursor (review finding, 2026-09-19).
+    /// The object [`Self::confirm`] was asked about, as `render:: target_object`
+    /// resolved it at arming time. Meaningful only while `confirm` is `Some`, and
+    /// written only beside it (`render:: arm_confirm`): the answer is carried out only
+    /// if the target still resolves to this name, since a reload can re-rank the browse
+    /// list under an index cursor.
     pub confirm_target: Option<String>,
-    /// The dataset the row under the cursor fed when `n` was pressed
-    /// (§19.3, Sources only): the new source's `dataset` seed. Cleared by
-    /// [`Self::cancel_naming`] and consumed by
-    /// `render::create_from_name`.
+    /// Source dataset captured from the selected browse row when naming starts. Clear
+    /// it when naming ends; it seeds the new source's dataset choice.
     pub naming_dataset: Option<String>,
-    /// What [`Stage::Naming`]'s `enter` creates (scopes-editing spec §6):
-    /// `Empty` for `n`, `CopyOf(source)` for `c`. Read once, by
-    /// `render::create_from_name`, and reset to `Empty` by
-    /// [`Self::cancel_naming`] so a later `n` on the same dialog instance
-    /// cannot inherit a stale `c`'s target.
+    /// Source of the object being named: defaults, a saved scope copy, or current frame
+    /// scope. Stored separately from the name input.
     pub naming_seed: NameSeed,
     /// The tag of the latest distinct request the Values stage submitted
-    /// (`render::enter_values_stage`); an outcome with any other tag is
-    /// stale and dropped (spec §7.3).
+    /// (`render::enter_values_stage`); an outcome with any other tag is stale and
+    /// dropped.
     pub values_tag: u64,
 }
 
@@ -3421,55 +2791,19 @@ impl ObjectDialogState {
         self.confirm_target = None;
     }
 
-    /// The **pure half** of entering the edit stage — call
-    /// [`render::enter_edit_stage`], never this, from anywhere with a
-    /// `Window` in scope.
+    /// Pure stage entry, called through `render::enter_edit_stage` so scroll reset,
+    /// repaint, and subsequent input synchronization stay together.
     ///
-    /// It opens `object`'s edit stage, turning the `escape` ladder's
-    /// `PreviousStage` rung on by constructing [`Stage::Edit`], and it
-    /// sets the two things that decide where the next keystroke goes:
-    ///
-    /// - the **browse query is dropped**, because the edit stage has its
-    ///   OWN filter (`Draft::query`, §18.3) — a separate cursor space
-    ///   from the browse list's, since `Draft::selected` indexes the
-    ///   draft's own `visible_rows()`, never `ObjectDialogState::
-    ///   selected`'s list. A stale browse query left in `state.query`
-    ///   would rank nothing here (the edit stage never reads it) while
-    ///   still being live enough to eat `escape`'s `ClearQuery` rung the
-    ///   moment the trader stepped back to browse — the newly-built
-    ///   draft's own `query` is separately guaranteed empty here too,
-    ///   defensively, though every constructor already starts it that
-    ///   way;
-    /// - the **mode is set explicitly**, never inherited, because `enter`
-    ///   opens an object from filter mode too, and a stage left in
-    ///   `Filter` with no field of its own sends the next `escape` down
-    ///   the `LeaveFilter` rung — which the edit handler does not claim,
-    ///   so the shell's modal branch closes the whole dialog instead of
-    ///   stepping back to the list, without ever asking. `Normal` for
-    ///   every domain, Groupings included (user ruling 2026-09-14): a
-    ///   slot opens in its chooser, and `i` opens the chain field.
-    ///
-    /// Both are pure, and that is now the whole transition: the shared
-    /// `Input` is emptied and blurred to match by `dialog::
-    /// sync_dialog_text` (spec §16.1), which reads the mode and
-    /// [`Self::effective_query`] after the handler returns rather than
-    /// being hand-written beside each mutation. A mode and a focus that
-    /// disagree is the one thing this dialog's "one switch" exists to
-    /// prevent — the defect this method's own second half was once fixed
-    /// for, and the reason that half has one owner now instead of a
-    /// copy at every site. The blur still needs a `Window`, which this
-    /// file may not name; what changed is that no caller has to remember
-    /// it. This method stays visible only inside this module's subtree
-    /// so [`render::enter_edit_stage`] remains the one door onto the
-    /// stage change itself.
+    /// Build the draft, clear both stage queries, and enter Normal mode. Browse and
+    /// draft selection index different lists; carrying the old filter or mode across
+    /// would misroute keys and Escape. The shared dialog input is synchronized by
+    /// `dialog::sync_dialog_text` after the transition.
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
-        // Every domain opens in normal mode with no field open — a
-        // Groupings slot lands in the chooser and `i` opens its chain
-        // field (user ruling 2026-09-14, superseding §18.8's 2026-09-12
-        // chain-field landing). There is deliberately no domain arm here:
-        // the one door every entry goes through has one answer.
+        // Every domain opens in normal mode with no field open — a Groupings slot lands
+        // in the chooser and `i` opens its chain field. There is deliberately no domain
+        // arm here: the one door every entry goes through has one answer.
         self.draft = Some(draft);
         self.stage = Stage::Edit {
             object: object.to_string(),
@@ -3481,20 +2815,9 @@ impl ObjectDialogState {
         self.disarm();
     }
 
-    /// [`Self::enter_edit`]'s twin for a name `n` or `c` has just
-    /// committed (§18.2, scopes-editing spec §6): the same stage
-    /// transition, over an already-built `draft` rather than one derived
-    /// from `config`. A committed name has nothing in `config` to derive
-    /// from yet — the write is still on its way through the debounced
-    /// flush — and `create_from_name` has already built whatever this
-    /// draft should hold (the domain's empty object for `n`, or `c`'s
-    /// copied source and fields), which a fresh `domain.draft(config,
-    /// name)` call would throw away.
-    ///
-    /// Visible only inside this subtree for the same reason
-    /// [`Self::enter_edit`] is: [`render::enter_edit_stage`] is the one
-    /// door onto either, and a caller reaching this directly would skip
-    /// the scroll reset and the frame request that door also owns.
+    /// Enter editing with an already-built creation or copy draft. Its object may not
+    /// yet be in active configuration, so deriving a fresh draft would discard its
+    /// initial fields. Use the render stage-entry wrapper for scroll and repaint.
     pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, mut draft: Draft) {
         // Same defensive clear `enter_edit` gives its own freshly-derived
         // draft — see that method's doc.
@@ -3510,22 +2833,9 @@ impl ObjectDialogState {
         self.disarm();
     }
 
-    /// Back to the browse list, dropping the draft. `selected` is left to
-    /// the caller, which puts it back on the object just edited — by
-    /// name, since the unfiltered list is a different list from the one
-    /// the object was opened from.
-    ///
-    /// No mode is set here, and none needs to be: see
-    /// [`render::leave_edit`], the one caller, for which modes can
-    /// actually stand at this point and why the sync is left to settle
-    /// the field and the focus from whichever one does.
-    ///
-    /// `query` is cleared here too, belt-and-braces: `set_query`'s
-    /// one-way mirror (§18.3) should already have kept it empty for the
-    /// whole life of the edit stage, but this is the same habit
-    /// `cancel_naming` and `begin_naming` already keep of clearing it on
-    /// every stage transition, rather than trusting an invariant a future
-    /// change to `set_query` could quietly break.
+    /// Return to browsing and drop the draft. The caller restores selection by object
+    /// name. Clear the browse query; retain mode for the shared input sync to settle
+    /// focus consistently with the transition.
     pub fn leave_edit(&mut self) {
         self.draft = None;
         self.stage = Stage::Browse;
@@ -3534,41 +2844,14 @@ impl ObjectDialogState {
         self.disarm();
     }
 
-    /// Replace the query — the **write half** of the one-way mirror
-    /// [`Self::effective_query`] reads back
-    /// (the pure half of the `InputEvent::Change` subscription). Resets
-    /// the selection to the top match (after an edit the old index
-    /// points at an unrelated row) and drops the notice, which named a
-    /// row the re-ranked list has just moved the selection off.
-    ///
-    /// The mirror is **one-way per stage**, never both at once: in
-    /// [`Stage::Edit`] the shared `Input` is the edit stage's own filter
-    /// (§18.3), so the keystroke belongs to `Draft::query`, and `state.
-    /// query` — the browse list's cursor space — must not also change
-    /// underneath it; everywhere else (browse, naming) it belongs to
-    /// `state.query` as it always did. Writing both, as an earlier build
-    /// of this method did, left a stale copy in whichever field the
-    /// current stage was NOT reading: the edit stage's own `ClearQuery`
-    /// rung only ever clears `Draft::query`, so a query typed while
-    /// editing was still sitting in `state.query` after `escape` walked
-    /// all the way back to browse — a filtered browse list under an
-    /// empty-looking filter field, and a `leave_edit` cursor restore that
-    /// silently failed to find the object it was looking for.
+    /// Mirror changed input text into the active stage's query, reset selection, and
+    /// clear the row-specific notice. Browse/naming use `state.query`; edit, column,
+    /// and values stages use the draft. Never write both query stores, which would
+    /// leave an invisible stale filter when returning to browse.
     pub fn set_query(&mut self, query: String) {
-        // The column stage (Part 2c §5.2) and the Values stage
-        // (scopes-editing spec §4) are both the edit stage's own filter
-        // row over a different set of rows — one draft, one cursor space
-        // — so they take the same side of the mirror. This arm, the read
-        // half in `effective_query` and the cursor half in
-        // `effective_selected` are the write and read halves of one
-        // mirror (this method's own doc has the full mechanism) and MUST
-        // list the same stages: a stage present in one but not the other
-        // reads back from a different slot than the keystroke was
-        // written to — a review Critical found the Values stage missing
-        // from all three, so `/` there wrote `state.query` (browse's own
-        // slot) while `draft.query` stayed empty, and `ctrl+a`
-        // ("tick every value the filter currently shows") ticked and
-        // wrote every value in the list rather than the filtered ones.
+        // Edit, Column, and Values share the draft's query and selection. Keep the
+        // stage sets here, in `effective_query`, and in `effective_selected` equal;
+        // otherwise the input can paint one filter while bulk changes use another.
         if matches!(
             self.stage,
             Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }
@@ -3583,12 +2866,11 @@ impl ObjectDialogState {
     }
 
     /// The query the open stage is filtering by — the draft's in
-    /// `Stage::Edit`/`Column`/`Values`, the state's own otherwise (spec
-    /// §16.2). The **read half** of [`Self::set_query`]'s one-way
-    /// mirror: `dialog::sync_dialog_text` writes the shared `Input` from
-    /// this, so a query left sitting in the other stage's slot can never
-    /// reach the screen. See [`Self::set_query`]'s doc for why this
-    /// match must name exactly the same stages that one does.
+    /// `Stage::Edit`/`Column`/`Values`, the state's own otherwise. The **read half** of
+    /// [`Self::set_query`]'s one-way mirror: `dialog::sync_dialog_text` writes the
+    /// shared `Input` from this, so a query left sitting in the other stage's slot can
+    /// never reach the screen. See [`Self::set_query`]'s doc for why this match must
+    /// name exactly the same stages that one does.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
             (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
@@ -3648,20 +2930,7 @@ impl ObjectDialogState {
         self.naming_seed = NameSeed::Empty;
     }
 
-    /// Whether `escape` has a stage to step back into before it closes
-    /// the dialog — the third rung of
-    /// [`crate::dialogmode::escape_step`]'s ladder, and this scaffold is
-    /// its first consumer (the keybinding dialog is one flat list and
-    /// always passes `false`).
-    ///
-    /// It is a predicate over the stage rather than a literal `false` at
-    /// the call site, and that is what made the edit stage turn the rung
-    /// on by merely existing: `enter_edit` constructs [`Stage::Edit`] and
-    /// nothing in `render` had to remember to change. A `false` spelled
-    /// at the call site is exactly the shape that gets left behind when a
-    /// stage arrives, and the failure is silent — `escape` in the edit
-    /// stage would close the whole dialog out from under the object being
-    /// edited, instead of going back one stage.
+    /// Whether Escape can return to a parent stage before closing the dialog.
     pub fn has_previous_stage(&self) -> bool {
         matches!(
             self.stage,
@@ -3670,12 +2939,8 @@ impl ObjectDialogState {
     }
 }
 
-/// The text one row exposes to the filter: its painted label
-/// ([`ObjectRow::display_name`] — the prefix and all, on a Sources row)
-/// and its summary — exactly what the row paints, and nothing more.
-/// `keybindings_view`'s own `searchable_text` carries the same rule and
-/// the review finding behind it: matching text the user cannot see
-/// breaks the agreement between what ranked and what is highlighted.
+/// Searchable browse text: the painted label, including a source's dataset prefix, plus
+/// the visible summary. Matching unseen text would make highlights misleading.
 pub fn searchable_text(row: &ObjectRow) -> String {
     format!("{} {}", row.display_name(), row.summary)
 }
@@ -3712,10 +2977,9 @@ mod tests {
     use super::*;
     use geode_core::config::{Config, ConfigSources, Layer, LayerDoc, Severity};
 
-    /// dataset-presentation spec §5.2: a cleared view-level key meets
-    /// the DATASET level before the desk view's own, because that is the
-    /// order they resolve in — so the notice names the layer the trader
-    /// will actually see from here, not the one furthest down.
+    /// a cleared view-level key meets the DATASET level before the desk view's own,
+    /// because that is the order they resolve in — so the notice names the layer the
+    /// trader will actually see from here, not the one furthest down.
     ///
     /// All three answers, from one clear over three different sets of
     /// layers: the key cleared is the same in each, and only what sits
@@ -3858,16 +3122,8 @@ mod tests {
         })
     }
 
-    /// A `tree` view over a `risk` dataset with two member columns — `npv`
-    /// (a measure) and `book` (a dimension) — and nothing left in the
-    /// available catalogue.
-    ///
-    /// The column stage's own fixture (Part 2c §5): it needs a REAL
-    /// dataset doc, unlike most tests here, because the `dataset` choice
-    /// is what proves the parent's fields are still reachable through
-    /// [`Draft::field_by_key`] while the stage has swapped `fields` out,
-    /// and a second member is what proves a path naming the OTHER column
-    /// lands nowhere (§5.5).
+    /// A real dataset and two-column view prove parent-field access during a column
+    /// projection and rejection of diagnostic paths belonging to the other column.
     fn config_with_view_and_datasets() -> Config {
         config_from(&[
             (
@@ -3974,7 +3230,7 @@ mod tests {
         ]);
         assert!(Domain::Views.objects(&config)[0].drifted);
 
-        // No entry at all (an override that predates 2b): never drifted.
+        // No recorded fork baseline: no drift can be established.
         let config = config_from(&[
             (Layer::Desk, "views", desk_v2),
             (Layer::User, "views", user),
@@ -4006,13 +3262,8 @@ mod tests {
         assert_eq!(override_key("views", "tree"), "views.tree");
     }
 
-    /// A presentation-only override **is** an override. A desk view a
-    /// trader has hidden a column on has a user-layer file naming it, so
-    /// `r` has to be offered: telling them "no user override to revert"
-    /// would be false about a file that demonstrably exists, and hiding a
-    /// column is the commonest edit this whole design exists to make
-    /// cheap. Spec §5.3 assumed presentation always accompanies a doc
-    /// override; it does not — that is the entire point of §4.1's split.
+    /// A presentation-only user override can be reverted even when the definition still
+    /// comes from the desk layer.
     #[test]
     fn a_presentation_only_override_is_marked_overridden() {
         let config = config_from(&[
@@ -4055,15 +3306,8 @@ mod tests {
         assert!(!rows[0].overridden);
     }
 
-    /// §18.2's "a name any layer already holds is refused" spans the
-    /// presentation overlay, not just the domain's own doc. A view the
-    /// desk has since dropped can still be named by the trader's own
-    /// `view_presentation.toml` (they hid a column on it while it
-    /// existed); that name produces no browse row at all, so a create
-    /// checking only the rows would happily make a fresh user view that
-    /// silently inherits the orphaned overlay's `hidden`/`order`/`width`
-    /// — and being user-only, `r` then refuses, leaving no dialog verb
-    /// that can clear it.
+    /// An orphaned user presentation reserves the name even after all definitions of
+    /// that object disappear, preventing new objects from inheriting stale settings.
     #[test]
     fn a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it() {
         let config = config_from(&[(
@@ -4132,10 +3376,8 @@ mod tests {
         );
     }
 
-    /// Drift needs `overrides.toml` (spec §5.2, Part 2). Until then the
-    /// honest answer is `false` for every row, including an overridden
-    /// one — a stand-in derived from the current config would mark every
-    /// deliberate customisation as drifted.
+    /// Without a recorded override baseline, differing user and inherited values cannot
+    /// establish drift.
     #[test]
     fn drift_is_not_claimed_before_overrides_toml_exists() {
         let config = config_from(&[
@@ -4206,8 +3448,8 @@ mod tests {
             Some("risk"),
             "not the empty placeholder"
         );
-        // No columns are the view's OWN yet — `npv` is only in the
-        // available catalogue, for `space` to add (§18.2).
+        // No columns are the view's OWN yet — `npv` is only in the available catalogue,
+        // for `space` to add.
         assert!(draft.list_items("columns").unwrap().is_empty());
         assert!(
             draft
@@ -4260,11 +3502,9 @@ mod tests {
         assert!(state.notice.is_none());
     }
 
-    /// Every domain opens its edit stage in normal mode with no field
-    /// open — Groupings included (user ruling 2026-09-14, superseding
-    /// 2026-09-12's chain-field landing, §18.8): a slot opens in the
-    /// chooser, and `i` is the way into the chain field. The Views half
-    /// pins that the rule has no domain arm at all.
+    /// Every domain opens its edit stage in normal mode with no field open — Groupings
+    /// included: a slot opens in the chooser, and `i` is the way into the chain field.
+    /// The Views half pins that the rule has no domain arm at all.
     #[test]
     fn every_domain_opens_in_normal_mode_with_no_field_open() {
         let config = config_from(&[
@@ -4291,9 +3531,9 @@ mod tests {
         assert_eq!(state.effective_query(), "");
     }
 
-    /// `effective_query` is the read half of `set_query`'s one-way
-    /// mirror (§16.2): each stage's own keystrokes land in — and are
-    /// read back from — that stage's own slot, never the other one.
+    /// `effective_query` is the read half of `set_query`'s one-way mirror: each stage's
+    /// own keystrokes land in — and are read back from — that stage's own slot, never
+    /// the other one.
     #[test]
     fn the_effective_query_is_the_stages_own() {
         let config = config_from(&[(
@@ -4546,11 +3786,7 @@ mod tests {
         );
     }
 
-    /// 2c §5.4: a `Number` with `wrap: true` steps past its bound and
-    /// lands on the other side rather than clamping — the hue field's
-    /// own behaviour — while a plain (`wrap: false`) field still clamps
-    /// to the bound, exactly as `a_number_steps_both_ways_and_stops_at_
-    /// each_end` pins for `step: 1`.
+    /// Wrapping numeric fields cross either endpoint and remain within their bounds.
     #[test]
     fn a_number_steps_by_its_step_and_wraps_only_when_asked() {
         let mut draft = single_field_draft(FieldKind::Number {
@@ -4590,11 +3826,8 @@ mod tests {
         );
     }
 
-    /// A value the dialog's own bounds never produced — Sources' reader
-    /// accepts any positive `stable_mtime` while the dialog caps display
-    /// at 100 — must be refused, not clamped: a clamp would write a
-    /// number (the bound) the trader never typed (§19.1's
-    /// refuse-don't-clamp ruling).
+    /// Out-of-range loaded values are refused by stepping instead of silently clamped.
+    /// The user must type a valid replacement deliberately.
     #[test]
     fn a_number_outside_its_range_is_refused_not_clamped_by_a_step() {
         let mut draft = single_field_draft(FieldKind::Number {
@@ -4659,10 +3892,9 @@ mod tests {
         );
     }
 
-    /// §3.2: `i` on a `Choice` row opens the field EMPTY (the current
-    /// value is already lit), with the highlight placed on the current
-    /// option; `enter` picks the lit row and closes; the cursor stays on
-    /// the row throughout.
+    /// `i` on a `Choice` row opens the field EMPTY (the current value is already lit),
+    /// with the highlight placed on the current option; `enter` picks the lit row and
+    /// closes; the cursor stays on the row throughout.
     #[test]
     fn i_on_a_choice_row_opens_an_empty_field_placed_on_the_current_option() {
         let mut draft = single_field_draft(FieldKind::Choice {
@@ -4777,8 +4009,8 @@ mod tests {
         assert_eq!(text.begin_choice_entry(), Step::Inert);
     }
 
-    /// The footer's `i` chip (§3.2): a two-option `Choice` is
-    /// `StepsAndTypes` now, a one-option one still `Inert`.
+    /// The footer's `i` chip: a two-option `Choice` is `StepsAndTypes` now, a
+    /// one-option one still `Inert`.
     #[test]
     fn a_choice_row_steps_and_types() {
         let draft = single_field_draft(FieldKind::Choice {
@@ -5043,14 +4275,7 @@ mod tests {
         );
     }
 
-    /// `fields` takes `Option<&str>` because spec §4 has it serve the
-    /// create path too, and a name nothing defines has to come back as an
-    /// object with no items of its OWN rather than a panic — a
-    /// `Choice` with no dataset selected and an empty column list. Its
-    /// catalogue is not empty though (§18.2): with no view to read,
-    /// `current` falls back to the schema's first dataset
-    /// (alphabetically, `other`, which has one column, `book`), and that
-    /// column is in the catalogue for `space` to add.
+    /// An absent object name builds fields for a new object without panicking.
     #[test]
     fn an_object_that_does_not_exist_has_empty_fields_rather_than_panicking() {
         let config = demo_config();
@@ -5134,9 +4359,9 @@ mod tests {
         assert_eq!(list_names(&draft), before);
     }
 
-    /// Validation runs against the DRAFT alone (spec §7.2). Validating the
-    /// merged doc instead would report every other broken view in the
-    /// config against the one object the user is editing.
+    /// Validation runs against the DRAFT alone. Validating the merged doc instead would
+    /// report every other broken view in the config against the one object the user is
+    /// editing.
     #[test]
     fn validation_sees_the_draft_and_not_the_rest_of_the_config() {
         let config = config_from(&[
@@ -5229,13 +4454,8 @@ mod tests {
         assert!(draft.writes_by_destination().is_empty());
     }
 
-    /// Entering the edit stage turns the ladder's `PreviousStage` rung on
-    /// and drops the browse query with it: `state.query` (browse) and
-    /// `Draft::query` (edit, §18.3) are two separate cursor spaces, so a
-    /// stale browse query left applied would rank a list the trader is no
-    /// longer looking at, and would also eat the `escape` that was meant
-    /// to go back a stage before the ladder ever reached the edit stage's
-    /// own query.
+    /// Entering Edit clears the separate browse and draft query stores and gives Escape
+    /// a parent stage to return to.
     #[test]
     fn entering_the_edit_stage_arms_the_previous_stage_rung() {
         let config = demo_config();
@@ -5261,21 +4481,15 @@ mod tests {
         assert!(state.draft.is_none());
     }
 
-    /// The confirm prompts name the object rather than asking "are you
-    /// sure". They no longer spell out the fork's long-term cost ("it stops
-    /// following the desk") — a user ruling of 2026-09-11 (commit 9916049)
-    /// took that sentence out of every prompt; the cost is documented in
-    /// spec §4.1, and the prompt's job is to name what is being copied.
+    /// Destructive prompts name their object and consequence.
     #[test]
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
     }
 
-    /// `Confirm::Overwrite` is armed only on a user-owned scope (a
-    /// desk-owned one writes at once, user ruling 2026-09-14), so its one
-    /// prompt must be true of that case alone: the previous contents
-    /// really are lost, and there is no fork to claim.
+    /// Overwrite confirmation describes replacement of a user-owned scope's values.
+    /// Inherited scopes instead take the announced-fork path.
     #[test]
     fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
         let owned = Confirm::Overwrite.prompt("mine");
@@ -5303,14 +4517,12 @@ mod tests {
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
     }
 
-    // ---- Task 4, as §18.7 left it: the object's own list and the
-    // ---- catalogue behind it -----------------------------------------
+    // ---- Membership and available candidates ----
 
-    /// A Groupings list has no available catalogue at ALL (§18.7.1) —
-    /// ticking IS membership there — so `remove_selected` refuses and
-    /// names the verb that does work here (`space`) rather than silently
-    /// unticking. Decided by the catalogue's absence, never by a `dest`
-    /// and never by whether some catalogue happens to be empty right now.
+    /// A Groupings list has no available catalogue at ALL — ticking IS membership there
+    /// — so `remove_selected` refuses and names the verb that does work here (`space`)
+    /// rather than silently unticking. Decided by the catalogue's absence, never by a
+    /// `dest` and never by whether some catalogue happens to be empty right now.
     #[test]
     fn a_groupings_list_has_no_available_block_and_x_refuses() {
         let config = config_from(&[
@@ -5333,13 +4545,8 @@ mod tests {
         );
     }
 
-    /// **The regression this ruling exists to close.** A Views draft
-    /// whose catalogue is EMPTY — every column the dataset offers already
-    /// added — must still let `x` remove one: a catalogue that exists and
-    /// holds nothing is not the same as no catalogue at all (§18.7.2).
-    /// Deciding by emptiness (as `dest`-scanning and item-scanning builds
-    /// before it both did, each in its own way) has `x` go dead the moment
-    /// the trader finishes adding everything the dataset offers.
+    /// An empty available catalogue still permits demotion. Catalogue existence, not
+    /// its current length, determines whether the list supports removal.
     #[test]
     fn remove_selected_still_works_when_the_catalogue_is_empty() {
         let config = config_from(&[
@@ -5378,7 +4585,7 @@ mod tests {
         );
     }
 
-    // ---- Mouse parity Task 4 (§18.9): dropping a list row by name ----
+    // ---- Dropping list rows by name ----
 
     /// A Views draft over `book`, `npv`, `delta01` — every column already
     /// in the view, so the catalogue exists and is empty (`draft_for`'s
@@ -5409,9 +4616,8 @@ mod tests {
         Domain::Views.draft(&config, "tree")
     }
 
-    /// A Groupings slot with `book`, `lhu` already chosen — no catalogue
-    /// at all (§18.7.1), the same shape
-    /// `a_groupings_list_has_no_available_block_and_x_refuses` builds.
+    /// A Groupings slot with `book`, `lhu` already chosen — no catalogue at all, the
+    /// same shape `a_groupings_list_has_no_available_block_and_x_refuses` builds.
     fn groupings_draft() -> Draft {
         let config = config_from(&[
             (
@@ -5449,8 +4655,8 @@ mod tests {
         }
     }
 
-    /// §18.9.3: "drop on a row" means take that row's index. Downward
-    /// lands after the target's old position, upward before it.
+    /// "drop on a row" means take that row's index. Downward lands after the target's
+    /// old position, upward before it.
     #[test]
     fn a_drop_takes_the_target_rows_index() {
         let mut draft = three_column_draft(); // book, npv, delta01 as items; catalogue empty-but-Some
@@ -5659,7 +4865,7 @@ mod tests {
         }
     }
 
-    // ---- Task 6: filtering the edit stage (§18.3) --------------------
+    // ---- Edit-stage filtering ----
 
     /// The edit stage's own filter narrows [`Draft::visible_rows`], and
     /// [`Draft::selected`] indexes that filtered list — the same
@@ -5733,13 +4939,11 @@ mod tests {
             .map(|i| i.name.as_str())
             .collect();
         assert_eq!(&names[..3], ["bravo", "charlie", "alpha"]);
-        // Row order, not fuzzy score, decides the filtered index now
-        // (review round 1): after the move, `rows()` reads
-        // [.., charlie (row 3), alpha (row 4)], and since "al" still
-        // scores alpha far higher than charlie, a score-ordered
-        // `visible_rows` would have put alpha BACK at index 0 — the
-        // identity check below would pass either way, which is exactly
-        // why this index is asserted explicitly too.
+        // Row order, not fuzzy score, decides the filtered index now: after the move,
+        // `rows()` reads [.., charlie (row 3), alpha (row 4)], and since "al" still
+        // scores alpha far higher than charlie, a score-ordered `visible_rows` would
+        // have put alpha BACK at index 0 — the identity check below would pass either
+        // way, which is exactly why this index is asserted explicitly too.
         assert_eq!(
             draft.selected, 1,
             "alpha is the second VISIBLE row in row order, not the first by score"
@@ -5751,17 +4955,9 @@ mod tests {
         );
     }
 
-    /// Review round 1: the edit stage's row order IS the data — column
-    /// order, chain order — so a filter must narrow it, never reorder
-    /// it. `visible_rows` used to sort by fuzzy score like the browse
-    /// list does, which put a later, better-scoring match ahead of an
-    /// earlier, worse-scoring one; that made `shift+j` unable to change
-    /// the painted order at all, and left §18.1's section header sitting
-    /// above whichever row happened to score best rather than at the
-    /// start of its block. `apple` (row 3) scores far higher against "a"
-    /// than `banana` (row 2) does (an idx-0 match earns a head-start bonus —
-    /// see `palette::fuzzy_match_lowered`), so a score-ordered list would
-    /// paint them in the wrong order despite both matching.
+    /// Filtering retains data order even when a later row has a better fuzzy score.
+    /// Otherwise reordering would not control painted order and headers could split the
+    /// wrong blocks.
     #[test]
     fn visible_rows_lists_matches_in_row_order_not_score_order() {
         let config = config_from(&[
@@ -5818,13 +5014,8 @@ mod tests {
         )
     }
 
-    /// A keystroke in an open plain field reaches the draft through the
-    /// `Input`'s change subscription as `set_query`. The rows under a plain
-    /// field stay unfiltered with the edited row highlighted (§19.1), so
-    /// the cursor must stay on that row — the filter's "reset to the top
-    /// match" rule is for a list that just re-ranked, and this one did
-    /// not. Found on a display 2026-09-13: every keystroke after `i` sent
-    /// the highlight back to the first row.
+    /// Typing in a plain field keeps its row highlighted. Its list is unfiltered, so a
+    /// query change must not reset selection as list filtering would.
     #[test]
     fn a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row() {
         let mut draft = draft_with_number_and_text();
@@ -6141,19 +5332,9 @@ mod tests {
         );
     }
 
-    /// §19.5, review round 1's Important-2 finding: a reader's diagnostic
-    /// index is a position in `Draft::source`'s own array — for Views,
-    /// `views.toml`'s definitional column order, the same order
-    /// `views::columns_for` reads to write the file back — which is NOT
-    /// `items`' order once `ViewPresentation::apply` (or a fresh drag)
-    /// has permuted `items` into the trader's personal presentation. This
-    /// fixture: `source.columns` is `[npv, delta]` (npv first, as
-    /// `views.toml` itself declares them), but `items` has been reordered
-    /// to `[delta, npv]`. A diagnostic path index of `1` names
-    /// `source.columns[1]`, which is `delta` — resolving it by name to
-    /// delta's CURRENT position in `items` (`0`) is the fix; resolving it
-    /// as a raw index into `items` (the pre-fix behaviour) would instead
-    /// land on `items[1]`, which is `npv` — the wrong column entirely.
+    /// Diagnostic indices name source-definition columns, not their reordered
+    /// presentation positions. Resolve through the source name to flag the same column
+    /// after a presentation reorder.
     #[test]
     fn row_for_path_resolves_a_reordered_list_index_by_name() {
         let mut source = toml::Table::new();
@@ -6207,10 +5388,7 @@ mod tests {
         );
     }
 
-    /// §19.5, review round 1's Minor-4: two diagnostics on the same row —
-    /// a Warning and an Error — must show the WORSE of the two, since the
-    /// glyph is one colour per row and a trader must never see a mild
-    /// warning colour when an error is also standing on that row.
+    /// Multiple diagnostics on one row use the highest severity for its glyph.
     #[test]
     fn flagged_rows_promotes_a_warning_to_error_on_the_same_row() {
         let mut draft = Draft::new_object(
@@ -6247,12 +5425,7 @@ mod tests {
         );
     }
 
-    /// The edit footer's row-sensitive question (user ruling 2026-09-13,
-    /// superseding the 2026-09-12 "i for edit text isn't discoverable"
-    /// answer, which asked whether the OBJECT had such a row anywhere
-    /// and so put the `i` chip on `Choice` rows `i` refuses): what the
-    /// row under the CURSOR answers to. Every arm, because the footer
-    /// paints a different pair of chip groups for each.
+    /// Selected-row vocabulary controls both stepping hints and typed-entry hints.
     #[test]
     fn selected_vocabulary_answers_for_the_row_under_the_cursor() {
         let field = |key: &str, kind: FieldKind| Field {
@@ -6306,10 +5479,8 @@ mod tests {
             "a Number steps and takes a typed value on any domain"
         );
 
-        // `Bool` steps and nothing more; a multi-option `Choice` steps
-        // AND types (§3.2's typeahead) — except a `Choice` with one
-        // option, which steps nowhere in either direction and so has
-        // nothing for `i` to open either.
+        // Booleans step only. Multi-option choices step and open typeahead; a
+        // single-option choice has no alternate value to select.
         let steps = Draft::new_object(
             "live",
             vec![
@@ -6373,12 +5544,11 @@ mod tests {
         );
     }
 
-    /// Part 2c §5.2: the column stage is a PROJECTION over the same draft
-    /// — the view's fields are stashed, the column's seven installed, and
-    /// the view's own list stays reachable underneath (which is what lets
-    /// the overlay writer keep rendering from it mid-stage). A step there
-    /// folds onto the item, writes presentation alone, and leaving
-    /// restores the view with the cursor back on the column.
+    /// the column stage is a PROJECTION over the same draft — the view's fields are
+    /// stashed, the column's seven installed, and the view's own list stays reachable
+    /// underneath (which is what lets the overlay writer keep rendering from it
+    /// mid-stage). A step there folds onto the item, writes presentation alone, and
+    /// leaving restores the view with the cursor back on the column.
     #[test]
     fn entering_a_column_swaps_the_fields_and_leaving_restores_them_with_the_fold() {
         let config = config_with_view_and_datasets();
@@ -6391,9 +5561,8 @@ mod tests {
             .find(|i| i.name == "npv")
             .unwrap()
             .clone();
-        // The context the door installs (dataset-presentation spec
-        // §5.1): without it the stage opens but folds nothing. Through
-        // the door's OWN builder, so this mirror of
+        // The context the door installs: without it the stage opens but folds nothing.
+        // Through the door's OWN builder, so this mirror of
         // `render::enter_column_stage` cannot drift from it.
         draft.column_ctx = Some(views::column_context(&draft, "npv", npv.clone()));
         assert!(draft.enter_column(
@@ -6440,16 +5609,8 @@ mod tests {
         assert!(!draft.enter_column("ghost", Vec::new()), "not a member");
     }
 
-    /// M-1 (Part 2c final review): a second `enter_column` while a column
-    /// stage is already open is refused, changing nothing.
-    ///
-    /// Unreachable through the dialog today, which is exactly why the
-    /// guard is worth its line: the membership test below it passes
-    /// through `field_by_key`'s parent fallback, so a re-entry would
-    /// stash the SEVEN installed column fields as `parent_fields` and
-    /// drop the view's own `columns` list forever — and the next write
-    /// would render a view with no columns at all. The assertions are on
-    /// that list surviving, not merely on the `false`.
+    /// A second column entry must not overwrite the stashed parent fields with the
+    /// installed presentation fields. Refuse it and retain the parent's column list.
     #[test]
     fn enter_column_refuses_re_entry_and_keeps_the_objects_own_list() {
         let config = config_with_view_and_datasets();
@@ -6592,12 +5753,8 @@ mod tests {
         assert_eq!(draft.column(), None);
     }
 
-    /// `leave_column` is the Column stage's own door — called while the
-    /// Values stage holds the shared stash, it must do nothing rather
-    /// than take a stash that belongs to the other stage (the review
-    /// finding this test and `enter_column_is_refused_while_the_values_stage_is_open`
-    /// close): the checked discriminant is `column`, which is `None`
-    /// while Values is open.
+    /// Leaving Column while Values owns the shared parent stash is inert. Check the
+    /// projection discriminant before taking the stash.
     #[test]
     fn leave_column_does_nothing_while_the_values_stage_is_open() {
         let mut draft = groupings_draft();
@@ -6628,10 +5785,8 @@ mod tests {
         assert_eq!(draft.fields, before);
     }
 
-    /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's
-    /// rule — to the OPEN column lands on the row keyed by its format key;
-    /// a path naming any other column, or the view itself, lands on
-    /// nothing while this stage is open (those stay on the header).
+    /// A path for the open column maps to its installed format field by name. Paths for
+    /// another column or the view itself stay in the header.
     #[test]
     fn row_for_path_in_the_column_stage_lands_on_the_format_key() {
         let config = config_with_view_and_datasets();

@@ -27,8 +27,8 @@ impl Direction {
     }
 }
 
-/// A rectangle in whatever space the caller works in. The tree computes
-/// unit-space geometry; 1b-ui passes pixel bounds.
+/// A rectangle in the caller's coordinate space. Navigation uses unit
+/// bounds; rendering supplies pixel bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -61,23 +61,14 @@ pub(crate) const EPS: f32 = 1e-3;
 /// Smallest fraction any split child may occupy.
 pub const MIN_RATIO: f32 = 0.05;
 
-/// Stable name for one divider in a tree (drag-splitters task): the path
-/// of child indices from the root down to the owning `Split`, plus the
-/// index of the boundary's left/top child — the same `(index, index + 1)`
-/// adjacent-pair convention [`Tree::move_divider`] operates in. An address
-/// is captured at mouse-down and applied on every mouse-move, and the tree
-/// can change in between (a keyboard split mid-drag, a session reload), so
-/// it deliberately names *structure* rather than borrowing into it:
-/// [`Tree::drag_divider`] re-validates the whole path on every application
-/// and treats anything stale as a no-op, never a panic. Accepted limit of
-/// name-by-structure (review round): a same-tree structural mutation
-/// mid-drag can leave an address that still *validates* but names a
-/// different boundary than the one grabbed (e.g. a split inserted before
-/// it renumbers siblings). The shell cancels drags on every guarded path
-/// (overlay open, workspace switch, fullscreen), so the remaining exposure
-/// is a keyboard split/close raced against a held button — worst case a
-/// benign misresize of a neighboring, still-clamped pair, never a panic or
-/// an invariant break.
+/// Structural address of a split divider: child indices from the root to
+/// its owning split, then the index of the left/top child in the adjacent pair.
+/// A drag captures this value and revalidates it on every application.
+///
+/// This is not a node identity or generation. A structural edit can leave a
+/// valid address pointing at a different boundary; that drag may resize the
+/// new pair. Callers must cancel gestures when their workspace or layout
+/// context is no longer applicable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DividerAddress {
     pub path: Vec<usize>,
@@ -94,11 +85,9 @@ pub enum Node {
         /// summing to 1.0.
         ratios: Vec<f32>,
     },
-    /// A slot holding several tiles with one painted (tile-stacks spec
-    /// §3). Members are leaves by construction — the variant holds ids,
-    /// not nodes — and `Tree::layout` emits only `children[active]`, so
-    /// every slot verb sees a stack as one tile. Invariants:
-    /// `children.len() >= 2`, `active < children.len()`.
+    /// A single layout slot with multiple retained tiles and one active member.
+    /// Members are IDs, not nested nodes. Valid stacks have at least two
+    /// members and `active < children.len()`; layout emits only the active ID.
     Stack {
         children: Vec<TileId>,
         active: usize,
@@ -151,14 +140,8 @@ fn node_holds(node: &Node, id: TileId) -> bool {
     }
 }
 
-/// Does `id` appear anywhere under `node` — a leaf of that id, a stack
-/// member, or, recursively, within a split's children? `Tree::contains`'s
-/// non-allocating core (tile-stacks fix round 1): `contains` used to be
-/// `self.tiles().contains(&id)`, a fresh `Vec` per call, and `Workspaces::
-/// stack_position` calls `contains` (via `Workspace::region_of`) once per
-/// workspace's main tree plus every dock, for every tile, every render —
-/// exactly the per-frame heap churn PHILOSOPHY.md forbids, paid even with
-/// no stacks open.
+/// Check leaf and stack membership recursively without allocating. Used by
+/// per-frame stack lookup as well as tree mutation guards.
 fn holds_anywhere(node: &Node, id: TileId) -> bool {
     match node {
         Node::Leaf(_) | Node::Stack { .. } => node_holds(node, id),
@@ -197,12 +180,9 @@ fn collect_visible(node: &Node, out: &mut Vec<TileId>) {
     }
 }
 
-/// One workspace's layout: an i3-style split tree. Pure data — every verb
-/// is a plain method, and [`Tree::layout`] is the only geometry authority
-/// (rendering and hjkl navigation both consume it).
-/// (`PartialEq` is derived for the dock-trees task: `session.rs` skips
-/// writing a dock table when the whole `Dock` — tree included — still
-/// equals `Dock::default()`, keeping pre-dock session files byte-identical.)
+/// A main or dock split tree with structural focus and optional fullscreen.
+/// Pure mutations and [`Tree::layout`] share one geometry model. Equality
+/// includes all state, allowing session serialization to omit default docks.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tree {
     root: Option<Node>,
@@ -236,9 +216,8 @@ impl Tree {
         out
     }
 
-    /// The tiles painted right now: every leaf plus each stack's active
-    /// member, in tree order (tile-stacks spec §3). `tiles()` still lists
-    /// hidden members — retention and session dirt need them.
+    /// Visible leaves and active stack members in tree order. `tiles()` also
+    /// includes hidden members for retention and persistence.
     pub fn visible_tiles(&self) -> Vec<TileId> {
         let mut out = Vec::new();
         if let Some(root) = &self.root {
@@ -257,9 +236,7 @@ impl Tree {
         Some((ix + 1, children.len()))
     }
 
-    /// Every member of `id`'s stack, in stack order, or `None` when `id`
-    /// is not a stack member — the transient member list's (spec §5.2)
-    /// window into the same stack `stack_position` locates.
+    /// All members of `id`'s stack in order, or `None` for a plain or absent tile.
     pub fn stack_members(&self, id: TileId) -> Option<Vec<TileId>> {
         let Node::Stack { children, .. } = find_stack(self.root.as_ref()?, id)? else {
             return None;
@@ -267,9 +244,8 @@ impl Tree {
         Some(children.clone())
     }
 
-    /// Make `id` the painted member of its stack (a no-op for a plain
-    /// leaf). Fullscreen follows: if the stack's outgoing active member
-    /// held it, `id` holds it now (spec §3 "Fullscreen").
+    /// Activate `id` within its stack. If the outgoing active member was
+    /// fullscreen, transfer fullscreen to `id`. A plain leaf needs no change.
     fn activate(&mut self, id: TileId) {
         let Some(root) = self.root.as_mut() else {
             return;
@@ -294,10 +270,9 @@ impl Tree {
         self.focused = Some(id);
     }
 
-    /// Insert `new` after `anchor` in the anchor's stack — a leaf anchor
-    /// becomes a two-member stack of the two (spec §6.1). `new` becomes
-    /// active and focused. Refuses, untouched, when `anchor` is not a
-    /// leaf here, `new` already is, or the two are one id.
+    /// Insert `new` after `anchor`, creating a stack if the anchor is a leaf.
+    /// Activate and focus `new`. Refuse an absent anchor, an existing `new`,
+    /// or identical IDs without changing the tree.
     pub(crate) fn stack_after(&mut self, anchor: TileId, new: TileId) -> bool {
         if anchor == new || !self.contains(anchor) || self.contains(new) {
             return false;
@@ -338,9 +313,8 @@ impl Tree {
         true
     }
 
-    /// Cycle the focused member by `delta` with wrap (spec §4:
-    /// `stack::next`/`prev`, a count prefix steps N). `false`, untouched,
-    /// when the focused tile is not a member.
+    /// Cycle the focused stack member by `delta`, wrapping at either end.
+    /// Return false without mutation if focus is not a stack member.
     pub fn stack_step(&mut self, delta: i64) -> bool {
         let Some(focused) = self.focused else {
             return false;
@@ -358,10 +332,9 @@ impl Tree {
         true
     }
 
-    /// Pop the focused member out of its stack and place it beside the
-    /// stack: `after` on the right/bottom side, else left/top (spec §3
-    /// "Move", §4 `stack::unstack`). The stack collapses to a leaf when
-    /// one member remains. `false`, untouched, on a plain leaf.
+    /// Remove the focused stack member and split it beside the remaining
+    /// stack: right/bottom when `after`, left/top otherwise. A one-member
+    /// remainder becomes a leaf. Return false for a plain tile.
     fn pop_out(&mut self, orientation: Orientation, after: bool) -> bool {
         let Some(focused) = self.focused else {
             return false;
@@ -395,9 +368,8 @@ impl Tree {
         true
     }
 
-    /// Pop the focused member out of its stack, placed after the stack in
-    /// `orientation` (spec §4 `stack::unstack`). `false`, untouched, on a
-    /// plain leaf.
+    /// Pop the focused stack member after its stack in `orientation`.
+    /// Return false for a plain tile.
     pub fn unstack_focused(&mut self, orientation: Orientation) -> bool {
         self.pop_out(orientation, true)
     }
@@ -418,16 +390,12 @@ impl Tree {
         }
     }
 
-    /// Split the focused tile, placing `new` adjacent to it. On an empty
-    /// tree this creates the first tile (the split verbs double as "open a
-    /// tile"). Sibling ratios equalize on insert (documented v1
-    /// simplification). Focus moves to the new tile. Splitting a non-empty
-    /// tree exits fullscreen.
-    ///
-    /// Invariant (dock-trees review fix): split never discards the id it
-    /// was given. Callers like `Workspace::move_to_dock` remove a tile
-    /// from one tree and hand it to another's `split` — a split that
-    /// silently returned would lose that tile forever.
+    /// Insert `new` beside focus, or create the first leaf in an empty tree.
+    /// Use the first leaf when a nonempty tree has no focus, so a tile moved
+    /// from another tree still has an insertion point. Matching-orientation
+    /// siblings receive equal ratios; otherwise the anchor is wrapped in a
+    /// half-and-half split. Focus moves to `new` and a nonempty tree exits
+    /// fullscreen. The caller must supply an ID not already in this tree.
     pub fn split(&mut self, new: TileId, orientation: Orientation) {
         match (self.root.take(), self.focused) {
             (None, _) => {
@@ -435,10 +403,7 @@ impl Tree {
             }
             (Some(root), Some(focused)) => {
                 self.fullscreen = None;
-                // `insert_beside` with `after: true` IS the focused-leaf
-                // split (post-merge review cleanup 10 — the previous
-                // `split_at` was a second copy of the same rules minus
-                // the side choice).
+                // Share the same insertion rule as ID-addressed edge drops.
                 self.root = Some(insert_beside(root, focused, new, orientation, true));
             }
             // Degenerate: root present but nothing focused. Live verbs
@@ -466,24 +431,18 @@ impl Tree {
         self.set_focus(new);
     }
 
-    /// Close the focused tile. Single-child splits collapse; sibling ratios
-    /// renormalize. Focus moves to the tree-order neighbor of the closed tile:
-    /// the leaf that was immediately after it in the pre-close leaf order,
-    /// or the previous one if the last leaf was closed. If no tiles remain,
-    /// focus becomes None.
+    /// Close focus, collapsing single-child containers and renormalizing
+    /// split ratios. Prefer the surviving stack's active member for focus;
+    /// otherwise choose the next tree-order tile, or the previous tile when
+    /// closing the last. An emptied tree has no focus.
     pub fn close(&mut self) {
         self.remove_focused();
     }
 
-    /// Remove the focused tile from the tree and return its id (dock-regions
-    /// task: `dock::move_*` needs the removed id back so it can park it in a
-    /// dock — this is `close` exactly, refocus rule and fullscreen-clearing
-    /// included, except the id is handed to the caller instead of being
-    /// forgotten; `close` is now a thin wrapper over this). Returns `None`
-    /// on an empty tree. The focused-is-Some-whenever-root-is-Some
-    /// invariant is preserved the same way `close` always preserved it:
-    /// focus moves to the pre-removal tree-order neighbor, or `None` only
-    /// when the tree emptied.
+    /// Remove and return the focused tile. Refocus the stack's new active
+    /// member when possible; otherwise use the surviving tree-order neighbor.
+    /// Clear fullscreen when removing its tile. Return `None` without focus;
+    /// a tree emptied by removal also clears focus.
     pub fn remove_focused(&mut self) -> Option<TileId> {
         let focused = self.focused?;
         if self.fullscreen == Some(focused) {
@@ -516,9 +475,8 @@ impl Tree {
             .take()
             .and_then(|n| remove_leaf(n, focused, &mut done));
 
-        // A closed member refocuses its own stack's new active member
-        // (spec §3 "Close"), never the tile after the stack; every other
-        // close keeps the tree-order-neighbour rule.
+        // Keep focus in the surviving stack after closing a member. Other
+        // closes use the tree-order neighbor.
         let next = match sibling {
             Some(s) if self.contains(s) => {
                 let root = self.root.as_ref().expect("contains(s) implies a root");
@@ -540,34 +498,14 @@ impl Tree {
         Some(focused)
     }
 
-    /// Remove an arbitrary tile by id, wherever it is (dock-trees task:
-    /// session healing's seam — a duplicate leaf claim in a dock tree is
-    /// healed by removing that leaf, which `remove_focused` alone can't
-    /// express without disturbing focus). Removes exactly ONE leaf — the
-    /// first in tree order — even when a hostile file duplicated the id
-    /// *within* one tree (review fix: an all-copies prune deleted both
-    /// copies, losing the tile entirely instead of letting the first
-    /// claim win; see `remove_leaf`). Same structural rules as
-    /// `close`/`remove_focused`: single-child splits collapse, sibling
-    /// ratios renormalize, fullscreen on the removed tile clears. Focus:
-    /// if the removed tile *was* focused, the usual tree-order-neighbor
-    /// refocus applies; otherwise the existing focus is untouched. Returns
-    /// false (tree untouched) when `id` isn't a leaf here. Crate-private
-    /// on purpose: originally this existed only for restore-time healing
-    /// (the keyboard verbs move tiles through `remove_focused`/`split`),
-    /// and since the tile-drag task it is also the live "pick the tile
-    /// up" half of the mouse drop verbs (`Workspace::
-    /// remove_tile_anywhere`) — which name the moved tile by id, not by
-    /// focus, so `remove_focused` can't express them. Either way the
-    /// one-place-per-TileId invariant stays enforced at the `Workspace`
-    /// seam: every live caller re-inserts the removed id into exactly one
-    /// tree before returning.
+    /// Remove one occurrence of `id`, the first in tree order. Collapse
+    /// single-child containers, renormalize split ratios, and clear fullscreen
+    /// on the removed tile. Restore the prior focus if it was another surviving
+    /// ID. Return false for an absent ID.
     ///
-    /// (Replaces the dock-regions task's `replace_leaf`, which existed
-    /// solely for the move-to-occupied-dock *swap* rule; dock trees killed
-    /// that rule — a move now inserts into the dock's tree — leaving
-    /// `replace_leaf` with no caller, so it was removed rather than kept
-    /// as dead API.)
+    /// Session healing uses one-at-a-time removal for duplicate dock claims.
+    /// Live drop operations pair removal with insertion into the destination
+    /// before returning, so a move retains its tile ID.
     pub(crate) fn remove(&mut self, id: TileId) -> bool {
         if !self.contains(id) {
             return false;
@@ -650,10 +588,8 @@ impl Tree {
         }
     }
 
-    /// Swap the focused tile with its geometric neighbor. Focus stays on
-    /// the same TileId, which now occupies the neighbor's position. A
-    /// stack member does not swap: it leaves its stack in that direction
-    /// instead (spec §3 "Move" — i3's move-out-of-container).
+    /// Swap a plain focused tile with its geometric neighbor while retaining
+    /// focus on its ID. A stack member instead pops out in that direction.
     pub fn move_direction(&mut self, dir: Direction) -> bool {
         let Some(focused) = self.focused else {
             return false;
@@ -759,39 +695,16 @@ impl Tree {
         false
     }
 
-    /// Set the ratio pair at `address` so the divider lands under an
-    /// absolute cursor position (drag-splitters task — the mouse
-    /// counterpart of [`Tree::move_divider`], which stays byte-identical
-    /// for the keyboard path). `bounds` is the rect this tree is laid out
-    /// in (the same one the render pass gives [`Tree::layout`]) and
-    /// `(x, y)` is the cursor in that space; the walk down `address.path`
-    /// re-derives the owning split's sub-rect from the ratios exactly the
-    /// way `layout_node` does, then picks the coordinate matching the
-    /// split's orientation — the caller never needs to know which axis a
-    /// divider moves along.
+    /// Move an addressed divider to an absolute cursor position within `bounds`.
+    /// Recompute the owning split rectangle along the address path, then adjust
+    /// only its adjacent ratio pair. Preserve that pair's sum and clamp each
+    /// side to at least `MIN_RATIO`.
     ///
-    /// Same invariants as `move_divider`, expressed absolutely instead of
-    /// incrementally: only the adjacent pair `(index, index + 1)` changes,
-    /// their sum is preserved (so every other sibling and the normalized
-    /// total are untouched), and the new position clamps into
-    /// `MIN_RATIO..=(pair total − MIN_RATIO)` — dragging past the clamp
-    /// pins the divider at the clamp rather than failing, because during
-    /// a live drag "stop at the limit" is the behavior the hand expects
-    /// (the keyboard's discrete step rejects instead; both end at the same
-    /// boundary).
-    ///
-    /// Returns `false` — tree untouched — for anything stale or
-    /// degenerate: a path that runs through a leaf or off the end of a
-    /// split's children (the layout changed mid-drag), a boundary index
-    /// with no right-hand sibling, a non-finite cursor coordinate, a
-    /// zero-extent bounds, or a pair whose total is already below
-    /// `2 × MIN_RATIO` (constructible via `from_parts`, which renormalizes
-    /// but doesn't enforce `MIN_RATIO`; a clamp range would be inverted).
-    /// Also `false` — the review-round no-change contract — when the
-    /// clamped result equals the ratio the pair already has (a repeated
-    /// position, or a drag pinned at a clamp it's already sitting at):
-    /// "true" strictly means "the layout changed", so the caller can key
-    /// re-renders and dirty bookkeeping off it directly.
+    /// Return false for an invalid path/boundary, non-finite position on the
+    /// relevant axis, nonpositive extent, or pair total below `2 * MIN_RATIO`.
+    /// Also return false when the ratio change is below 1e-6. Unlike discrete
+    /// keyboard resize, dragging beyond the limit clamps to it. Bounds must use
+    /// the same coordinate space as the cursor and rendered tree.
     pub fn drag_divider(&mut self, address: &DividerAddress, x: f32, y: f32, bounds: Rect) -> bool {
         let Some(root) = &mut self.root else {
             return false;
@@ -852,13 +765,8 @@ impl Tree {
             return false;
         }
         let new_a = ((pos - origin) / extent - start).clamp(MIN_RATIO, total - MIN_RATIO);
-        // No-change detection (review fix): without it, every move pinned
-        // at a clamp the divider is already sitting at would report true
-        // and trigger a re-render for an identical layout. 1e-6 epsilon in
-        // ratio space: far below any perceptible change (one pixel on an
-        // 8K-wide split is ~1e-4 of it), far above f32 noise at this
-        // scale — and the common no-op cases (same cursor position, same
-        // clamp bound) reproduce bit-identical values anyway.
+        // Ignore sub-1e-6 ratio changes so a repeated position or a drag pinned
+        // at its limit does not trigger redundant dirty state and rendering.
         if (new_a - ratios[i]).abs() < 1e-6 {
             return false;
         }
@@ -867,26 +775,14 @@ impl Tree {
         true
     }
 
-    /// Insert `new` as `anchor`'s split sibling on a chosen side (tile-drag
-    /// task — the drop verbs' insert primitive; `split` stays byte-identical
-    /// for the keyboard path). Exactly `split`'s structural rules, anchored
-    /// by id instead of by focus and with an explicit side: when `anchor`'s
-    /// parent split already has `orientation`, `new` becomes a flat sibling
-    /// immediately before/after it with ratios equalized (the same v1
-    /// equalize-on-insert simplification `split` documents); otherwise the
-    /// anchor leaf wraps into a new 2-way split of `orientation` occupying
-    /// its old footprint, `new` on the requested side at 0.5/0.5. Focus
-    /// moves to `new` (drop semantics: focus follows the moved tile) and —
-    /// mirroring `split`'s rule that an explicit layout operation trumps a
-    /// stale fullscreen — any fullscreen clears.
+    /// Insert `new` beside `anchor` on the chosen side. If the enclosing split
+    /// has the requested orientation, add a sibling and equalize its ratios;
+    /// otherwise wrap the anchor slot in a half-and-half split. A stack member
+    /// anchors its whole stack. Focus `new` and clear fullscreen.
     ///
-    /// Returns `false`, tree untouched, when `anchor` isn't a leaf here,
-    /// `new` already is, or the two are the same id. Unlike `split`, a
-    /// refusal can NOT lose the id being inserted, because refusal happens
-    /// before anything is removed anywhere — callers (the `Workspace` drop
-    /// verbs) verify the anchor exists *before* removing the dragged tile
-    /// from its source tree, and fall back to a plain `split` if this
-    /// somehow still refuses, so a tile can never vanish mid-move.
+    /// Refuse identical IDs, an absent anchor, or a `new` already in this tree
+    /// before mutation. Workspace drop callers check both endpoints before
+    /// removal and retain a plain-split fallback if insertion is refused.
     pub(crate) fn insert_at_leaf(
         &mut self,
         anchor: TileId,
@@ -905,16 +801,9 @@ impl Tree {
         true
     }
 
-    /// Clear any fullscreen state without touching focus (dock-regions
-    /// task). Exists for `Workspace::move_to_dock`: moving a tile into a
-    /// dock must exit fullscreen first — a fullscreen layout covers the
-    /// whole surface and would hide the very dock the moved tile just
-    /// landed in (and `remove_focused` only clears fullscreen when the
-    /// *removed* tile held it, which a hostile restore can decouple).
-    /// Mirrors `split`'s own "splitting a non-empty tree exits fullscreen"
-    /// rule: an explicit layout operation trumps a stale fullscreen. Also
-    /// the seam `Dock::from_parts` uses to enforce "dock trees never have
-    /// fullscreen".
+    /// Clear fullscreen without changing focus. Moving into a dock uses this
+    /// so the destination remains visible; dock restoration also uses it to
+    /// enforce the absence of dock fullscreen state.
     pub fn exit_fullscreen(&mut self) {
         self.fullscreen = None;
     }
@@ -993,25 +882,15 @@ impl Tree {
             .is_some_and(|root| toggle_at(root, focused))
     }
 
-    /// Construct a `Tree` from raw parts (session restore, Task 3): the
-    /// fields are private everywhere else, so this is the one place a
-    /// hostile/corrupted session file's data gets turned back into a `Tree`,
-    /// with validation instead of blind trust.
+    /// Validate and restore raw tree parts. Reject splits with fewer than two
+    /// children, mismatched ratio counts, or nonpositive/non-finite ratios.
+    /// Normalize accepted ratios; heal stack membership and active indices.
     ///
-    /// Structural invalidity in `root` is `Err` (the shape genuinely can't
-    /// be interpreted as a layout): any `Split` with fewer than 2 children,
-    /// a `ratios` vec whose length doesn't match `children`, or any ratio
-    /// that is non-finite (NaN/infinite) or non-positive. A structurally
-    /// valid split's ratios are then renormalized to sum to exactly 1.0 —
-    /// this heals small drift (e.g. from a TOML float round-trip) rather
-    /// than rejecting it, since the brief only asks non-positive/NaN ratios
-    /// to be rejected.
-    ///
-    /// `focused`/`fullscreen` are a different kind of problem: a `TileId`
-    /// that doesn't exist in `root` as a leaf. That's harmless (nothing
-    /// downstream trusts them beyond "is this id currently a leaf",
-    /// per `contains`), so it's healed by clearing to `None` rather than
-    /// rejecting the whole tree over a dangling reference.
+    /// Drop focus/fullscreen references to IDs absent from the restored tree.
+    /// A retained focus activates its stack member. Workspace and dock
+    /// constructors supply a first-tile focus when a nonempty tree lacks one.
+    /// Plain duplicate leaf IDs are not rejected here; dock claim healing is a
+    /// separate workspace operation.
     pub fn from_parts(
         root: Option<Node>,
         focused: Option<TileId>,
@@ -1041,15 +920,10 @@ impl Tree {
     }
 }
 
-/// Recursively validate one `Node` for [`Tree::from_parts`]. A `Split`
-/// must have >= 2 children with a matching-length `ratios` vec of finite,
-/// positive values (renormalized on success). A `Stack` is HEALED rather
-/// than refused (tile-stacks spec §7): a member already claimed by an
-/// earlier node in document order (`seen`) or repeated within the stack
-/// is dropped, an out-of-range `active` clamps to 0, one survivor
-/// collapses to a leaf and none vanishes — `Ok(None)`, which a parent
-/// split then drops from its own children (collapsing to its survivor
-/// when one remains) exactly as `remove_leaf` would.
+/// Validate splits and normalize their ratios. For stacks, discard members
+/// already encountered in tree order or repeated within the stack; reset an
+/// out-of-range active index to zero. Collapse one survivor to a leaf and
+/// remove an empty stack, collapsing any parent split left with one child.
 fn validate_node(node: Node, seen: &mut Vec<TileId>) -> Result<Option<Node>, String> {
     match node {
         Node::Leaf(id) => {
@@ -1133,18 +1007,10 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     }
 }
 
-/// The one structural insert-beside-a-leaf primitive (tile-drag task,
-/// backing [`Tree::insert_at_leaf`] — and, post-merge review cleanup 10,
-/// [`Tree::split`] too, which is exactly this with `after: true` at the
-/// focused leaf; the tree used to carry a second, `after`-less copy named
-/// `split_at` restating the same rules): flat sibling insert with
-/// equalized ratios when the anchor's parent split already has
-/// `orientation` — locating the anchor's slot by `node_holds`, so a
-/// stack the anchor belongs to is one sibling among the others there
-/// too — otherwise wrap the anchor — or, when `anchor` is a stack
-/// member, the whole stack holding it as one unit (`node_holds`) —
-/// into a new 0.5/0.5 split, with `after` picking which side `new`
-/// lands on.
+/// Insert beside an anchor slot. A matching-orientation split gets a flat
+/// sibling with equalized ratios; otherwise wrap the slot in a half-and-half
+/// split. A stack containing the anchor is one slot. `after` selects the side.
+/// Shared by focus-based splitting and ID-based edge insertion.
 fn insert_beside(
     node: Node,
     anchor: TileId,
@@ -1198,15 +1064,10 @@ fn insert_beside(
     }
 }
 
-/// Remove exactly ONE leaf holding `target` — the first in tree order —
-/// rebuilding the node (returns `None` when the removal emptied it).
-/// `done` threads "already removed one" through the recursion. One leaf,
-/// not all (dock-trees review fix): a live tree never holds duplicate ids,
-/// so for every live caller this is the same operation as before — but
-/// session healing removes duplicate leaves from hostile dock trees one
-/// claim at a time, and an all-matches prune there deleted every copy of
-/// an id duplicated *within* one tree, losing the tile entirely instead of
-/// letting the first claim win.
+/// Remove the first occurrence of `target` in tree order and rebuild the
+/// container, returning `None` if empty. The threaded `done` flag prevents
+/// removing every duplicate at once: dock healing must be able to remove
+/// claims one at a time while retaining a surviving tile.
 fn remove_leaf(node: Node, target: TileId, done: &mut bool) -> Option<Node> {
     match node {
         Node::Leaf(id) if id == target && !*done => {
@@ -1230,9 +1091,8 @@ fn remove_leaf(node: Node, target: TileId, done: &mut bool) -> Option<Node> {
                 0 => None,
                 1 => Some(Node::Leaf(children[0])),
                 n => {
-                    // The next member takes the closed one's slot; the
-                    // previous one when the closed member was last
-                    // (spec §3 "Close").
+                    // Select the next member at the removed index, or the previous one
+                    // when the removed member was last.
                     let active = if ix < active {
                         active - 1
                     } else {
@@ -1564,8 +1424,7 @@ mod tests {
         tree.split(TileId(1), Orientation::Horizontal);
         tree.split(TileId(2), Orientation::Horizontal);
         tree.split(TileId(3), Orientation::Vertical); // right col: 2 over 3
-        // Resize comes in Task 3; emulate asymmetry by focusing and testing
-        // overlap tie-break on the symmetric grid instead:
+        // Check focus and overlap tie-breaking on the symmetric grid.
         tree.focus(TileId(1));
         assert!(tree.focus_direction(Direction::Right));
         // 2 and 3 are equidistant (same shared edge); overlap with the
@@ -1601,7 +1460,7 @@ mod tests {
     #[test]
     fn fullscreen_blocks_navigation() {
         let mut tree = grid();
-        tree.toggle_fullscreen(); // Task 3 provides this; here it gates layout
+        tree.toggle_fullscreen(); // Fullscreen replaces the split layout.
         assert!(!tree.focus_direction(Direction::Right));
         assert_eq!(tree.focused(), Some(TileId(1)));
     }
@@ -1782,7 +1641,7 @@ mod tests {
         );
     }
 
-    // --- drag_divider (drag-splitters task) -----------------------------
+    // --- Divider dragging ---------------------------------------------
 
     /// Pixel-flavored bounds for drag tests: dragging is defined against
     /// the laid-out rect, so these tests use a non-unit, offset rect to
@@ -2111,7 +1970,7 @@ mod tests {
         );
     }
 
-    // --- remove_focused / remove (dock-regions + dock-trees tasks) ------
+    // --- Removal ------------------------------------------------------
 
     #[test]
     fn remove_focused_returns_the_removed_id_and_refocuses_like_close() {
@@ -2200,10 +2059,8 @@ mod tests {
 
     #[test]
     fn remove_of_a_duplicated_id_takes_only_the_first_occurrence() {
-        // Review fix: a hostile session file can duplicate an id WITHIN
-        // one tree (node_from_toml has no duplicate check). remove() must
-        // prune exactly one leaf — first in tree order — so healing's
-        // first-claim-wins leaves one copy alive instead of deleting both.
+        // A malformed session can duplicate an ID within a tree. Remove one
+        // occurrence so claim healing can retain a survivor.
         let dup = Node::Split {
             orientation: Orientation::Horizontal,
             children: vec![
@@ -2225,14 +2082,9 @@ mod tests {
 
     #[test]
     fn split_with_root_but_no_focus_inserts_at_the_first_leaf_instead_of_dropping() {
-        // Review fix: the old degenerate arm returned without inserting,
-        // so a caller that had already removed the tile from another tree
-        // (move_to_dock's move-back) lost it forever. The invariant is
-        // "split never discards the id it was given": with no focus, the
-        // first tree-order leaf anchors the insert and focus lands on the
-        // new tile as usual. (Reachable only through a reconstructed
-        // root-Some/focused-None tree — Tree::from_parts heals a dangling
-        // focused to None.)
+        // A restored nonempty tree may lack focus. Splitting must use the first
+        // leaf as its anchor and retain the incoming tile; callers may already
+        // have removed that tile from another region.
         let mut tree = Tree::from_parts(Some(Node::Leaf(TileId(1))), None, None).unwrap();
         assert_eq!(tree.focused(), None, "fixture sanity: no focus");
         tree.split(TileId(2), Orientation::Horizontal);
@@ -2244,7 +2096,7 @@ mod tests {
         assert_eq!(tree.focused(), Some(TileId(2)));
     }
 
-    // --- Tree::from_parts (Task 3: session restore reconstruction) -----
+    // --- Tree restoration ---------------------------------------------
 
     #[test]
     fn from_parts_rebuilds_an_equivalent_tree() {
@@ -2495,7 +2347,7 @@ mod tests {
         assert!(approx(r2.x, 0.5) && approx(r3.x, 0.75));
     }
 
-    // --- insert_at_leaf (tile-drag task) ---------------------------------
+    // --- ID-based insertion -------------------------------------------
 
     #[test]
     fn insert_at_leaf_before_and_after_join_a_matching_orientation_split() {
@@ -2575,7 +2427,7 @@ mod tests {
         );
     }
 
-    // --- stacks (tile-stacks spec §3) ------------------------------------
+    // --- Stacks -------------------------------------------------------
 
     /// [1 | stack(2, 3 active)] built through `stack_after`.
     fn two_tiles_then_stack() -> Tree {

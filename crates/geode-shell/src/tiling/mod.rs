@@ -1,12 +1,10 @@
-//! Tiling window-management core (spec §3.1, §3.6): the pure tree that is
-//! the single source of truth for workspace layout. Rendering (Phase 1b-ui)
-//! consumes [`Tree::layout`]; directional navigation uses the same geometry,
-//! so what you see is what hjkl navigates. No gpui here (spec §10.3).
-//! Dock-regions task (generalized by dock-trees): each workspace also
-//! carries three fixed docks ([`Docks`]) beside its tree — each dock
-//! holding a full [`Tree`] of its own — unified under [`Workspace`], whose
-//! verbs route by [`FocusRegion`]; [`docks::layout`] carves the dock
-//! frames, and each visible dock's own `Tree::layout` places its tiles.
+//! Pure workspace layout, structural focus, navigation, and movement.
+//!
+//! [`Tree::layout`] supplies tile geometry for rendering and navigation. Each
+//! [`Workspace`] combines a main tree with three dock trees and routes verbs
+//! through its [`FocusRegion`]. [`dock_layout`] carves visible dock frames;
+//! each region's tree then places its visible tiles. This module has no GPUI
+//! dependency.
 
 mod dividers;
 mod docks;

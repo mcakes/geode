@@ -1,5 +1,5 @@
-//! Saved scopes (Phase 4 spec §3.9): `scopes.toml`, a doc atomic at depth
-//! one, each named scope replaced whole by a finer layer.
+//! Saved scopes from `scopes.toml`. Each named scope replaces whole across
+//! configuration layers.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
@@ -9,45 +9,26 @@ use std::collections::BTreeMap;
 
 pub type SavedScopes = BTreeMap<String, Scope>;
 
-/// Names a saved scope may never take, shared by every door that could
-/// create one — `Frame::save_scope` (`geode-shell`, historically
-/// `:scope save` on a tile's command line, test-only since 2026-09-20)
-/// and `shell::objectdialog::Domain::Scopes::reserved_names` (the config
-/// dialog's `n`/`c`/`scope::save_current` naming prompt, the one
-/// production door left) both read this one list, in the mould of
-/// `geode_core::colour::RESERVED_NAMES`. `save_current` is the
-/// `scope::save_current` palette action's own id (scope-save spec's
-/// amendment): a saved scope by that name would collide with it in the
-/// palette and shadow it from `input.rs`'s `scope::<name>` dispatch arm.
-/// **Refusing it at the dialog alone is not enough** — the review that
-/// added this constant found `:scope save save_current` on a tile still
-/// reached `Frame::save_scope` unchecked, persisting `[save_current]` to
-/// `scopes.toml`; the next `register_scope_actions` at startup then
-/// tried to register `scope::save_current` a second time and panicked
-/// (`ActionRegistry::register`'s `.expect("builtin action ids are
-/// unique by construction")`) — a config value on disk that crashes the
-/// app at every launch, unfixable by a trader who cannot even open the
-/// dialog that would tell them why. The `:scope save` route closed on
-/// 2026-09-20 (command-line locality spec §5): `:scope` is a refusal on
-/// every tile now, and `Frame::save_scope` has no production caller
-/// left — the palette's `Scope: Save current as…` action
-/// (`scope::save_current`) opens the Scopes object dialog's own naming
-/// prompt (`objectdialog::render::open_save_scope`, `NameSeed::
-/// FromFrame`) and commits through the dialog's own create path,
-/// guarded by this same list via `Domain::reserved_names`.
-/// `register_scope_actions` itself
-/// (`geode-shell/src/defaults.rs`) is the second, independent backstop:
-/// even a scope named some OTHER already-registered id (a future
-/// action, or a name collision this list has not yet learned about)
-/// must not panic the registry either, so it skips rather than expects.
+/// Names reserved by scope actions. A saved scope named `save_current`
+/// would collide with the action that opens the save prompt. Creation paths
+/// share this list; action registration also skips occupied IDs so a
+/// hand-edited configuration cannot panic the registry on a collision.
 pub const RESERVED_NAMES: [&str; 1] = ["save_current"];
 
-/// Read every named scope out of a merged `scopes` doc, dropping (with a
-/// warning) any that isn't a table, names a column no dataset declares, or
-/// carries an unparseable expression. Validated against every dataset in
-/// `schema` — the dataset reporting the fewest problems wins, so a scope
-/// naming columns from more than one dataset isn't unfairly penalised by
-/// checking it against just one.
+/// Read named scopes, warning and dropping non-table objects or strings
+/// containing malformed expressions.
+/// Validation runs against each dataset separately; the fewest diagnostics
+/// are reported. With a nonempty schema, at least one dataset must validate
+/// the entire scope. Columns spread across different datasets do not form a
+/// union. With no datasets, validation yields no diagnostics.
+///
+/// Field-shape checks are permissive: non-table dimensions and non-string
+/// text/expressions are ignored; non-array dimension values become empty
+/// selections, and mixed arrays keep only strings. These silent fallbacks
+/// can remove constraints from the loaded scope.
+///
+/// This reader does not reject reserved scope names; creation and action
+/// registration enforce action-name conflicts separately.
 pub fn saved_scopes_from_doc(
     doc: &MergedDoc,
     schema: &SchemaSpec,
@@ -55,9 +36,8 @@ pub fn saved_scopes_from_doc(
 ) -> (SavedScopes, Vec<Diagnostic>) {
     let mut out = SavedScopes::new();
     let mut diags = Vec::new();
-    // `scopes.<name>[.<suffix>]` (§19.5): most call sites below know
-    // exactly which key misbehaved (`.expression`, `.dimensions.<col>`);
-    // the ones that don't (not a table at all) name the object whole.
+    // Point diagnostics at `scopes.<name>` or the offending expression or
+    // dimension-selection field.
     let warn = |path: String, m: String| Diagnostic {
         severity: Severity::Warning,
         layer: None,
@@ -115,8 +95,8 @@ pub fn saved_scopes_from_doc(
                 }
             }
         }
-        // Validate against every dataset that has the columns; a scope
-        // naming a column no dataset declares is an error for that scope.
+        // Accept when one dataset validates the whole scope; otherwise report
+        // the smallest diagnostic set. An empty schema supplies no checks.
         let bad: Vec<Diagnostic> = schema
             .datasets
             .iter()
@@ -152,9 +132,9 @@ pub fn saved_scopes_from_doc(
     (out, diags)
 }
 
-/// The TOML table `persist_scope_to_user_config` (geode-shell) writes for
-/// one scope — the inverse of the table shape [`saved_scopes_from_doc`]
-/// reads.
+/// Serialize selections, text, and expression in the saved-scope table shape.
+/// Empty selections are omitted. The `impossible` flag is not persisted, so
+/// this is not a lossless serialization of an arbitrary composed scope.
 pub fn scope_to_table(scope: &Scope) -> toml_edit::Table {
     let mut t = toml_edit::Table::new();
     let mut dims = toml_edit::Table::new();

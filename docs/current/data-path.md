@@ -189,6 +189,11 @@ the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters.
 
+The [typed-document reference](typed-documents.md) describes schema and view
+validation, grain meaning, scope composition, and checks deferred to query
+compilation. A typed reader returning a value does not prove every requested
+query can be served by the dataset's actual storage grains.
+
 The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each
 other. A newer request interrupts an older one for the same key; request and

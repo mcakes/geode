@@ -1,41 +1,19 @@
-//! Fixed dock regions (dock-regions task, generalized by the dock-trees
-//! task): three per-workspace regions — left, right, bottom — each holding
-//! a full tiling [`Tree`] alongside the main i3-style tree, for the
-//! "always there" panes a desk keeps pinned (a watchlist on the left, a
-//! detail pane on the right, a log strip on the bottom) without giving up
-//! the tree for the main working set. Originally a dock held at most one
-//! tile; the dock-trees generalization swapped that `Option<TileId>` for a
-//! `Tree`, so a dock gets splits, orientations, directional focus/move,
-//! divider resize, and focus memory by *reusing* the tree — no parallel
-//! layout logic exists here, and none may be added. Pure data, no gpui
-//! (spec §10.3) — the [`Workspace`](super::Workspace) verbs consult and
-//! mutate these; rendering consumes [`layout`] for the dock frames and each
-//! dock's own `Tree::layout` for the tiles within.
+//! Three fixed regions beside a workspace's main tree: left, right, and
+//! bottom. Each dock owns a full [`Tree`], visibility, and a size fraction.
+//! Hidden docks retain their tree and focus memory. Docks share the main
+//! tree's layout, navigation, and session encoding instead of introducing a
+//! second layout model.
 //!
-//! **Inventory decision (not gpui-component's `dock` module):** the pinned
-//! release ships the dock framework across two crates —
-//! `gpui-component-0.6.2/src/dock/` (the `Panel`/`PanelView` skins and
-//! `DockSkin`) and `gpui-base-0.6.2/src/dock/` (`DockArea`, `PaneTree`,
-//! `TabGroup`, `DockAreaState`, drag-and-drop) — that is a competing layout
-//! *and persistence* system: it owns its own split tree, its own
-//! drag-and-drop docking, its own serde-based `DockAreaState` save/restore,
-//! and its own notion of which panel is active. Geode already
-//! has all of those seams, deliberately elsewhere: the split tree is
-//! `tiling::Tree` (the single geometry authority `Tree::layout`, which hjkl
-//! navigation shares — "what you see is what hjkl navigates"), persistence
-//! is `session.rs`'s hand-built tolerant TOML (heal-and-warn, never panic —
-//! serde derives reject exactly the hostile shapes it must heal), and focus
-//! is the keymap engine's job, not a widget's. Adopting `DockArea` would
-//! mean either running two layout trees with two persistence formats side
-//! by side or rebasing the whole Phase-1 shell onto gpui-component's, and
-//! its panel chrome (tabs, toolbars, drag handles) is mouse-first where
-//! Geode is keyboard-first (PHILOSOPHY.md: every action keyboard-reachable).
-//! So docks are a couple hundred lines of our own pure state here, rendered
-//! with the exact same tile chrome the tree already uses — the same kind of
-//! decision `shell/sidebar.rs` records for gpui-component's `Sidebar<E>`.
-//! The dock-trees generalization only *strengthened* that reasoning: once a
-//! dock IS a `Tree`, every tree behavior arrives for free through the one
-//! layout engine, where `DockArea` would have demanded a second one.
+//! [`layout`] carves visible dock frames out of a content rectangle; each
+//! dock's `Tree::layout` places its tiles inside that frame. Left and right
+//! use fractions of the full width, then bottom uses a fraction of the full
+//! height within the remaining width. A visible empty dock still occupies
+//! space and can receive explicit focus or a new tile.
+//!
+//! Sizes default to 0.25 and clamp to 0.10–0.50. Docks cannot be fullscreen.
+//! Directional focus and fallback require a visible, occupied dock; explicit
+//! showing or clicking can focus a visible empty dock. All state here is
+//! independent of GPUI; [`Workspace`](super::Workspace) owns region routing.
 
 use super::tree::{Rect, TileId, Tree};
 
@@ -122,10 +100,9 @@ impl Dock {
         self.size
     }
 
-    /// Visible AND occupied — the state in which a dock is a
-    /// directional-focus target and a `fallback_region` candidate. Not
-    /// the region invariant any more: a visible empty dock may hold the
-    /// focus region (spec 2026-09-08 add-tile §8) so an add can fill it.
+    /// Whether directional navigation or fallback can target this dock:
+    /// visible and occupied. Explicit focus may also rest in a visible empty
+    /// dock so the next add can fill it.
     pub fn focusable(&self) -> bool {
         self.visible && !self.tree.is_empty()
     }
@@ -224,10 +201,10 @@ impl Docks {
     }
 }
 
-/// Where focus lives within one workspace: the main tiling tree, or one of
-/// the docks. `Dock(side)` is only ever valid while that dock is
-/// [`Dock::focusable`] (visible and occupied) — the `Workspace` verbs
-/// maintain that invariant and session restore heals violations to `Main`.
+/// The main tree or a visible dock holding structural focus. A visible empty
+/// dock is valid for explicit focus even though [`Dock::focusable`] excludes
+/// it from directional navigation. Hiding a focused dock selects a fallback
+/// region, which may be main or another visible occupied dock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FocusRegion {
     #[default]

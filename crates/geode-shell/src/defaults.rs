@@ -1,83 +1,26 @@
-//! Compiled-in defaults: the builtin action set and keymap (spec §3.1).
-//! These form the Builtin config layer; desk and user files override them.
+//! Compiled-in shell actions and keymap defaults.
+//! Desk and user bindings override these through the ordinary keymap compiler.
 
 use crate::actions::{ActionDef, ActionId, ActionRegistry};
 use crate::keymap::Modifiers;
 use geode_core::config::{Config, Diagnostic, Severity};
 
-/// The builtin keymap document, layered under desk/user keymaps.
+/// Shell builtin bindings, followed by module fragments and desk/user layers.
+/// Module-context bindings belong to module factories' default keymap fragments.
 ///
-/// Directional focus is `mod+h/j/k/l` (user direction — vim letters on
-/// the primary modifier, replacing the Phase 1c `ctrl+w h/j/k/l` chords).
-/// Not `ctrl+arrows`: macOS binds those to Mission Control/Spaces
-/// system-wide and swallows the events before any app sees them.
-/// Move-tile is `ctrl+alt+arrows` (user direction, superseding the earlier
-/// `ctrl+shift+arrows`) and resize is `shift+arrows` (user direction,
-/// retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window prefix and
-/// `shift+h/j/k/l`) — the builtin keymap now has no sequence
-/// bindings at all; sequences remain a first-class engine feature for
-/// desk/user layers. There is no split chord: tiles are *added* by kind
-/// (`tile::add_<kind>[_horizontal|_vertical]`, palette rows registered
-/// by `register_add_actions`) and `shift+d`/`ctrl+shift+d` duplicate the
-/// focused tile beside/below itself (spec 2026-09-08 add-tile §3).
-/// `ctrl+v` and `ctrl+h` are free. Resize is a direct binding, not a
-/// mode: `shift+arrows` move the
-/// divider adjacent to the focused tile toward the arrow's direction by
-/// `RESIZE_STEP` (the key names the divider's direction, not
-/// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
-/// consequence when the focused tile has no divider on that side).
+/// Focus uses `mod+h/j/k/l`; move-tile uses `ctrl+alt+arrows`; resize uses
+/// `shift+arrows`. Resize moves the adjacent divider toward the arrow, including
+/// [`crate::tiling::Tree::move_divider`]'s edge-flip behavior. Control-arrow focus
+/// would conflict with macOS Mission Control/Spaces shortcuts.
 ///
-/// Docks (dock-regions task): `ctrl+[` / `ctrl+]` / `ctrl+/` toggle the
-/// left/right/bottom dock; the *move*-to-dock verbs are the same physical
-/// keys with shift held — which the user thinks of as `ctrl+shift+[` etc.,
-/// but which are deliberately bound as `ctrl+{` / `ctrl+}` / `ctrl+?`
-/// (shifted character, NO shift modifier). Verified against the pinned
-/// platform sources, not assumed: both macOS (`gpui_macos/src/events.rs`,
-/// the `else if shift { shift = false; chars_with_shift }` arm) and Windows
-/// (`gpui_windows/src/keyboard.rs`, `get_keystroke_key`'s
-/// `need_to_convert_to_shifted_key` OEM-key list) deliver shift+punctuation
-/// as the shifted character with the shift modifier *cleared* — a real
-/// `KeyDownEvent` for shift+[ arrives as key `{`, `shift: false`, so a
-/// `"ctrl+shift+["` binding would never match anything. (Letters are the
-/// opposite: a shifted letter stays the letter + shift modifier, so a
-/// shifted-letter chord would be bound with the modifier spelled out —
-/// as would a shifted *arrow*, which is why `shift+arrows` resize binds
-/// shift as a modifier.) The e2e dock tests dispatch `ctrl-{`
-/// through gpui's real pipeline to pin this shape.
+/// Dock moves use `ctrl+{`, `ctrl+}`, and `ctrl+?`: the pinned macOS and Windows
+/// backends deliver shifted punctuation as the shifted character with Shift
+/// cleared. Letters and arrows retain an explicit Shift modifier instead.
 ///
-/// Close-tile is `ctrl+w` (user direction — the browser/vim close idiom;
-/// free since the vim window prefix retired, and unclaimed by macOS).
-///
-/// Frame slots (Phase 3 §4.2) are declared in their own table, FIRST —
-/// deliberately ahead of the `workspace` table's `mod+1..9` below, not
-/// alongside the other context-less bindings further down. The matcher
-/// keeps the *last* declaration-order match among exact keystroke ties
-/// (`Matcher::press`, "Bindings are in layer-then-definition order; keep
-/// the last"). This ordering was originally defense-in-depth against a
-/// user's `keymap.mod = "ctrl"` aliasing `mod+1` onto the exact same
-/// keystroke as the shipped `ctrl+1`: Task 4b (Phase 4a, user ruling)
-/// refused that alias outright as invalid config instead of relying on
-/// tie-break ordering to keep it safe (`defaults::mod_alias_from_config`
-/// returns an error diagnostic and keeps the default alias) — `mod` and
-/// `ctrl` can no longer collide, so this file's declaration order is no
-/// longer load-bearing for that reason. It stays as written: removing it
-/// buys nothing, and the tie-break rule is worth keeping documented for
-/// whatever binding table lands here next.
-///
-/// **This document binds nothing inside a module's context, and must not
-/// start again** (market-data documents §8.4). The blotter's two
-/// `blotter && mode == …` sections and the diagnostics tile's own section
-/// used to live here, with a mirrored `(id, title)` table apiece
-/// (`BLOTTER_ACTION_DEFS`, `DIAGNOSTICS_ACTION_DEFS`) registered by
-/// [`register_builtin_actions`] so those bindings survived `build_keymap`
-/// in a build that had never loaded the module — the shell cannot depend
-/// on a module crate, so the only way to bind a module's keys from here
-/// was to keep a copy of its vocabulary. All four are retired: a module
-/// now ships its own bindings as a keymap fragment
-/// ([`crate::keymap::fragments`], `ModuleFactory::default_keymap`), which
-/// the app splices in above this document and below every desk/user
-/// layer, so the ids a binding names and the ids the module registers are
-/// one list in one crate.
+/// The builtin document has no multi-key sequences; the engine supports them in
+/// other layers. Exact ties use the last matching entry. Frame-slot bindings
+/// precede workspace bindings, although the configured `mod` alias cannot be
+/// Control and therefore cannot collide with the literal Control digit bindings.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 [bindings.keys]
@@ -163,8 +106,7 @@ fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
     .expect("builtin action ids are unique by construction");
 }
 
-/// Register the shell's own actions. Modules register theirs at module
-/// registration time (spec §9.1); these are the shell's.
+/// Register shell-owned actions. Factories register module-owned actions separately.
 pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "workspace::focus_left", "Focus left", "Workspace");
     action(reg, "workspace::focus_down", "Focus down", "Workspace");
@@ -193,18 +135,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Move split right",
         "Workspace",
     );
-    // Pairwise reorient around the focused tile (see
-    // `Tree::toggle_split_orientation` — deliberately not i3's
-    // whole-container toggle), bound mod+e (i3's layout-toggle key).
+    // Reorient the pair around the focused tile through Tree::toggle_split_orientation.
     action(
         reg,
         "workspace::toggle_split_orientation",
         "Toggle split orientation",
         "Workspace",
     );
-    // Duplicate the focused tile beside itself, carrying its serialized
-    // state (spec 2026-09-08 add-tile §3.3/§6). Horizontal = to the
-    // right, Vertical = below — the tree's own orientation words.
+    // Duplicate the focused tile with its serialized state: horizontal places
+    // it to the right, vertical places it below.
     action(
         reg,
         "workspace::duplicate_horizontal",
@@ -224,19 +163,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Workspace",
     );
     action(reg, "workspace::close_tile", "Close tile", "Workspace");
-    // Dock regions (dock-regions task): toggle shows/hides a dock (a
-    // hidden dock keeps its tile); move sends the focused tile there —
-    // or back into the tree when it's already the focused dock. See
-    // `tiling::Workspace` for the full verb semantics and BUILTIN_KEYMAP's
-    // doc comment for why the move bindings are spelled `ctrl+{` etc.
+    // Dock toggles retain hidden occupants. Move sends the focused tile to a
+    // dock, or back to the tree when that dock is already focused.
     action(reg, "dock::toggle_left", "Toggle left dock", "Dock");
     action(reg, "dock::toggle_right", "Toggle right dock", "Dock");
     action(reg, "dock::toggle_bottom", "Toggle bottom dock", "Dock");
     action(reg, "dock::move_left", "Move tile to left dock", "Dock");
     action(reg, "dock::move_right", "Move tile to right dock", "Dock");
     action(reg, "dock::move_bottom", "Move tile to bottom dock", "Dock");
-    // Tile stacks (spec 2026-09-19 §4): cycle the focused member, open the
-    // member list, pop the member out. `pick`/`unstack` are palette-only.
+    // Cycle stack members, pick a member, or unstack it; pick/unstack are palette-only.
     action(reg, "stack::next", "Stack: Next", "Workspace");
     action(reg, "stack::prev", "Stack: Previous", "Workspace");
     action(reg, "stack::pick", "Stack: Pick…", "Workspace");
@@ -250,22 +185,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         );
     }
     action(reg, "palette::toggle", "Toggle command palette", "Palette");
-    // No `theme::toggle_mode` (user ruling 2026-09-12): a theme's name
-    // carries its own light/dark, and the palette's theme rows are the
-    // whole vocabulary — see `theme.rs`'s "No light/dark mode".
-    // The sidebar's bottom profile icon, ctrl+,, and the palette all
-    // dispatch this (Task 5: the real settings dialog). Category
-    // "Appearance" — not a standalone "Settings" category — groups it in
-    // the palette alongside the theme rows, which share the same category
-    // (`palette::THEME_CATEGORY`).
+    // Settings share the Appearance category with themes. A theme name
+    // selects its light/dark presentation; there is no separate mode action.
     action(reg, "settings::open", "Open settings…", "Appearance");
-    // Step the UI font size (crate::fontsize, clamped small..=large).
-    // ctrl+= / ctrl+- — the browser-zoom idiom: the unshifted key next to
-    // backspace is `=`, and platforms deliver ctrl+that-key as key "="
-    // (see the shift+punctuation note on BUILTIN_KEYMAP's doc comment for
-    // why "ctrl++" would be both unpressable-without-shift and unparseable
-    // — parse_keystroke splits on '+'). Same "Appearance" category as the
-    // settings dialog that owns the equivalent toggle group.
+    // Font size steps clamp to the supported range. `ctrl+=` uses the
+    // unshifted key; literal `+` is the keystroke parser's separator.
     action(
         reg,
         "fontsize::increase",
@@ -278,87 +202,37 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Decrease font size",
         "Appearance",
     );
-    // `[ui] line_numbers` off → on → rel (user ruling 2026-09-11);
-    // palette-only, like the settings row it duplicates.
+    // Cycle `[ui] line_numbers` through off, on, and relative; palette-only.
     action(
         reg,
         "ui::line_numbers_cycle",
         "Cycle line numbers (off / on / relative)",
         "Appearance",
     );
-    // The keybinding dialog (Part B). Palette-only by design: no key
-    // binding of its own in BUILTIN_KEYMAP — bootstrapping a dialog whose
-    // whole purpose is showing/editing keybindings out of a keybinding
-    // would be a little too cute, and the palette is always reachable
-    // regardless. Category "Keyboard", not "Appearance" — this edits
-    // behavior (bindings), not how the app looks.
+    // Open the keybinding editor from the palette, under Keyboard.
     action(reg, "keybindings::open", "Keyboard shortcuts…", "Keyboard");
-    // Phase 4c: the object dialog over `views` (`shell::objectdialog`).
-    // Palette-only, with no binding in BUILTIN_KEYMAP, for the same
-    // reason `keybindings::open` above has none: it is an occasional,
-    // deliberate act of config maintenance rather than muscle memory
-    // worth a chord, and the palette is always reachable. Category
-    // "Configuration" — its siblings (`config::groupings`,
-    // `config::scopes`, `config::schema`, `config::sources`) land beside
-    // it, so the palette groups the whole family under one heading.
+    // The palette groups named-object editors under Configuration.
     action(reg, "config::views", "Edit views…", "Configuration");
-    // Part 2a Task 4: the object dialog over `groupings` — the nine
-    // `ctrl+1`..`ctrl+9` slots. Palette-only for the same reason
-    // `config::views` is: the chord that matters day to day is the slot
-    // itself (`frame::slot_*`, below), not the occasional edit of what a
-    // slot groups by.
+    // Edit the groupings assigned to the nine Control-digit slots.
     action(reg, "config::groupings", "Edit groupings…", "Configuration");
-    // Part 2a Task 5: the object dialog over `scopes` — the saved scopes
-    // the palette's own `scope::<name>` actions recall (`:scope load
-    // <name>` recalled the same scopes until command-line locality
-    // closed that route 2026-09-20). Palette-only for the same reason
-    // `config::views` and `config::groupings` are: the chord that
-    // matters day to day is the palette's own scope row, not the
-    // occasional management act (rename is unbuilt; there is no "load
-    // into frame" verb here either — both are design-review departures
-    // from spec §8.4, recorded in this crate's Part 2a Task 5 report)
-    // this dialog exists for.
+    // Manage saved scopes; their separate `scope::<name>` actions recall them.
     action(reg, "config::scopes", "Edit scopes…", "Configuration");
-    // Part 2b Task 2: the read-only schema inspector (spec §9, §19.4)
-    // over `datasets` — the vocabulary the other three dialogs build
-    // their choices from, made inspectable. Palette-only like its
-    // siblings; its title says read-only because the palette row is the
-    // only place a trader learns that before opening it.
+    // Inspect the read-only dataset schema used by configuration choices.
     action(reg, "config::schema", "Edit schema…", "Configuration");
-    // Part 2b Task 3: the object dialog over `sources` — the ingest
-    // feeds, flat-listed dataset first (§19.3). Palette-only like its
-    // siblings; there is no chord because a trader reaches for it as
-    // rarely as `config::scopes` or `config::groupings` do.
+    // Edit ingest sources, grouped by dataset.
     action(reg, "config::sources", "Edit sources…", "Configuration");
-    // Part 2c Task 5: the object dialog over `colours` — the shared
-    // colour vocabulary a column's `colour` field and a chart series can
-    // name (spec §6.1). Palette-only like its siblings; there is no
-    // chord because naming a colour is an occasional act of desk
-    // configuration, not something reached for mid-session.
+    // Edit named colours shared by column presentation and chart series.
     action(reg, "config::colours", "Edit colours…", "Configuration");
-    // Open the user config directory in the OS file manager (Finder /
-    // Explorer) — the door to the files behind every `config::*` dialog,
-    // for the edits the dialogs do not cover. Palette-only like its
-    // siblings. No `…`: it opens a system window, not a dialog of
-    // Geode's own.
+    // Open the user configuration directory in the OS file manager for edits
+    // outside the dialogs. The title omits an ellipsis because this opens a folder.
     action(
         reg,
         "config::open_directory",
         "Open config directory",
         "Configuration",
     );
-    // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
-    // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
-    // unlike the punctuation story above, so this spelling is real, and no
-    // builtin binding claims it under the default mod). This used to be a
-    // remap hazard: under `keymap.mod = "ctrl"` it aliased onto
-    // `ctrl+shift+p`, and the matcher's last-exact-match rule let it
-    // shadow the palette's second binding (ctrl+k still opened the
-    // palette). Task 4b (Phase 4a, user ruling) refused that alias
-    // outright as invalid config, so `mod` and `ctrl` can no longer
-    // collide here or anywhere else. `perf::reset` is palette-only —
-    // resetting counters is an occasional deliberate act, not muscle
-    // memory worth a chord.
+    // Toggle the frame-time overlay with `mod+shift+p`.
+    // Counter reset is available through the palette.
     action(
         reg,
         "perf::toggle_overlay",
@@ -371,10 +245,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Reset performance counters",
         "Diagnostics",
     );
-    // The per-tile command line (Phase 3 §3.4): the shell's own actions,
-    // bound `:`/`/` in the `tile` context (any focused tile with an
-    // occupant) so every module gets them for free, without registering
-    // anything of its own.
+    // Command and find prompts are shell actions in the occupied `tile`
+    // context, so every module gets `:` and `/` without registering them.
     action(
         reg,
         "tile::command_line",
@@ -382,18 +254,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Tile",
     );
     action(reg, "tile::find", "Find in tile", "Tile");
-    // The tile picker (2026-09-19): `mod+n` lists the roster's kinds with
-    // typeahead — the choosing form of the `<Kind>: Split` rows
-    // `register_add_actions` registers, and what a bare double-click on
-    // a placeholder tile opens. Category "Tiles" beside those rows; `…`
-    // because it opens a dialog. NOT `tile::add_<kind>`-shaped, so
-    // `parse_add_action` never reads it as an add of an empty kind (its
-    // prefix is `tile::add_`, underscore included).
+    // The tile picker lists roster kinds. Its id is outside the `tile::add_`
+    // prefix so parse_add_action cannot mistake it for a specific module kind.
     action(reg, "tile::add", "Add a tile…", "Tiles");
-    // The nine grouping slots (Phase 3 §4.2): ctrl+1..9 activate a
-    // configured slot (an empty one is ignored — see `Frame::
-    // set_active_slot`), ctrl+0 returns every following tile to its
-    // view's own grouping.
+    // Control-1 through Control-9 activate grouping slots; empty slots are
+    // ignored. Control-0 restores each following tile's view-default grouping.
     for i in 1..=9 {
         action(
             reg,
@@ -408,62 +273,35 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Clear grouping slot (views' own grouping)",
         "Frame",
     );
-    // Scope undo/redo/clear (Phase 4a §3.6): `mod+z`/`mod+shift+z` walk
-    // the bounded undo/redo stacks `Frame::set_scope` maintains;
-    // `scope_clear` is palette-only, like `perf::reset` above — clearing
-    // the whole scope is an occasional deliberate act, not muscle memory
-    // worth a chord of its own.
+    // Scope undo/redo traverse Frame's bounded history. Clearing the whole
+    // scope is a separate palette action.
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
-    // Save the frame's current scope as a new named one (scope-save
-    // spec's amendment to Part 2a's `Domain::Scopes`): opens the Scopes
-    // dialog straight onto the naming prompt, seeded from the frame
-    // (`objectdialog::render::open_save_scope`) — the palette door onto
-    // what pre-2026-09-19 `n` used to do. Category "Scope", matching
-    // `register_scope_actions`'s own per-scope rows, not "Frame" — this
-    // is the save half of the same vocabulary. Palette-only, like
-    // `frame::scope_clear` above: an occasional deliberate act. **Trap**
-    // (CLAUDE.md's Scopes bullet has the same warning): `input.rs`'s
-    // dispatch must match this id BEFORE its `strip_prefix("scope::")`
-    // arm, which would otherwise read `save_current` as the name of a
-    // saved scope to load — `Domain::Scopes.reserved_names()` refuses a
-    // saved scope named `save_current` for the same reason.
+    // Save the current frame scope through the Scopes dialog naming prompt.
+    // Dispatch this id before matching the generic `scope::` prefix; otherwise
+    // `save_current` would be interpreted as a scope name. That name is reserved
+    // in scope configuration for the same reason.
     action(
         reg,
         "scope::save_current",
         "Scope: Save current as…",
         "Scope",
     );
-    // The dimension picker (Phase 4a §3.3), opened on the column-choice
-    // stage — `mod+p`. The per-column `frame::pick_<column>` actions
-    // (opening straight onto one column's values stage) are registered
-    // separately, from the loaded schema, by `register_pick_actions`
-    // below: this crate cannot register them here because there is no
-    // schema to enumerate at `register_builtin_actions`' own call site
-    // (before any config is loaded).
+    // Open the dimension picker at column selection. Per-column actions are
+    // registered separately from the startup schema by register_pick_actions.
     action(reg, "frame::pick", "Pick a dimension…", "Frame");
-    // The grouping picker (2026-09-19): `mod+g` lists the filled slots
-    // and the view default with typeahead — the choosing form of the
-    // nine `frame::slot_N` chords above, and what a click on the
-    // toolbar's grouping readout opens. `…` because it opens a dialog.
+    // The grouping picker lists filled slots and the view default with typeahead.
     action(reg, "frame::grouping", "Pick a grouping…", "Frame");
-    // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
-    // focus into it from anywhere in the shell, the one keyboard route
-    // in (typing itself, once focused, needs no action — the field's own
-    // `Input` handles that; see `shell/input.rs`'s filter-focused guard).
+    // Focus the scope text field; its Input handles typing once focused.
     action(
         reg,
         "frame::focus_text",
         "Focus the scope text field",
         "Frame",
     );
-    // The as-of selector (Phase 4a §3.6): `mod+t` opens a modal to view
-    // data as of a past instant, with the frame's recent generation
-    // times as honest presets. `frame::live`/`frame::as_of_undo` are
-    // palette-only — occasional deliberate acts, not muscle memory worth
-    // a chord of their own, same reasoning as `frame::scope_clear`/
-    // `perf::reset` above.
+    // Open the as-of selector with recent generation timestamps as presets.
+    // Live mode and as-of undo are separate palette actions.
     action(reg, "frame::as_of", "Jump to a point in time…", "Frame");
     action(reg, "frame::live", "Return to live", "Frame");
     action(
@@ -472,19 +310,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Swap to the previous as of",
         "Frame",
     );
-    // The scope expression dialog (command-line locality spec §4.1):
-    // palette-only, the typed door onto the frame's expression layer now
-    // that `:scope <expr>` is a refusal. `…` because it opens a dialog.
+    // Open the frame-scope expression dialog through the palette.
     action(
         reg,
         "frame::scope_expression",
         "Set scope expression…",
         "Frame",
     );
-    // Set log level… (command-line locality spec §4.2): target then level
-    // over the choice dialog, landing on `Diagnostics::request_level` —
-    // the diagnostics tile's `:level` moved here. Category "Diagnostics"
-    // beside the tile's own actions.
+    // Choose a log target and level, then submit Diagnostics::request_level.
     action(reg, "log::level", "Set log level…", "Diagnostics");
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
@@ -506,16 +339,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     }
 }
 
-/// `frame::pick_<column>` for every pickable column (Phase 4a §3.3).
-/// Registered at startup from the loaded schema — `main.rs` calls this
-/// right after [`register_builtin_actions`] and before `build_keymap`,
-/// over `shell::pickable_columns(&config)` — so the palette lists `Pick:
-/// <column>` for each one and a keymap can bind e.g. `mod+b =
-/// "frame::pick_book"`. Unlike `register_builtin_actions`, the action ids
-/// this produces depend on config, so `test_services` (the shell crate's
-/// own test fixture) calls this too, over its (empty) config, so the
-/// startup-ordering path is exercised even when there is nothing to
-/// register — the loop below is simply a no-op then.
+/// Register `frame::pick_<column>` actions from the startup pickable columns.
+/// Registration precedes keymap compilation so these ids are bindable. The action
+/// registry is fixed at startup; newly pickable columns need restart for new ids.
 pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::Pickable]) {
     for c in columns {
         action(
@@ -527,35 +353,14 @@ pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::
     }
 }
 
-/// `scope::<name>` for every saved scope (spec §3.11), category "Scope",
-/// unbound by default — the same shape as [`register_pick_actions`],
-/// registered right beside it: `main.rs` calls this after it, over
-/// `shell::saved_scopes(&config)`, so the palette lists one entry per
-/// saved scope and a keymap can bind e.g. `mod+shift+e =
-/// "scope::eu"`. Like `register_pick_actions`, the action ids this
-/// produces depend on config — a scope added by a live reload is not
-/// registered until restart (spec §1.3) — so `test_services` calls this
-/// too, over its (empty) saved scopes, exercising the startup-ordering
-/// path even when there is nothing to register.
+/// Register palette and keymap actions `scope::<name>` for startup saved scopes.
+/// They are unbound by default. Reload updates saved scope contents, but newly
+/// added names require restart to enter the action registry.
 pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scopes::SavedScopes) {
     for name in saved.keys() {
         let id = format!("scope::{name}");
-        // A config VALUE must never panic the app, however it reached
-        // disk — `Frame::save_scope` and this dialog's own naming prompt
-        // both refuse `geode_core::scopes::RESERVED_NAMES` (chiefly
-        // `save_current`, this crate's own `scope::save_current` action
-        // id), but that is belt, not suspenders: a hand-edited or
-        // desk-layer `scopes.toml` reaches this loop with no door to
-        // check it first, and `action`'s `.expect("builtin action ids
-        // are unique by construction")` used to take that literally,
-        // crashing at every launch with no in-app way for a trader to
-        // fix the file that caused it (the review finding this closes).
-        // Skipping and logging once is the whole fix: the saved scope
-        // still exists and loads fine through `Frame::load_scope` (the
-        // palette's `scope::<name>` action, or `:scope load` on a tile's
-        // command line until command-line locality closed that route
-        // 2026-09-20), it simply gets no palette row of its own under a
-        // name something else already claimed.
+        // A hand-written scope name may collide with a shell action. Keep the
+        // existing action and skip this palette row rather than panic at startup.
         if reg.contains(&ActionId(id.clone())) {
             tracing::warn!(
                 target: "geode::config",
@@ -567,17 +372,10 @@ pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scop
     }
 }
 
-/// Three palette rows per module kind (spec 2026-09-08 add-tile §3.2,
-/// retitled by user ruling 2026-09-09 to the crate's `Category: Verb`
-/// pattern — see `register_pick_actions`'s "Pick: <column>" and
-/// `register_scope_actions`'s "Scope: <name>"): `tile::add_<kind>`
-/// ("<Kind>: Split", the setting decides the direction),
-/// `tile::add_<kind>_horizontal` ("<Kind>: Split Horizontal", to the
-/// right) and `tile::add_<kind>_vertical` ("<Kind>: Split Vertical",
-/// below), category "Tiles". Action ids are unchanged — only titles.
-/// Registered from the roster's kinds right beside `register_pick_actions`
-/// / `register_scope_actions` — after the builtins, before `build_keymap`
-/// — so a desk keymap can bind e.g. `mod+b = "tile::add_blotter"`.
+/// Register four Tiles actions per module kind: default-direction split,
+/// explicit horizontal/right split, explicit vertical/below split, and stack.
+/// Ids are `tile::add_<kind>` with optional `_horizontal`, `_vertical`, or
+/// `_stacked` suffixes. Registration precedes keymap compilation.
 pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
     for kind in kinds {
         let title = capitalize(kind);
@@ -619,20 +417,16 @@ pub fn capitalize(kind: &str) -> String {
     }
 }
 
-/// How an add row places its tile (spec 2026-09-08 §4.2, tile-stacks
-/// spec §6.1): a split in an explicit or setting-resolved direction, or
-/// stacked onto the focused tile.
+/// Place a tile in an explicit/default-direction split or the focused stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddPlacement {
     Split(Option<crate::tiling::Orientation>),
     Stacked,
 }
 
-/// The inverse of [`register_add_actions`] for `ShellView::dispatch`:
-/// `(kind, placement)` for a `tile::add_*` id, `None` for anything else.
-/// The suffix is peeled BEFORE the kind is read, so a kind can never be
-/// misparsed by a suffix of its own name, and an empty kind is not an
-/// add.
+/// Decode a `tile::add_*` action into kind and placement; reject empty kinds.
+/// Placement suffixes are stripped first, so kind names ending in a reserved
+/// suffix are ambiguous and cannot be represented as a default-direction add.
 pub fn parse_add_action(id: &str) -> Option<(&str, AddPlacement)> {
     use crate::tiling::Orientation;
     let rest = id.strip_prefix("tile::add_")?;
@@ -648,19 +442,15 @@ pub fn parse_add_action(id: &str) -> Option<(&str, AddPlacement)> {
     (!kind.is_empty()).then_some((kind, placement))
 }
 
-/// The default primary modifier (spec §3.1: Alt, remappable).
+/// Default primary modifier: Alt.
 pub fn default_mod() -> Modifiers {
     Modifiers::ALT
 }
 
-/// Resolve the `mod` alias from config: doc `app`, key `keymap.mod`.
-/// `"ctrl"` is refused with an error diagnostic and the default alias is
-/// returned — ctrl is reserved for the shipped literal bindings
-/// (`ctrl+1..9`, `ctrl+0`, `ctrl+k`, `ctrl+/` …), and aliasing `mod` onto
-/// it makes every `mod` chord collide with one of them (Phase 4a user
-/// ruling, Task 4b: rather than document the collisions, refuse the
-/// alias). Any other unknown value keeps today's behaviour: it silently
-/// falls back to the default, with no diagnostic.
+/// Resolve `app.toml`'s `[keymap] mod`: `alt` or `cmd`.
+/// `ctrl` returns an error and the Alt fallback because it collides with shipped
+/// literal Control bindings. Missing, non-string, and other string values silently
+/// fall back to Alt. Values are case-sensitive.
 pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
     match config.get("app", "keymap.mod").and_then(|v| v.as_str()) {
         Some("ctrl") => (
@@ -682,9 +472,8 @@ pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
     }
 }
 
-/// `[app] modules.default` is no longer read (spec 2026-09-08 add-tile
-/// §7.1): tiles are added by kind. A layer that still sets it gets one
-/// warning so the key does not silently rot in a desk file.
+/// Warn when the ignored `app.toml` key `modules.default` is present.
+/// Tiles are created by explicit module kind.
 pub fn modules_default_diagnostic(config: &Config) -> Option<Diagnostic> {
     config.get("app", "modules.default").map(|_| Diagnostic {
         severity: Severity::Warning,
@@ -737,12 +526,7 @@ mod tests {
             diags.is_empty(),
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
-        // 4 focus + 4 move + 4 resize + orientation toggle + fullscreen
-        // + close + 2 duplicates + 3 dock toggles + 3 dock moves + 9
-        // workspace switches + 2 palette::toggle bindings + theme toggle
-        // + settings::open (Task 5) + 2 font size steps + perf overlay
-        // toggle (spec §7.4). No splits: the add-tile task retired them
-        // and freed ctrl+v/ctrl+h (spec 2026-09-08 add-tile §3.1).
+        // The builtin document contains the complete shell binding set.
         assert!(keymap.bindings().len() >= 39);
     }
 
@@ -766,10 +550,7 @@ mod tests {
         }
     }
 
-    /// `config::open_directory` sits beside the six `Edit …` dialogs in
-    /// the palette's Configuration category, and its title carries no
-    /// `…` — it opens a system window, not a dialog of Geode's own (the
-    /// `…` rule in CLAUDE.md is "opens a dialog").
+    /// Opening the configuration folder is a Configuration action without an ellipsis.
     #[test]
     fn open_config_directory_is_registered_under_configuration_without_ellipsis() {
         use crate::actions::ActionId;
@@ -782,17 +563,8 @@ mod tests {
         assert_eq!(def.title, "Open config directory");
     }
 
-    /// Review finding: `Frame::save_scope`/`Domain::Scopes` reserve
-    /// `save_current`, but a `scopes.toml` written before that ruling
-    /// (or edited by hand, or landed at the desk layer where no dialog
-    /// runs the check) can still name a scope `save_current` — and
-    /// `register_scope_actions` used to hand that straight to `action`'s
-    /// `.expect("builtin action ids are unique by construction")`,
-    /// panicking the whole app at every launch. It must skip the
-    /// collision instead: the builtin `scope::save_current` action
-    /// (registered by `register_builtin_actions`, ahead of this call in
-    /// every real startup) keeps its own title, and an unrelated saved
-    /// scope alongside it still gets its own row.
+    /// A configured scope cannot replace a shell action with the same id.
+    /// Other scopes still register after a collision is skipped.
     #[test]
     fn register_scope_actions_skips_a_collision_and_does_not_panic() {
         use crate::actions::ActionId;
@@ -833,9 +605,7 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// Task 4b (Phase 4a, user ruling): `keymap.mod = "ctrl"` is refused
-    /// as invalid config rather than merely documented as a collision
-    /// hazard — see `mod_alias_from_config`'s own doc comment.
+    /// Control is refused as the primary modifier to protect literal Control bindings.
     #[test]
     fn mod_alias_ctrl_is_refused_with_an_error_and_the_default_stands() {
         let config = config_from_app("[keymap]\nmod = \"ctrl\"\n");
@@ -874,17 +644,8 @@ mod tests {
         assert!(diag.message.contains("Add"), "{}", diag.message);
     }
 
-    /// Fix round 1 (review Finding 1): if `mod_alias` were ever
-    /// `Modifiers::CTRL`, `mod+1` would parse to the exact same keystroke
-    /// as `ctrl+1` — so BUILTIN_KEYMAP's shipped `workspace::switch_1`
-    /// must still win that tie. It does because the frame-slot table is
-    /// declared *before* the `workspace` table (see `BUILTIN_KEYMAP`'s
-    /// own doc comment) and the matcher keeps the last declaration-order
-    /// match. `mod_alias_from_config` itself now refuses to ever produce
-    /// `Modifiers::CTRL` from config (Task 4b), so this test exercises
-    /// the matcher's tie-break directly with the raw `Modifiers` value —
-    /// a regression guard kept for defense in depth, independent of
-    /// config validation.
+    /// A raw Control alias bypasses config validation. Workspace switching
+    /// still wins the digit tie because its entry follows the frame-slot entry.
     #[test]
     fn ctrl_1_resolves_to_the_shipped_workspace_switch_under_a_ctrl_mod_alias() {
         match resolve(Modifiers::CTRL, "ctrl+1") {
@@ -895,9 +656,7 @@ mod tests {
         }
     }
 
-    /// The other half of Finding 1's fix: under the default mod alias
-    /// (Alt), `mod+1` parses to `alt+1` — no collision with `ctrl+1` — so
-    /// the frame slot binding resolves normally.
+    /// With the default Alt alias, Control-digit frame slots have no alias collision.
     #[test]
     fn ctrl_1_resolves_to_the_frame_slot_under_the_default_mod_alias() {
         match resolve(default_mod(), "ctrl+1") {
@@ -908,8 +667,7 @@ mod tests {
         }
     }
 
-    /// Spec 2026-09-08 add-tile §3.1: the split verbs are retired and
-    /// their chords are free — tiles are added by kind instead.
+    /// Generic split actions are absent; tile additions identify the module kind.
     #[test]
     fn the_split_actions_are_gone() {
         use crate::actions::ActionId;

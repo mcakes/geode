@@ -1,6 +1,6 @@
-//! The shared action registry (spec §3.2, §9.1): modules declare actions
-//! here; the keymap maps keys to action ids; the palette lists them. Modules
-//! never bind keys directly.
+//! Action metadata shared by keymaps, palette entries, and dispatch.
+//! Modules register action ids and contribute default keymap fragments; bindings
+//! are resolved centrally.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -31,22 +31,9 @@ pub struct ActionDef {
 #[derive(Debug, Default)]
 pub struct ActionRegistry {
     actions: BTreeMap<ActionId, ActionDef>,
-    /// FNV-1a hash → action id, filled at [`Self::register`]. Shared (an
-    /// `Arc`, not a plain map) so [`Self::hash_names`] can hand a clone
-    /// to the crash hook (`geode_app::crash::install_panic_hook`),
-    /// installed once as a `'static` closure with no live reference to
-    /// this registry — `ActionRegistry` is not `Send`/`Sync`, so the
-    /// closure cannot borrow it directly, only a clone of this `Arc`.
-    ///
-    /// Fix round 1, MIN-1: this is *not* here so the hook sees
-    /// registrations made after install-time. Every caller of
-    /// `register` (`register_builtin_actions`, `register_pick_actions`,
-    /// `register_scope_actions`) runs once each, during
-    /// `build_shell_services`, before `install_panic_hook` is ever
-    /// called (`main.rs`) — `shell/mod.rs` states outright that "the
-    /// action registry itself never changes at runtime". The `Arc` is
-    /// only about ownership (a clone the hook can hold without holding
-    /// the registry), not liveness.
+    /// Shared FNV-1a hash-to-id map for crash reporting. The panic hook can
+    /// retain this Arc independently of the registry. Registrations update the
+    /// shared map; the application registers its actions during startup.
     hashes: Arc<RwLock<HashMap<u64, String>>>,
 }
 
@@ -75,23 +62,10 @@ impl ActionRegistry {
         self.actions.values()
     }
 
-    /// The registered action whose id hashes (FNV-1a) to `h`, if any.
-    /// Scans `self.actions` (already the single source of truth for
-    /// every registered id) rather than reading through `hashes` — that
-    /// field is `Arc<RwLock<_>>` for [`Self::hash_names`]'s sake, and a
-    /// method borrowing `&self` cannot hand back a `&str` tied to a lock
-    /// guard that does not outlive the call.
-    ///
-    /// Fix round 1, MIN-7: this has no production caller — the crash
-    /// hook resolves through [`Self::hash_names`]'s clone instead, since
-    /// it has no live `&ActionRegistry` to call this on — so today it is
-    /// test-only surface, kept because the brief specifies it. It is
-    /// also not a strictly redundant view of `hashes`: on an FNV-1a
-    /// collision between two ids, `hashes.insert` (in [`Self::register`])
-    /// keeps whichever was registered *last*, while this scan returns
-    /// whichever sorts *first* in `BTreeMap` order — unreachable in
-    /// practice (64 bits over a few hundred ids) but the two are not
-    /// guaranteed to agree.
+    /// Find an action id by its FNV-1a hash, scanning ids in sorted order.
+    /// The returned reference borrows this registry rather than a lock guard. On a
+    /// hash collision this returns the first sorted id, while [`Self::hash_names`]
+    /// retains the most recently registered id for that hash.
     pub fn name_of_hash(&self, h: u64) -> Option<&str> {
         self.actions
             .keys()
@@ -99,10 +73,7 @@ impl ActionRegistry {
             .map(|id| id.0.as_str())
     }
 
-    /// A clone of the shared hash → id map, for a caller (`geode-app`'s
-    /// panic hook) that needs to resolve hashes from outside any live
-    /// reference to this registry. See the `hashes` field's own doc
-    /// comment.
+    /// Share the hash-to-id map with callers that outlive a registry borrow.
     pub fn hash_names(&self) -> Arc<RwLock<HashMap<u64, String>>> {
         self.hashes.clone()
     }
@@ -153,9 +124,7 @@ mod tests {
         assert_eq!(ids, vec!["a::a", "b::b"]);
     }
 
-    // Phase 4b Task 6: the crash hook resolves `ActionTail`'s FNV-1a
-    // hashes back to action ids through this — see `hashes`' own doc
-    // comment.
+    // Registered action ids can be resolved from the hashes recorded in the action tail.
     #[test]
     fn registering_then_looking_up_by_hash_returns_the_id() {
         let mut reg = ActionRegistry::default();

@@ -1,10 +1,10 @@
-//! What every tile is looking at (spec §4.1). Three predicate kinds
-//! composed with AND: dimension selections, a text filter, and a validated
-//! expression.
+//! Shared scope values: dimension selections, a text filter, and an
+//! expression. The query combines these predicate kinds with AND. Across
+//! scope layers, selections intersect, expressions combine with AND, and an
+//! inner text filter replaces an outer text filter.
 //!
-//! This is the *value*. Scope state lives in the shell and the compiler
-//! lives in the data layer, and those crates may never depend on each
-//! other — so the type they share sits below both (spec §6.2).
+//! Shell state and data compilation use these types without depending on
+//! each other.
 
 pub mod expr;
 
@@ -17,9 +17,9 @@ use crate::schema::DatasetSpec;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DimensionSelection {
     pub column: String,
-    /// Empty means "no constraint", not "match nothing" — an empty
-    /// selection is dropped during composition rather than emitting a
-    /// predicate that excludes every row.
+    /// Empty represents no constraint unless `Scope::impossible` is set.
+    /// Composition skips empty inner selections but can treat an empty
+    /// outer selection as a contradiction; see [`Scope::and_then`].
     pub values: Vec<String>,
 }
 
@@ -47,27 +47,22 @@ impl Scope {
             && self.expression.is_none()
     }
 
-    /// Compose two layers (spec §4.2: global AND workspace AND tile).
-    /// Selections on the same dimension **intersect**: narrowing twice
-    /// narrows, and a layer can never widen what a coarser layer allowed.
+    /// Compose scope layers. Selections on the same dimension intersect;
+    /// expressions combine with AND. Inner text replaces outer text when set.
+    /// Disjoint selections set `impossible` and retain the dimension name:
+    /// an empty selection alone means no constraint, so it cannot represent
+    /// the contradiction without this flag.
     ///
-    /// Disjoint selections are the case worth naming. Composing
-    /// `book in [BK000]` with `book in [BK001]` yields *nothing*, and
-    /// dropping the emptied selection would yield *everything* — a tile
-    /// silently showing the whole desk because its scope contradicted the
-    /// workspace's. So the contradiction is recorded in
-    /// [`Scope::impossible`] rather than encoded as an empty selection,
-    /// which already means the opposite.
+    /// Empty inner selections are skipped. Empty outer selections are
+    /// cloned before intersection: if the inner scope supplies values for
+    /// that column, the empty intersection sets `impossible`. This is an
+    /// asymmetry for unnormalized inputs, including reader-produced empty
+    /// selections; an empty outer entry is not always treated as absent.
     pub fn and_then(&self, inner: &Scope) -> Scope {
         let mut dimensions = self.dimensions.clone();
         let mut impossible = self.impossible || inner.impossible;
-        // Seeded from `self`, not just from this composition. A selection
-        // emptied by an earlier `and_then` is carried in `self.dimensions`
-        // with no values; recomputing `contradicted` from scratch let the
-        // next composition's `retain` drop it, so a third layer lost the
-        // name and reported whichever dimension it constrained instead —
-        // worse than reporting nothing, because that dimension is not what
-        // the scope is doing.
+        // Carry the names of existing contradictions through further composition;
+        // otherwise a later layer could hide which dimension selected no rows.
         let mut contradicted: Vec<String> = if self.impossible {
             self.dimensions
                 .iter()
@@ -92,12 +87,9 @@ impl Scope {
                 None => dimensions.push(sel.clone()),
             }
         }
-        // A selection emptied by intersection is kept, with its values
-        // gone: it is the record of *which* dimension contradicted, and
-        // `columns()` needs the name to say so. One that arrived empty
-        // never constrained anything and is dropped as before. The
-        // compiler is unaffected either way — it returns "nothing" as soon
-        // as it sees `impossible`, and skips empty selections regardless.
+        // Retain emptied intersections so `columns()` can name the contradiction.
+        // Drop other empty outer entries. An initially empty entry intersected
+        // above is already marked contradictory and is retained.
         dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));
 
         Scope {
@@ -112,14 +104,9 @@ impl Scope {
         }
     }
 
-    /// Every column the scope constrains. The text filter is excluded: it
-    /// targets whatever the schema declares textual, not a named column.
-    ///
-    /// A contradiction still names its dimension. This is what a UI renders
-    /// scope chips from, and reporting nothing for a scope that selects
-    /// nothing made it indistinguishable from a scope that constrains
-    /// nothing — the two are opposites, and the wrong one reads as "you
-    /// are looking at everything".
+    /// Column references from selections and expressions, with duplicates
+    /// retained. The text filter has no explicit column name. Contradictory
+    /// selections still contribute their dimension names for scope chips.
     pub fn columns(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .dimensions
@@ -133,14 +120,11 @@ impl Scope {
         out
     }
 
-    /// Columns must exist in the dataset. Failures are Diagnostics, never
-    /// panics — a bad scope is a user error reported at the point of entry
-    /// (spec §10.1).
-    ///
-    /// A derived dimension (§6.8) is a legitimate scope column even though
-    /// no dataset declares it — `desk = "Flow"` is the standing case — so
-    /// a name is resolved through `dims` before being called unknown. What
-    /// must exist is the column it derives *from*.
+    /// Validate referenced columns against one dataset and return errors.
+    /// Derived dimensions must resolve to source columns in that dataset.
+    /// Comparisons on derived labels accept equality and inequality only;
+    /// membership is also allowed. This checks names and those operators,
+    /// not literal types or every column's storage/query eligibility.
     pub fn validate(&self, ds: &DatasetSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let bad = |message: String| Diagnostic {
             severity: Severity::Error,
@@ -165,11 +149,8 @@ impl Scope {
             })
             .collect();
 
-        // A derived dimension is a mapped label, not an ordered value, so
-        // `desk > 'EU'` means nothing. The compiler already refuses it —
-        // but as a `StoreError::Sql` from inside the query path, long after
-        // the person who typed it has moved on. §10.1 wants it here, at the
-        // point of entry, while it is still their expression.
+        // Derived dimensions are mapped labels; ordering and `like` are not
+        // supported. Diagnose these at entry before the compiler rejects them.
         if let Some(e) = &self.expression {
             e.for_each_comparison(&mut |column, op| {
                 if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {
@@ -184,14 +165,10 @@ impl Scope {
         diags
     }
 
-    /// The scope as it applies to one dataset: dimension selections on
-    /// columns the dataset lacks — resolving a derived dimension to the
-    /// column it derives from — are removed and returned by name, so the
-    /// query drops them and the snapshot's provenance can say so
-    /// (`ScopeSemantics::NotApplicable`, market-data spec §3.4). Text and
-    /// expression pass through: the text filter already routes by the
-    /// dataset's own textual columns, and an expression naming an
-    /// unknown column is refused at the point of entry by `validate`.
+    /// Remove dimension selections whose columns the dataset lacks, resolving
+    /// derived dimensions through their sources. Return the removed names for
+    /// provenance. Text, expressions, and `impossible` pass through unchanged;
+    /// this does not validate or remove unknown expression references.
     pub fn applicable_to(
         &self,
         ds: &DatasetSpec,
@@ -294,7 +271,7 @@ grain = "underlying"
 
     #[test]
     fn layers_compose_by_conjunction() {
-        // global AND workspace AND tile (spec §4.2).
+        // Compose global, workspace, and tile scope in order.
         let global = Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
@@ -357,10 +334,7 @@ grain = "underlying"
 
     #[test]
     fn an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry() {
-        // A derived dimension is a mapped label, not an ordered value, so
-        // `desk > 'EU'` means nothing. The compiler already refuses it —
-        // but from inside the query path, as a StoreError::Sql, long after
-        // the person who typed the expression has moved on.
+        // Mapped labels reject ordering at validation time as well as compilation.
         let dims = merge_docs(
             "dimensions",
             &[LayerDoc::builtin(
@@ -405,11 +379,7 @@ grain = "underlying"
 
     #[test]
     fn a_contradiction_still_names_the_dimension_that_caused_it() {
-        // `columns()` is what a UI renders scope chips from. A
-        // contradiction dropped the emptied selection, so it reported no
-        // columns at all — and a tile showing nothing because its scope
-        // contradicted the workspace's looked exactly like a tile with no
-        // scope. The two are opposites.
+        // Scope chips must name the contradictory dimension even when no rows match.
         let selection = |v: &str| Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
@@ -430,10 +400,7 @@ grain = "underlying"
             "and it is not an empty scope, which selects everything"
         );
 
-        // And it survives further composition. Recomputing `contradicted`
-        // per call dropped the record on the next `and_then`: a third
-        // layer reported `lhu` — a constraint the scope is not applying —
-        // and a fourth reported nothing at all, which is the original bug.
+        // Further composition must preserve the original contradiction name.
         let third = Scope {
             dimensions: vec![DimensionSelection {
                 column: "lhu".into(),
@@ -566,14 +533,13 @@ grain = "underlying"
 
     #[test]
     fn the_text_filter_targets_only_declared_textual_columns() {
-        // spec §4.1: matched against columns declared textual, not all.
+        // The text filter targets declared textual columns.
         let ds = dataset();
         let textual: Vec<&str> = ds.textual_columns().map(|c| c.name.as_str()).collect();
         assert_eq!(textual, vec!["book", "underlying_ref"]);
     }
 
-    /// A minimal document dataset (market-data spec §3.1) whose only
-    /// column is the named dimension, keyed on it.
+    /// A minimal document dataset with one identity dimension.
     fn document_dataset_with_dimension(column: &str) -> DatasetSpec {
         DatasetSpec {
             name: "cvi".into(),

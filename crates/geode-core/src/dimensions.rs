@@ -1,11 +1,10 @@
-//! Dimensions the desk groups by that are not in the source files
-//! (spec §6.8). `desk` is the standing case: the CSVs carry `book`, and
-//! which desk a book belongs to is desk knowledge kept in config.
+//! Derived dimensions map source values to configured labels. For example,
+//! `desk` can be derived from the `book` column without being present in a
+//! source file. A many-to-one map declares a functional dependency used by
+//! attribution: a book determines its desk.
 //!
-//! The `from` clause does two jobs. It says where the values come from,
-//! and it declares a functional dependency — `book` determines `desk` —
-//! which is what lets the attribution rule treat a desk-level rollup as
-//! additive rather than blanking it (§6.3).
+//! Parsing enforces conflicting source mappings, but does not check `from`
+//! against a dataset. Consumers validate that the source column exists.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use std::collections::BTreeMap;
@@ -33,10 +32,9 @@ impl DerivedDimensions {
         self.dims.iter()
     }
 
-    /// The column a grouping or scope column ultimately resolves to: a
-    /// derived dimension resolves to its source, anything else to itself.
-    /// The attribution rule (§6.3) compares base columns, which is how a
-    /// desk-level grouping counts as determined by `book`.
+    /// Resolve one derived dimension to its configured source column, or
+    /// return the name unchanged. This is a single lookup, not recursive
+    /// resolution; attribution compares the resulting base columns.
     pub fn base_column<'a>(&'a self, column: &'a str) -> &'a str {
         match self.get(column) {
             Some(d) => &d.from,
@@ -52,10 +50,8 @@ impl DerivedDimensions {
             if name == "config_version" {
                 continue;
             }
-            // `dimensions.<name>[.<suffix>]` (§19.5) — `""` for "not a
-            // table" (there is no field to point into), `from` for the
-            // source-column key, `values.<derived_value>` for a problem
-            // inside one mapped value's own array.
+            // Point diagnostics at the dimension object, its `from` field, or the
+            // specific mapped value whose source array is malformed.
             let bad = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
@@ -205,9 +201,7 @@ IDX_EXO_US = ["BK003"]
 
     #[test]
     fn a_dimension_config_version_header_is_not_a_spurious_diagnostic() {
-        // Every config doc carries this header by convention
-        // (`groupings.toml`'s own `GroupingSlots::from_doc` already
-        // skips it) — it must not be treated as a malformed dimension.
+        // The version header is metadata, not a dimension declaration.
         let (dims, diags) =
             DerivedDimensions::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
         assert!(diags.is_empty(), "{diags:?}");

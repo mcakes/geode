@@ -8,9 +8,13 @@ Start with the documents that describe Geode **as it works now**:
 | [Philosophy](PHILOSOPHY.md) | Product and architecture principles |
 | [Architecture](current/architecture.md) | Crate boundaries, runtime ownership, configuration, and failure handling |
 | [Configuration](current/configuration.md) | Layers, documents, validation, writes, reload, keymaps, theme, time, and logging |
+| [Typed documents](current/typed-documents.md) | Schema, views, presentation, grouping, scope, colour, and formatting reader contracts |
+| [Configuration dialogs](current/configuration-dialogs.md) | Drafts, validation, overrides, immediate application, persistence, and failure behavior |
+| [Keymaps and actions](current/keymaps.md) | Binding precedence, predicates, sequences, counts, module fragments, editing, and reset |
 | [Data path](current/data-path.md) | Current data flow, correctness rules, and reasons for them |
 | [Requests and UI delivery](current/request-delivery.md) | Request admission, cancellation, reload, shutdown, mailbox coalescing, and window routing |
 | [Shell](current/shell.md) | Window ownership, tiles, input, focus, modules, and persistence |
+| [Tiling and workspaces](current/tiling.md) | Layout geometry, region focus, stacks, transfers, resizing, and restoration limits |
 | [Feature modules](current/features.md) | Blotter, documents, timeseries, diagnostics, pricing, and demo behavior |
 | [Crate READMEs](../crates/) | Local module maps and crate contracts |
 | [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |

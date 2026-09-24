@@ -1,0 +1,206 @@
+# Keymaps and actions
+
+Geode resolves keys to registered action IDs. The action registry supplies the
+palette title and category; configuration supplies bindings. Modules contribute
+actions and default keymap fragments without requiring the shell to depend on
+module crates.
+
+The implementation is in
+[`keymap/`](../../crates/geode-shell/src/keymap/mod.rs),
+[`defaults.rs`](../../crates/geode-shell/src/defaults.rs), and
+[`keymap_edit.rs`](../../crates/geode-shell/src/keymap_edit.rs).
+See [configuration](configuration.md) for file loading, reload acceptance,
+and write durability, and [shell input](shell.md#actions-and-keyboard-routing) for focused
+inputs and overlays that handle keys before ordinary matching.
+
+## Documents and precedence
+
+Bindings live in `keymap.toml`:
+
+```toml
+config_version = 1
+
+[[bindings]]
+context = "workspace"
+[bindings.keys]
+"mod+h" = "workspace::focus_left"
+"mod+l" = "none"
+```
+
+Keymap compilation consumes the original documents, rather than the generic
+merged `bindings` array. The application orders them as shell builtins, module
+fragments, desk, then user. The compiler preserves the supplied document order
+and each document's `[[bindings]]` array order. Within one keys table, it sorts
+by the original key spelling, independently of TOML declaration order.
+
+At each press, the last matching exact binding wins. This allows a later entry
+to replace an action or assign `"none"` to disable a lower binding. Context
+specificity has no separate priority: a later context-free binding also wins
+over an earlier contextual binding whenever the sequence is identical.
+
+Two different spellings can normalize to the same key. With Alt as `mod`,
+`"alt+h"` and `"mod+h"` in one table are both legal TOML keys; alphabetical
+sorting puts `"mod+h"` last, so its action wins that tie.
+
+Malformed entries, predicates, key sequences, and non-string actions produce
+error diagnostics and are skipped. Unknown action IDs produce warnings and are
+skipped; `"none"` is accepted without registration. Startup can use the remaining
+compiled bindings. On reload, compilation errors participate in the shell's
+last-good acceptance gate; see [reload](configuration.md#hot-reload).
+
+## Key spelling and primary modifier
+
+A binding is a whitespace-separated sequence of keystrokes, such as `"g g"` or
+`"mod+shift+h"`. A keystroke joins modifiers and one key with `+`. Modifiers are
+`ctrl`, `alt`, `shift`, `cmd` (also `super` or `win`), and `mod`. Parsing folds
+ASCII case but never infers Shift from a capital letter: `G` parses as `g`,
+whereas `shift+g` retains Shift. The parser accepts arbitrary non-modifier key
+names; successful parsing alone does not prove a platform can deliver that key.
+A literal `+` cannot be represented through this separator syntax.
+
+The primary modifier is configured separately in **`app.toml`**:
+
+```toml
+[keymap]
+mod = "alt"
+```
+
+`alt` is the default; `cmd` selects Command. The exact value `ctrl` returns an
+error and falls back to Alt because it conflicts with shipped literal Control
+bindings. Missing, non-string, unknown, and differently cased values silently
+fall back to Alt.
+
+Platform event spelling matters. The pinned macOS and Windows backends report
+shifted punctuation as its shifted character with Shift cleared, so dock move
+bindings use `ctrl+{`, `ctrl+}`, and `ctrl+?`. Shifted letters and arrows retain
+the explicit modifier, such as `mod+shift+p` or `shift+left`.
+
+## Context predicates
+
+The shell supplies a stack from outermost to innermost context. Predicates
+support flags, comparisons, boolean operators, and parentheses:
+
+```text
+workspace
+blotter && mode == normal
+!modal && (blotter || marketdata)
+mode != insert
+```
+
+A flag matches when any stack frame carries it. A comparison uses the innermost
+frame defining its key. Both `==` and `!=` are false when the key is absent;
+`!(mode == insert)` therefore differs from `mode != insert` for a missing mode.
+Within a frame, the first stored value for a repeated key wins.
+
+Negation binds more tightly than conjunction, which binds more tightly than
+disjunction. Identifiers accept ASCII letters, digits, underscores, and hyphens.
+Comparison values may also use single or double quotes; quoted strings do not
+process escapes. Empty expressions and malformed or trailing tokens are errors.
+Unary negation and parenthesis nesting share a depth limit of 64.
+
+## Sequences and counts
+
+The matcher retains a pending sequence and optional count between presses. Each
+press evaluates predicates against the context stack supplied for that press.
+
+- An exact match dispatches immediately, even when a longer sequence has the
+  same prefix. Binding `g` makes `g g` unreachable through that prefix.
+- A prefix with no exact match remains pending while longer candidates exist.
+- A dead end clears the sequence and count. Its final key is not retried as the
+  start of a different binding.
+- `"none"` clears state and returns `NoMatch`; it suppresses action dispatch
+  without providing a separate event-consumption result to callers.
+- The matcher has no timeout. Its `cancel` operation clears both sequence and
+  count; shell transitions such as opening the palette, a modal, or a command
+  prompt call it explicitly.
+
+Counts are enabled only when the **innermost** context carries `counts`. Before
+a sequence starts, bare digits accumulate to a maximum of 9999. A leading zero
+remains an ordinary key; zero extends an existing count. Modified digits and
+digits after a sequence starts are ordinary binding keys. The next matched
+action receives the optional count; action handlers decide how to use it.
+
+## Module defaults
+
+A factory's `default_keymap` contributes a builtin-layer keymap with a synthetic
+`<module:kind>` diagnostic source. Fragments are placed after shell builtins and
+before desk/user bindings, so they participate in ordinary override and reset
+behavior.
+
+The fragment filter requires a string context whose first scanned identifier
+belongs to the factory's declared contexts. It rejects `!`, `||`, and `(`
+anywhere in the text, including inside quoted values; this also rejects `!=`.
+Authors should use a bare owning flag followed by optional conjunctions, such
+as `marketdata && mode == normal`. The ordinary compiler subsequently validates
+predicate syntax, keys, and action IDs.
+
+This filter is textual. It does not prove that the first identifier is used as
+a flag rather than a comparison key, or that factories declare distinct context
+names. Module authors must retain those ownership constraints. Malformed TOML
+or filtered entries produce diagnostics without preventing the rest of the
+module roster from loading. Retained fragment-filter diagnostics are shown on
+reload but do not themselves reject a user edit; errors from the ordinary
+compiler still participate in the reload gate.
+
+## Editing, unbinding, and reset
+
+The keybinding editor writes only `<user_dir>/keymap.toml`. It preserves original
+context and key spellings because these identify entries in the source file:
+rendering `mod+h` as `alt+h`, or normalizing predicate whitespace, would target
+a different TOML key or context string.
+
+| Operation | Persisted change |
+|---|---|
+| Rebind | Write the new key, then remove the old user key or write `"none"` over a lower-layer key |
+| Rebind to the same spelling | Write the new value and skip displacement |
+| Unbind a user key | Remove it, exposing any lower-layer binding |
+| Unbind a builtin/desk key | Write a user `"none"` shadow |
+| Reset one action | Remove its user bindings and shadows covering its live lower-layer bindings |
+| Reset all | Remove every user `bindings` entry, including hand-written entries; retain other fields |
+
+Rebind and unbind use the **first** matching raw context string, creating an
+entry when absent. Reset searches **all** matching entries and preserves empty
+entries and their comments. A later duplicate context entry can therefore
+continue to shadow a newly written rebind. The writer does not validate action
+IDs, key syntax, or predicate meaning, and a successful write does not guarantee
+that the new binding will win after reload.
+
+A rebind whose old user key is absent still writes the new key and reports
+`OldKeyNotFound`. Unbind reports whether a user key was removed; `false` can
+mean a removal miss or a successful lower-layer shadow, depending on the
+requested operation. Reset reports the actual removal count, which can exceed
+the number of requested keys when context entries are duplicated.
+
+The editor rejects malformed TOML and a present `bindings` value that is not a
+`toml_edit` array of tables before writing. The compiler accepts inline arrays
+such as `bindings = [{ keys = { ... } }]`, but editing those files requires
+conversion to `[[bindings]]`. Both ordinary and inline `keys` tables inside an
+entry are editable. Missing or non-table `keys` values are replaced with an
+empty table. Existing key quoting and leading comments are retained when its
+value changes; decoration attached to the replaced value is not retained.
+
+Writes use the shared serialized configuration transaction and become active
+through normal reload. The temporary `.tmp` file is outside the reload scanner's
+TOML filter. Parse and shape errors leave the original file untouched; shared
+[write semantics](configuration.md#runtime-edits) define I/O failure and
+durability limits.
+
+## Display resolution and action registration limits
+
+The dialog's effective binding and reset calculations do not have a live focus
+stack. They approximate context coverage: a later same-sequence entry shadows
+an earlier one if its context is absent or the two raw context strings are
+identical. Logically equivalent or overlapping predicates with different
+spellings can therefore appear independently in the dialog even though runtime
+dispatch chooses only one. Reset associates an unbind with the live lower-layer
+action under that same approximation, so a desk reassignment is not mistaken
+for an override of the original builtin action.
+
+The action registry is fixed at startup. New pickable columns and saved scope
+names introduced through reload need restart to gain their derived action IDs;
+existing scope actions use the refreshed saved scope contents. A configured
+scope whose ID collides with an existing action is skipped with a warning.
+Each module kind has four add actions: default split, horizontal split, vertical
+split, and stack. The parser reserves the `_horizontal`, `_vertical`, and
+`_stacked` suffixes for placement, so kind names ending in those suffixes are
+ambiguous as default-direction add IDs.

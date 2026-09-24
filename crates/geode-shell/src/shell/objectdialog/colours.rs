@@ -1,43 +1,14 @@
-//! The `Domain::Colours` adapter (Part 2c spec §6.1) — the shared colour
-//! vocabulary a column's `colour` field and a chart series can name
-//! (`geode_core::colour::NamedColours`), edited as one object per named
-//! colour: a `hue` on the canonical wheel (with its `tone`), or a
-//! `token` naming one of the active theme's own semantic colours.
+//! Adapter for shared named colours: a hue and tone, or a semantic theme token, with
+//! optional sign tinting. All fields write the colour's definition.
 //!
-//! ## Only the keys in force
+//! The writer emits only the selected base: a token excludes hue and tone; a hue omits
+//! the default normal tone. Unticked `tint_sign` is omitted. Unmodelled definition keys
+//! survive. A fractional source hue also survives edits to other fields while its
+//! rounded numeric field remains unchanged.
 //!
-//! `hue`+`tone` and `token` are mutually exclusive in the reader
-//! (`NamedColours::from_doc`'s own `refuse_both` diagnostic) — a colour
-//! is one or the other, never both. [`to_table`] keeps that true on
-//! every write by removing all four keys first and then writing back
-//! only the ones the current choice is actually made of: `token` alone
-//! when it is not `"none"`, otherwise `hue` and — only when the tone is
-//! `light` — `tone`; and beside either, `tint_sign` only when ticked.
-//! There is no third state to represent: a hue whose tone is `normal`
-//! never writes `tone` at all, since `normal` is the reader's own
-//! default and an explicit `tone = "normal"` would be a silent no-op key
-//! nobody asked for; `tint_sign = false` is the same no-op.
-//!
-//! ## Reserved names refused before they reach a write
-//!
-//! `none`/`sign` are reserved by a column's own `colour` field grammar
-//! (a column can say "no colour" or "follow the sign" without naming an
-//! object here) — `geode_core::colour::RESERVED_NAMES`. The reader
-//! already drops a colour by either name with a diagnostic
-//! (`NamedColours::from_doc`); [`super::Domain::reserved_names`] makes
-//! [`super::Domain::name_taken`] refuse the name a keystroke earlier, so
-//! `n` never reaches a write for one at all — see `render.rs`'s
-//! `create_from_name`, whose reserved branch reads this list.
-//!
-//! ## The live swatch
-//!
-//! [`definition_of`] reads the draft's four fields back into a
-//! [`geode_core::colour::Definition`] — the same shape [`fields`] built
-//! them from — so `render.rs`'s edit-header swatch can resolve it
-//! against the active theme without re-parsing `draft.source`. The
-//! browse row's own swatch does not go through this at all: it resolves
-//! each row's *saved* colour straight off the merged `colours.toml`
-//! (`NamedColours::from_doc`), since a browse row has no draft.
+//! `none` and `sign` are reserved by column-format syntax and cannot be created as
+//! named colours. Edit swatches resolve the draft's current fields; browse swatches
+//! resolve the saved definitions against the active theme.
 
 use geode_core::colour::{Definition, NamedColours, Token, Tone};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
@@ -191,25 +162,13 @@ fn tint_sign_of(draft: &Draft) -> bool {
         .any(|f| f.key == "tint_sign" && matches!(f.kind, FieldKind::Bool(true)))
 }
 
-/// The draft as `colours.toml` holds it: `draft.source` with every key
-/// the field vocabulary owns (`hue`, `tone`, `token`, `tint_sign`) removed and then
-/// rewritten from the current choice alone — this module's own doc
-/// comment has the "only the keys in force" reasoning. Anything
-/// the vocabulary does not model survives untouched, the same
-/// "preserve what we don't own" rule every other adapter's `to_table`
-/// follows — and so does a `hue` the vocabulary DOES model but this
-/// save did not step, which is how a hand-edited `hue = 210.5` survives
-/// a step of `tone` (the final review's M-2: the field is seeded
-/// rounded, so writing it unconditionally rewrote the file).
+/// Rewrite the keys owned by the four fields while retaining unmodelled keys. Emit only
+/// the selected hue/tone or token base and optional sign tinting. Preserve a fractional
+/// source hue while its rounded field value is unchanged.
 pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     let mut table = super::toml_table_to_edit(&draft.source);
-    // Kept, not discarded (the final review's M-2): `fields` seeds the
-    // `Number` with `hue.round()`, so a hand-edited `hue = 210.5` reads
-    // back as `211` and writing the field on every save would rewrite
-    // the file's own value on a step of `tone` or `token` the trader
-    // made instead. The saved item goes back verbatim — formatting and
-    // all — whenever the field still rounds to it, so only a step of the
-    // hue itself replaces it.
+    // The numeric field holds a rounded hue. Preserve the original fractional value
+    // when an edit changes another field; a changed hue writes its new value.
     let saved_hue = table.remove("hue");
     table.remove("tone");
     table.remove("token");
@@ -248,13 +207,12 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
     toml_edit::Item::Table(table)
 }
 
-/// Everything wrong with the draft as it stands (spec §7.2): the
-/// rendered table, parsed back and read by the very reader that decides
-/// what every consumer of a named colour sees (`NamedColours::from_doc`)
-/// — on the object being edited alone, wrapped in a document of its
-/// own, for the reason `sources::validate` and `scopes::validate` both
-/// give for doing the same: validating the whole merged doc would
-/// report every other colour's problems against this one.
+/// Everything wrong with the draft as it stands: the rendered table, parsed back and
+/// read by the very reader that decides what every consumer of a named colour sees
+/// (`NamedColours::from_doc`) — on the object being edited alone, wrapped in a document
+/// of its own, for the reason `sources::validate` and `scopes::validate` both give for
+/// doing the same: validating the whole merged doc would report every other colour's
+/// problems against this one.
 pub fn validate(draft: &Draft, _config: &Config) -> Vec<Diagnostic> {
     let doc = merge_docs(
         DOC,
@@ -380,17 +338,8 @@ mod tests {
         );
     }
 
-    /// M-2 (Part 2c final review): a hand-edited fractional `hue` is the
-    /// trader's own value, and a save that did not step the hue must
-    /// leave it alone.
-    ///
-    /// [`fields`] seeds the `Number` with `hue.round()` — the field
-    /// vocabulary has no fractional step — so writing the field's value
-    /// on every save rewrote `hue = 210.5` to `hue = 211` the first time
-    /// the trader touched `tone` or `token`, without them ever pressing
-    /// a key on the hue row. Stepping the hue itself still writes it,
-    /// which is the other half asserted here: the guard is "did this
-    /// save move the hue", never "is the source fractional".
+    /// An edit to tone or token preserves the original fractional hue while the rounded
+    /// hue field is unchanged. Stepping that field writes the new hue.
     #[test]
     fn a_fractional_hue_survives_a_save_that_did_not_step_it() {
         let config = config_with_colours("[gamma]\nhue = 210.5\n");

@@ -1,9 +1,10 @@
-//! The nine grouping slots (foundation §4.4, Phase 3 §4.2). Numbered,
-//! not named: users rebind them often and a slot is referred to by its
-//! number and its grouping string — `lhu / underlying_ref / position_ref`.
+//! Nine numbered grouping slots, labelled by their column sequence, such as
+//! `lhu / underlying_ref / position_ref`. Each slot replaces whole across
+//! configuration layers, so overriding slot 3 preserves the other slots.
 //!
-//! `groupings.toml` is atomic at depth one, so a user layer overriding
-//! slot `3` replaces only slot 3 and inherits the rest.
+//! The reader checks that each name exists in some dataset or in derived
+//! dimensions; it does not require a single dataset to carry the whole group
+//! or verify that each column is groupable.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
@@ -30,11 +31,8 @@ impl GroupingSlots {
             dims.get(column).is_some()
                 || schema.datasets.iter().any(|ds| ds.column(column).is_some())
         };
-        // `groupings.<slot>` — the slot number IS the object's identity
-        // (§19.5), so every diagnostic below names it whole; there is no
-        // finer key inside one slot's bare array to point into. The "not
-        // a slot number" case uses the raw `key` (it never parsed to a
-        // slot at all) — every other case uses the parsed `slot`.
+        // A slot's bare array is one object, so diagnostics name `groupings.<slot>`.
+        // Unparseable slot numbers retain their original spelling in the path.
         let at = |severity: Severity, slot: &str, m: String| Diagnostic {
             severity,
             layer: None,

@@ -38,9 +38,8 @@ impl KeyContext {
     }
 }
 
-/// The flag a context sets to opt into count prefixes (Phase 3 §3.3):
-/// while the innermost context on the stack carries it, bare digits
-/// accumulate in the matcher instead of being matched.
+/// Opt-in flag for count prefixes. Only the innermost context controls this;
+/// bare digits accumulate before a sequence starts, except for a leading zero.
 pub const COUNTS: &str = "counts";
 
 impl KeyContext {
@@ -260,7 +259,12 @@ impl Parser {
     }
 }
 
-/// Parse a context expression like `blotter && mode == normal`.
+/// Parse flags, comparisons, `!`, `&&`, `||`, and parentheses.
+/// Negation binds more tightly than conjunction, which binds more tightly than
+/// disjunction. Comparison values may be identifiers or single/double-quoted
+/// strings; strings do not process escapes. Unary/parenthesis nesting is capped.
+/// At evaluation, flags match any stack frame, while comparisons use the
+/// innermost definition; both `==` and `!=` are false when the key is absent.
 pub fn parse_predicate(s: &str) -> Result<Predicate, String> {
     let toks = tokenize(s)?;
     if toks.is_empty() {

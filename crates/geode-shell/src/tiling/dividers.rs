@@ -1,33 +1,16 @@
-//! Divider-strip geometry for mouse-driven resizing (drag-splitters task).
-//! Pure functions only — no gpui (spec §10.3), same as the rest of
-//! `tiling/`. The render pass asks two questions per frame and this module
-//! answers both from geometry the pass already has:
+//! Pure divider geometry shared by rendering and drag handling.
 //!
-//! 1. *Where are the grabbable strips?* [`divider_strips`] enumerates one
-//!    strip per adjacent child pair of every `Split` in a tree, computed
-//!    during a single walk over the same rects [`Tree::layout`] produces
-//!    (the walk re-derives child rects from ratios exactly the way
-//!    `layout_node` does, so a strip is always centered on the boundary
-//!    the user actually sees). [`dock_edge_strips`] does the same for the
-//!    three dock frame edges, mapping the dock rects `dock_layout` already
-//!    returned — no second dock layout pass.
-//! 2. *What does a cursor position mean for a dock frame?*
-//!    [`dock_size_from_position`] turns an absolute cursor coordinate into
-//!    the dock-size fraction `Dock::set_size` expects (that setter owns the
-//!    0.10..=0.50 clamp; this function only does the projection).
+//! [`divider_strips`] walks split ratios using the same rectangle subdivision
+//! as [`Tree::layout`], placing a hit strip at each adjacent-child boundary.
+//! [`dock_edge_strips`] uses already-computed dock frames. Fullscreen trees
+//! have no divider strips.
 //!
-//! The tree-divider counterpart of question 2 — cursor position → ratio
-//! pair — lives on [`Tree::drag_divider`](super::tree::Tree::drag_divider)
-//! instead, because it mutates the tree's private ratios under the same
-//! `MIN_RATIO` invariants as `move_divider`; the [`DividerAddress`] that
-//! names which divider to move is defined there too, as tree vocabulary.
-//!
-//! Every strip carries a *stable address*, not a `&mut` into the tree:
-//! the mouse-down that starts a drag and the mouse-moves that apply it are
-//! separate events over separate frames, and the layout can change between
-//! them (a keyboard split mid-drag, a session reload). A stale address must
-//! be a safe no-op, never a panic — `Tree::drag_divider` validates the
-//! whole path on every application.
+//! [`dock_size_from_position`] projects an absolute cursor coordinate to a
+//! fraction of the content area; the dock setter owns size clamping. Tree
+//! ratio mutation belongs to [`Tree::drag_divider`], which checks the supplied
+//! [`DividerAddress`] on each application. Addresses name structure, not node
+//! identity: an invalidated path is refused, but a still-valid path can name a
+//! different boundary after a structural edit.
 
 use super::docks::DockSide;
 use super::tree::{DividerAddress, Node, Orientation, Rect, Tree};

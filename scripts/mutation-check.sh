@@ -6849,27 +6849,17 @@ run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" 
 # persisted as accounted for. Needs `user_dir: None`, which only one
 # fixture in the suite has.
 #
-# Re-anchored on the preceding "Before the baseline moves" comment (Task
-# 3): `commit_create` resolves the SAME `user_dir` with the SAME "nothing
-# was changed" wording, so the bare guard-clause anchor stopped being
-# unique the moment that sibling function existed.
+# Include the baseline comment to distinguish this guard from the same
+# missing-directory check in `commit_create`.
 run_mutation "objectdialog: a shell with nowhere to write still marks the draft saved" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    // **Before the baseline moves.** A shell with nowhere to write queues
-    // nothing, so nothing has been accounted for and the draft must stay
-    // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and the revert of a failed write (`revert_failed_write`)
-    // or a later successful commit would then treat a value that was
-    // never applied and never persisted as accounted for.
+  '    // Do not advance the baseline until there is somewhere to persist the edit. An
+    // unqueued change must remain dirty for a later attempt.
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };' \
-  '    // **Before the baseline moves.** A shell with nowhere to write queues
-    // nothing, so nothing has been accounted for and the draft must stay
-    // dirty: a `mark_saved()` here would make the unqueued value the
-    // baseline, and the revert of a failed write (`revert_failed_write`)
-    // or a later successful commit would then treat a value that was
-    // never applied and never persisted as accounted for.
+  '    // Do not advance the baseline until there is somewhere to persist the edit. An
+    // unqueued change must remain dirty for a later attempt.
     let user_dir = match shell.user_dir.clone() {
         Some(dir) => dir,
         None => {
@@ -8643,23 +8633,11 @@ run_mutation "choice: a row click completes that row" \
 # holding the OLD dataset's columns.
 run_mutation "choice: a picked dataset rebuilds the available catalogue" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                        scroll_to_cursor(shell);
-                        // The cursor is still on the row `apply_choice`'"'"'s
-                        // own `follow(row)` left it on, which is exactly
-                        // what `maybe_refresh_available`'"'"'s dataset-row
-                        // check keys on — the same reason `space` and
-                        // the action bar'"'"'s tick run it ahead of
-                        // `revalidate` (final review, Critical 1).
-                        maybe_refresh_available(shell);
-                        revalidate(shell);' \
-  '                        scroll_to_cursor(shell);
-                        // The cursor is still on the row `apply_choice`'"'"'s
-                        // own `follow(row)` left it on, which is exactly
-                        // what `maybe_refresh_available`'"'"'s dataset-row
-                        // check keys on — the same reason `space` and
-                        // the action bar'"'"'s tick run it ahead of
-                        // `revalidate` (final review, Critical 1).
-                        revalidate(shell);' \
+  '                        maybe_refresh_available(shell);
+                        revalidate(shell);
+                        commit_change(shell, cx);' \
+  '                        revalidate(shell);
+                        commit_change(shell, cx);' \
   geode-shell a_picked_dataset_rebuilds_the_available_catalogue
 
 # ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
@@ -8931,12 +8909,14 @@ run_mutation "schema/document: an axis role not listed in axes is refused" \
 
 run_mutation "schema/document: measure vocabulary is dropped per column" \
   crates/geode-core/src/schema/mod.rs \
-  '    ds.columns.retain(|c| !foreign.contains(&c.name));
-
-    // A value is a per-row fact that is not identity (spec 2026-09-19' \
-  '    let _ = &foreign;
-
-    // A value is a per-row fact that is not identity (spec 2026-09-19' \
+  '            format!("datasets.{name}.columns.{c}.role"),
+        ));
+    }
+    ds.columns.retain(|c| !foreign.contains(&c.name));' \
+  '            format!("datasets.{name}.columns.{c}.role"),
+        ));
+    }
+    let _ = &foreign;' \
   geode-core measure_vocabulary_on_a_document_dataset_is_refused_per_column
 
 run_mutation "schema/measures: document vocabulary is dropped per column" \
@@ -9533,15 +9513,15 @@ run_mutation "objectdialog: schema lists only this dataset's derived dimensions"
 # if the shared `Domain::writable()` method itself were untouched.
 run_mutation "objectdialog: a drop on the schema inspector is refused" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
-    // as the tick — so a read-only domain refuses it identically.
+  '    // a drop is a reorder or a promotion/demotion — a write, same as the tick — so a
+    // read-only domain refuses it identically.
     let writable = shell
         .object_dialog
         .as_ref()
         .is_some_and(|state| state.domain.writable(&state.stage));
     if !writable {' \
-  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
-    // as the tick — so a read-only domain refuses it identically.
+  '    // a drop is a reorder or a promotion/demotion — a write, same as the tick — so a
+    // read-only domain refuses it identically.
     let writable = shell
         .object_dialog
         .as_ref()
