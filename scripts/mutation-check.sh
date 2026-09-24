@@ -4196,7 +4196,7 @@ run_mutation "publication routing: panel promotion uses its own dependencies" \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
 run_mutation "publication routing: a series query must really arrive" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   'if self.query_in_flight
             && self' \
   'if false
@@ -16591,7 +16591,7 @@ run_mutation "timeseries: an add fetches before it queries" \
 # barrier waits for). Applied, it paints the old question's points under
 # the new question's header.
 run_mutation "timeseries: a stale tag is dropped" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if outcome.tag != self.tag {' \
   '        if false {' \
   geode-timeseries \
@@ -16602,7 +16602,7 @@ run_mutation "timeseries: a stale tag is dropped" \
 # shapes it. Following scope too makes every keystroke in the scope bar a
 # refetch and a requery on every open chart.
 run_mutation "timeseries: only as_of is followed" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        versions.as_of != now.as_of' \
   '        versions.as_of != now.as_of || versions.scope != now.scope' \
   geode-timeseries \
@@ -16613,7 +16613,7 @@ run_mutation "timeseries: only as_of is followed" \
 # appended. Gated on n > 0, a tile that already has its data never asks
 # for it and paints the empty hint for ever.
 run_mutation "timeseries: Ok(0) still requeries" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if result.is_ok() && self.visible {' \
   '        if matches!(result, Ok(n) if n > 0) && self.visible {' \
   geode-timeseries \
@@ -16625,7 +16625,7 @@ run_mutation "timeseries: Ok(0) still requeries" \
 # `set_pair_state` and must stop there; without the early return another
 # chart's fetch requeries this one.
 run_mutation "timeseries: a pair the tile does not hold is ignored" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if changed.is_none() {' \
   '        if false {' \
   geode-timeseries \
@@ -16635,7 +16635,7 @@ run_mutation "timeseries: a pair the tile does not hold is ignored" \
 # trip spent for nothing — and one the pool would rather spend on a
 # visible chart.
 run_mutation "timeseries: a hidden tile cancels in flight" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '            self.data.cancel(QueryKey(self.id.0));' \
   '            let _ = QueryKey(self.id.0);' \
   geode-timeseries \
@@ -16646,7 +16646,7 @@ run_mutation "timeseries: a hidden tile cancels in flight" \
 # option adds a different pair from the one under the highlight — here,
 # the default source instead of the one the trader arrowed down to.
 run_mutation "timeseries: enter picks the highlighted row not the text" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            PickerStage::Sources { identity } => match p.list.pick() {' \
   '            PickerStage::Sources { identity } => match Some(0usize) {' \
   geode-timeseries \
@@ -16657,7 +16657,7 @@ run_mutation "timeseries: enter picks the highlighted row not the text" \
 # dropped handle never reports `None`, and the shell's focus-return net
 # never fires — every chord dies for the rest of the session (CLAUDE.md).
 run_mutation "timeseries: the picker closer blurs before dropping" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            window.blur(cx);' \
   '            let _ = &window;' \
   geode-timeseries \
@@ -16668,7 +16668,7 @@ run_mutation "timeseries: the picker closer blurs before dropping" \
 # expression away and reports the error as a tile notice with nothing
 # left to fix.
 run_mutation "timeseries: an expression parse error keeps the field open" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '                if let Some(Popup::Expr(f)) = &mut self.popup {
                     f.error = Some(e.into());
                 }
@@ -16684,7 +16684,7 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
 # types itself into the day segment and the popup stays open — the
 # keyboard path to `3m` is gone.
 run_mutation "timeseries: a digit in the range popup commits a preset" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '                    && Preset::digit(d).is_some() =>' \
   '                    && false =>' \
   geode-timeseries \
@@ -16706,7 +16706,7 @@ run_mutation "timeseries: a no-op key is not an edit" \
 # trader who opens `r` under a historical as-of and presses `enter` has
 # their stored `to` silently rewritten to the as-of day.
 run_mutation "timeseries: an absolute range seeds from its stored dates" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            Range::Absolute { from, to } => (*from, *to),' \
   '' \
   geode-timeseries \
@@ -16717,7 +16717,7 @@ run_mutation "timeseries: an absolute range seeds from its stored dates" \
 # trader who pans with the list up meant the chart, and an overlay left
 # over the answer is the confusing half.
 run_mutation "timeseries: a popup closes before another verb" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                "list"
                     | "list_down"' \
   '                "pan_left"
@@ -16732,7 +16732,7 @@ run_mutation "timeseries: a popup closes before another verb" \
 # installed leaves `key_context` reporting `insert` with nothing focused
 # — a tile deaf to every bare key until `escape`.
 run_mutation "timeseries: an insert popup closes on any verb but its own four" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")' \
   '                true' \
   geode-timeseries \
@@ -16745,7 +16745,7 @@ run_mutation "timeseries: an insert popup closes on any verb but its own four" \
 # bump — flush every path `geode-chart` has cached, for a model identical
 # to the one it replaced.
 run_mutation "timeseries: the chart model is rebuilt only when its inputs change" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        if self.last_chart_key.as_ref() == Some(&key) {' \
   '        if false {' \
   geode-timeseries \
@@ -16763,7 +16763,7 @@ run_mutation "timeseries: the chart model is rebuilt only when its inputs change
 # counter monotonic and every built model still carries a fresh, larger
 # version. The two entries around it are the load-bearing pair.
 run_mutation "timeseries: a chrome change bumps the chart version" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        self.chart_version += 1;' \
   '        self.chart_version += 0;' \
   geode-timeseries \
@@ -16774,7 +16774,7 @@ run_mutation "timeseries: a chrome change bumps the chart version" \
 # `Arc` into the cell every tile shares, and nothing else would ever tell
 # a painted chart that a name it draws with was redefined.
 run_mutation "timeseries: a colours reload reaches an open tile" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        theme,
         colours,
         offset_secs,
@@ -16798,7 +16798,7 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
 # A stale entry is indistinguishable from a live fetch, so the same pair,
 # re-added, would be skipped for the tile's whole life.
 run_mutation "timeseries: a removed pair leaves no in_flight ghost" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        self.in_flight
             .retain(|(source, identity)| model.holds_pair(source, identity));' \
   '        let _ = model;' \
@@ -16810,7 +16810,7 @@ run_mutation "timeseries: a removed pair leaves no in_flight ghost" \
 # span, and without this compare an unanswered pair keeps its entry and
 # the new span is never asked for at all.
 run_mutation "timeseries: a range change refetches an unanswered pair" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if self.in_flight_range.as_ref() != Some(self.model.range()) {' \
   '        if false {' \
   geode-timeseries \
@@ -16821,7 +16821,7 @@ run_mutation "timeseries: a range change refetches an unanswered pair" \
 # tile refetches as well as requeries, gaps first. Requery alone paints
 # a truncated left edge with no sign that anything is missing.
 run_mutation "timeseries: an as-of change refetches" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                    this.fetch_pending(cx);' \
   '                    ();' \
   geode-timeseries \
@@ -16833,7 +16833,7 @@ run_mutation "timeseries: an as-of change refetches" \
 # an as-of change leaves `Range` identical, so a stale entry would
 # suppress the new span's ask entirely.
 run_mutation "timeseries: an as-of change drops the in-flight set" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                    this.in_flight.clear();
                     this.model.mark_all_fetching();' \
   '                    this.model.mark_all_fetching();' \
@@ -16846,7 +16846,7 @@ run_mutation "timeseries: an as-of change drops the in-flight set" \
 # freshly shown tile whose first fetch is still out, ANY frame notify (a
 # scope keystroke, say) asked for every pair's span a second time.
 run_mutation "timeseries: the as-of refetch is gated on a real as-of move" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                if this
                     .acted
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
