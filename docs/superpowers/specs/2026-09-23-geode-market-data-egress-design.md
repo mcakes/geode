@@ -233,3 +233,36 @@ Weighting data ≫ shell ≫ modules.
   Solace) — the vendor shim, written blind later.
 - Wire tags, `currency`/`schedule_date` and the status vocabulary (XSD).
 - Clearing a value back to empty, and cell-level echo highlighting.
+
+## 10. Amendments (2026-09-24, from the code survey)
+
+1. **Egress addresses are per document, with `{key}`.** `ChannelEgress::upload`
+   publishes on the address it is given, and the echo reaches the panel only
+   if that address is one the document's source subscribes to. §4's shape
+   becomes:
+
+       [egress.sophis]
+       adapter = "demo_bus"
+       [egress.sophis.documents]
+       cvi_params = "marketdata/cvi/{key}"
+       dividend_schedule = "marketdata/dividend/{key}"
+
+   `{key}` is replaced by the document key's parts joined with `/`. An address
+   without `{key}` is allowed (one fixed address for every key).
+2. **`egress.toml` is restart-required, like `sources.toml`.** Nothing reloads
+   sources into `geode-data` live; egress joins the same restart list rather
+   than inventing a live path. §4's "hot reload keeps the last valid set" is
+   withdrawn.
+3. **The kind ignores the id axis on write; assembly keeps it.** `DocumentRows`
+   for a dividend must still carry the `dividend_id` axis (the kind's
+   vocabulary check and `validate` both require it), so §6's "the label column
+   is omitted" becomes: assembly writes the painted labels (`new-<n>` included)
+   into the axis and `DividendKind::write` never emits them.
+4. **Group sizes are captured by the tile, not at first edit.** `Draft::set`
+   has no model. The tile calls `Draft::capture_groups(&base_model)` whenever
+   the painted model is the draft's base (before `:rebase`, before a policy
+   rebase, and before writing the session). A draft restored from an older
+   session with no captured groups applies no guard.
+5. **`Sent` is not persisted.** The session already persists no draft state;
+   a `Sent` draft restores as `Editing` with its edits (the trader may upload
+   again). §7's "sent, unconfirmed" is withdrawn.
