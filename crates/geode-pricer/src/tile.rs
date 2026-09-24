@@ -10,11 +10,14 @@
 use crate::content::{PricerSettings, Shared};
 use crate::core::commands::{self, Command};
 use crate::core::edit::{Edit, EditError, Undo};
+use crate::core::entry::{history, next_place, place_for};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
+use crate::core::shorthand::parse;
 use crate::core::storage::from_rows;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
+use crate::core::{Place, RowSpec};
 use crate::delegate::{ChevronClicked, SheetDelegate};
 use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -33,7 +36,8 @@ use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, Task, Window, div};
+use gpui::{App, Context, Entity, Focusable as _, SharedString, Task, Window, div};
+use gpui_component::input::InputState;
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
@@ -74,6 +78,18 @@ pub(crate) struct Cursor {
     pub col: usize,
     pub last_row: usize,
 }
+
+/// The entry field (spec §8.4): where its rows will land, the field, and
+/// the sheet's own lines to walk with `up`/`down`.
+pub(crate) struct Entry {
+    pub place: Place,
+    pub input: Entity<InputState>,
+    history: Vec<String>,
+    /// `None`: the trader's own text; `Some(i)`: showing `history[i]`.
+    history_ix: Option<usize>,
+}
+
+const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 
 pub struct PricerTile {
     pub(crate) id: TileId,
@@ -118,10 +134,13 @@ pub struct PricerTile {
     in_flight: HashMap<LineId, u64>,
     /// Read only through `apply_edit`/`apply_edits` (Task 9's entry field
     /// and cell editor, Task 11's `:spot clear` and `u`/`ctrl+r` dispatch).
-    #[allow(dead_code)]
     pub(crate) undo: UndoStack,
     refresh_task: Option<Task<()>>,
     retry_task: Option<Task<()>>,
+    /// The open entry field (spec §8.4): `o`/`shift+o` open it, `enter`
+    /// parses and inserts through `apply_edit`, `escape` or a click drops
+    /// it. `None` in normal mode.
+    pub(crate) entry: Option<Entry>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -302,6 +321,7 @@ impl PricerTile {
             undo: UndoStack::default(),
             refresh_task: None,
             retry_task: None,
+            entry: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -310,20 +330,25 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal` until Tasks 9–11 add `entry`, `insert` and `menu`.
+    /// `normal` until Task 10 adds `insert` (Task 11 adds `menu`).
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("pricer").pair("mode", self.mode()).counts()
     }
 
     pub(crate) fn mode(&self) -> &'static str {
-        "normal"
+        if self.entry.is_some() {
+            "entry"
+        } else {
+            "normal"
+        }
     }
 
-    /// Does one of THIS tile's own fields hold window focus? (Tasks 9–10
-    /// add the entry field, the cell editor and the choice field.)
+    /// Does one of THIS tile's own fields hold window focus? (Task 10 adds
+    /// the cell editor and the choice field.)
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
-        let _ = (window, cx);
-        false
+        self.entry
+            .as_ref()
+            .is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub fn title(&self) -> SharedString {
@@ -420,9 +445,8 @@ impl PricerTile {
     }
 
     /// The one edit door (global constraints): apply, record the undo,
-    /// then everything an edit implies. Task 9's entry field and cell
-    /// editor are its first production callers.
-    #[allow(dead_code)]
+    /// then everything an edit implies. The entry field's `commit_entry` is
+    /// its first production caller; Task 10's cell editor is the next.
     pub(crate) fn apply_edit(
         &mut self,
         edit: Edit,
@@ -467,12 +491,134 @@ impl PricerTile {
         Ok(())
     }
 
+    /// `o` / `shift+o`: a placeholder after (before) the cursor row, the
+    /// field focused (spec §8.4). A leg place opens its package so the
+    /// placeholder shows where it lands.
+    fn open_entry(&mut self, below: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            self.footer = Some("the sheet is still loading".into());
+            return;
+        }
+        self.close_entry(window, cx);
+        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(ENTRY_HINT));
+        input.read(cx).focus_handle(cx).focus(window, cx);
+        self.entry = Some(Entry {
+            place,
+            input: input.clone(),
+            history: history(&self.sheet),
+            history_ix: None,
+        });
+        self.table
+            .update(cx, |t, _| t.delegate_mut().entry = Some(input));
+        self.rebuild(cx);
+    }
+
+    /// `enter`: parse, insert, reprice, and open the next placeholder
+    /// below what landed; a parse error or a refusal keeps the text and
+    /// says why in the footer.
+    fn commit_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let text = entry.input.read(cx).value().to_string();
+        let spec = match parse(&text) {
+            Ok(spec) => spec,
+            Err(e) => {
+                self.footer = Some(format!("{} (column {})", e.message, e.offset + 1).into());
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+        };
+        let at = entry.place;
+        // Move the placeholder first so the edit's own rebuild paints it
+        // below what landed; put it back on a refusal.
+        entry.place = next_place(at, &spec);
+        match self.apply_edit(
+            Edit::Insert {
+                place: at,
+                rows: vec![spec.clone()],
+            },
+            cx,
+        ) {
+            Ok(()) => {
+                let first = match at {
+                    Place::Root { at } => at,
+                    Place::Leg { package, leg } => package + 1 + leg,
+                };
+                let id = self.sheet.id(first);
+                if matches!(spec, RowSpec::Package { .. }) {
+                    self.expansion.set(id, true);
+                }
+                self.cursor.line = Some(id);
+                if let Some(entry) = self.entry.as_mut() {
+                    entry.history = history(&self.sheet);
+                    entry.history_ix = None;
+                    entry.input.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+                self.rebuild(cx);
+            }
+            Err(e) => {
+                if let Some(entry) = self.entry.as_mut() {
+                    entry.place = at;
+                }
+                self.footer = Some(e.to_string().into());
+                self.rebuild(cx);
+            }
+        }
+    }
+
+    /// Blur only if OUR field holds focus, then drop it (the market-data
+    /// rule, CLAUDE.md): an unblurred dead handle leaves the window
+    /// focused on nothing and the shell's focus return never fires.
+    pub(crate) fn close_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry.take() else {
+            return;
+        };
+        if entry.input.read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        self.table.update(cx, |t, _| t.delegate_mut().entry = None);
+        self.rebuild(cx);
+    }
+
+    /// `up` walks back through the sheet's lines, `down` forward; past the
+    /// newest is an empty field.
+    fn step_history(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        if entry.history.is_empty() {
+            return;
+        }
+        let last = entry.history.len() as isize - 1;
+        let next = match entry.history_ix {
+            None if delta > 0 => Some(0),
+            None => None,
+            Some(i) => {
+                let j = i as isize + delta;
+                if j < 0 {
+                    None
+                } else {
+                    Some(j.min(last) as usize)
+                }
+            }
+        };
+        entry.history_ix = next;
+        let text = next.map(|i| entry.history[i].clone()).unwrap_or_default();
+        entry
+            .input
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+    }
+
     /// What every edit, undo and redo implies: forget dead package ids,
     /// rebuild, reprice what changed, and make sure the timer runs once
     /// the sheet has a line. Task 12 adds the write-behind save. Reached
-    /// only through `apply_edit`/`apply_edits` until Task 9 wires a
-    /// production caller.
-    #[allow(dead_code)]
+    /// only through `apply_edit`/`apply_edits`.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.expansion.retain_packages(&self.sheet);
         self.rebuild(cx);
@@ -686,9 +832,15 @@ impl PricerTile {
         let Some(verb) = action.0.strip_prefix("pricer::") else {
             return false;
         };
-        let _ = window;
         let n = count.unwrap_or(1).max(1) as usize;
         self.footer = None;
+        // Any verb but the field's own four closes an open entry first (a
+        // palette dispatch can arrive while it is open).
+        if self.entry.is_some()
+            && !matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
+        {
+            self.close_entry(window, cx);
+        }
         match verb {
             "down" => self.step_rows(n as isize),
             "up" => self.step_rows(-(n as isize)),
@@ -755,6 +907,26 @@ impl PricerTile {
             }
             "price" => {
                 self.reprice_all(cx);
+                return true;
+            }
+            "add_below" | "add_above" => {
+                self.open_entry(verb == "add_below", window, cx);
+                return true;
+            }
+            "commit" => {
+                self.commit_entry(window, cx);
+                return true;
+            }
+            "cancel" => {
+                self.close_entry(window, cx);
+                return true;
+            }
+            "insert_up" => {
+                self.step_history(1, window, cx);
+                return true;
+            }
+            "insert_down" => {
+                self.step_history(-1, window, cx);
                 return true;
             }
             _ => return false,
@@ -960,9 +1132,9 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// Task 9 answers the open entry field's place.
-    pub(crate) fn entry_place(&self) -> Option<crate::core::Place> {
-        None
+    /// The open entry field's place, if any (spec §8.4).
+    pub(crate) fn entry_place(&self) -> Option<Place> {
+        self.entry.as_ref().map(|e| e.place)
     }
 
     /// The only way a model reaches the table (spec §8.2).
@@ -1055,8 +1227,16 @@ impl PricerTile {
     }
 
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
         if let TableEvent::SelectCell(row, col) = event {
+            // A click anywhere cancels an open entry, never commits it
+            // (global constraints). `SelectRow`/`SelectColumn` are what
+            // `sync_cursor` itself emits when it mirrors the cursor into
+            // the table (including from inside `open_entry`'s own
+            // `rebuild`), so only a real cell click — `SelectCell` —
+            // closes the field.
+            if self.entry.is_some() {
+                self.close_entry(window, cx);
+            }
             self.set_cursor_row(*row);
             if let Some(c) = SheetDelegate::plan_col(*col) {
                 self.cursor.col = c;
@@ -2140,5 +2320,138 @@ pub(crate) mod tests {
         });
         let tokyo = h.tile.read_with(&vcx, |t, _| t.header.time.clone());
         assert_ne!(utc, tokyo, "a zone change re-prepares the header");
+    }
+
+    // ---- Task 9 ----
+
+    fn typed(h: &Harness, vcx: &mut VisualTestContext, text: &str) {
+        vcx.simulate_input(text);
+        h.draw(vcx);
+    }
+
+    fn focused(vcx: &mut VisualTestContext) -> bool {
+        vcx.update(|window, cx| window.focused(cx).is_some())
+    }
+
+    /// Spec §12: `o`, a line, `enter` adds a row and submits one request.
+    #[gpui::test]
+    fn o_then_a_line_then_enter_adds_a_row_submits_it_and_opens_the_next_placeholder(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert_eq!(h.mode(&mut vcx), "entry");
+        assert!(focused(&mut vcx), "the field owns focus");
+        typed(&h, &mut vcx, "-5 SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.sheet_len(&vcx), 1);
+        let batches = h.prices();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].lines.len(), 1);
+        assert_eq!(h.mode(&mut vcx), "entry", "a fresh placeholder opens below");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), Some(1));
+        typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.sheet_len(&vcx), 4, "a package with its two legs");
+        assert_eq!(
+            h.tree(&vcx).len(),
+            5,
+            "the typed package opens so its legs show, plus the placeholder"
+        );
+    }
+
+    #[gpui::test]
+    fn a_parse_error_keeps_the_text_and_names_the_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 CX");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.sheet_len(&vcx), 0);
+        assert_eq!(h.mode(&mut vcx), "entry");
+        let footer = h.footer(&vcx).unwrap();
+        assert!(footer.ends_with("(column 14)"), "{footer}");
+        let text = h.tile.read_with(&vcx, |t, cx| {
+            t.entry.as_ref().unwrap().input.read(cx).value().to_string()
+        });
+        assert_eq!(text, "SPX Z26 5000 CX", "the text is kept for fixing");
+    }
+
+    #[gpui::test]
+    fn shift_o_on_a_leg_inserts_a_leg_before_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "down", Some(2)); // the second leg
+        h.dispatch(&mut vcx, "add_above", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        let legs = h.tile.read_with(&vcx, |t, _| t.sheet.children(1).len());
+        assert_eq!(legs, 3);
+        let middle = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(3));
+        assert_eq!(middle, "SPX Z26 5000 C", "between the two legs");
+    }
+
+    #[gpui::test]
+    fn a_package_typed_at_a_leg_place_is_refused_in_the_footer(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "add_below", None); // a package row: its first leg
+        typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("a package cannot hold a package")
+        );
+        assert_eq!(h.mode(&mut vcx), "entry");
+    }
+
+    #[gpui::test]
+    fn up_and_down_walk_the_sheets_own_lines_newest_first(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        let text = |vcx: &VisualTestContext| {
+            h.tile.read_with(vcx, |t, cx| {
+                t.entry.as_ref().unwrap().input.read(cx).value().to_string()
+            })
+        };
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(text(&vcx), "SPX Z26 4000 P");
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(text(&vcx), "-5 SPX Z26 4800/5200 CS");
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(text(&vcx), "SPX Z26 4000 P");
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(text(&vcx), "", "past the newest is an empty field");
+    }
+
+    #[gpui::test]
+    fn escape_removes_the_placeholder_and_the_field_blurs_before_it_drops(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(focused(&mut vcx));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(!focused(&mut vcx), "blurred, then dropped (CLAUDE.md)");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), None);
+        assert_eq!(h.sheet_len(&vcx), 5, "the sheet never held the placeholder");
+    }
+
+    #[gpui::test]
+    fn a_click_on_the_table_cancels_the_entry_and_another_verb_closes_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-2");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "a click cancels, never commits");
+        h.dispatch(&mut vcx, "add_below", None);
+        h.dispatch(&mut vcx, "down", None); // from the palette: not an entry verb
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx));
     }
 }

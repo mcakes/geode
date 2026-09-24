@@ -10,7 +10,10 @@ use crate::paint::Paints;
 use geode_shell::fonts;
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
-use gpui::{App, ClickEvent, Context, EventEmitter, SharedString, TextAlign, Window, div, px};
+use gpui::{
+    App, ClickEvent, Context, Entity, EventEmitter, SharedString, TextAlign, Window, div, px,
+};
+use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
 use std::rc::Rc;
@@ -35,6 +38,10 @@ pub struct SheetDelegate {
     pub(crate) cursor: Option<(usize, usize)>,
     pub(crate) paints: Paints,
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
+    /// The tile's open entry field, mirrored here so `render_td` can paint
+    /// it (Task 9's `Entry` row); the tile's `entry` is the source of
+    /// truth, this is a read-only mirror.
+    pub(crate) entry: Option<Entity<InputState>>,
 }
 
 impl SheetDelegate {
@@ -44,6 +51,7 @@ impl SheetDelegate {
             cursor: None,
             paints: Paints::derive(theme),
             chevron: None,
+            entry: None,
         }
     }
 
@@ -169,7 +177,20 @@ impl TableDelegate for SheetDelegate {
             .debug_selector(|| format!("pricer-cell-{row_ix}-{col_ix}"));
         let Some(plan_col) = Self::plan_col(col_ix) else {
             // The tree column: indent by depth, a chevron on a package,
-            // then the row's shorthand.
+            // then the row's shorthand — except the entry placeholder,
+            // which paints the open field (or nothing, mid-transition)
+            // over the table's active-row ground instead.
+            if row.kind == GridRowKind::Entry {
+                let ground = cx.theme().table_active;
+                return match &self.entry {
+                    Some(input) => base
+                        .bg(ground)
+                        .debug_selector(|| "pricer-entry".into())
+                        .child(div().flex_1().child(Input::new(input)))
+                        .into_any_element(),
+                    None => base.bg(ground).into_any_element(),
+                };
+            }
             let mut el = base
                 .pl(px(row.depth as f32 * INDENT))
                 .text_color(paints.text(crate::core::CellState::Own, package));
