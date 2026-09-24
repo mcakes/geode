@@ -4,6 +4,7 @@
 
 use crate::tile::PricerTile;
 use geode_shell::choice::ChoiceList;
+use geode_shell::shell::listrow;
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
@@ -135,9 +136,15 @@ pub(crate) struct Menu {
 /// The `.` action menu (planning decision 22), anchored under the
 /// header's right edge by the caller. The pricer's own row door
 /// (`render_choice`'s shape) rather than the market-data popup, which
-/// this crate may not import (CLAUDE.md).
+/// this crate may not import (CLAUDE.md); `deferred`/`anchored` escapes
+/// the table's clip and paints above it, the same as `render_choice`
+/// (review finding: a bare surface here was occluded by the `DataTable`,
+/// a later sibling).
 pub(crate) fn render_menu(m: &Menu, tile: &Entity<PricerTile>, cx: &App) -> impl IntoElement {
     let theme = cx.theme();
+    // The list-row tokens through the one door (`shell::listrow`): the
+    // highlighted row is the state, the hovered row is the pointer.
+    let row_paint = listrow::row_paint(theme);
     let mut list = popover_surface(cx)
         .debug_selector(|| "pricer-menu".into())
         .occlude()
@@ -150,22 +157,29 @@ pub(crate) fn render_menu(m: &Menu, tile: &Entity<PricerTile>, cx: &App) -> impl
             MenuItem::Action { title, enabled, .. } => ((*title).into(), enabled.is_ok()),
             MenuItem::View { label, .. } => (label.clone(), true),
         };
+        let highlighted = i == m.highlighted;
+        let mut row = h_flex()
+            .h(scale::design(ROW_HEIGHT))
+            .px(scale::design(ROW_INSET))
+            .rounded(theme.radius)
+            .items_center();
+        row = if highlighted {
+            row.bg(row_paint.active)
+        } else {
+            row.hover(|s| s.bg(row_paint.hover))
+        };
+        // A disabled row keeps muted text even when highlighted — the
+        // door's `text` is only for an enabled row (review finding: a
+        // highlighted disabled row must still read as disabled).
+        row = row.text_color(if !enabled {
+            theme.muted_foreground
+        } else if highlighted {
+            row_paint.text
+        } else {
+            theme.popover_foreground
+        });
         list = list.child(
-            h_flex()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .rounded(theme.radius)
-                .items_center()
-                .when(i == m.highlighted, |d| {
-                    d.bg(theme.accent).text_color(theme.accent_foreground)
-                })
-                .when(i != m.highlighted && enabled, |d| {
-                    d.text_color(theme.popover_foreground)
-                })
-                .when(i != m.highlighted && !enabled, |d| {
-                    d.text_color(theme.muted_foreground)
-                })
-                .debug_selector(move || format!("pricer-menu-row-{i}"))
+            row.debug_selector(move || format!("pricer-menu-row-{i}"))
                 .on_mouse_down(MouseButton::Left, {
                     let tile = tile.clone();
                     move |_, window, cx| {
@@ -176,5 +190,12 @@ pub(crate) fn render_menu(m: &Menu, tile: &Entity<PricerTile>, cx: &App) -> impl
                 .child(label),
         );
     }
-    list
+    deferred(
+        anchored()
+            .anchor(Anchor::TopRight)
+            .position_mode(AnchoredPositionMode::Local)
+            .snap_to_window_with_margin(px(SNAP_MARGIN))
+            .child(list),
+    )
+    .with_priority(1)
 }

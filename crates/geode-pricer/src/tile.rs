@@ -1091,6 +1091,12 @@ impl PricerTile {
                 Ok(mut s) => {
                     s.mark_all_stale();
                     self.sheet = s;
+                    // The undo stack's inverses were recorded against the
+                    // fallback sheet's rows (review finding): once it is
+                    // gone, replaying one would either refuse against the
+                    // real document or, worse, write a fallback value
+                    // over it. Nothing to undo into is the safe state.
+                    self.undo.clear();
                 }
                 Err(e) => self.notice = Some(format!("sheet '{name}' did not load: {e}").into()),
             },
@@ -1358,6 +1364,13 @@ impl PricerTile {
     fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
         let spec = self.register.clone().ok_or("nothing to put")?;
         let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
+        // A line landing on a leg slot of a collapsed package (`o`'s own
+        // rule) must open it first, the way `open_entry` does — otherwise
+        // the new leg paints into a hidden row and the cursor falls back
+        // to wherever it was (review finding).
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }
         self.apply_edit(
             Edit::Insert {
                 place,
@@ -1453,6 +1466,18 @@ impl PricerTile {
                 .collect(),
         };
         self.apply_edits(edits, cx).map_err(|e| e.to_string())
+    }
+
+    /// `:shift`/`:spot`/`:group`/`:ungroup` edit the sheet; a pending load
+    /// holds the empty fallback sheet, so an edit landed there would be
+    /// lost (silently, with its undo pointing at rows that no longer
+    /// exist) the moment `loaded` swaps the real document in.
+    fn refuse_while_loading(&self) -> Result<(), String> {
+        if self.loading {
+            Err("the sheet is still loading".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn menu_items(&self) -> Vec<MenuItem> {
@@ -1671,10 +1696,27 @@ impl PricerTile {
                 cx.notify();
                 Ok(())
             }
-            Command::Shift { field, value } => self.set_sheet_shift(field, value, cx),
-            Command::Spot { underlying, level } => self.set_spot(underlying, level, cx),
-            Command::Group(count) => self.group(count.unwrap_or(1), cx),
-            Command::Ungroup => self.ungroup(cx),
+            // These four edit the sheet (Shift/Spot through `apply_edit`
+            // or `apply_edits`, Group/Ungroup through `apply_edit`):
+            // refused while a load is pending, or the edit would land on
+            // the empty fallback sheet and be lost when `loaded` swaps it
+            // out from under the recorded undo (review finding).
+            Command::Shift { field, value } => {
+                self.refuse_while_loading()?;
+                self.set_sheet_shift(field, value, cx)
+            }
+            Command::Spot { underlying, level } => {
+                self.refuse_while_loading()?;
+                self.set_spot(underlying, level, cx)
+            }
+            Command::Group(count) => {
+                self.refuse_while_loading()?;
+                self.group(count.unwrap_or(1), cx)
+            }
+            Command::Ungroup => {
+                self.refuse_while_loading()?;
+                self.ungroup(cx)
+            }
         }
     }
 
@@ -3600,5 +3642,100 @@ pub(crate) mod tests {
             });
             assert!(level.is_none() && !overlay, "`:{line}` reached the app");
         }
+    }
+
+    // ---- Task 11 fix round 1 ----
+
+    /// Review finding: `:shift`/`:spot`/`:group`/`:ungroup` must not edit
+    /// the empty fallback sheet while a load is pending — the edit would
+    /// be lost, undo included, the moment `loaded` swaps the real
+    /// document in. And even if something else bypassed that guard,
+    /// `loaded` clears the undo stack rather than trust inverses recorded
+    /// against rows that are about to disappear.
+    #[gpui::test]
+    fn shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        let loading = Err("the sheet is still loading".to_string());
+        assert_eq!(h.command(&mut vcx, "shift spot 2"), loading);
+        assert_eq!(h.command(&mut vcx, "spot spx 5100"), loading);
+        assert_eq!(h.command(&mut vcx, "group"), loading);
+        assert_eq!(h.command(&mut vcx, "ungroup"), loading);
+        // Seed the undo stack directly — every production edit path
+        // already refuses while loading, this one included once fixed —
+        // so `loaded` swapping the sheet has something to lose if it did
+        // not clear it.
+        h.tile.update(&mut vcx, |t, cx| {
+            t.apply_edit(
+                Edit::SetSheetShift(crate::core::OwnShifts {
+                    spot_pct: Some(1.0),
+                    vol_pts: None,
+                }),
+                cx,
+            )
+            .unwrap();
+        });
+        assert!(h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("nothing to undo"));
+    }
+
+    /// Review finding: a line put onto a collapsed package's leg slot
+    /// (`put_place`'s own rule) must open the package first, the way `o`
+    /// does — otherwise the new leg paints into a hidden row.
+    #[gpui::test]
+    fn put_below_onto_a_collapsed_packages_leg_slot_opens_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "top", None);
+        h.dispatch(&mut vcx, "yank_row", None); // yank A: a line
+        h.dispatch(&mut vcx, "down", None); // the still-collapsed package
+        h.dispatch(&mut vcx, "put_below", None);
+        assert_eq!(
+            h.tree(&vcx),
+            vec![
+                "SPX Z26 5000 C".to_string(),
+                "CS SPX Z26".to_string(),
+                "SPX Z26 5000 C".to_string(),
+                "-5 SPX Z26 4800 C".to_string(),
+                "5 SPX Z26 5200 C".to_string(),
+                "SPX Z26 4000 P".to_string(),
+            ],
+            "the package opened so the new leg (and its siblings) paint"
+        );
+        let cursor_row = h.cursor(&vcx).map(|c| c.0);
+        assert_eq!(
+            cursor_row,
+            Some(2),
+            "the cursor lands on the new leg, not wherever it fell back to"
+        );
+    }
+
+    /// Review finding: the menu's row must paint clickable above the
+    /// `DataTable` (a later sibling), not be occluded by it.
+    #[gpui::test]
+    fn a_click_on_a_menu_row_picks_it_and_paints_above_the_table(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "menu", None);
+        let at = centre_of(&mut vcx, "pricer-menu-row-0"); // Price all
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(
+            h.mode(&mut vcx),
+            "normal",
+            "the click reached the menu row and picked it"
+        );
+        assert_eq!(
+            h.prices()[0].lines.len(),
+            4,
+            "Price all reached the tile, not the table underneath it"
+        );
     }
 }
