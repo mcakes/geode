@@ -3,6 +3,7 @@
 //! package templates, the column vocabulary, the views doc and the
 //! storage row shape. No gpui type appears here.
 
+pub mod cell;
 pub mod columns;
 pub mod edit;
 pub mod sheet;
@@ -11,6 +12,7 @@ pub mod storage;
 pub mod template;
 pub mod views;
 
+pub use cell::{CellEditor, READ_ONLY};
 pub use columns::{
     Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
 };
