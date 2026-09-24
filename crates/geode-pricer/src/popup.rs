@@ -1,0 +1,111 @@
+//! The tile's popups (spec §8.4–§8.5): the choice typeahead under an
+//! editing cell, and (Task 11) the action menu. Rows are prepared when
+//! the list changes, never formatted in render.
+
+use crate::tile::PricerTile;
+use geode_shell::choice::ChoiceList;
+use geode_shell::shell::scale;
+use gpui::prelude::*;
+use gpui::{
+    Anchor, AnchoredPositionMode, App, Div, Entity, MouseButton, SharedString, anchored, deferred,
+    div, px,
+};
+use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
+
+const ROW_HEIGHT: f32 = 26.0;
+const ROW_INSET: f32 = 8.0;
+const MIN_WIDTH: f32 = 160.0;
+/// How far a popup keeps from the window's edge when it is snapped back
+/// on screen (the market-data popups' margin).
+const SNAP_MARGIN: f32 = 8.0;
+
+pub(crate) fn popover_surface(cx: &App) -> Div {
+    v_flex()
+        .min_w(scale::design(MIN_WIDTH))
+        .p_1()
+        .gap_y_0p5()
+        .text_sm()
+        .popover_style(cx)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ChoicePaint {
+    pub rows: Vec<SharedString>,
+    /// Window-relative, as `ChoiceList::highlighted` answers it.
+    pub highlighted: usize,
+}
+
+pub(crate) fn choice_paint(list: &ChoiceList) -> ChoicePaint {
+    ChoicePaint {
+        rows: list
+            .painted()
+            .iter()
+            .map(|r| list.options()[r.row].clone().into())
+            .collect(),
+        highlighted: list.highlighted(),
+    }
+}
+
+/// The ranked options under the editing cell, anchored by their top-left
+/// corner at the point the delegate paints them from (the cell's
+/// bottom-left). `deferred` escapes the table's clip; the snap keeps a
+/// bottom-row list on screen. A row click picks it (`stop_propagation`: a
+/// click that means "pick" must not also land on the grid, which would
+/// cancel the editor); a press anywhere else closes the editor.
+pub(crate) fn render_choice(
+    p: &ChoicePaint,
+    tile: &Entity<PricerTile>,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
+        .debug_selector(|| "pricer-choice".into())
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_editor(window, cx))
+        });
+    if p.rows.is_empty() {
+        list = list.child(
+            div()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .flex()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .child("no option matches"),
+        );
+    }
+    for (i, text) in p.rows.iter().enumerate() {
+        list = list.child(
+            h_flex()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .rounded(theme.radius)
+                .items_center()
+                .when(i == p.highlighted, |d| {
+                    d.bg(theme.accent).text_color(theme.accent_foreground)
+                })
+                .when(i != p.highlighted, |d| {
+                    d.text_color(theme.popover_foreground)
+                })
+                .debug_selector(move || format!("pricer-choice-row-{i}"))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.choice_pick(i, window, cx))
+                    }
+                })
+                .child(text.clone()),
+        );
+    }
+    deferred(
+        anchored()
+            .anchor(Anchor::TopLeft)
+            .position_mode(AnchoredPositionMode::Local)
+            .snap_to_window_with_margin(px(SNAP_MARGIN))
+            .child(list),
+    )
+    .with_priority(1)
+}

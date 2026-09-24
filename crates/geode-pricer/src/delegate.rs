@@ -7,11 +7,14 @@
 
 use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
+use crate::popup::{ChoicePaint, render_choice};
+use crate::tile::PricerTile;
 use geode_shell::fonts;
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, SharedString, TextAlign, Window, div, px,
+    App, ClickEvent, Context, Entity, EventEmitter, SharedString, TextAlign, WeakEntity, Window,
+    div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -32,6 +35,17 @@ pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<SheetDelegate> {}
 
+/// A paint-time copy of the tile's open editor (`PricerTile::sync_editor`):
+/// the grid cell it sits on, its field, and the typeahead's prepared rows.
+#[derive(Clone)]
+pub(crate) struct EditorPaint {
+    pub row: usize,
+    /// The plan column (never the tree).
+    pub col: usize,
+    pub input: Entity<InputState>,
+    pub choice: Option<Rc<ChoicePaint>>,
+}
+
 pub struct SheetDelegate {
     pub(crate) model: Rc<GridModel>,
     /// `(grid row, plan column)`; `None` with no cursor row.
@@ -42,16 +56,23 @@ pub struct SheetDelegate {
     /// it (Task 9's `Entry` row); the tile's `entry` is the source of
     /// truth, this is a read-only mirror.
     pub(crate) entry: Option<Entity<InputState>>,
+    /// The tile's open cell editor, mirrored the same way (Task 10).
+    pub(crate) editor: Option<EditorPaint>,
+    /// The typeahead's rows call back into the tile; a dropped tile
+    /// paints no popup.
+    pub(crate) tile: WeakEntity<PricerTile>,
 }
 
 impl SheetDelegate {
-    pub(crate) fn new(theme: &Theme) -> Self {
+    pub(crate) fn new(theme: &Theme, tile: WeakEntity<PricerTile>) -> Self {
         SheetDelegate {
             model: Rc::new(GridModel::default()),
             cursor: None,
             paints: Paints::derive(theme),
             chevron: None,
             entry: None,
+            editor: None,
+            tile,
         }
     }
 
@@ -220,12 +241,43 @@ impl TableDelegate for SheetDelegate {
         };
         let at_cursor = self.cursor == Some((row_ix, plan_col));
         let right = model.columns.get(plan_col).is_some_and(|c| c.right);
-        base.when(right, |el| el.justify_end())
-            .when(at_cursor, |el| el.border_1().border_color(active_border))
-            .when_some(row.cells.get(plan_col), |el, cell| {
-                el.text_color(paints.text(cell.state, package))
-                    .child(cell.text.clone())
-            })
-            .into_any_element()
+        let el = base
+            .when(right, |el| el.justify_end())
+            .when(at_cursor, |el| el.border_1().border_color(active_border));
+        // The open editor paints its field in place of the text (a
+        // refcount clone at most). The typeahead hangs under THIS cell: a
+        // zero-size absolute child at the cell's bottom-left is the anchor
+        // `render_choice`'s `TopLeft` positions against (the market-data
+        // delegate's arrangement).
+        let editing = self
+            .editor
+            .as_ref()
+            .filter(|e| e.row == row_ix && e.col == plan_col)
+            .cloned();
+        match editing {
+            Some(e) => {
+                let popup = e.choice.as_ref().and_then(|paint| {
+                    let tile = self.tile.upgrade()?;
+                    Some(render_choice(paint, &tile, cx).into_any_element())
+                });
+                el.child(
+                    div()
+                        .flex_1()
+                        .debug_selector(|| format!("pricer-editor-{row_ix}-{col_ix}"))
+                        .child(Input::new(&e.input)),
+                )
+                .when_some(popup, |el, popup| {
+                    el.relative()
+                        .child(div().absolute().left_0().bottom_0().child(popup))
+                })
+                .into_any_element()
+            }
+            None => el
+                .when_some(row.cells.get(plan_col), |el, cell| {
+                    el.text_color(paints.text(cell.state, package))
+                        .child(cell.text.clone())
+                })
+                .into_any_element(),
+        }
     }
 }

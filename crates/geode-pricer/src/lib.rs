@@ -10,6 +10,7 @@ pub mod delegate;
 pub mod grid;
 pub mod header;
 pub mod paint;
+pub mod popup;
 pub mod session;
 pub mod store;
 pub mod tile;

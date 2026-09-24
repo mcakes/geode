@@ -8,6 +8,8 @@
 //! header and notifies.
 
 use crate::content::{PricerSettings, Shared};
+use crate::core::cell::{self, CellEditor};
+use crate::core::columns::ColumnKind;
 use crate::core::commands::{self, Command};
 use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for};
@@ -18,9 +20,10 @@ use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
-use crate::delegate::{ChevronClicked, SheetDelegate};
+use crate::delegate::{ChevronClicked, EditorPaint, SheetDelegate};
 use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
+use crate::popup::choice_paint;
 use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
@@ -30,14 +33,16 @@ use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::QueryKey;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
+use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
+use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
 use gpui::{App, Context, Entity, Focusable as _, SharedString, Task, Window, div};
-use gpui_component::input::InputState;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
@@ -91,6 +96,50 @@ pub(crate) struct Entry {
 
 const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 
+/// A commit whose target line went away, or whose column is no longer the
+/// one it opened on (a view switch), refuses with this.
+pub(crate) const MOVED: &str = "the cell moved; edit refused";
+
+/// The open cell editor (spec §8.4): its target by line identity and
+/// column kind — re-checked at commit, so a line deleted or a view
+/// switched under an open editor refuses rather than writing elsewhere.
+pub(crate) enum Editor {
+    Text {
+        line: LineId,
+        col: usize,
+        kind: ColumnKind,
+        input: Entity<InputState>,
+    },
+    Choice {
+        line: LineId,
+        col: usize,
+        kind: ColumnKind,
+        input: Entity<InputState>,
+        list: ChoiceList,
+        /// An unmatched query commits as typed (planning decision 17).
+        free: bool,
+    },
+}
+
+impl Editor {
+    fn input(&self) -> &Entity<InputState> {
+        match self {
+            Editor::Text { input, .. } | Editor::Choice { input, .. } => input,
+        }
+    }
+
+    fn target(&self) -> (LineId, usize, ColumnKind) {
+        match self {
+            Editor::Text {
+                line, col, kind, ..
+            }
+            | Editor::Choice {
+                line, col, kind, ..
+            } => (*line, *col, *kind),
+        }
+    }
+}
+
 pub struct PricerTile {
     pub(crate) id: TileId,
     // Read from Task 8 on (the request door and the frame's as-of).
@@ -141,6 +190,10 @@ pub struct PricerTile {
     /// parses and inserts through `apply_edit`, `escape` or a click drops
     /// it. `None` in normal mode.
     pub(crate) entry: Option<Entry>,
+    /// The open cell editor (spec §8.4): `i`/`enter`/double-click open it,
+    /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
+    /// drops it. `None` outside insert mode.
+    pub(crate) editor: Option<Editor>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -230,7 +283,7 @@ impl PricerTile {
             (e, None)
         };
 
-        let delegate = SheetDelegate::new(cx.theme());
+        let delegate = SheetDelegate::new(cx.theme(), cx.weak_entity());
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
@@ -322,6 +375,7 @@ impl PricerTile {
             refresh_task: None,
             retry_task: None,
             entry: None,
+            editor: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -330,7 +384,7 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal` until Task 10 adds `insert` (Task 11 adds `menu`).
+    /// `normal`, `entry` or `insert` (Task 11 adds `menu`).
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("pricer").pair("mode", self.mode()).counts()
     }
@@ -338,17 +392,26 @@ impl PricerTile {
     pub(crate) fn mode(&self) -> &'static str {
         if self.entry.is_some() {
             "entry"
+        } else if self.editor.is_some() {
+            "insert"
         } else {
             "normal"
         }
     }
 
-    /// Does one of THIS tile's own fields hold window focus? (Task 10 adds
-    /// the cell editor and the choice field.)
+    /// Does one of THIS tile's own fields (the entry field, the cell
+    /// editor or the typeahead's field) hold window focus? Answered from
+    /// the focus handles, never from the mode.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
-        self.entry
+        let entry = self
+            .entry
             .as_ref()
-            .is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window))
+            .is_some_and(|e| e.input.read(cx).focus_handle(cx).is_focused(window));
+        let editor = self
+            .editor
+            .as_ref()
+            .is_some_and(|e| e.input().read(cx).focus_handle(cx).is_focused(window));
+        entry || editor
     }
 
     pub fn title(&self) -> SharedString {
@@ -615,6 +678,230 @@ impl PricerTile {
             .update(cx, |s, cx| s.set_value(text, window, cx));
     }
 
+    // ---- the cell editor (spec §8.4) -----------------------------------
+
+    /// `i`/`enter`/double-click: a text field on the cell's grammar
+    /// spelling, or a typeahead over its vocabulary; a cell that does not
+    /// edit says why in the footer.
+    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            self.footer = Some("the sheet is still loading".into());
+            return;
+        }
+        self.close_editor(window, cx);
+        let (Some(row), Some(planned)) = (
+            self.cursor_sheet_row(),
+            self.plan.columns.get(self.cursor.col),
+        ) else {
+            return;
+        };
+        let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
+        let editor = match cell::editor_for(&self.sheet, row, kind) {
+            Err(why) => {
+                self.footer = Some(why.into());
+                return;
+            }
+            Ok(CellEditor::Text(text)) => {
+                let input = cx.new(|cx| InputState::new(window, cx));
+                input.update(cx, |s, cx| s.set_value(text, window, cx));
+                Editor::Text {
+                    line,
+                    col,
+                    kind,
+                    input,
+                }
+            }
+            Ok(CellEditor::Choice {
+                options,
+                current,
+                free,
+            }) => {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder(current.clone()));
+                // Every keystroke re-ranks. The subscription dies with the
+                // field, which `close_editor` drops.
+                cx.subscribe_in(
+                    &input,
+                    window,
+                    |this, input, event: &InputEvent, _window, cx| {
+                        if let InputEvent::Change = event {
+                            let query = input.read(cx).value().to_string();
+                            // The borrow of `list` ends before `sync_editor`.
+                            let changed = match &mut this.editor {
+                                Some(Editor::Choice {
+                                    list, input: own, ..
+                                }) if &*own == input => list.set_query(&query),
+                                _ => false,
+                            };
+                            if changed {
+                                this.sync_editor(cx);
+                            }
+                        }
+                    },
+                )
+                .detach();
+                let mut list = ChoiceList::new(options, DEFAULT_CAP);
+                list.place(Some(&current));
+                Editor::Choice {
+                    line,
+                    col,
+                    kind,
+                    input,
+                    list,
+                    free,
+                }
+            }
+        };
+        editor.input().read(cx).focus_handle(cx).focus(window, cx);
+        self.editor = Some(editor);
+        self.sync_editor(cx);
+    }
+
+    /// `enter`: the live text (re-read — `set_value` emits no `Change`),
+    /// the target re-checked by line and column kind, parsed into one
+    /// `Edit`; a bad value keeps the editor open with the reason. The
+    /// editor closes (blur first) BEFORE the edit applies, so the rebuild
+    /// never paints a dead field.
+    fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The editor's borrow ends inside this block, before any `self` call.
+        let (value, (line, col, kind)) = {
+            let Some(editor) = self.editor.as_mut() else {
+                return;
+            };
+            let text = editor.input().read(cx).value().to_string();
+            let target = editor.target();
+            let value = match editor {
+                Editor::Text { .. } => Some(text),
+                Editor::Choice { list, free, .. } => {
+                    list.set_query(&text);
+                    match list.pick() {
+                        Some(i) => Some(list.options()[i].clone()),
+                        None if *free && !text.trim().is_empty() => Some(text),
+                        None => None,
+                    }
+                }
+            };
+            (value, target)
+        };
+        let Some(value) = value else {
+            self.footer = Some("no option matches".into());
+            self.sync_editor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        };
+        let same_column = self
+            .plan
+            .columns
+            .get(col)
+            .is_some_and(|c| c.def.kind == kind);
+        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {
+            self.close_editor(window, cx);
+            self.footer = Some(MOVED.into());
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        };
+        match cell::commit(&self.sheet, row, kind, &value) {
+            Err(why) => {
+                self.footer = Some(why.into());
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(edit) => {
+                self.close_editor(window, cx);
+                if let Err(e) = self.apply_edit(edit, cx) {
+                    self.footer = Some(e.to_string().into());
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// A click on a typeahead row: highlight it, then commit.
+    pub(crate) fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = match &mut self.editor {
+            Some(Editor::Choice { list, input, .. }) => list.set_highlighted(row).then(|| {
+                (
+                    input.clone(),
+                    list.highlighted_text().unwrap_or_default().to_string(),
+                )
+            }),
+            _ => None,
+        };
+        if let Some((input, text)) = picked {
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+            self.footer = None;
+            self.commit_edit(window, cx);
+        }
+    }
+
+    /// Blur only if OUR field holds focus, then drop it (the market-data
+    /// rule, CLAUDE.md): an unblurred dead handle leaves the window
+    /// focused on nothing and the shell's focus return never fires.
+    pub(crate) fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        if editor.input().read(cx).focus_handle(cx).is_focused(window) {
+            window.blur(cx);
+        }
+        self.sync_editor(cx);
+        cx.notify();
+    }
+
+    /// `up`/`down` (`shift`: ten) step a numeric editor by its text's own
+    /// precision (planning decision 2); in a typeahead they move the
+    /// highlight.
+    fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let refused = match &mut self.editor {
+            Some(Editor::Text { kind, input, .. }) => {
+                let text = input.read(cx).value().to_string();
+                match cell::nudge(*kind, &text, steps) {
+                    Ok(next) => {
+                        input.update(cx, |s, cx| s.set_value(next, window, cx));
+                        None
+                    }
+                    Err(why) => Some(why),
+                }
+            }
+            // `up` moves the highlight up the list: a negative step.
+            Some(Editor::Choice { list, .. }) => {
+                list.nav(NavCommand::Move(-steps));
+                None
+            }
+            None => None,
+        };
+        if let Some(why) = refused {
+            self.footer = Some(why.into());
+        }
+        self.sync_editor(cx);
+    }
+
+    /// Mirror the open editor into the delegate: its grid cell (looked up
+    /// by line — a delivery can rebuild the model under it), its field,
+    /// and the typeahead's prepared rows.
+    fn sync_editor(&mut self, cx: &mut Context<Self>) {
+        let paint = self.editor.as_ref().and_then(|e| {
+            let (line, col, _) = e.target();
+            let row = self.model.grid_row_of(line)?;
+            let choice = match e {
+                Editor::Choice { list, .. } => Some(Rc::new(choice_paint(list))),
+                Editor::Text { .. } => None,
+            };
+            Some(EditorPaint {
+                row,
+                col,
+                input: e.input().clone(),
+                choice,
+            })
+        });
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().editor = paint;
+            cx.notify();
+        });
+    }
+
     /// What every edit, undo and redo implies: forget dead package ids,
     /// rebuild, reprice what changed, and make sure the timer runs once
     /// the sheet has a line. Task 12 adds the write-behind save. Reached
@@ -834,12 +1121,15 @@ impl PricerTile {
         };
         let n = count.unwrap_or(1).max(1) as usize;
         self.footer = None;
-        // Any verb but the field's own four closes an open entry first (a
-        // palette dispatch can arrive while it is open).
-        if self.entry.is_some()
-            && !matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
-        {
+        // Any verb but the fields' own closes an open field first (a
+        // palette dispatch can arrive while one is open).
+        let field_verb = matches!(
+            verb,
+            "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
+        );
+        if !field_verb {
             self.close_entry(window, cx);
+            self.close_editor(window, cx);
         }
         match verb {
             "down" => self.step_rows(n as isize),
@@ -913,20 +1203,37 @@ impl PricerTile {
                 self.open_entry(verb == "add_below", window, cx);
                 return true;
             }
+            "edit" => {
+                self.begin_edit(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return true;
+            }
             "commit" => {
-                self.commit_entry(window, cx);
+                if self.entry.is_some() {
+                    self.commit_entry(window, cx);
+                } else {
+                    self.commit_edit(window, cx);
+                }
                 return true;
             }
             "cancel" => {
                 self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
                 return true;
             }
-            "insert_up" => {
-                self.step_history(1, window, cx);
-                return true;
-            }
-            "insert_down" => {
-                self.step_history(-1, window, cx);
+            "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big" => {
+                let up = verb.starts_with("insert_up");
+                if self.entry.is_some() {
+                    self.step_history(if up { 1 } else { -1 }, window, cx);
+                } else {
+                    let magnitude: i64 = if verb.ends_with("_big") { 10 } else { 1 };
+                    let steps = (if up { magnitude } else { -magnitude }) * n as i64;
+                    self.nudge(steps, window, cx);
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
                 return true;
             }
             _ => return false,
@@ -1145,6 +1452,8 @@ impl PricerTile {
             t.refresh(cx);
         });
         self.sync_cursor(cx);
+        // A rebuild moves grid rows: the editor follows its line.
+        self.sync_editor(cx);
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {
@@ -1227,26 +1536,43 @@ impl PricerTile {
     }
 
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let TableEvent::SelectCell(row, col) = event {
-            // A click anywhere cancels an open entry, never commits it
-            // (global constraints). `SelectRow`/`SelectColumn` are what
-            // `sync_cursor` itself emits when it mirrors the cursor into
-            // the table (including from inside `open_entry`'s own
-            // `rebuild`), so only a real cell click — `SelectCell` —
-            // closes the field.
-            if self.entry.is_some() {
+        match event {
+            TableEvent::SelectCell(row, col) => {
+                // A click anywhere cancels an open entry or editor, never
+                // commits it (global constraints). `SelectRow`/
+                // `SelectColumn` are what `sync_cursor` itself emits when
+                // it mirrors the cursor into the table (including from
+                // inside `open_entry`'s and `begin_edit`'s own rebuilds),
+                // so only a real cell click — `SelectCell` — closes a field.
                 self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                self.set_cursor_row(*row);
+                if let Some(c) = SheetDelegate::plan_col(*col) {
+                    self.cursor.col = c;
+                }
+                self.sync_cursor(cx);
+                self.rebuild_chrome();
+                cx.notify();
             }
-            self.set_cursor_row(*row);
-            if let Some(c) = SheetDelegate::plan_col(*col) {
-                self.cursor.col = c;
+            // The mouse form of `i` (spec §8.4). The first click of the
+            // pair already landed as `SelectCell` and cancelled whatever
+            // was open; the tree column opens nothing.
+            TableEvent::DoubleClickedCell(row, col) => {
+                self.close_entry(window, cx);
+                self.set_cursor_row(*row);
+                if let Some(c) = SheetDelegate::plan_col(*col) {
+                    self.cursor.col = c;
+                    self.sync_cursor(cx);
+                    self.footer = None;
+                    self.begin_edit(window, cx);
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
             }
-            self.sync_cursor(cx);
-            self.rebuild_chrome();
-            cx.notify();
+            // `SelectRow`/`SelectColumn` are what `sync_cursor` itself
+            // emits: deliberately unmatched.
+            _ => {}
         }
-        // `SelectRow`/`SelectColumn` are what `sync_cursor` itself emits:
-        // deliberately unmatched. Task 10 adds `DoubleClickedCell`.
     }
 }
 
@@ -2453,5 +2779,237 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "down", None); // from the palette: not an entry verb
         assert_eq!(h.mode(&mut vcx), "normal");
         assert!(!focused(&mut vcx));
+    }
+
+    // ---- Task 10 ----
+
+    fn editor_text(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+        h.tile.read_with(vcx, |t, cx| match &t.editor {
+            Some(Editor::Text { input, .. } | Editor::Choice { input, .. }) => {
+                Some(input.read(cx).value().to_string())
+            }
+            None => None,
+        })
+    }
+
+    fn set_editor(h: &Harness, vcx: &mut VisualTestContext, text: &str) {
+        let text = text.to_string();
+        vcx.update(|window, cx| {
+            let input = match &h.tile.read(cx).editor {
+                Some(Editor::Text { input, .. } | Editor::Choice { input, .. }) => input.clone(),
+                None => panic!("an editor is open"),
+            };
+            // `set_value` emits no `Change` (CLAUDE.md's trap): every commit
+            // path must re-read the live text, and this proves it does.
+            input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+        });
+    }
+
+    /// Spec §12: editing the strike marks it stale and resubmits.
+    #[gpui::test]
+    fn i_on_a_strike_edits_it_and_enter_reprices_that_line(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let b = h.prices().remove(0);
+        h.answer(&mut vcx, &b, 12.5);
+        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the shell's insert-focus predicate sees the editor"
+        );
+        set_editor(&h, &mut vcx, "5100");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5100");
+        let again = h.prices();
+        assert_eq!(
+            again[0].lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.undo.can_undo()),
+            "a cell commit is one undo entry"
+        );
+    }
+
+    #[gpui::test]
+    fn a_bad_value_keeps_the_editor_open_with_the_reason(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "edit", None); // qty
+        set_editor(&h, &mut vcx, "0");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(h.footer(&vcx).as_deref(), Some("quantity must not be zero"));
+    }
+
+    #[gpui::test]
+    fn a_read_only_cell_and_a_package_row_say_so(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "last_col", None); // rho
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
+        h.dispatch(&mut vcx, "first_col", None);
+        h.dispatch(&mut vcx, "down", None); // the package
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
+    }
+
+    #[gpui::test]
+    fn up_and_down_nudge_by_the_texts_precision_and_shift_steps_ten(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5001"));
+        h.dispatch(&mut vcx, "insert_down_big", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4991"));
+        h.dispatch(&mut vcx, "insert_up", Some(3));
+        assert_eq!(
+            editor_text(&h, &vcx).as_deref(),
+            Some("4994"),
+            "a count multiplies"
+        );
+    }
+
+    #[gpui::test]
+    fn an_empty_shift_commit_inherits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let spot = h
+            .columns(&vcx)
+            .iter()
+            .position(|c| c == "spot_shift")
+            .unwrap();
+        h.dispatch(&mut vcx, "right", Some(spot as u32));
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.sheet.shift(0).spot_pct),
+            Some(2.0)
+        );
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("2"));
+        set_editor(&h, &mut vcx, "");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.sheet.shift(0).spot_pct),
+            None,
+            "empty means inherit"
+        );
+    }
+
+    #[gpui::test]
+    fn a_type_cell_opens_a_typeahead_that_filters_and_enter_picks(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(4)); // type
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| matches!(t.editor, Some(Editor::Choice { .. })))
+        );
+        vcx.simulate_input("p");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        // An unknown underlying commits as typed (planning decision 17).
+        h.dispatch(&mut vcx, "first_col", None);
+        h.dispatch(&mut vcx, "right", None); // underlying
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.simulate_input("ndx");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.cell(&vcx, 0, "underlying"), "NDX");
+        // A closed vocabulary refuses a query nothing matches.
+        h.dispatch(&mut vcx, "right", Some(3)); // type
+        h.dispatch(&mut vcx, "edit", None);
+        vcx.simulate_input("x");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("no option matches"));
+        assert_eq!(h.mode(&mut vcx), "insert");
+    }
+
+    /// Spec §12 ("the editor blurs before it drops"), both closers.
+    #[gpui::test]
+    fn the_editor_gives_up_focus_before_it_is_dropped(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(focused(&mut vcx));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(!focused(&mut vcx), "cancel: blurred, then dropped");
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(!focused(&mut vcx), "commit: blurred, then dropped");
+        h.dispatch(&mut vcx, "right", None); // type: the typeahead's field too
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(focused(&mut vcx));
+        h.dispatch(&mut vcx, "cancel", None);
+        assert!(!focused(&mut vcx));
+    }
+
+    #[gpui::test]
+    fn a_click_cancels_an_open_editor_and_never_commits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        let at = centre_of(&mut vcx, "pricer-cell-2-2");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
+    }
+
+    #[gpui::test]
+    fn a_double_click_opens_the_editor_on_that_cell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
+    }
+
+    #[gpui::test]
+    fn a_commit_whose_line_went_away_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        h.tile
+            .update(&mut vcx, |t, cx| t.apply_edit(Edit::Remove { at: 0 }, cx))
+            .unwrap();
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(MOVED));
+        assert_eq!(h.mode(&mut vcx), "normal");
+    }
+
+    /// The typeahead paints under its cell (through `deferred`, over the
+    /// rows below) and a click on a row picks it — the pointer route of
+    /// `choice_pick`, not a call.
+    #[gpui::test]
+    fn a_click_on_a_typeahead_row_picks_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(4)); // type
+        h.dispatch(&mut vcx, "edit", None);
+        let cell = centre_of(&mut vcx, "pricer-editor-0-5");
+        let at = centre_of(&mut vcx, "pricer-choice-row-1"); // "P"
+        assert!(at.y > cell.y, "the list hangs under its cell");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, "type"), "P");
+        assert!(
+            !focused(&mut vcx),
+            "the pick closes the field: blurred, then dropped"
+        );
     }
 }
