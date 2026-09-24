@@ -11,6 +11,21 @@
 //! source of truth; the shared input is synchronized only through the dialog
 //! focus seam.
 
+pub mod apply;
+mod colours;
+mod dataset_columns;
+mod groupings;
+pub mod render;
+mod schema;
+mod scopes;
+mod sources;
+mod views;
+
+/// `ShellView::deliver_distinct` routes a `SCOPES_KEY` outcome to the Values
+/// stage's own delivery. Scoped to this crate's shell because nothing outside
+/// it needs the door.
+pub(in crate::shell) use render::deliver_values;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
