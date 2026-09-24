@@ -108,6 +108,8 @@ impl TileContent for DiagnosticsContent {
             // `SeriesFetched` DOES reach it, since it is broadcast to
             // every visible occupant.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+            // This tile never uploads; an outcome addressed here is a routing bug.
+            Delivery::Upload(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

@@ -54,6 +54,26 @@ pub enum Delivery {
         identity: String,
         result: Result<u64, String>,
     },
+    /// A document upload's outcome (egress spec §5), routed by the
+    /// submitting tile's key like a `Query`. Plain fields so the shell,
+    /// which never names `geode-data`, can carry `geode_data::egress::
+    /// UploadOutcome` across the boundary. Only `MarketDataTile::deliver_
+    /// upload` acts on it (a stub through Task 8; Task 9 wires the
+    /// `Sent`/failure transition); every other occupant ignores it.
+    Upload(UploadDelivery),
+}
+
+/// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
+/// UploadOutcome` one for one.
+#[derive(Debug)]
+pub struct UploadDelivery {
+    pub key: QueryKey,
+    /// The tile's upload counter, echoed back so a stale outcome (an
+    /// earlier upload from the same tile, still in flight when a second
+    /// one was sent) can be told from the current one.
+    pub tag: u64,
+    pub target: String,
+    pub result: Result<(), String>,
 }
 
 impl Delivery {
@@ -67,6 +87,7 @@ impl Delivery {
             Delivery::Price(outcome) => Some(outcome.key),
             Delivery::Series(outcome) => Some(outcome.key),
             Delivery::SeriesFetched { .. } => None,
+            Delivery::Upload(u) => Some(u.key),
         }
     }
 }
@@ -479,6 +500,8 @@ pub mod placeholder {
                 // This tile asks no series query and holds no
                 // `(identity, source)` pair.
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::Upload(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -785,6 +808,13 @@ pub mod recording {
                         self.tile,
                         format!("{identity}@{source}"),
                     ));
+                }
+                // Recorded the same way a `Query`/`Series` outcome is:
+                // the tag is what a test tells them apart by.
+                Delivery::Upload(u) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Delivered(self.tile, u.tag));
                 }
             }
         }

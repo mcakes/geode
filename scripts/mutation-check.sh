@@ -17354,6 +17354,91 @@ run_mutation "objectdialog: enter in browse filter mode is not an exit" \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
+# ---- market-data egress, Task 8: Delivery::Upload and geode-app wiring ----
+
+# `Delivery::key()`'s per-variant answer, mutated to `None` for the new
+# variant — exactly the shape the `Series`/`Price` entries above use. A
+# `None` here would fall the outcome into `ShellView::deliver`'s
+# broadcast-or-drop path instead of routing it to the submitting tile.
+run_mutation "shell: an upload delivery routes by key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Upload(u) => Some(u.key),' \
+  '            Delivery::Upload(_) => None,' \
+  geode-shell \
+  an_upload_delivery_reaches_its_tile_and_no_other
+
+# The bridge's own arm (Task 7's placeholder only logged; Task 8 routes
+# it): a revert to a bare log-and-drop arm is silent, exactly the
+# SeriesFetched entry above guards the same failure mode for its own event.
+run_mutation "bridge: a DataEvent::Upload reaches the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::Upload(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::Upload(UploadDelivery {
+                                    key: outcome.key,
+                                    tag: outcome.tag,
+                                    target: outcome.target,
+                                    result: outcome.result,
+                                }),
+                                window,
+                                cx,
+                            )
+                        });
+                    }' \
+  '                    DataEvent::Upload(_) => {}' \
+  geode-app \
+  an_upload_outcome_is_routed_to_its_tile
+
+# `data_setup` used to hardcode `egress: Vec::new()` (Task 7 left egress.
+# toml unread); a revert to that is silent — no diagnostic, and every
+# resolved target simply vanishes from the running service.
+run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer,
+            egress,
+        },' \
+  '            pricer,
+            egress: Vec::new(),
+        },' \
+  geode-app \
+  the_demo_layer_produces_a_servable_data_setup
+
+# egress.toml joins sources/datasets in the restart-required list (egress
+# spec §10 amendment 2): a live reload never rebuilds the running egress
+# workers, so a changed `egress` doc must ask for a restart exactly as a
+# changed `sources` doc does — the label swap leaves the comparison
+# itself intact (same shape the sources/datasets entry above uses) but
+# the reported message no longer names "egress".
+run_mutation "frame: an egress change is a restart, not a silent apply" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("egress", &self.egress_baseline),' \
+  '                ("nonesuch", &self.egress_baseline),' \
+  geode-shell \
+  an_egress_change_asks_for_a_restart
+
+# `targets_for`'s own narrowing predicate: dropped, every resolved target
+# would appear eligible for every document, offering `:upload` (Task 9) a
+# target that does not actually accept the panel's document.
+run_mutation "marketdata: targets_for narrows to targets that accept the document" \
+  crates/geode-marketdata/src/content.rs \
+  '        .filter(|(_, documents)| documents.iter().any(|d| d == document))' \
+  '        .filter(|_| true)' \
+  geode-marketdata \
+  targets_for_narrows_to_one_document_and_keeps_egress_toml_order
+
+# The production wiring from factory to tile: `create` must narrow ITS
+# OWN factory's shared egress list to this panel's own document before
+# handing it to `MarketDataTile::new` — an empty list here would leave
+# every panel with no eligible upload target regardless of what
+# `egress.toml` actually resolved.
+run_mutation "marketdata: create narrows the factory's egress list to this panel's own document" \
+  crates/geode-marketdata/src/content.rs \
+  '        let egress_targets = targets_for(&self.egress, self.spec.document);' \
+  '        let egress_targets: Vec<SharedString> = Vec::new();' \
+  geode-marketdata \
+  the_tile_stores_the_targets_its_factory_resolves_for_its_document
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

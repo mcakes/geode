@@ -7,6 +7,7 @@ use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
 use geode_core::config::{Config, Diagnostic, Severity, load_views};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::egress_config;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::SourceShape;
@@ -20,7 +21,7 @@ use geode_data::{
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
-use geode_shell::module::Delivery;
+use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
@@ -76,6 +77,20 @@ pub fn data_setup(
         .map(|doc| SourceSpec::from_doc(doc, &schema))
         .unwrap_or_default();
     diagnostics.extend(d);
+    // `egress.toml` (egress spec §4, §10 amendments 1/2): typed, then
+    // resolved against `adapters` — the same registry this function's
+    // caller ultimately hands to `DataServiceConfig.adapters` below, read
+    // here (by reference) before that move. An unknown adapter or one
+    // with no egress side drops the target with a diagnostic; the
+    // survivors are what `DataServiceConfig.egress` carries and what
+    // `bridge::start` narrows per document for the market-data factories.
+    let (egress_specs, d) = config
+        .doc("egress")
+        .map(|doc| egress_config::from_doc(doc, &schema))
+        .unwrap_or_default();
+    diagnostics.extend(d);
+    let (egress, d) = geode_data::egress::resolve(egress_specs, &adapters);
+    diagnostics.extend(d);
     let (colours, colour_diags) = config
         .doc("colours")
         .map(NamedColours::from_doc)
@@ -128,9 +143,7 @@ pub fn data_setup(
                 documents
             },
             pricer,
-            // `egress.toml` is not read yet; every upload answers "unknown
-            // target" until the app resolves its targets here.
-            egress: Vec::new(),
+            egress,
         },
         views,
         dimensions,
@@ -244,6 +257,24 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
+    // Task 8: target name → accepted document names, in `egress.toml`
+    // order — captured before `DataService::spawn` moves `setup.config`,
+    // and shared unmodified between the CVI and dividend factories built
+    // below over the SAME resolved list (`MarketDataFactory::create`
+    // narrows it per document with its own `targets_for`).
+    let egress_targets: Arc<Vec<(String, Vec<String>)>> = Arc::new(
+        setup
+            .config
+            .egress
+            .iter()
+            .map(|spec| {
+                (
+                    spec.name.clone(),
+                    spec.documents.iter().map(|(doc, _)| doc.clone()).collect(),
+                )
+            })
+            .collect(),
+    );
     let handle = DataService::spawn(setup.config, sink);
     // Both factories receive the same startup colours and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
@@ -260,19 +291,27 @@ pub fn start(
         stale_after,
     ));
     Bridge {
-        marketdata: Rc::new(MarketDataFactory::new(
-            handle.clone(),
-            &CVI,
-            // One threshold, one config key: a document's own freshness
-            // means exactly what a dataset's does to the blotter, and two
-            // keys for one idea would be two things to keep in step.
-            stale_after,
-        )),
+        marketdata: Rc::new(
+            MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                // One threshold, one config key: a document's own
+                // freshness means exactly what a dataset's does to the
+                // blotter, and two keys for one idea would be two things
+                // to keep in step.
+                stale_after,
+            )
+            .with_egress(egress_targets.clone()),
+        ),
         // The second document kind, over the same shared `marketdata`
         // context: `.without_keymap()` is what keeps `keymap_fragments`
-        // from splicing a second, identical `<module:{kind}>` layer.
+        // from splicing a second, identical `<module:{kind}>` layer. The
+        // same `egress_targets` `Arc`, narrowed to its own document by
+        // `create`.
         dividend: Rc::new(
-            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
+            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after)
+                .without_keymap()
+                .with_egress(egress_targets),
         ),
         timeseries,
         handle,
@@ -530,17 +569,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     });
                 }
                 match event {
-                    // Not routed yet: no tile submits an upload. Delivering
-                    // it to the requesting tile is the panel's `:upload`.
+                    // Routed by the submitting tile's key, exactly as a
+                    // `Query`/`Series` outcome is (Task 8). `geode_data::
+                    // egress` already logs the outcome under `geode::
+                    // ingest`; `MarketDataTile::deliver_upload` is a stub
+                    // through Task 8 — Task 9 wires the `Sent`/failure
+                    // transition it triggers here.
                     DataEvent::Upload(outcome) => {
-                        tracing::debug!(
-                            target: "geode::query",
-                            "upload outcome for {:?} (tag {}) to '{}': {:?}",
-                            outcome.key,
-                            outcome.tag,
-                            outcome.target,
-                            outcome.result
-                        );
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::Upload(UploadDelivery {
+                                    key: outcome.key,
+                                    tag: outcome.tag,
+                                    target: outcome.target,
+                                    result: outcome.result,
+                                }),
+                                window,
+                                cx,
+                            )
+                        });
                     }
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
@@ -1555,6 +1602,75 @@ role = "key"
                 r,
                 geode_shell::module::recording::Recorded::Delivered(tile, tag)
                     if tile.0 == 1 && *tag == 11
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// The drain loop's `DataEvent::Upload` arm used to only log (Task
+    /// 7's placeholder); Task 8 routes it into `Delivery::Upload`,
+    /// addressed to the submitting tile's key exactly as a `Query`/
+    /// `Series` outcome is.
+    #[gpui::test]
+    fn an_upload_outcome_is_routed_to_its_tile(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        // The restored workspace's one tile is id 1, so that is the key
+        // this outcome is addressed to.
+        tx.try_send(DataEvent::Upload(geode_data::egress::UploadOutcome {
+            key: geode_core::query::QueryKey(1),
+            tag: 7,
+            target: "sophis".into(),
+            result: Ok(()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::Delivered(tile, tag)
+                    if tile.0 == 1 && *tag == 7
             )),
             "{:?}",
             log.borrow()

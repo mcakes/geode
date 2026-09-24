@@ -73,7 +73,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -402,6 +402,18 @@ pub struct MarketDataTile {
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
+    /// The eligible upload targets for this panel's own document (Task
+    /// 8): every resolved `egress.toml` target whose `documents` list
+    /// names [`PanelSpec::document`], in `egress.toml` order — set once
+    /// at construction from `MarketDataFactory::create`'s own
+    /// `targets_for`, since the resolved list is a startup fact (egress
+    /// spec §10 amendment 2, restart-required like `sources.toml`), not
+    /// something a live reload changes. Only stored for now (pinned by
+    /// this crate's own production-route test); `:upload` (Task 9) is
+    /// what reads it, hence the not-test `dead_code` allowance rather
+    /// than `#[cfg(test)]` — it stays compiled and wired end to end.
+    #[cfg_attr(not(test), allow(dead_code))]
+    egress_targets: Vec<SharedString>,
     /// The frame versions the last request was made under; `None` until
     /// the first.
     ///
@@ -571,6 +583,7 @@ impl MarketDataTile {
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         stale_after: Rc<StdCell<Duration>>,
+        egress_targets: Vec<SharedString>,
         restored: Option<&toml::Table>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -808,6 +821,7 @@ impl MarketDataTile {
             parked,
             key,
             tag: 0,
+            egress_targets,
             acted: None,
             query_in_flight: false,
             publication: None,
@@ -1110,6 +1124,15 @@ impl MarketDataTile {
             }
         }
         self.changed(cx);
+    }
+
+    /// An upload outcome routed to this tile (Task 8's `Delivery::Upload`
+    /// routing seam). A stub: it does nothing yet. **Task 9 wires the
+    /// outcome** — the `Sent`/failure transition on `y`, the header's
+    /// "sent"/"upload failed" line, and dropping a stale `tag` that is
+    /// not this tile's latest upload.
+    pub fn deliver_upload(&mut self, u: UploadDelivery, _cx: &mut Context<Self>) {
+        let _ = u;
     }
 
     /// Put a delivered snapshot on screen: the draft's own view of the
@@ -5079,6 +5102,59 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// Task 8, the production route: `MarketDataFactory::create` narrows
+    /// its shared `egress` list to THIS panel's own document
+    /// (`targets_for`, pinned in isolation by `geode_marketdata::content`'s
+    /// own test) and the tile stores exactly that narrowed list — not the
+    /// whole resolved list, and not the other document's targets. `:upload`
+    /// (Task 9) is what will read it; this only pins the wiring.
+    #[gpui::test]
+    fn the_tile_stores_the_targets_its_factory_resolves_for_its_document(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (data, _rx) = DataHandle::for_tests();
+        let egress: Arc<Vec<(String, Vec<String>)>> = Arc::new(vec![
+            (
+                "sophis".to_string(),
+                vec!["cvi_params".to_string(), "dividend_schedule".to_string()],
+            ),
+            ("bbg".to_string(), vec!["dividend_schedule".to_string()]),
+        ]);
+        let factory =
+            MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).with_egress(egress);
+        let slot: Rc<RefCell<Option<Entity<MarketDataTile>>>> = Rc::new(RefCell::new(None));
+        let out = slot.clone();
+        cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let frame =
+                    cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
+                let occupant = factory.create(TileId(TILE), None, frame, diagnostics, window, cx);
+                let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
+                *out.borrow_mut() = Some(tile.clone());
+                let host = cx.new(|_| Host {
+                    tile,
+                    clicks: Rc::new(StdCell::new(0)),
+                    moves: Rc::new(StdCell::new(0)),
+                    keys: Rc::new(StdCell::new(0)),
+                });
+                cx.new(|cx| gpui_component::Root::new(host, window, cx))
+            })
+        })
+        .unwrap();
+
+        let tile = slot.borrow_mut().take().expect("the factory built one");
+        cx.update(|cx| {
+            assert_eq!(
+                tile.read(cx).egress_targets,
+                vec![SharedString::from("sophis")],
+                "CVI's own document ('cvi_params') narrows the shared list to \
+                 the one target that accepts it, dropping 'bbg' (dividend only)"
+            );
+        });
     }
 
     impl Harness {

@@ -20,6 +20,7 @@ use gpui::prelude::*;
 use gpui::{App, Entity, SharedString, Window};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Every action this module registers, with its palette title. One list,
@@ -220,6 +221,9 @@ impl TileContent for MarketDataContent {
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+            // Task 8's routing seam: `deliver_upload` is a stub until
+            // Task 9 wires the `Sent`/failure transition.
+            Delivery::Upload(u) => self.tile.update(cx, |t, cx| t.deliver_upload(u, cx)),
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -254,6 +258,15 @@ pub struct MarketDataFactory {
     /// `true` by default: the first, and ordinarily the only, factory
     /// over this crate's one shared `marketdata` context ships it.
     ships_keymap: bool,
+    /// Every resolved egress target, as name → accepted document names in
+    /// `egress.toml` order (Task 8) — empty until `geode-app` calls
+    /// [`Self::with_egress`]. `Arc`, not `Rc`: `geode-app` builds one list
+    /// from `egress.toml` and shares it, unmodified, between the CVI and
+    /// dividend factories built over the same resolved targets. `create`
+    /// narrows it to this spec's own document with [`targets_for`]; the
+    /// tile only stores the narrowed list (`:upload`, Task 9, is what
+    /// reads it).
+    egress: Arc<Vec<(String, Vec<String>)>>,
 }
 
 impl MarketDataFactory {
@@ -267,7 +280,16 @@ impl MarketDataFactory {
             spec,
             stale_after: Rc::new(Cell::new(stale_after)),
             ships_keymap: true,
+            egress: Arc::new(Vec::new()),
         }
+    }
+
+    /// Every egress target resolved from `egress.toml`, shared with every
+    /// other factory built over the same resolved list (see the field's
+    /// own doc comment).
+    pub fn with_egress(mut self, egress: Arc<Vec<(String, Vec<String>)>>) -> MarketDataFactory {
+        self.egress = egress;
+        self
     }
 
     /// A second document kind's factory over the same shared
@@ -296,6 +318,18 @@ impl MarketDataFactory {
     pub fn spec(&self) -> &'static PanelSpec {
         self.spec
     }
+}
+
+/// The eligible upload targets for one document (Task 8; `:upload`, Task
+/// 9, is what a trader reads this list through): every `egress` entry
+/// whose accepted documents name `document`, in `egress.toml`'s own
+/// order — the same order `resolve` and `from_doc` both preserve.
+fn targets_for(egress: &[(String, Vec<String>)], document: &str) -> Vec<SharedString> {
+    egress
+        .iter()
+        .filter(|(_, documents)| documents.iter().any(|d| d == document))
+        .map(|(name, _)| SharedString::from(name.clone()))
+        .collect()
 }
 
 impl ModuleFactory for MarketDataFactory {
@@ -352,6 +386,7 @@ impl ModuleFactory for MarketDataFactory {
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
+        let egress_targets = targets_for(&self.egress, self.spec.document);
         let entity = cx.new(|cx| {
             MarketDataTile::new(
                 tile,
@@ -360,6 +395,7 @@ impl ModuleFactory for MarketDataFactory {
                 diagnostics,
                 self.data.clone(),
                 self.stale_after.clone(),
+                egress_targets,
                 restored,
                 window,
                 cx,
@@ -508,6 +544,38 @@ mod tests {
                 "{id} must still be registered with no fragment shipped"
             );
         }
+    }
+
+    /// Task 8: `targets_for` narrows the resolved `egress.toml` list to
+    /// the targets that actually accept ONE document, preserving the
+    /// order `egress.toml` declared the targets in — a target that lists
+    /// a different document only must not appear, and a target that
+    /// happens to sort earlier by name must not jump ahead of one that
+    /// was declared first.
+    #[test]
+    fn targets_for_narrows_to_one_document_and_keeps_egress_toml_order() {
+        let egress = vec![
+            ("bbg".to_string(), vec!["dividend_schedule".to_string()]),
+            (
+                "sophis".to_string(),
+                vec!["cvi_params".to_string(), "dividend_schedule".to_string()],
+            ),
+            ("other".to_string(), vec!["risk_snapshot".to_string()]),
+        ];
+        assert_eq!(
+            targets_for(&egress, "dividend_schedule"),
+            vec![SharedString::from("bbg"), SharedString::from("sophis")],
+            "both targets that accept it, in egress.toml order"
+        );
+        assert_eq!(
+            targets_for(&egress, "cvi_params"),
+            vec![SharedString::from("sophis")],
+            "only the one target that accepts it"
+        );
+        assert!(
+            targets_for(&egress, "nonesuch").is_empty(),
+            "a document no target accepts has no eligible target"
+        );
     }
 
     /// `^`/`$` are the column extremes, exactly the blotter's pair (the
