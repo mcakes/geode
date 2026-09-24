@@ -9933,16 +9933,22 @@ run_mutation "cvi: write refuses a hole in the grid" \
   '        if false {' \
   geode-documents write_refuses_rows_that_are_not_a_full_grid
 
-# dividend: an upstream id beginning `new-` is refused on the way in
-# (design spec §5.3), because that prefix is reserved for a row a
-# trader's insert mints locally — accepting one silently would let a
-# fed id collide with a minted one, corrupting the draft's own
-# uniqueness invariant with no marker to show it.
-run_mutation "dividend: a new- id is refused" \
+# dividend: the ordinal is what keeps two same-day dividends distinct.
+# Mutated to the bare date, the second row takes the first's id and the
+# draft's edits for one land on the other.
+run_mutation "dividend: mint_ids numbers a repeated ex date" \
   crates/geode-documents/src/dividend.rs \
-  '                                if trimmed.starts_with(MINTED_PREFIX) {' \
-  '                                if false {' \
-  geode-documents a_new_prefixed_id_is_refused
+  '            if *n == 1 {' \
+  '            if true {' \
+  geode-documents mint_ids_numbers_same_day_rows_in_feed_order
+
+# dividend: the wire carries no id. Mutated to emit one, an upload
+# leaks Geode's internal row identity to Sophis.
+run_mutation "dividend: write emits no id" \
+  crates/geode-documents/src/dividend.rs \
+  '        w.write_event(Event::Start(BytesStart::new("dividend")))' \
+  '        leaf(&mut w, "id", "X")?; w.write_event(Event::Start(BytesStart::new("dividend")))' \
+  geode-documents write_emits_no_id_even_for_a_minted_label
 
 # dividend: a `status` outside the closed four-word set is refused on
 # parse, not passed through as an uncategorised value the panel would

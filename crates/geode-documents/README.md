@@ -13,6 +13,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `cvi` | `CviKind`: the CVI parameter document (`marketData/underlying`, `cviParams/anchorDate`, `spotRef`, `nodes/node*`, `slices/slice*` with a `term`, one `forward`/`atm`/`skew` per slice and one `param` per node). |
+| `dividend` | `DividendKind`: the dividend-schedule document (`marketData/underlying`, `dividends/currency`, `scheduleDate`, one `dividend` per row with `exDate`, `announcedDate`, `payDate`, `amount`, `status`). The wire carries no row id; `mint_ids` mints the `dividend_id` axis from each row's `exDate` at parse (`#n` for the `n`th row sharing a date, feed order), so a row's identity never depends on an upstream id that arrives late, repeats, or is absent. An inbound `<id>` is simply an unrecognised element. |
 
 The parser is a hand-written `quick_xml` event walk rather than a serde
 derive for three reasons: the ragged-slice rule needs
