@@ -15854,6 +15854,84 @@ run_mutation "pricer shorthand: a template quantity overflows silently" \
   '                qty: qty.wrapping_mul(l.weight),' \
   geode-pricer every_error_names_the_offending_offset
 
+# Line pricer Part 3 Task 4: the strictly-LIFO undo stack and the `:`
+# command vocabulary (spec §6.2/§8.5, §8.6).
+run_mutation "pricer undo: depth trims the oldest entry, not the newest" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_front();
+        }' \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_back();
+        }' \
+  geode-pricer the_stack_keeps_the_newest_hundred
+
+run_mutation "pricer undo: a fresh edit forks history by dropping the redo side" \
+  crates/geode-pricer/src/core/undo.rs \
+  '    pub fn record(&mut self, undo: Undo) {
+        self.undone.clear();' \
+  '    pub fn record(&mut self, undo: Undo) {' \
+  geode-pricer a_new_edit_clears_the_redo_side
+
+run_mutation "pricer undo: a refused inverse mid-undo clears the whole history" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                self.clear();
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  geode-pricer a_refused_inverse_mid_undo_drops_the_rest_of_both_sides
+
+run_mutation "pricer commands: group accepts a zero count" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)' \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: refresh accepts a zero duration" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["refresh", d] => parse_duration(d)
+            .filter(|d| !d.is_zero())' \
+  '        ["refresh", d] => parse_duration(d)' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: a Part 4 verb answers 'unknown command' instead of naming itself" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  '        [verb, ..] if false && NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: completions offer the word under the cursor as a choice" \
+  crates/geode-pricer/src/core/commands.rs \
+  '    words.pop(); // the word under the cursor' \
+  '    // words.pop(); // the word under the cursor' \
+  geode-pricer completions_offer_each_positions_vocabulary_unfiltered
+
 # The document family's numeric-only VALUE-column rule exempts a `local`
 # dataset (the pricer's sheets store enumerable text per row); this pins
 # the exemption's own boundary — a bool/timestamp value still drops.

@@ -6,6 +6,7 @@
 pub mod cell;
 pub mod clip;
 pub mod columns;
+pub mod commands;
 pub mod edit;
 pub mod entry;
 pub mod sheet;
@@ -13,6 +14,7 @@ pub mod shorthand;
 pub mod storage;
 pub mod template;
 pub mod tree;
+pub mod undo;
 pub mod views;
 
 pub use cell::{CellEditor, READ_ONLY};
@@ -30,6 +32,7 @@ pub use storage::{
 };
 pub use template::{LegSpec, Template};
 pub use tree::{Expansion, visible_rows};
+pub use undo::{UNDO_DEPTH, UndoStack};
 pub use views::{
     BUILTIN_VIEWS, ColumnPlan, PRICER_VIEWS_DOC, PlannedColumn, PricerView, ViewColumn, Views,
 };
