@@ -118,6 +118,12 @@ fn flat(place: Place) -> (usize, usize) {
 }
 
 impl GridModel {
+    /// The tile opens the target package before it arms a `Place::Leg`
+    /// entry (the tile's entry task does so), so a `Leg` place whose
+    /// package `expansion` still has closed is a fallback this model
+    /// never itself refuses: the placeholder lands directly after the
+    /// closed package row, at depth 1, rather than among legs the caller
+    /// hid (review fix, 2026-09-24).
     pub fn build(
         sheet: &Sheet,
         expansion: &Expansion,
@@ -305,6 +311,31 @@ mod tests {
         let m = build(&s, &e, Some(Place::Root { at: 5 }));
         assert_eq!(m.entry_row(), Some(5), "at the end");
         assert_eq!(s.len(), 5, "the sheet never holds the placeholder");
+    }
+
+    /// Review fix (2026-09-24): the tile always opens a package before it
+    /// arms a `Leg` entry into it, so this is a fallback path, not the
+    /// intended display — but `GridModel::build` must still answer
+    /// something sane if it is ever reached with the package still
+    /// closed. Pinned behaviour: the legs stay hidden (the caller's
+    /// `Expansion` is not consulted or overridden) and the placeholder
+    /// lands right after the closed package row, at depth 1 — the same
+    /// depth a leg would carry, not the package's own depth 0.
+    #[test]
+    fn a_leg_entry_into_a_closed_package_lands_after_it_as_a_fallback() {
+        let s = sheet();
+        let m = build(
+            &s,
+            &Expansion::default(),
+            Some(Place::Leg { package: 1, leg: 2 }),
+        );
+        assert_eq!(m.rows.len(), 4, "A, closed P, the placeholder, B — no legs");
+        assert_eq!(m.rows[1].kind, GridRowKind::Package { open: false });
+        assert_eq!(m.entry_row(), Some(2));
+        assert_eq!(m.rows[2].kind, GridRowKind::Entry);
+        assert_eq!(m.rows[2].id, None);
+        assert_eq!(m.rows[2].depth, 1);
+        assert_eq!(m.rows[3].row, Some(4), "B follows, unaffected");
     }
 
     #[test]

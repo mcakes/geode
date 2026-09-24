@@ -6,13 +6,52 @@
 //! floored trio. Resolved in `render_td` from the cell's `CellState`; the
 //! `GridModel` stays theme-free. The tile re-derives it when the theme
 //! global changes (an observer, never a per-cell check).
+//!
+//! Each floor moves toward whichever of pure black or pure white
+//! contrasts more with the ground it paints on (the market-data
+//! `FlooredTones` idiom, `geode-marketdata/src/tile.rs`) — one pole for
+//! the table ground, one for the package ground — never toward the
+//! colour's own theme anchor (`theme.foreground`). Floored toward its own
+//! anchor, an already-equal pair (`own`/`package_own` against a theme
+//! whose `foreground` already painted its ground, e.g. a monochrome
+//! theme) gives `readable_on` nothing to bisect toward and the floor is a
+//! no-op (review fix, 2026-09-24). Every colour clears `READABLE_RATIO`
+//! against one of the two poles, so this floor always lands.
 
 use crate::core::columns::CellState;
-use geode_core::colour::{Rgb, readable_on};
+use geode_core::colour::{Rgb, contrast_ratio, readable_on};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::colours::{over, to_hsla, to_rgb};
 use gpui::Hsla;
 use gpui_component::Theme;
+
+const BLACK: Rgb = Rgb {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+};
+const WHITE: Rgb = Rgb {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+};
+
+/// Whichever of black or white contrasts more against `bg`.
+fn pole(bg: Rgb) -> Rgb {
+    if contrast_ratio(BLACK, bg) >= contrast_ratio(WHITE, bg) {
+        BLACK
+    } else {
+        WHITE
+    }
+}
+
+/// Floor `c` to `READABLE_RATIO` against `bg`, moving toward `bg`'s own
+/// pole rather than toward `c` (or any other fixed anchor) — see the
+/// module doc for why a fixed anchor can leave the bisection nothing to
+/// move toward.
+fn floor_toward_pole(c: Hsla, bg: Rgb) -> Hsla {
+    to_hsla(readable_on(to_rgb(c), bg, pole(bg)))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Paints {
@@ -30,17 +69,15 @@ impl Paints {
     pub fn derive(theme: &Theme) -> Paints {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let package: Rgb = over(theme.secondary, ground);
-        let toward = to_rgb(theme.foreground);
-        let floor = |c: Hsla, bg: Rgb| to_hsla(readable_on(to_rgb(c), bg, toward));
         let danger = chip_paint(theme, Tone::DangerText).text;
         Paints {
-            own: floor(theme.foreground, ground),
-            muted: floor(theme.muted_foreground, ground),
-            danger: floor(danger, ground),
+            own: floor_toward_pole(theme.foreground, ground),
+            muted: floor_toward_pole(theme.muted_foreground, ground),
+            danger: floor_toward_pole(danger, ground),
             package_ground: to_hsla(package),
-            package_own: floor(theme.foreground, package),
-            package_muted: floor(theme.muted_foreground, package),
-            package_danger: floor(danger, package),
+            package_own: floor_toward_pole(theme.foreground, package),
+            package_muted: floor_toward_pole(theme.muted_foreground, package),
+            package_danger: floor_toward_pole(danger, package),
         }
     }
 
@@ -104,6 +141,26 @@ mod tests {
             failures.is_empty(),
             "unreadable pricer paints:\n{}",
             failures.join("\n")
+        );
+    }
+
+    /// Review fix (2026-09-24): floating `own`/`package_own` toward
+    /// `theme.foreground` itself made `readable_on` a no-op whenever the
+    /// colour and its ground already matched (`contrast_ratio` at 1:1,
+    /// nothing for the bisection to move toward). Pin the fix at the
+    /// helper `derive` calls: a colour equal to its own ground must still
+    /// reach `READABLE_RATIO` once floored toward a pole.
+    #[test]
+    fn the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio() {
+        let ground = Rgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+        };
+        let floored = floor_toward_pole(to_hsla(ground), ground);
+        assert!(
+            contrast_ratio(to_rgb(floored), ground) >= READABLE_RATIO,
+            "a colour equal to its ground must still clear {READABLE_RATIO}:1 once floored"
         );
     }
 
