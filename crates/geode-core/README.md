@@ -1,11 +1,11 @@
 # geode-core
 
 The shared vocabulary of the Geode workspace: the types every other crate
-speaks in, with no I/O, no gpui and no DuckDB. It sits at the bottom of
-the dependency graph, so anything two crates that may never depend on
-each other need to exchange lives here (the shell and the data layer are
-the standing case: `Scope`, `Snapshot`, `Health` and the query value
-types all moved down for that reason).
+speaks in, without gpui or DuckDB dependencies. Typed readers and merging are
+I/O-free; `config::Config::load` and `read_docs` read configuration files.
+It sits at the bottom of the dependency graph. Types exchanged between
+independent crates live here: the shell and data layer share `Scope`,
+`Snapshot`, `Health`, and query values without depending on each other.
 
 Its place in the dependency graph is described in
 [`docs/current/architecture.md`](../../docs/current/architecture.md).
@@ -16,7 +16,7 @@ Layered document behavior is described in
 
 | Module | Holds |
 |---|---|
-| `config` | Layered TOML configuration: Builtin → Desk → User, deep-merged with per-path provenance. Invalid config never panics; failures are `Diagnostic` values and the bad input is skipped. `toml`'s `preserve_order` is on, so a doc's key order is file order everywhere it is iterated. |
+| `config` | Builtin → Desk → User TOML loading, recursive merging with whole-object exceptions, and path provenance. File loading collects diagnostics; typed readers validate separately. `load_views` applies dataset and view presentation without rewriting definitions. TOML key order is preserved. |
 | `schema` | The declared shape of the desk's data (`datasets.toml`): datasets, families (`measure`, `document`, `series`), columns, roles and measure `grain`. Grain `Ord` reads coarse < fine. |
 | `scope` | What every tile is looking at: dimension selections, a text filter and a validated expression, composed with AND. `scope::expr` is the restricted WHERE grammar, parsed against the schema, never raw SQL. |
 | `scopes` | Saved scopes (`scopes.toml`). |
@@ -57,8 +57,9 @@ Source settings and validation outcomes are described in the
 Parsing a source does not establish transport availability or runtime support
 for its readiness strategy; the data service checks those boundaries.
 
-- Nothing here opens a file, a socket or a window. A type that needs to
-  know a gpui or DuckDB type does not belong in this crate.
+- Keep typed interpretation and merging free of I/O; configuration file
+  loading is a separate entry point. A type that needs to know a gpui or
+  DuckDB type does not belong in this crate.
 - Every parse failure degrades to a `Diagnostic` and skips the offending
   input. A panic on bad config is a defect.
 - Struct-of-arrays throughout (`docs/PHILOSOPHY.md` §6): `Snapshot`,

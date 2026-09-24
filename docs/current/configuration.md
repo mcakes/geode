@@ -13,21 +13,30 @@ Configuration is loaded in three layers, from lowest to highest precedence:
 3. **User** configuration from `%APPDATA%\geode` on Windows or
    `$HOME/.config/geode` elsewhere.
 
-Tables merge recursively. A value in a higher layer replaces the value at the
-same path; unrelated lower-layer values remain. Every merged value retains its
-source layer so the UI can explain whether it is inherited or overridden.
+Tables merge recursively. Scalars, arrays, and values of a different type
+replace the lower-layer value at the same path; unrelated values remain.
+Provenance records the winning layer at a leaf or whole-object root, and
+`Config::explain` checks the requested path and then its recorded ancestors.
 TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
-Named objects such as sources, datasets, and views are exceptions to recursive
-merging: a higher layer replaces the entire table for that name. Overriding
-one source therefore requires its complete configuration, including required
-fields; omitted fields do not inherit from the lower-layer source.
+Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
+`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `dimensions`,
+`colours`, `pricer_views`, and `overrides` replace whole named objects.
+Overriding one source therefore requires its complete configuration, including
+required fields; omitted fields do not inherit from the lower-layer source.
 
-Each document carries `config_version`. A missing version is diagnosed and
-read as current where compatibility permits; an unsupported version is
-rejected. Parse and validation failures become `Diagnostic` values instead of
-panics. Reload keeps the last valid effective configuration.
+Disk loading reads immediate `*.toml` children in sorted path order. Missing
+or unreadable directories and failed directory entries are silently skipped.
+An individual file read or TOML parse failure produces an error diagnostic
+and skips that file. `config_version` must be the integer `1`; an unsupported
+value skips the file with an error, while an absent stamp warns and assumes
+version 1. Compiled builtin documents bypass the version check.
+
+`Config::read_docs` reads the layers; `Config::from_docs` merges supplied
+documents without I/O or typed validation. The latter preserves input order
+within each document name, so its caller must supply precedence order and
+retain any read diagnostics. `Config::load` combines both steps.
 
 ## Documents
 
@@ -44,9 +53,14 @@ The main configuration documents have distinct owners:
 | `scopes.toml` | Named scopes |
 | `colours.toml` | Named semantic data colours |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
+| `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
 | `keymap.toml` | User bindings layered over builtin and module bindings |
 | `overrides.toml` | Intentional drift accepted from the configuration dialogs |
-| `session.toml` | Layout and transient session state; not part of the layered config merge |
+| `session.toml` | Layout and transient session state; excluded from reload change detection |
+
+Session state has its own reader. The generic config loader still reads any
+`session.toml` in a layer directory; changing it alone does not trigger reload,
+but it can be included when another watched file changes.
 
 The schema declares meaning rather than storage details. Measure columns name
 their aggregation grain. Document columns distinguish keys, attributes, and
@@ -56,9 +70,20 @@ the underlying dataset.
 
 ## Validation boundaries
 
-`geode-core` parses and validates configuration without I/O. It returns typed
-documents plus diagnostics. Consumers derive their runtime state from those
-types; modules do not reopen configuration files.
+Typed readers in `geode-core` interpret supplied documents without I/O and
+return values plus diagnostics. Its `Config::load` and `Config::read_docs`
+entry points do read files. Consumers derive runtime state from the loaded
+documents; modules do not reopen configuration files. File loading does not
+run every typed reader, and the reload rejection boundary is described below.
+
+`load_views` resolves each presentation property in this order: kind default,
+view definition, dataset presentation, then view presentation. It checks named
+colour references at each definition site before overlays can hide an invalid
+value or reorder columns. Definition diagnostics use file column indices;
+overlay diagnostics use column names. The raw merged `views` document remains
+unchanged so dialogs can persist definitions and presentation separately. This loader
+returns view and overlay diagnostics, including unknown-colour warnings;
+schema and colour-definition diagnostics are reported by other callers.
 
 Scope expressions use a restricted grammar validated against the schema. They
 are never raw SQL. Source adapter names, document kinds, module keymap
@@ -135,12 +160,22 @@ The application writes only the user layer. Desk configuration is shared and
 builtin configuration is compiled, so neither is a valid target for an
 interactive edit.
 
-All shell writes pass through `geode_shell::config_write`. A submission is
-accepted synchronously, then the complete read, parse, edit, write, sync, and
-rename operation runs on the background executor. Writes to the same directory
-retain submission order. A parse failure leaves the original file untouched.
-Temporary filenames do not end in `.toml`, preventing the reload poll from
-seeing a partial document.
+All shell writes pass through `geode_shell::config_write`. `submit` accepts an
+operation synchronously and runs it on the background executor. Submissions
+to the same configured directory retain acceptance order. Dropping the result
+task does not cancel an accepted write; process exit remains best-effort.
+
+`edit` and `try_edit` hold a directory transaction lock from reading and
+parsing the current file through mutation and replacement. Parse failure,
+mutation failure, or mutation unwind leaves the original file untouched.
+New documents receive the current version stamp. `write` instead replaces a
+whole document without parsing or preserving its previous contents.
+
+Replacement writes a uniquely named temporary file beside the target, syncs
+it, then renames it over the target. Temporary names end in `.tmp`, preventing
+the poll from reading partial documents. The directory is not fsynced, and an
+error can leave a temporary file behind. Ordering coordinates this process's
+writers using the same directory path, not other processes or symlink aliases.
 
 Dialogs edit typed drafts rather than TOML text. The draft owns validation and
 dirty state; a shared `InputState` is only the active field editor.
@@ -154,15 +189,56 @@ from an accidental mismatch.
 
 ## Hot reload
 
-The reload worker polls configuration files. Polling avoids relying on file
-watch semantics that differ across local and network filesystems. A decision
-step compares the candidate configuration with the current valid state:
+The watcher waits 500 ms between polls, then scans desk and user directories
+for immediate `*.toml` children, excluding `session.toml`. It compares paths
+and modification times, so additions and removals trigger reload but an edit
+with an unchanged mtime does not. Scan failures are silently skipped and may
+look like removals. Scanning and loading run in the background; validation
+and runtime application run on the UI thread. Work adds to the poll interval.
 
-- valid changes replace the affected runtime state;
-- invalid changes report diagnostics and retain the last valid state;
-- unchanged values do not notify GPUI globals or rebuild module state;
-- changes that cannot be applied safely at runtime are marked
-  restart-required.
+The first poll establishes a baseline without loading; an edit between startup
+loading and that poll can therefore go unnoticed until another file change.
+Each changed snapshot becomes the new baseline before validation, so rejected
+input is retried only after another detected change. Unchanged polls retain
+the last reload outcome.
+
+A candidate reuses all original builtin documents, including demo defaults.
+Checked module keymap fragments are inserted between builtin and desk/user
+keymaps. File-load, modifier-alias, clock, and assembled-keymap diagnostics
+reach the rejection decision. Any error there retains the active `Config`
+and runtime settings; warnings allow application. Both outcomes replace the
+current config-diagnostics batch, and rejection also logs and emits its errors.
+Compiled-fragment diagnostics remain visible but do not block reload because
+their invalid bindings were already dropped.
+
+This decision does not validate every typed document. Grouping, saved-scope,
+log-level, theme, and bridge view readers run later; their problems do not
+roll back the whole reload. Grouping and scope diagnostics are logged;
+theme-application warnings are currently discarded. Keep-last-good therefore
+applies to the errors collected before the decision, not every later reader.
+
+Accepted candidates update runtime state according to their inputs:
+
+| Input | Live effect |
+|---|---|
+| Keymap layers or modifier alias | Replace bindings and close an open palette whose snapshot depends on them; restore focus on the next render |
+| Effective `app.theme` | Apply the theme when changed; unrelated edits preserve the current theme |
+| `groupings`, `datasets`, or `dimensions` | Rebuild shared grouping slots |
+| `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
+| `datasets` or `dimensions` | Rebuild dimension-picker columns |
+| Views, either presentation document, dimensions, or colours | Emit `ConfigReloaded` for the app bridge |
+| Sources, datasets, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+
+Document-change checks compare the original per-layer documents, including
+their paths, rather than just merged values. Source and dataset changes can
+therefore update shell presentation while the data engine still needs restart.
+Pricing refresh is live and does not itself require restart.
+
+Every accepted reload advances the frame's config revision and republishes
+`Chords`. `UiSettings`, `SeriesSettings`, and `AppClock` are published only
+when their values change. The view-related event is queued before any frame
+notification so the bridge refreshes factory/handle views before tiles observe
+the new revision and submit queries.
 
 View and derived-dimension replacements use a latest-value mailbox into the
 data service, so a full request queue cannot permanently lose a configuration

@@ -200,8 +200,12 @@ before editing, temporary files live beside it and do not end in `.toml`, and
 rename exposes either the old or new complete file to the reload poll.
 
 Hot reload keeps the last valid configuration when a changed document is
-rejected. Module-visible globals are updated only when their value changes so
-observers do not repaint on every poll.
+rejected by the file, modifier, clock, or keymap checks. Later typed readers
+do not roll back the whole reload. Every accepted reload advances the frame's
+config revision and republishes `Chords`; the other module-visible globals
+update only when their values change. See the
+[reload contract](configuration.md#hot-reload) for detection, validation,
+notification ordering, and restart requirements.
 
 ## Presentation rules
 

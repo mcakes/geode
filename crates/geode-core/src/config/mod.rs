@@ -1,6 +1,8 @@
-//! Layered configuration (spec §8): Builtin → Desk → User TOML documents,
-//! deep-merged with per-path provenance. Invalid config never panics —
-//! failures surface as [`Diagnostic`] values and the bad input is skipped.
+//! Layered TOML configuration with recursive table merging, whole-object
+//! replacement for named definitions, and dotted-path provenance.
+//!
+//! Disk loading collects read, parse, and version diagnostics. Typed readers
+//! validate the merged documents separately.
 
 mod load;
 mod merge;
@@ -37,44 +39,24 @@ pub enum Severity {
     Error,
 }
 
-/// A problem found while loading or interpreting config. Never fatal.
-///
-/// `PartialEq` (Phase 4b Task 4 fix round 1, MAJ-5): `Diagnostics::
-/// note_config` compares a freshly loaded batch against the one already
-/// held to decide whether a reload actually changed anything — `Severity`,
-/// `Layer`, `PathBuf`, `String` and `Option<String>` (`path`) all already
-/// support it, so this is a plain derive, not a new comparison to design.
+/// A problem found while loading or interpreting configuration. Consumers
+/// choose whether its severity rejects an operation. Equality includes location
+/// and message, allowing unchanged diagnostic batches to be deduplicated.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub layer: Option<Layer>,
     pub file: Option<PathBuf>,
     pub message: String,
-    /// The reader's own key path into the doc, e.g. `"app.theme.name"`
-    /// (Phase 4b Task 4; grammar and every reader filled in Phase 4c
-    /// §19.5: `<doc>.<object>[.<field>[.<index>[.<subkey>]]]`, e.g.
-    /// `views.tree.columns.1.format.precision`). `None` by default —
-    /// `Diagnostic::error`/`warning` and a handful of document-level
-    /// literal build sites (a bad `default =` header, an unrecognised
-    /// top-level key) leave it unset since there is no object to name —
-    /// but every reader across `geode-core` that parses a *named* config
-    /// object (views, view presentation, groupings, scopes, sources,
-    /// datasets/schema, dimensions) attaches it via [`Self::with_path`].
-    /// 4c's config dialogs use it to land a diagnostic on the field row
-    /// it names (`Draft::row_for_path`, `flagged_rows`).
+    /// Optional reader-assigned key path, such as
+    /// `views.tree.columns.1.format.precision`. Dialogs use it to associate a
+    /// diagnostic with a field row; document-level errors may omit it.
     pub path: Option<String>,
 }
 
 impl std::fmt::Display for Diagnostic {
-    /// `[layer] file: message`, degrading cleanly when either is absent:
-    /// `[user] /path/keymap.toml: parse error` (both present), `[builtin]
-    /// <no file>: message` (file absent), `<no file>: message` (both
-    /// absent) — the leading `[layer] ` is simply omitted rather than
-    /// printing an empty bracket pair. A `path`, when present, is
-    /// appended as ` (at <path>)` after the message — it names the exact
-    /// key the reader was looking at, which the layer/file pair alone
-    /// cannot (two objects in the same file, one diagnostic each, read
-    /// identically without it).
+    /// Display `[layer] file: message`, omitting an absent layer and using
+    /// `<no file>` for an absent file. Append ` (at <path>)` when supplied.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(layer) = self.layer {
             write!(f, "[{}] ", layer.name())?;
@@ -112,10 +94,7 @@ impl Diagnostic {
         }
     }
 
-    /// Attach the reader's own key path into the doc (Phase 4b Task 4;
-    /// consumed by 4c's config dialogs — see the `path` field's own doc
-    /// comment). A builder, not a constructor parameter: every existing
-    /// call site of `error`/`warning` stays unchanged.
+    /// Attach the reader's key path for field-level diagnostic display.
     pub fn with_path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -163,16 +142,7 @@ pub struct ConfigSources {
     pub user: Option<PathBuf>,
 }
 
-/// The loaded, merged configuration plus everything needed to explain it.
-///
-/// `Clone` (Phase 4b Task 5): `geode_diagnostics::DiagnosticsFactory`
-/// holds its own `Rc<RefCell<Config>>` for the config section's
-/// effective-config explainer, refreshed on every `ShellEvent::
-/// ConfigReloaded` from `ShellView::config()`'s `&Config` — the same
-/// clone-on-reload shape `BlotterFactory::set_views`/`set_schema` already
-/// use for their own `Vec`/`SchemaSpec` copies. Every field here is
-/// already `Clone` (`MergedDoc`, `LayerDoc`, `Diagnostic`), so this is a
-/// plain derive, not a new copy to design.
+/// Merged documents, their original layer documents, provenance, and diagnostics.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     docs: BTreeMap<String, MergedDoc>,
@@ -181,16 +151,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Read every layer off disk, then merge — the two halves, in that
-    /// order, and nothing else.
-    ///
-    /// The signature is unchanged and so is the behaviour; what changed
-    /// (Phase 4c, spec §7.1) is that the halves are separable.
-    /// [`read_docs`](Self::read_docs) is the disk half and
-    /// [`from_docs`](Self::from_docs) the merge half, so a caller that
-    /// already holds the documents — a config dialog that has just
-    /// changed one object in memory — re-merges without a file read,
-    /// through **the same merge** this function uses.
+    /// Read builtin, desk, and user documents in precedence order, then merge
+    /// and attach read diagnostics. Typed document validation is separate.
+    /// Use [`Self::from_docs`] to merge documents already held in memory.
     pub fn load(sources: &ConfigSources) -> Config {
         let (docs, diagnostics) = Self::read_docs(sources);
         let mut config = Self::from_docs(docs);
@@ -206,10 +169,6 @@ impl Config {
         let mut all: Vec<LayerDoc> = sources.builtin.clone();
         for (layer, dir) in [(Layer::Desk, &sources.desk), (Layer::User, &sources.user)] {
             if let Some(dir) = dir {
-                // `load_layer` IS `read_layer_docs`: the disk half was
-                // already a function of its own, so the split only had to
-                // lift the merge out beside it rather than rename it and
-                // churn every caller and test that names it.
                 let (docs, diags) = load_layer(layer, dir);
                 all.extend(docs);
                 diagnostics.extend(diags);
@@ -218,21 +177,10 @@ impl Config {
         (all, diagnostics)
     }
 
-    /// The merge half of [`load`](Self::load), and **the only place
-    /// merging happens anywhere**.
-    ///
-    /// `docs` arrive in merge order (Builtin → Desk → User); they are
-    /// grouped by name preserving that order, and each group is handed to
-    /// [`merge_docs`]. `diagnostics` is empty — they belong to whatever
-    /// produced the documents, and a caller that carries some forward
-    /// (the dialogs' in-memory edit path, which re-read nothing and so
-    /// has learned nothing new about the files) assigns them afterwards.
-    ///
-    /// Every source of a `Config` funnels through here — startup, the
-    /// watcher's reload, and a dialog edit — so a dialog cannot disagree
-    /// with the file it wrote about what its own change means. Adding a
-    /// second merger to "optimise" an in-memory edit would reintroduce
-    /// exactly that disagreement, silently.
+    /// Merge documents grouped by name, preserving each group's input order.
+    /// The caller supplies precedence order; this method does not sort by layer.
+    /// Diagnostics start empty, so callers must attach any read diagnostics they
+    /// need to retain. Typed readers validate the resulting documents separately.
     pub fn from_docs(docs: Vec<LayerDoc>) -> Config {
         let mut layered: BTreeMap<String, Vec<LayerDoc>> = BTreeMap::new();
         for doc in docs {
@@ -249,13 +197,9 @@ impl Config {
         }
     }
 
-    /// Every layered document this config was merged from, in merge
-    /// order — what [`from_docs`](Self::from_docs) takes back.
-    ///
-    /// Grouped-by-name order rather than the flat order `read_docs`
-    /// returned, which is the same thing as far as the merge is
-    /// concerned: `from_docs` regroups by name, and only the order
-    /// *within* a name's group decides anything.
+    /// Return original documents grouped alphabetically by name, preserving
+    /// merge order within each group. Passing these to [`Self::from_docs`]
+    /// reproduces the merged documents, without carrying over diagnostics.
     pub fn all_docs(&self) -> Vec<LayerDoc> {
         self.layered.values().flatten().cloned().collect()
     }
@@ -264,22 +208,14 @@ impl Config {
         self.docs.get(name)
     }
 
-    /// Every doc name this `Config` holds a merged doc for, in
-    /// alphabetical order (`docs` is a `BTreeMap`) — for a reader that
-    /// wants to enumerate "everything", not name one doc in particular
-    /// (Phase 4b Task 5 fix round 1, MIN-3: the diagnostics module's
-    /// effective-config explainer used to walk a hand-maintained constant
-    /// list of doc names instead, which could silently fall behind a doc
-    /// this or a future reader added). This is about *display*, not the
-    /// "a reader names what it wants" rationale `doc`/`get` follow for
-    /// *typed* access — an enumerator doesn't weaken that.
+    /// Iterate the names of all merged documents in alphabetical order.
     pub fn doc_names(&self) -> impl Iterator<Item = &str> {
         self.docs.keys().map(String::as_str)
     }
 
-    /// The unmerged per-layer docs for `name`, in Builtin → Desk → User order.
-    /// Consumers that layer at interpretation time (the keymap engine) use
-    /// this instead of the merged doc.
+    /// The unmerged documents for `name`, in supplied merge order (normally
+    /// Builtin → Desk → User). Readers such as the keymap engine interpret
+    /// these layers directly.
     pub fn layered_docs(&self, name: &str) -> &[LayerDoc] {
         self.layered.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
@@ -312,10 +248,7 @@ impl Config {
     }
 }
 
-/// Fixture builders for downstream crates' tests that need a real
-/// `Config` — not just a `MergedDoc` (`merge_docs`/`LayerDoc::builtin`,
-/// the pattern `geode-data`'s benches use) — but with no desk/user
-/// directory on disk.
+/// In-memory configuration fixtures for downstream tests.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::{Config, ConfigSources, LayerDoc};
@@ -333,19 +266,9 @@ pub mod test_support {
     }
 }
 
-/// Whether `name` can be the top-level key of an object in a layered
-/// config doc (`[name]` in `views.toml`, `name = [...]` in
-/// `groupings.toml`): trimmed, non-empty, not the `config_version`
-/// stamp every doc carries, and free of the three characters that would
-/// make it a quoted or dotted TOML key (whitespace, `.`, `"`).
-///
-/// One rule, two callers — `Frame::save_scope` (historically `:scope
-/// save <name>` on a tile's command line, test-only since the
-/// 2026-09-20 command-line locality ruling retired that route) and the
-/// object dialog's `n` — so a name the dialog accepts is a name
-/// `Frame::save_scope` still accepts too, and vice versa. Returns the
-/// trimmed name so a caller cannot check one spelling and write
-/// another.
+/// Trim and validate a layered-config object name. Reject empty names,
+/// `config_version`, whitespace, dots, and double quotes. Return the trimmed
+/// spelling so callers validate and persist the same name.
 pub fn check_object_name(name: &str) -> Result<&str, String> {
     let name = name.trim();
     if name.is_empty()
@@ -403,11 +326,8 @@ mod tests {
         assert_eq!(layers, vec![Layer::Builtin, Layer::Desk, Layer::User]);
     }
 
-    /// The merge half alone, on the docs the disk half produced, is the
-    /// same `Config` `load` builds — the property that lets an in-memory
-    /// edit (the config dialogs, spec §7.1) re-merge without going near a
-    /// file. A second merger would be free to disagree; this asserts the
-    /// one that exists is the one both paths use.
+    /// Merging the disk reader's documents must produce the same values and
+    /// provenance as `Config::load`.
     #[test]
     fn from_docs_merges_exactly_as_load_does() {
         let desk = tempfile::tempdir().unwrap();
@@ -474,10 +394,7 @@ mod tests {
         );
     }
 
-    /// Phase 4b Task 5 fix round 1, MIN-3: `doc_names` lists every doc
-    /// `Config` actually holds, alphabetically — so an effective-config
-    /// explainer walking it needs no hand-maintained list to keep in
-    /// sync with what's actually loaded.
+    /// Document enumeration includes every loaded name in alphabetical order.
     #[test]
     fn doc_names_lists_every_loaded_doc_alphabetically() {
         let sources = ConfigSources {
@@ -502,10 +419,7 @@ mod tests {
         assert_eq!(diag.to_string(), "[user] /path/keymap.toml: bad toml");
     }
 
-    /// Phase 4b Task 4: `path` defaults to `None` on every constructor
-    /// (`error`/`warning`) and `with_path` is the one door that sets it —
-    /// 4c's config dialogs attach a reader's key path to a field row
-    /// through this builder.
+    /// Constructors omit the key path; `with_path` attaches it.
     #[test]
     fn with_path_sets_the_field_and_defaults_to_none() {
         let diag = Diagnostic::error(Layer::User, PathBuf::from("app.toml"), "bad");

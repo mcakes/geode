@@ -3,8 +3,10 @@ use crate::schema::SchemaSpec;
 use crate::view::{Colour, DatasetPresentationSpec, ViewPresentationSpec, ViewSpec};
 use std::path::Path;
 
-/// Read every `*.toml` file in `root` (non-recursive, sorted by path).
-/// A missing directory is not an error — a layer may simply be absent.
+/// Read `*.toml` files in `root`, non-recursively and in sorted path order.
+/// Missing or unreadable directories and failed directory entries are skipped.
+/// File read, TOML parse, and unsupported-version errors diagnose and skip the
+/// file; a missing version warns and assumes [`CONFIG_VERSION`].
 pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>) {
     let mut docs = Vec::new();
     let mut diags = Vec::new();
@@ -67,61 +69,27 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
     (docs, diags)
 }
 
-/// The views a module is handed: the merged `views` doc read into
-/// `ViewSpec`s, with `view_presentation` merged **over** them.
+/// Read merged view definitions and apply presentation overlays per property:
+/// kind default → view definition → dataset presentation → view presentation.
+/// A missing `views` document returns no views or diagnostics.
 ///
-/// This is the one door to a `ViewSpec`, and the ordering is the whole
-/// point. `Config::load` has already done the named-object merge, so the
-/// `views` doc here is the desk's view with any user override applied
-/// whole-object (`config::merge::atomic_depth`). Only then does
-/// presentation reorder, hide and resize within it — so a user-layer
-/// view override and a personal presentation file compose rather than
-/// race, and no module can ever observe a view the trader's presentation
-/// has not yet touched.
+/// Named colours are checked at each definition site before overlays can hide
+/// invalid values or reorder columns. Definition diagnostics use file column
+/// indices; overlay diagnostics use column names. Dataset colours are checked
+/// even when no view-presentation document exists.
 ///
-/// It cannot be folded into `Config::load` itself by rewriting the
-/// merged `views` table, tempting as that would be for
-/// unbypassability: the Views dialog reads that same doc to decide what
-/// is definitional (`Destination::Doc`) and what is presentation
-/// (`Destination::Presentation`), and a doc with presentation already
-/// folded in would make it write widths back into `views.toml` — exactly
-/// the fork this design exists to prevent (spec §4.1).
-///
-/// Diagnostics are the readers' own plus the merge's mismatch warnings.
-/// A missing `views` doc is an empty list, not an error: callers that
-/// need to distinguish "no views configured" ask `Config::doc` first.
-///
-/// Cross-checks a column's named colour (Part 2c §3–§4; dataset overlay
-/// spec §2.3) against the `colours` doc at each of the three places a
-/// colour can be named, since no reader has access to the `colours` doc
-/// to check it itself. The view's own `format.colour` is checked right
-/// here, between the two reads above and ABOVE both overlays' `apply`
-/// calls: the index in the diagnostic's path must be the FILE's own
-/// column order, which is what `views` still is at this point — the
-/// view overlay's `apply` reorders, hides and resizes it — and the
-/// VALUE must be the desk's own key, which is what
-/// `view.presentation_of` still answers only while neither overlay has
-/// been merged over it. The dataset overlay's
-/// `[dataset.columns.<col>].colour`
-/// is checked right after `colours` is bound, UNCONDITIONALLY on
-/// `dataset_overlay` alone — never nested inside the `view_presentation`
-/// block below, since a desk with no `view_presentation.toml` at all
-/// (the default state) must still hear about it (spec §2.3; the whole-
-/// branch review's Critical). The view overlay's own
-/// `[view.columns.<col>].colour` (Part 2c §4) is checked just below,
-/// against `presentation.views` directly rather than the merged result
-/// — it is keyed by column name, not file position, so it needs no such
-/// ordering care.
+/// The raw merged `views` document stays unchanged so dialogs can persist view
+/// definitions separately from presentation. Returned diagnostics cover views,
+/// overlay parsing/application, and colour references; schema and named-colour
+/// definition diagnostics are left to their readers' callers.
 pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     let Some(views_doc) = config.doc("views") else {
         return (Vec::new(), Vec::new());
     };
     let (mut views, mut diags) = ViewSpec::from_doc(views_doc);
 
-    // The dataset-level overlay merges BETWEEN the desk's own keys
-    // (already in `presentation` from `from_doc`) and the view overlay
-    // below, so the resolved order per key is kind default → desk view
-    // column → dataset-level → view-level (dataset-presentation spec §3.1).
+    // Resolve dataset presentation after view definitions and before the
+    // view-specific overlay.
     let schema = config
         .doc("datasets")
         .map(|d| SchemaSpec::from_doc(d).0)
@@ -138,10 +106,8 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         .map(|d| crate::colour::NamedColours::from_doc(d).0)
         .unwrap_or_default();
 
-    // Unconditional on `dataset_overlay` alone — NOT nested inside the
-    // `view_presentation` block below, since a desk with no
-    // view_presentation.toml at all (the default state) must still hear
-    // about an unknown colour named at the dataset level (spec §2.3).
+    // Dataset colour references must be checked even without a
+    // `view_presentation` document.
     if let Some(overlay) = &dataset_overlay {
         for (dataset, columns) in &overlay.datasets {
             for (col, cp) in columns {
@@ -185,16 +151,9 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         }
     }
 
-    // Applied HERE, BELOW the desk-view colour loop above and above the
-    // view overlay below. The loop reads `view.presentation_of(..)`, so
-    // merging the dataset level over the desk's keys first would make
-    // that loop report the DATASET's colour at a `views.<v>.columns.<i>`
-    // path (a file holding no colour key at all) once per view carrying
-    // the column, and would hide a desk view's own bad colour behind a
-    // valid dataset-level one (the final whole-branch review's
-    // Important 1). Resolution order is unaffected: the loop mutates
-    // nothing, so the merge is still kind default → desk → dataset →
-    // view (spec §3.1).
+    // Validate definition colours before applying this overlay: otherwise a
+    // valid override could hide an invalid definition, or an overlay's error
+    // could be attributed to a definition that never named that colour.
     if let Some(overlay) = &dataset_overlay {
         diags.extend(overlay.apply(&mut views, &schema));
     }
@@ -297,12 +256,8 @@ mod tests {
         assert_eq!(diags[0].severity, Severity::Warning);
     }
 
-    /// The merge runs AFTER the named-object merge, so a user-layer view
-    /// override and a presentation file compose rather than race: the
-    /// desk's `tree` is merged whole-object first, and only then does the
-    /// user's presentation reorder and hide within it. Order and hidden
-    /// are both asserted through the returned `ViewSpec`, which is the
-    /// only thing a module is ever handed.
+    /// A user view replaces the desk definition as a whole; presentation then
+    /// reorders and hides columns in that effective definition.
     #[test]
     fn presentation_is_merged_over_the_view_after_the_named_object_merge() {
         let desk = tempfile::tempdir().unwrap();
@@ -457,8 +412,7 @@ mod tests {
             vec!["dataset_presentation.risk.columns.npv.colour"],
             "one mistake, one diagnostic: the dataset-level colour must not \
              also be reported at `views.<v>.columns.<i>.format.colour`, a \
-             path into a file that holds no colour key at all (the final \
-             whole-branch review's Important 1)"
+             path into a file that holds no colour key at all"
         );
         let colour_warning = diags
             .iter()
@@ -471,11 +425,8 @@ mod tests {
         );
     }
 
-    /// Case 2 of the same finding: the desk view's own `format.colour`
-    /// loop reads `view.presentation_of(..)`, so with the dataset
-    /// overlay merged over it first a VALID dataset-level colour hid
-    /// the desk's own broken one entirely — a regression to an existing
-    /// check, resurfacing only when the trader cleared their overlay.
+    /// A valid dataset colour override must not hide a warning about the
+    /// view definition's own invalid colour.
     #[test]
     fn the_desk_views_own_colour_check_reads_the_desk_value() {
         let config = Config::load(&ConfigSources {
@@ -526,10 +477,8 @@ mod tests {
 
     #[test]
     fn a_dataset_overlay_colour_is_cross_checked_without_a_view_overlay() {
-        // No `view_presentation` doc at all — the default state for a
-        // desk that has never opened a presentation dialog. The
-        // dataset-overlay colour cross-check must not depend on that
-        // doc's presence (spec §2.3; the whole-branch review's Critical).
+        // Omit `view_presentation` to verify that dataset colour warnings do
+        // not depend on its presence.
         let config = Config::load(&ConfigSources {
             builtin: vec![
                 LayerDoc::builtin(

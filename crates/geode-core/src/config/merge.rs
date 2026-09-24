@@ -2,25 +2,20 @@ use super::{Layer, LayerDoc};
 use std::collections::BTreeMap;
 use toml::{Table, Value};
 
-/// A doc after layer merging, with per-dotted-path provenance for
-/// `geode config explain`-style tooling (spec §8: "layered config without
-/// provenance is a support nightmare").
+/// A merged document with dotted-path provenance. Whole-object replacements
+/// record provenance at the object's root; leaf lookups use that ancestor.
 #[derive(Debug, Clone, Default)]
 pub struct MergedDoc {
     pub value: Table,
     pub provenance: BTreeMap<String, Layer>,
 }
 
-/// Docs whose top-level entries are named objects overridden whole-object
-/// by name (spec §8): merging inside a view/layout is clever but undebuggable.
+/// Depth at which a higher layer replaces an entire named object.
+/// Documents without an atomic depth merge tables recursively.
 fn atomic_depth(doc_name: &str) -> Option<u32> {
     match doc_name {
-        // `view_presentation` is here for the same reason `views` is: one
-        // table per view name, and a later layer's table for a view
-        // replaces the earlier one whole rather than half-merging one
-        // trader's column order into another's (spec §5.6).
-        // dataset_presentation (dataset-presentation spec §2.1): one table
-        // per dataset name, like view_presentation.
+        // Presentation tables replace whole objects by name, including column
+        // order and hidden-column settings.
         "views"
         | "view_presentation"
         | "dataset_presentation"
@@ -30,13 +25,11 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "datasets"
         | "sources"
         | "dimensions" => Some(1),
-        // colours (Part 2c §2.1): one named colour per table
+        // One complete definition per colour name.
         "colours" => Some(1),
-        // pricer_views (line-pricer spec §6.5): one table per view name,
-        // like `views` — a desk or user layer overrides a view whole.
+        // One complete definition per pricer view name.
         "pricer_views" => Some(1),
-        // `overrides` (4c §19.6): one entry per forked object, keyed
-        // "<doc>.<object>"; user layer only.
+        // One complete override entry per name.
         "overrides" => Some(1),
         _ => None,
     }
@@ -150,8 +143,8 @@ mod tests {
 
     #[test]
     fn atomic_doc_replaces_named_object_whole() {
-        // "views" is an atomic doc: a later layer's view of the same name
-        // replaces the earlier one entirely — no field-level merge (spec §8).
+        // A higher-layer view replaces the whole named object; omitted fields
+        // do not inherit from the lower-layer definition.
         let merged = merge_docs(
             "views",
             &[

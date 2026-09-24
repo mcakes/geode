@@ -1,14 +1,9 @@
-//! Config hot reload (Task 1c-1, spec §8): a background poll of the desk
-//! and user config directories' `*.toml` mtimes, and the "keep last-good"
-//! decision applied when a reload is attempted.
+//! Filesystem snapshots and the decision to apply a configuration reload.
 //!
-//! This module is deliberately split into pure, `cx`-free pieces —
-//! [`scan`]/[`Snapshot::changed_since`] and [`decide`] — so the actual
-//! decision logic is unit-testable with tempdirs, with no window or gpui
-//! executor involved. `ShellView` (in `shell/mod.rs`) is the only thing that
-//! touches gpui: it owns the watched dirs, drives the ~500ms poll via
-//! `cx.spawn` + a background timer, and calls [`decide`] after loading a
-//! fresh `Config` off the UI thread.
+//! [`scan`] reads directory entries and modification times; snapshot comparison
+//! and [`decide`] are I/O-free. The shell watcher scans and loads on the
+//! background executor, then validates and applies the candidate on the UI
+//! thread.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,18 +11,13 @@ use std::time::SystemTime;
 
 use geode_core::config::{Config, ConfigSources, LayerDoc, Severity};
 
-/// Filename excluded from every [`scan`] snapshot. A later task writes
-/// `session.toml` into the user config dir from inside the running app;
-/// if it were included here, the app's own write would perturb the
-/// snapshot and the very next poll would see a "change" and reload itself
-/// in a loop. Pre-flight ruling: exclude it now, before anything writes it.
+/// Exclude session saves from change detection: writing layout or transient
+/// state must not trigger a layered configuration reload.
 pub const EXCLUDED_FILENAME: &str = "session.toml";
 
-/// A snapshot of every `*.toml` file's mtime across the watched desk and
-/// user config directories (`session.toml` excluded — see
-/// [`EXCLUDED_FILENAME`]). Pure data: comparing two snapshots
-/// ([`changed_since`](Self::changed_since)) is the entire "did anything on
-/// disk change" question, with no I/O of its own.
+/// Paths and modification times for watched TOML files, excluding
+/// [`EXCLUDED_FILENAME`]. Equality detects additions, removals, and changed
+/// mtimes; content changes with an unchanged mtime are invisible.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     entries: BTreeMap<PathBuf, SystemTime>,
@@ -43,11 +33,10 @@ impl Snapshot {
     }
 }
 
-/// Scan every `*.toml` file (non-recursive, `session.toml` excluded) in
-/// `desk` and `user` — whichever are `Some` — and capture its mtime. Missing
-/// directories and unreadable files are silently skipped, mirroring
-/// `geode_core::config::load_layer`'s tolerance for absent layers: a config
-/// directory that doesn't exist yet is not an error, just an empty layer.
+/// Capture mtimes of `*.toml` files directly inside `desk` and `user`, excluding
+/// `session.toml`. Unreadable directories, directory entries, metadata, and
+/// modification times are silently skipped. A skipped file can therefore appear
+/// removed relative to the previous snapshot.
 pub fn scan(desk: Option<&Path>, user: Option<&Path>) -> Snapshot {
     let mut entries = BTreeMap::new();
     for dir in [desk, user].into_iter().flatten() {
@@ -79,25 +68,10 @@ fn scan_dir(dir: &Path, entries: &mut BTreeMap<PathBuf, SystemTime>) {
     }
 }
 
-/// Load a fresh `Config` for a reload: the SAME builtin docs the process
-/// started with, re-merged over freshly re-read `desk` and `user`
-/// directories.
-///
-/// `builtin` is passed in, never rebuilt here, and that is the whole
-/// point of the parameter. The builtin layer is whatever the *app*
-/// compiled in for this run — `geode-app` always supplies the default
-/// keymap and, under `--demo`, an entire generated desk on top of it —
-/// and it exists nowhere on disk for a reload to re-read. This function
-/// once reconstructed it as "the builtin keymap, surely", which silently
-/// deleted every other builtin doc on the first config write of a
-/// session: a theme toggle, a font-size change or a dialog save fired the
-/// mtime watcher, and the demo's views, datasets and sources ceased to
-/// exist until restart. The caller ([`crate::shell::ShellServices::
-/// builtin`]) holds the real docs; this takes them verbatim.
-///
-/// Runs off the UI thread (`shell/mod.rs`'s watcher spawns it on the
-/// background executor): it reads directories, and PHILOSOPHY.md forbids
-/// file I/O on the render thread.
+/// Merge the process's original builtin documents with freshly read desk and
+/// user files. The caller supplies the complete builtin layer, including any
+/// generated demo documents, because it cannot be recovered from disk.
+/// The shell watcher runs this filesystem work on the background executor.
 pub fn load_config(builtin: Vec<LayerDoc>, desk: Option<PathBuf>, user: Option<PathBuf>) -> Config {
     Config::load(&ConfigSources {
         builtin,
@@ -106,36 +80,23 @@ pub fn load_config(builtin: Vec<LayerDoc>, desk: Option<PathBuf>, user: Option<P
     })
 }
 
-/// The result of one reload attempt, and what the status bar shows for it.
-/// `Unchanged` is the starting state before any reload has ever run (and is
-/// never produced by [`decide`] — the watcher only calls `decide` after
-/// `Snapshot::changed_since` has already said something on disk moved).
+/// Decision for a reload attempt. `Unchanged` is the initial state and is never
+/// returned by [`decide`]; polls without a change retain the previous outcome.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReloadOutcome {
-    /// The freshly loaded config had no error diagnostics and was applied.
-    /// `warnings` carries every warning-severity diagnostic message folded
-    /// into `new_config.diagnostics` before `decide` ran — `Config::load`'s
-    /// own warnings, plus keymap-build warnings (see `decide`'s doc for why
-    /// those get folded in). Theme-resolution warnings are a separate,
-    /// later step (`ThemeService::apply_from_config`, only called when
-    /// `[theme]` actually changed) and are currently discarded rather than
-    /// merged in here. For the optional non-noisy status bar marker (brief
-    /// allows skipping it).
+    /// The candidate has no error diagnostics at the decision boundary.
+    /// `warnings` contains warning messages present when [`decide`] ran;
+    /// diagnostics from later runtime readers are not included.
     Applied { warnings: Vec<String> },
-    /// The freshly loaded config had at least one error diagnostic; the
-    /// entire previous `Config` (and everything built from it) was kept
-    /// untouched. `errors` carries every error-severity diagnostic message.
+    /// The candidate has errors, so retain the active config and runtime
+    /// settings. The shell still updates reload status and diagnostics.
     KeptLastGood { errors: Vec<String> },
-    /// No reload has been attempted yet (or the last poll saw no change).
+    /// No reload has been attempted yet.
     Unchanged,
 }
 
 impl ReloadOutcome {
-    /// The status bar's reload indicator text for this outcome: `None` when
-    /// config is healthy (brief: "nothing when healthy"; a brief `reloaded`
-    /// marker for `Applied` is explicitly optional and skipped here as
-    /// noisy), `Some` danger-toned message when the last reload attempt
-    /// kept the previous config because the new one had errors.
+    /// Show an error count for a rejected attempt; otherwise show no marker.
     pub fn status_message(&self) -> Option<String> {
         match self {
             ReloadOutcome::KeptLastGood { errors } => Some(format!(
@@ -147,19 +108,10 @@ impl ReloadOutcome {
     }
 }
 
-/// Decide whether `new_config` should be applied or discarded in favor of
-/// the last-good config, purely from its own diagnostics (plan constraint:
-/// "any error diagnostic ⇒ keep last-good entire Config"). Any
-/// error-severity diagnostic — regardless of how many, or whether warnings
-/// are also present — means [`ReloadOutcome::KeptLastGood`]; zero errors
-/// (warnings allowed) means [`ReloadOutcome::Applied`].
-///
-/// Callers that also need to fold in diagnostics from a later step (e.g.
-/// keymap building, which needs the config's own layered docs and so can
-/// only run after `Config::load`) should extend `new_config.diagnostics`
-/// with those before calling `decide`, so a keymap error is treated exactly
-/// like a config error — one "did the reload attempt produce any error"
-/// question, not two.
+/// Reject a candidate if `new_config.diagnostics` contains any errors;
+/// otherwise return `Applied` with its warning messages. This function neither
+/// validates typed documents nor mutates runtime state. Callers must append all
+/// diagnostics that should block application before calling it.
 pub fn decide(new_config: &Config) -> ReloadOutcome {
     let errors: Vec<String> = new_config
         .diagnostics
@@ -182,9 +134,7 @@ pub fn decide(new_config: &Config) -> ReloadOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // The real builtin keymap doc: only the tests build one now — the
-    // reload itself is handed the app's builtin layer rather than
-    // reconstructing any part of it (see `load_config`).
+    // A builtin keymap fixture; production reload receives the app's full layer.
     use crate::defaults::BUILTIN_KEYMAP;
     use geode_core::config::{ConfigSources, Diagnostic, Layer};
     use std::time::Duration;
@@ -251,9 +201,7 @@ mod tests {
         let after = scan(Some(dir.path()), None);
         assert!(
             !after.changed_since(&before),
-            "writing session.toml must not look like a config change — a later \
-             task writes this file from inside the app, and it must never \
-             trigger a self-reload"
+            "writing session.toml must not trigger a layered config reload"
         );
     }
 
@@ -288,12 +236,8 @@ mod tests {
 
     // --- load_config ----------------------------------------------------
 
-    /// The reload must re-merge the SAME builtin layer the process started
-    /// with, not a reconstruction of it. `geode-app` compiles in more than
-    /// the keymap — under `--demo` a whole generated desk (`views`,
-    /// `datasets`, `sources`, …) — and none of it is on disk, so a reload
-    /// that rebuilt "the builtin keymap" deleted the rest of it the
-    /// instant anything wrote a config file.
+    /// Reload retains all supplied builtin documents, including generated demo
+    /// views, datasets, and sources that have no backing files.
     #[test]
     fn a_reload_keeps_every_builtin_doc_not_just_the_keymap() {
         let user = tempfile::tempdir().unwrap();
@@ -315,9 +259,7 @@ mod tests {
         );
     }
 
-    /// The user layer still merges over the builtin one after a reload —
-    /// proving the fix reuses the builtin docs as a *layer*, not as a
-    /// replacement for what is on disk.
+    /// Reload merges user files over the retained builtin layer.
     #[test]
     fn a_user_doc_still_overrides_the_builtin_layer_after_a_reload() {
         let user = tempfile::tempdir().unwrap();

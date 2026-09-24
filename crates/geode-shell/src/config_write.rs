@@ -108,15 +108,9 @@ pub(crate) fn submit<T: Send + 'static>(
     })
 }
 
-/// The path a layered config document lives at, refusing every layer but
-/// [`Layer::User`] *before* touching the filesystem.
-///
-/// The layer guard lives here, on the one function both [`write`] and
-/// [`edit`] must call to learn where to write, so there is no way to
-/// reach a write without passing it. Only the user layer is ever written
-/// from inside the running app (spec §3.1): the builtin layer is
-/// compiled in, and the desk layer is shared state a single trader's
-/// running app has no business rewriting.
+/// Resolve a config document path, rejecting every layer except
+/// [`Layer::User`] before filesystem access. Both [`write`] and [`edit`] use
+/// this guard; builtin documents are compiled in and desk files are shared.
 pub(crate) fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathBuf, String> {
     if layer != Layer::User {
         return Err(format!(
@@ -128,15 +122,10 @@ pub(crate) fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathB
     Ok(user_dir.join(format!("{doc}.toml")))
 }
 
-/// Atomically replace one layered config document with `text`.
-///
-/// **This is a whole-file replacement and deliberately bypasses
-/// [`edit`]'s untouched-on-parse-failure refusal**: nothing here reads,
-/// parses, or preserves whatever is on disk, so a user's comments, key
-/// order and unrelated tables are gone the moment it succeeds. That is
-/// right only when the caller already holds the complete document it
-/// means to write as a deliberate replacement. A caller setting one key
-/// wants [`edit`] instead; picking this one there silently discards hand-edits.
+/// Atomically replace a user-layer document with `text` under the directory
+/// transaction lock. This does not read or parse the old file, preserve its
+/// comments or unrelated keys, or validate the replacement. Use [`edit`] for
+/// keyed changes that must preserve the rest of an existing document.
 pub fn write(user_dir: &Path, layer: Layer, doc: &str, text: &str) -> Result<(), String> {
     let path = doc_path(user_dir, layer, doc)?;
     let writer = writer(user_dir);
@@ -207,51 +196,29 @@ fn open_at(path: &Path) -> Result<DocumentMut, String> {
     };
 
     if !existed {
-        // The stamp every layered doc carries, from the one constant the
-        // loader checks it against (`config::load`) — a literal here
-        // would be a second copy to remember when the schema moves, and
-        // this door is now the only place a new file gets one at all.
+        // New files use the same version stamp the loader accepts.
         doc["config_version"] = value(CONFIG_VERSION);
     }
 
     Ok(doc)
 }
 
-/// Process-global counter giving every [`write_file`] call in this
-/// process a temp filename distinct from every other *concurrent* call,
-/// on top of the pid already distinguishing this process from any other
-/// racing on the same file. `Ordering::Relaxed` is enough — this needs
-/// distinct values, not a synchronization point with any other memory
-/// access.
+/// Allocate distinct temporary filenames within the process. The filename also
+/// includes the process ID so concurrent processes stage separate files.
+/// Relaxed ordering suffices because only uniqueness matters.
 ///
-/// The fixed temp name this replaced was a real race: two writers
-/// sharing one temp filename could interleave — one call's
-/// `File::create` truncating the other's in-progress write, or one
-/// call's `rename` consuming the other's temp file out from under it
-/// (an `ENOENT` surfaced as a spurious warning even though the first
-/// writer's data was fine). A unique name per call removes that
-/// interleaving entirely: each writer only ever touches its own file
-/// until its own `rename`.
-///
-/// Layered config mutations are serialized above this primitive. Raw whole-file
-/// replacements (session snapshots) and writers in other processes still rely
-/// only on atomic rename, not on a cross-process ordering guarantee.
+/// Directory locks serialize layered config mutations within this process.
+/// Raw writes (including session snapshots) and other processes have only
+/// atomic replacement: the last successful rename wins.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Atomically write `text` to `path`: a unique temp file in the *same*
-/// directory (rename is only atomic within a filesystem), `fsync`, then
-/// rename over `path` — a crash or a concurrent reader never observes a
-/// partial write. Creates the parent directory if it does not exist yet.
+/// Write to a unique temporary file beside `path`, sync it, then rename it over
+/// the target. Create the parent directory when absent. Concurrent readers see
+/// a complete old or new file; the directory is not fsynced, so durability
+/// across system failure is best-effort. Errors may leave a temporary file.
 ///
-/// `pub(crate)` rather than private because `session::write_atomic`
-/// writes `session.toml`, which is not a *layered* config document — it
-/// is per-machine session state, deliberately excluded from
-/// `reload::scan` — so it cannot come through [`write`]'s
-/// layer-and-doc-name door, but must still be the same one atomic write.
-///
-/// This is real, potentially-blocking file I/O. Callers driven by UI
-/// events must run it on a background executor, never inline on the
-/// render thread (spec §7: nothing may stall the render thread).
+/// Shared by layered config writes and session persistence. This is blocking
+/// filesystem I/O; UI callers must run it on a background executor.
 pub(crate) fn write_file(path: &Path, text: &str) -> Result<(), String> {
     let dir = path
         .parent()
@@ -278,13 +245,8 @@ pub(crate) fn write_file(path: &Path, text: &str) -> Result<(), String> {
     })
 }
 
-/// The temp file's name for one atomic write to `path` (M9, 3b final
-/// review): derived from `path`'s own file name rather than hardcoded,
-/// because this one writer now stages `app.toml`, `groupings.toml`,
-/// `scopes.toml`, `keymap.toml` and `session.toml`, and a name naming
-/// the wrong file lies to anyone who finds one after a crash. Kept as a
-/// separate pure function so the naming can be tested without touching a
-/// filesystem.
+/// Build a temporary filename from the target's filename, process ID, and
+/// per-process counter. Its `.tmp` suffix excludes it from TOML scans.
 fn tmp_file_name(path: &Path, pid: u32, counter: u64) -> String {
     let file_name = path
         .file_name()
@@ -299,9 +261,7 @@ mod tmp_file_name_tests {
 
     #[test]
     fn the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml() {
-        // M9: this writer stages more than app.toml
-        // (groupings.toml via frame's slot save, keymap.toml, session.toml),
-        // so a name hardcoded to `.app.toml.*` lied about what it staged.
+        // Temporary filenames identify the document being staged.
         assert_eq!(
             tmp_file_name(Path::new("/x/groupings.toml"), 7, 3),
             ".groupings.toml.7-3.tmp"
@@ -336,8 +296,7 @@ mod tests {
         assert!(strays.is_empty(), "temp files must not survive: {strays:?}");
     }
 
-    /// The whole point of `edit`: a user's comments and unrelated keys are
-    /// theirs, and a keyed persist must not eat them.
+    /// Keyed edits preserve existing comments and unrelated keys.
     #[test]
     fn edit_preserves_comments_and_unrelated_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -355,9 +314,7 @@ mod tests {
         assert!(text.contains(r#"name = "Bloomberg""#), "{text}");
     }
 
-    /// A file the user hand-edited into a broken state is theirs. Refuse,
-    /// leave it byte-for-byte, and say so — the contract
-    /// `fontsize::persist_to_user_config` already keeps.
+    /// A parse failure leaves the original file byte-for-byte unchanged.
     #[test]
     fn edit_refuses_an_unparseable_file_without_touching_it() {
         let dir = tempfile::tempdir().unwrap();
