@@ -328,3 +328,117 @@ pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
         provenance(BASE),
     )
 }
+
+/// A [`crate::core::DIVIDEND`] document: `(dividend_id, ex_date,
+/// announced_date, pay_date, amount, status)` per row — the shipped
+/// panel's own five value columns, for the one production-route test that
+/// must prove `MarketDataTile::bump`'s `ty_of` reads the REAL spec's
+/// `Columns::Values` branch correctly, not `SCHEDULE`'s three-column
+/// stand-in (task 3 review, fix round 1).
+pub(crate) fn dividend_snapshot(rows: &[(&str, &str, &str, &str, f64, &str)]) -> Snapshot {
+    let n = rows.len();
+    let dt =
+        |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").expect("a valid fixture date");
+    Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+            ),
+            (
+                meta("dividend_id", Attribution::Additive),
+                TestColumn::Dict(rows.iter().map(|r| Some(r.0.to_string())).collect()),
+            ),
+            (
+                meta("ex_date", Attribution::DeterminedNonAdditive),
+                TestColumn::Date(rows.iter().map(|r| Some(dt(r.1))).collect()),
+            ),
+            (
+                meta("announced_date", Attribution::DeterminedNonAdditive),
+                TestColumn::Date(rows.iter().map(|r| Some(dt(r.2))).collect()),
+            ),
+            (
+                meta("pay_date", Attribution::DeterminedNonAdditive),
+                TestColumn::Date(rows.iter().map(|r| Some(dt(r.3))).collect()),
+            ),
+            (
+                meta("amount", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(rows.iter().map(|r| Some(r.4)).collect()),
+            ),
+            (
+                meta("status", Attribution::DeterminedNonAdditive),
+                TestColumn::Dict(rows.iter().map(|r| Some(r.5.to_string())).collect()),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    )
+}
+
+/// A flat panel with one `F64` and one `I64` value column (task 3 review,
+/// fix round 1) — cheap to add as a `const`, and the one shape neither
+/// [`SCHEDULE`] (no `I64` column) nor [`LADDER`] (its `I64` is the row
+/// AXIS, never a value cell `:bump` can reach) offers: a row whose cells
+/// `:bump` must land at TWO different declared types, the fixture the
+/// tile-level atomicity test for `bumped`'s refusal needs.
+pub(crate) const MIXED: PanelSpec = PanelSpec {
+    kind: "mixed",
+    title: "Mixed",
+    dataset: "mixed",
+    document: "mixed",
+    rows: RowAxis {
+        column: "mixed_id",
+        identity: RowIdentity::Minted,
+        label: RowLabel::Shown,
+    },
+    columns: Columns::Values(&[
+        ValueColumn {
+            column: "amt",
+            label: "amt",
+            ty: ColumnType::F64,
+            format: SCHEDULE_AMOUNT_FORMAT,
+            choices: None,
+            required: false,
+        },
+        ValueColumn {
+            column: "n",
+            label: "n",
+            ty: ColumnType::I64,
+            format: ColumnFormat::MEASURE,
+            choices: None,
+            required: false,
+        },
+    ]),
+    header: &[],
+    slice_values: &[],
+    value_type: ColumnType::F64,
+    format: ColumnFormat::MEASURE,
+    actions: &[],
+};
+
+/// A [`MIXED`] document: `(mixed_id, amt, n)` per row.
+pub(crate) fn mixed_snapshot(rows: &[(&str, f64, i64)]) -> Snapshot {
+    let n = rows.len();
+    Snapshot::for_tests_with_provenance(
+        vec![
+            (
+                meta("underlying_ref", Attribution::Additive),
+                TestColumn::Dict(vec![Some("SPX.Z".into()); n]),
+            ),
+            (
+                meta("mixed_id", Attribution::Additive),
+                TestColumn::Dict(rows.iter().map(|r| Some(r.0.to_string())).collect()),
+            ),
+            (
+                meta("amt", Attribution::DeterminedNonAdditive),
+                TestColumn::F64(rows.iter().map(|r| Some(r.1)).collect()),
+            ),
+            (
+                meta("n", Attribution::DeterminedNonAdditive),
+                TestColumn::I64(rows.iter().map(|r| r.2).collect()),
+            ),
+        ],
+        0,
+        provenance(BASE),
+    )
+}

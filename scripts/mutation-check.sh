@@ -14847,6 +14847,21 @@ run_mutation "draft: bump lands the declared integer type" \
   '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
   geode-marketdata bump_lands_the_declared_type
 
+# `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
+# result before either write door opens (task 3 review, fix round 1).
+# Mutated away, a mixed F64/I64 inserted row writes its F64 cell through
+# `set_row_cell` before the I64 cell's fractional-delta refusal is ever
+# reached — a partial bump the trader never asked for.
+run_mutation "mdedit: an inserted-row bump checks every cell before writing any" \
+  crates/geode-marketdata/src/tile.rs \
+  '        for (labels, value, ty) in &inserted {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }' \
+  '        for (labels, value, ty) in &inserted {
+            let _ = (labels, value, ty);
+        }' \
+  geode-marketdata a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing
+
 # `o` on a row that already has a follower re-hangs that follower onto
 # the NEW row (Task 8's review), so the new row sits immediately below
 # the cursor row. Mutated away, the two hang off the same anchor as

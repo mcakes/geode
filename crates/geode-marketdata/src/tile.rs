@@ -3575,6 +3575,25 @@ impl MarketDataTile {
                 }
             }
         }
+        // Every cell's `bumped()` result is checked — document rows AND
+        // inserted rows together — before either write door opens
+        // (controller ruling, fix round 1): a mixed row with an I64 node
+        // behind an F64 one must not land the F64 cells through
+        // `Draft::bump` and only then hit the I64 refusal in the
+        // `set_row_cell` loop below, since a partial bump on a row an
+        // inserted-row cell shares with document cells is exactly the
+        // half-applied edit `Draft::bump`'s own check-then-write exists to
+        // rule out. `bumped` is a pure function of its four arguments, so
+        // validating it here and letting `Draft::bump`/`set_row_cell`
+        // recompute the identical result when they actually write is a
+        // second pass over a keystroke's worth of cells, not a risk of
+        // disagreement.
+        for (_, labels, value, ty) in &document {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }
+        for (labels, value, ty) in &inserted {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }
         self.draft.bump(document.into_iter(), delta, &base)?;
         for ((row_label, col_label), value, ty) in inserted {
             let value = bumped(value, delta, ty, &col_label)?;
@@ -4575,7 +4594,7 @@ mod tests {
     use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
-    use crate::core::{CVI, DraftState};
+    use crate::core::{CVI, DIVIDEND, DraftState};
     use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;
@@ -7227,6 +7246,130 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
             "nothing was written"
         );
+    }
+
+    /// The shipped `DIVIDEND` panel's own `Columns::Values` branch of
+    /// `ty_of` (task 3 review, fix round 1): a row bump lands `amount` as
+    /// `Value::F64` — proven against the REAL spec, not `SCHEDULE`'s
+    /// three-column stand-in, since `ty_of`'s positional read off
+    /// `spec.flat_columns()` is only as trustworthy as the spec it is
+    /// actually tested against. `ex`/`announced`/`pay` are `Date` and
+    /// `status` is a `Choice`, so the row bump reaches `amount` (index 3)
+    /// alone, the same shape `a_flat_panels_row_bump_moves_only_the_number_column`
+    /// proves over `SCHEDULE`.
+    #[gpui::test]
+    fn a_dividend_panels_row_bump_lands_amount_as_f64(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot(&[(
+                "D1",
+                "2026-12-18",
+                "2026-11-01",
+                "2027-01-05",
+                1.25,
+                "declared",
+            )])),
+        );
+
+        h.command(&mut vcx, "bump 1 row").expect("a bump on row 0");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 3)).cloned()),
+            Some(Value::F64(2.25)),
+            "amount is DIVIDEND's flat column 3 (ex, announced, pay, amount, status)"
+        );
+    }
+
+    /// An inserted row's own cells land at each column's DECLARED type,
+    /// not a blanket `Value::F64` (task 3 review, fix round 1): `amt` is
+    /// `F64`, `n` is `I64`, and a whole-number delta bumps both through
+    /// the production `:bump` route, `set_row_cell`'s own door.
+    #[gpui::test]
+    fn an_inserted_rows_bump_lands_each_cells_declared_type(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::mixed_snapshot(&[("M1", 1.0, 2)])),
+        );
+
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        // `insert_below` opens the new row's first cell (`amt`) in insert
+        // mode already; fill it, then move onto `n` and fill it too —
+        // the same edit → commit route `a_commit_on_an_inserted_row_writes_its_own_cells`
+        // uses.
+        h.set_editor(&mut vcx, "1.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.command(&mut vcx, "bump 2 row")
+            .expect("a whole-number bump");
+        let cells = h
+            .tile
+            .read_with(&vcx, |t, _| match t.draft().row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.clone(),
+                other => panic!("new-1 is still an inserted row, got {other:?}"),
+            });
+        assert_eq!(cells.get("amt"), Some(&Value::F64(3.5)));
+        assert_eq!(cells.get("n"), Some(&Value::I64(4)));
+    }
+
+    /// The atomicity fix itself (task 3 review, fix round 1, controller
+    /// ruling): a row bump across an inserted row's `F64` cell and `I64`
+    /// cell, with a FRACTIONAL delta the `I64` cell refuses, must not
+    /// land the `F64` cell first and then refuse — every cell's `bumped`
+    /// result is computed before either write door (`Draft::bump`,
+    /// `set_row_cell`) opens, so the refusal leaves BOTH cells exactly as
+    /// they were.
+    #[gpui::test]
+    fn a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::mixed_snapshot(&[("M1", 1.0, 2)])),
+        );
+
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        h.set_editor(&mut vcx, "1.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+
+        let err = h
+            .command(&mut vcx, "bump 0.5 row")
+            .expect_err("n cannot take a fractional delta");
+        assert_eq!(err, "bump: n takes whole numbers");
+        let cells = h
+            .tile
+            .read_with(&vcx, |t, _| match t.draft().row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.clone(),
+                other => panic!("new-1 is still an inserted row, got {other:?}"),
+            });
+        assert_eq!(
+            cells.get("amt"),
+            Some(&Value::F64(1.5)),
+            "amt must NOT have been bumped ahead of n's refusal"
+        );
+        assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
     }
 
     /// A session carrying an inserted row, a deleted row and a cell edit
