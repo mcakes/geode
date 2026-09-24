@@ -1532,6 +1532,40 @@ mod tests {
         assert_eq!(draft.edits.len(), 1, "the 2026-12-18 edit survives");
     }
 
+    /// The `Deleted` half of the same guard (draft.rs's `RowEdit::Deleted`
+    /// arm, review finding 2): a row marked deleted inside a captured
+    /// same-day group is refused the same way a cell edit in that group
+    /// is — the mark is dropped with the same-day reason rather than
+    /// carried onto whichever row the shifted ordinal now names, and the
+    /// row simply disappears from `rows` (nothing left to mark deleted
+    /// once its own identity is gone).
+    #[test]
+    fn rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size() {
+        let base =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-12-18"]);
+        let newer = crate::core::test_fixtures::flat_model(&[
+            "2026-09-18",
+            "2026-09-18#2",
+            "2026-09-18#3",
+            "2026-12-18",
+        ]);
+        let mut draft = Draft::default();
+        draft.delete_row("2026-09-18#2", "t0");
+        draft.capture_groups(&base);
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(
+            dropped
+                .iter()
+                .any(|(l, why)| l == "2026-09-18#2" && why.contains("2 → 3")),
+            "{dropped:?}"
+        );
+        assert!(
+            draft.rows.is_empty(),
+            "the deleted mark did not survive the rebase: {:?}",
+            draft.rows
+        );
+    }
+
     #[test]
     fn rebase_without_captured_groups_applies_no_guard() {
         let newer =

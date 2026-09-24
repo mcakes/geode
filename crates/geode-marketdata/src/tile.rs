@@ -55,9 +55,8 @@ use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, DraftState, FieldKey, MatrixModel,
-    PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell,
-    route,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
+    Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel};
@@ -1178,21 +1177,14 @@ impl MarketDataTile {
                     // OUTGOING document's own group sizes before this
                     // rebase moves `draft` onto the incoming one —
                     // `painted_snapshot` is exactly what is on screen
-                    // right now, which is this draft's base by
-                    // construction (still `self.base_snapshot`/
-                    // `self.snapshot`, neither overwritten yet). A build
-                    // failure here is silently skipped, the same "leave
-                    // groups as they were" the restore path below takes:
-                    // it cannot happen against a document that painted a
-                    // moment ago, and if it somehow did, the worst case
-                    // is the guard comparing against a stale count rather
-                    // than losing the rebase itself.
-                    if let Some(base) = self.painted_snapshot()
-                        && let Ok(base_model) =
-                            MatrixModel::build(&base, self.spec, &Draft::default())
-                    {
-                        draft.capture_groups(&base_model);
-                    }
+                    // right now (still `self.base_snapshot`/
+                    // `self.snapshot`, neither overwritten yet), and
+                    // `capture_groups_if_base` is what confirms it is
+                    // really this draft's base and not a fallback (its own
+                    // doc comment has the M-1 story). Skipped in silence
+                    // otherwise, the same "leave groups as they were" the
+                    // restore path below takes.
+                    self.capture_groups_if_base(&mut draft);
                     // Two builds, on purpose: `Draft::rebase` re-places
                     // the edits by the NEW document's row and column
                     // labels, which only a model of that document
@@ -1436,6 +1428,41 @@ impl MarketDataTile {
     /// is retained, else the newest delivered.
     fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
         self.base_snapshot.clone().or_else(|| self.snapshot.clone())
+    }
+
+    /// Capture `draft`'s same-day group sizes (spec §2's rebase guard,
+    /// amendment 4) against the snapshot on screen right now — but ONLY
+    /// when that snapshot really IS `draft`'s own base generation, never
+    /// merely `painted_snapshot()`'s best guess (review finding, controller
+    /// ruling: a capture site captures only when the model it is about to
+    /// count was built from a snapshot whose source time equals
+    /// `draft.base`).
+    ///
+    /// `painted_snapshot()` falls back to the NEWEST delivered snapshot
+    /// when no base is retained — the M-1 path in `apply`: a restored or
+    /// parked draft whose base generation was never delivered this
+    /// session at all. Trusting that fallback here would silently replace
+    /// a previously correct `groups` (captured against the true base, by
+    /// an earlier call or carried in from the session) with the NEWER
+    /// document's own sizes, disarming the guard it exists to run — a
+    /// same-day group that in truth changed size between the draft's real
+    /// base and the newer document would then read as unchanged. Skipped
+    /// in silence otherwise: leaving `groups` untouched is always the safe
+    /// choice, since a stale-but-correct-for-its-generation count only
+    /// ever makes the guard MORE willing to refuse, never less.
+    ///
+    /// Every capture site in this file calls this rather than
+    /// `Draft::capture_groups` directly, so the rule lives in one place.
+    fn capture_groups_if_base(&self, draft: &mut Draft) {
+        let Some(base) = self.painted_snapshot() else {
+            return;
+        };
+        if source_time_of(&base) != draft.base {
+            return;
+        }
+        if let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default()) {
+            draft.capture_groups(&base_model);
+        }
     }
 
     /// Rebuild the prepared grid. Called on a delivery and on a draft
@@ -3642,14 +3669,18 @@ impl MarketDataTile {
         // The rebase guard (spec §2, amendment 4) needs the group sizes
         // of the document currently on screen — `painted_snapshot` while
         // `Behind` — before `rebase` below moves the draft onto the newer
-        // one. Skipped, not refused, on a build failure: the guard is a
+        // one. Skipped, not refused, on a build failure or when the
+        // painted snapshot is not really this draft's base (the M-1 path
+        // — `capture_groups_if_base`'s own doc comment): the guard is a
         // refinement of `rebase`'s own report, never a gate on running it
-        // at all.
-        if let Some(base) = self.painted_snapshot()
-            && let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default())
-        {
-            self.draft.capture_groups(&base_model);
-        }
+        // at all. `self.draft` is taken out and put back rather than
+        // borrowed in place, since `capture_groups_if_base` also reads
+        // `self` (`painted_snapshot`, `spec`) and a method call cannot
+        // hold both an immutable borrow of `self` and a mutable one of
+        // `self.draft` at once.
+        let mut draft = std::mem::take(&mut self.draft);
+        self.capture_groups_if_base(&mut draft);
+        self.draft = draft;
         // Not `.expect(..)`: `Behind` implies a newer generation was
         // delivered, but this is a render-thread module, and an invariant
         // break here must read as a `:`-line refusal, never a crash.
@@ -4046,11 +4077,21 @@ impl MarketDataTile {
         // `underlying`) has nothing to park under and stays put — the
         // first underlying named claims it, exactly as the constructor
         // already leaves it waiting for one.
+        //
+        // The rebase guard's group sizes are captured here too (controller
+        // ruling), still under `capture_groups_if_base`'s same source-time
+        // rule: `self.painted_snapshot()`/`self.key` still name the
+        // OUTGOING underlying at this point (the reset a few lines below
+        // has not run yet), so a park is exactly one more place the
+        // painted model can be the draft's own base. `self.draft` is taken
+        // out and put back rather than borrowed in place, the same
+        // borrow-shape reason `fn rebase` does — see that call site.
         if let Some(outgoing) = self.key.take()
             && !self.draft.is_empty()
         {
-            self.parked.insert(outgoing, self.draft.to_toml());
-            self.draft = Draft::default();
+            let mut draft = std::mem::take(&mut self.draft);
+            self.capture_groups_if_base(&mut draft);
+            self.parked.insert(outgoing, draft.to_toml());
         }
         if let Some(table) = self.parked.remove(&key) {
             self.draft = Draft::from_toml(&table);
@@ -4201,9 +4242,10 @@ impl MarketDataTile {
         let mut drafts = toml::Table::new();
         if !self.draft.is_empty() {
             // The rebase guard (spec §2, amendment 4) needs group sizes
-            // captured against the document currently painted — true here
-            // exactly while `Editing` (the snapshot on screen) or `Behind`
-            // (`painted_snapshot` names the base, not the newer arrival).
+            // captured against the document currently painted — but only
+            // when `painted_snapshot` really NAMES the base rather than
+            // falling back to a newer arrival nobody's base ever was (the
+            // M-1 path — `capture_groups_if_base`'s own doc comment).
             // Computed on a CLONE, not `self.draft` itself: `serialize`
             // takes `&self`, and this is the one capture site with no
             // `&mut` to write it back onto the live draft, so a same-day
@@ -4211,12 +4253,7 @@ impl MarketDataTile {
             // session is still caught on the NEXT restart rather than
             // only on the next explicit rebase.
             let mut draft = self.draft.clone();
-            if matches!(draft.state, DraftState::Editing | DraftState::Behind { .. })
-                && let Some(base) = self.painted_snapshot()
-                && let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default())
-            {
-                draft.capture_groups(&base_model);
-            }
+            self.capture_groups_if_base(&mut draft);
             match &self.key {
                 Some(key) => {
                     drafts.insert(display_key(key), toml::Value::Table(draft.to_toml()));
@@ -8896,6 +8933,100 @@ deleted = true
             .tile
             .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
         assert_eq!(len, 0, "the same-day group edit did not survive the rebase");
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.contains("2026-09-18#2") && c.contains("2 → 3")),
+            "{chips:?}"
+        );
+    }
+
+    /// The M-1 path (review finding 1): a draft restored from the session
+    /// carries `groups` captured against its TRUE base, and that base
+    /// generation is never delivered THIS session at all — the very first
+    /// delivery is a newer one, so `base_snapshot` is never retained and
+    /// `painted_snapshot()` falls back to that newer snapshot. A capture
+    /// site that trusted the fallback would silently overwrite the
+    /// restored `groups` with the newer document's own sizes (a group of
+    /// two reading as "was two" instead of the true base's two) and the
+    /// guard would never fire. `capture_groups_if_base` must instead
+    /// leave the session's `groups` untouched, so `:rebase` still refuses
+    /// the shifted edit.
+    #[gpui::test]
+    fn rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = format!(
+            r#"
+underlying = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-09-18#2", "amount", 9.0]]
+[draft.groups]
+"2026-09-18" = 2
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        // The FIRST delivery this tile has ever seen — `BASE` never
+        // arrives, so `base_snapshot` has nothing to retain and this is
+        // exactly the M-1 path. The same-date group has grown from the
+        // session's captured two rows to three.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot_at(
+                &[
+                    (
+                        "2026-09-18",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        1.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#2",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        2.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#3",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        3.0,
+                        "declared",
+                    ),
+                ],
+                NEWER,
+            )),
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| matches!(
+                t.draft().state,
+                DraftState::Behind { .. }
+            )),
+            "the base was never delivered: this must be the M-1 path"
+        );
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+
+        let (len, chips) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
+        assert_eq!(
+            len, 0,
+            "the guard must still fire even though the painted snapshot \
+             was never this draft's base"
+        );
         assert!(
             chips
                 .iter()

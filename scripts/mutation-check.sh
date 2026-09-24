@@ -11630,6 +11630,20 @@ run_mutation "mdtile: serialize writes the draft" \
   geode-marketdata \
   serialize_round_trips_key_and_draft
 
+# The rebase guard's group capture must skip a `painted_snapshot()` that
+# is not really the draft's own base (review finding 1: a restored/parked
+# draft whose base was never delivered this session falls back to the
+# NEWEST snapshot, and capturing against that silently disarms the guard
+# it exists to run). Mutated to always capture, the M-1 window test's
+# session-restored `groups` are overwritten by the newer document's own
+# sizes and the shifted edit is no longer refused.
+run_mutation "mdtile: a capture only counts the draft's true base" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if source_time_of(&base) != draft.base {' \
+  '        if false {' \
+  geode-marketdata \
+  rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
+
 # A delivery re-clamps the cursor, because a new generation can be
 # shorter than the one it replaces. Mutated away, the cursor sits past the
 # end of the grid: a yank answers nothing, and `move_cursor`'s own clamp
@@ -14859,6 +14873,20 @@ run_mutation "draft: rebase refuses a changed same-day group" \
   '                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
                 if false {' \
   geode-marketdata rebase_refuses_edits_in_a_same_day_group_that_changed_size
+
+# The `Deleted` half of the same guard (review finding 2): a row marked
+# deleted inside a same-day group whose size changed must be refused
+# too, not carried onto whichever row the shifted ordinal now names.
+# Mutated to skip the check (the `group_of(&label)` two-line anchor is
+# what makes this the Deleted-arm site rather than the cell-edit one
+# above it — see that entry's own comment).
+run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if size_now != 0 && was != size_now {' \
+  '                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if false {' \
+  geode-marketdata rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size
 
 # `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
 # result before either write door opens (task 3 review, fix round 1).
