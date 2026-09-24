@@ -9,13 +9,15 @@
 
 use crate::content::{PricerSettings, Shared};
 use crate::core::cell::{self, CellEditor};
+use crate::core::clip::{put_place, spec_of};
 use crate::core::columns::ColumnKind;
-use crate::core::commands::{self, Command};
+use crate::core::commands::{self, Command, ShiftField};
 use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::storage::from_rows;
+use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
@@ -23,7 +25,7 @@ use crate::core::{Place, RowSpec};
 use crate::delegate::{ChevronClicked, EditorPaint, SheetDelegate};
 use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::choice_paint;
+use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
 use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
@@ -37,6 +39,7 @@ use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
@@ -194,6 +197,8 @@ pub struct PricerTile {
     /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
     /// drops it. `None` outside insert mode.
     pub(crate) editor: Option<Editor>,
+    /// The `.` action menu (Task 11): `None` outside menu mode.
+    pub(crate) menu: Option<Menu>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -208,6 +213,14 @@ fn untitled(shared: &Shared) -> String {
         .map(|n| format!("untitled-{n}"))
         .find(|name| !shared.open.borrow().contains(name) && !shared.store.contains(name))
         .expect("an unbounded range finds a free name")
+}
+
+/// The flat row an insert at `place` puts its first row on.
+fn landed_row(place: Place) -> usize {
+    match place {
+        Place::Root { at } => at,
+        Place::Leg { package, leg } => package + 1 + leg,
+    }
 }
 
 /// An empty sheet under `name`, carrying the record's view and refresh —
@@ -376,6 +389,7 @@ impl PricerTile {
             retry_task: None,
             entry: None,
             editor: None,
+            menu: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -384,7 +398,7 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal`, `entry` or `insert` (Task 11 adds `menu`).
+    /// `normal`, `entry`, `insert` or `menu`.
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("pricer").pair("mode", self.mode()).counts()
     }
@@ -394,6 +408,8 @@ impl PricerTile {
             "entry"
         } else if self.editor.is_some() {
             "insert"
+        } else if self.menu.is_some() {
+            "menu"
         } else {
             "normal"
         }
@@ -524,7 +540,6 @@ impl PricerTile {
     /// Several edits as ONE undo entry (`:spot clear`, Task 11). On a
     /// refusal the ones already applied are taken back and nothing is
     /// recorded.
-    #[allow(dead_code)]
     pub(crate) fn apply_edits(
         &mut self,
         edits: Vec<Edit>,
@@ -609,11 +624,7 @@ impl PricerTile {
             cx,
         ) {
             Ok(()) => {
-                let first = match at {
-                    Place::Root { at } => at,
-                    Place::Leg { package, leg } => package + 1 + leg,
-                };
-                let id = self.sheet.id(first);
+                let id = self.sheet.id(landed_row(at));
                 if matches!(spec, RowSpec::Package { .. }) {
                     self.expansion.set(id, true);
                 }
@@ -1131,6 +1142,12 @@ impl PricerTile {
             self.close_entry(window, cx);
             self.close_editor(window, cx);
         }
+        // Any verb but the menu's own closes an open menu (a palette
+        // dispatch, or a verb picked from the menu itself, can arrive
+        // while one is open).
+        if self.menu.is_some() && !verb.starts_with("menu") {
+            self.menu = None;
+        }
         match verb {
             "down" => self.step_rows(n as isize),
             "up" => self.step_rows(-(n as isize)),
@@ -1236,6 +1253,53 @@ impl PricerTile {
                 }
                 return true;
             }
+            "delete" | "undo" | "redo" | "put_below" | "put_above" | "move_down" | "move_up"
+            | "group" | "ungroup" => {
+                if self.loading {
+                    self.footer = Some("the sheet is still loading".into());
+                } else {
+                    let result = match verb {
+                        "delete" => self.delete_row(cx),
+                        "undo" => self.history_step(false, cx),
+                        "redo" => self.history_step(true, cx),
+                        "put_below" => self.put(true, cx),
+                        "put_above" => self.put(false, cx),
+                        "move_down" => self.move_row(n as isize, cx),
+                        "move_up" => self.move_row(-(n as isize), cx),
+                        "group" => self.group(n, cx),
+                        _ => self.ungroup(cx),
+                    };
+                    if let Err(why) = result {
+                        self.footer = Some(why.into());
+                    }
+                }
+            }
+            "menu" => {
+                self.toggle_menu(cx);
+                return true;
+            }
+            "menu_down" | "menu_up" => {
+                if let Some(m) = self.menu.as_mut() {
+                    let len = m.items.len() as isize;
+                    let step = if verb == "menu_down" {
+                        n as isize
+                    } else {
+                        -(n as isize)
+                    };
+                    m.highlighted = (m.highlighted as isize + step).clamp(0, len - 1) as usize;
+                }
+            }
+            "menu_pick" => {
+                let at = self.menu.as_ref().map(|m| m.highlighted);
+                if let Some(at) = at {
+                    self.menu_pick(at, window, cx);
+                }
+                return true;
+            }
+            "menu_close" => {
+                self.close_menu(cx);
+                return true;
+            }
             _ => return false,
         }
         self.sync_cursor(cx);
@@ -1247,6 +1311,261 @@ impl PricerTile {
     /// The sheet row under the cursor.
     pub(crate) fn cursor_sheet_row(&self) -> Option<usize> {
         self.cursor_row().and_then(|r| self.model.rows[r].row)
+    }
+
+    /// `d d` (spec §8.5): no confirm — `u` is one key away. What was
+    /// deleted is what `p` puts.
+    fn delete_row(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let row = self.cursor_sheet_row().ok_or("no row")?;
+        let spec = spec_of(&self.sheet, row);
+        self.apply_edit(Edit::Remove { at: row }, cx)
+            .map_err(|e| e.to_string())?;
+        self.register = Some(spec);
+        Ok(())
+    }
+
+    /// `u` / `ctrl+r`. A refused inverse clears the whole history
+    /// (`UndoStack`'s rule) and says so.
+    fn history_step(&mut self, redo: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        let stepped = if redo {
+            self.undo.redo(&mut self.sheet)
+        } else {
+            self.undo.undo(&mut self.sheet)
+        };
+        match stepped {
+            Ok(true) => {
+                self.after_edit(cx);
+                Ok(())
+            }
+            Ok(false) => Err(if redo {
+                "nothing to redo"
+            } else {
+                "nothing to undo"
+            }
+            .into()),
+            Err(e) => {
+                self.after_edit(cx);
+                Err(format!(
+                    "{} failed ({e}); history cleared",
+                    if redo { "redo" } else { "undo" }
+                ))
+            }
+        }
+    }
+
+    /// `p` / `shift+p`: the register as fresh rows (fresh ids, fresh
+    /// requests) where `put_place` says (planning decision 12).
+    fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        let spec = self.register.clone().ok_or("nothing to put")?;
+        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
+        self.apply_edit(
+            Edit::Insert {
+                place,
+                rows: vec![spec.clone()],
+            },
+            cx,
+        )
+        .map_err(|e| e.to_string())?;
+        let id = self.sheet.id(landed_row(place));
+        if matches!(spec, RowSpec::Package { .. }) {
+            self.expansion.set(id, true);
+        }
+        self.cursor.line = Some(id);
+        self.rebuild(cx);
+        Ok(())
+    }
+
+    /// `shift+j` / `shift+k`: within the parent; the cursor follows its
+    /// line (it is keyed by id).
+    fn move_row(&mut self, delta: isize, cx: &mut Context<Self>) -> Result<(), String> {
+        let row = self.cursor_sheet_row().ok_or("no row")?;
+        self.apply_edit(Edit::Move { row, delta }, cx)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `g p` (count): the cursor row and the next `count − 1` roots become
+    /// a custom package, opened.
+    fn group(&mut self, count: usize, cx: &mut Context<Self>) -> Result<(), String> {
+        let first = self.cursor_sheet_row().ok_or("no row")?;
+        self.apply_edit(
+            Edit::Group {
+                first,
+                count,
+                template: Template::Custom,
+                id: None,
+            },
+            cx,
+        )
+        .map_err(|e| e.to_string())?;
+        let id = self.sheet.id(first);
+        self.expansion.set(id, true);
+        self.cursor.line = Some(id);
+        self.rebuild(cx);
+        Ok(())
+    }
+
+    /// `g u`: the package under the cursor — on a leg, its package.
+    fn ungroup(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let row = self.cursor_sheet_row().ok_or("no row")?;
+        let package = if self.sheet.is_package(row) {
+            row
+        } else {
+            self.sheet.parent(row).ok_or("not in a package")?
+        };
+        self.apply_edit(Edit::Ungroup { row: package }, cx)
+            .map_err(|e| e.to_string())
+    }
+
+    fn set_sheet_shift(
+        &mut self,
+        field: ShiftField,
+        value: Option<f64>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let mut s = self.sheet.sheet_shift();
+        match field {
+            ShiftField::Spot => s.spot_pct = value,
+            ShiftField::Vol => s.vol_pts = value,
+        }
+        self.apply_edit(Edit::SetSheetShift(s), cx)
+            .map_err(|e| e.to_string())
+    }
+
+    /// `:spot` (ruling 1): one underlying set or cleared, or every
+    /// override cleared as ONE undo entry.
+    fn set_spot(
+        &mut self,
+        underlying: Option<String>,
+        level: Option<f64>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let edits: Vec<Edit> = match underlying {
+            Some(underlying) => vec![Edit::SetSpotOverride { underlying, level }],
+            None => self
+                .sheet
+                .overrides()
+                .spot
+                .keys()
+                .map(|u| Edit::SetSpotOverride {
+                    underlying: u.clone(),
+                    level: None,
+                })
+                .collect(),
+        };
+        self.apply_edits(edits, cx).map_err(|e| e.to_string())
+    }
+
+    fn menu_items(&self) -> Vec<MenuItem> {
+        let row = self.cursor_sheet_row();
+        let root_line =
+            row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
+        let packaged =
+            row.is_some_and(|r| self.sheet.is_package(r) || self.sheet.parent(r).is_some());
+        let mut items = vec![
+            MenuItem::Action {
+                id: "pricer::price",
+                title: "Price all",
+                enabled: Ok(()),
+            },
+            MenuItem::Action {
+                id: "pricer::group",
+                title: "Group",
+                enabled: if root_line {
+                    Ok(())
+                } else {
+                    Err("group needs a top-level line")
+                },
+            },
+            MenuItem::Action {
+                id: "pricer::ungroup",
+                title: "Ungroup",
+                enabled: if packaged {
+                    Ok(())
+                } else {
+                    Err("not in a package")
+                },
+            },
+            MenuItem::Action {
+                id: "pricer::undo",
+                title: "Undo",
+                enabled: if self.undo.can_undo() {
+                    Ok(())
+                } else {
+                    Err("nothing to undo")
+                },
+            },
+            MenuItem::Action {
+                id: "pricer::redo",
+                title: "Redo",
+                enabled: if self.undo.can_redo() {
+                    Ok(())
+                } else {
+                    Err("nothing to redo")
+                },
+            },
+            MenuItem::Action {
+                id: "pricer::delete",
+                title: "Delete row",
+                enabled: if row.is_some() { Ok(()) } else { Err("no row") },
+            },
+        ];
+        for name in self.shared.views.borrow().names() {
+            let label = if name == self.sheet.view {
+                format!("view: {name} \u{2713}")
+            } else {
+                format!("view: {name}")
+            };
+            items.push(MenuItem::View {
+                name: name.to_string().into(),
+                label: label.into(),
+            });
+        }
+        items
+    }
+
+    fn toggle_menu(&mut self, cx: &mut Context<Self>) {
+        self.menu = match self.menu {
+            Some(_) => None,
+            None => Some(Menu {
+                items: self.menu_items(),
+                highlighted: 0,
+            }),
+        };
+        cx.notify();
+    }
+
+    pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
+        if self.menu.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// A disabled row says why and keeps the menu open; an enabled one
+    /// closes it and dispatches through the same door a key would.
+    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.menu.as_ref().and_then(|m| m.items.get(index)).cloned() else {
+            return;
+        };
+        match item {
+            MenuItem::Action {
+                enabled: Err(why), ..
+            } => {
+                self.footer = Some(why.into());
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            MenuItem::Action { id, .. } => {
+                self.menu = None;
+                self.dispatch(&ActionId(id.to_string()), None, window, cx);
+            }
+            MenuItem::View { name, .. } => {
+                self.menu = None;
+                if let Err(why) = self.set_view(&name, cx) {
+                    self.footer = Some(why.into());
+                }
+                cx.notify();
+            }
+        }
     }
 
     fn step_rows(&mut self, delta: isize) {
@@ -1352,10 +1671,10 @@ impl PricerTile {
                 cx.notify();
                 Ok(())
             }
-            // Task 11 replaces this arm.
-            Command::Shift { .. } | Command::Spot { .. } | Command::Group(_) | Command::Ungroup => {
-                Err("not built yet".into())
-            }
+            Command::Shift { field, value } => self.set_sheet_shift(field, value, cx),
+            Command::Spot { underlying, level } => self.set_spot(underlying, level, cx),
+            Command::Group(count) => self.group(count.unwrap_or(1), cx),
+            Command::Ungroup => self.ungroup(cx),
         }
     }
 
@@ -1588,7 +1907,26 @@ impl gpui::Render for PricerTile {
                 > stale_after
         });
         let theme = cx.theme();
+        let tile = cx.entity();
         let header = header::render(&self.header, theme, self.stack.as_ref(), self.id);
+        // The menu is anchored off a zero-size, absolutely positioned
+        // sibling at the header's own right edge (the market-data
+        // arrangement) — `relative` on the wrapper is what makes that
+        // positioning read against the header rather than the window.
+        let header =
+            div()
+                .relative()
+                .w_full()
+                .child(header)
+                .when_some(self.menu.as_ref(), |el, m| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .top(scale::design(header::HEADER_HEIGHT))
+                            .child(render_menu(m, &tile, cx)),
+                    )
+                });
         let body = div().flex_1().min_h_0().w_full().child(
             DataTable::new(&self.table)
                 .with_size(Size::XSmall)
@@ -3011,5 +3349,256 @@ pub(crate) mod tests {
             !focused(&mut vcx),
             "the pick closes the field: blurred, then dropped"
         );
+    }
+
+    // ---- Task 11 ----
+
+    fn answer_all(h: &Harness, vcx: &mut VisualTestContext, price: f64) {
+        for b in h.prices() {
+            h.answer(vcx, &b, price);
+        }
+    }
+
+    /// Spec §12: `dd` then `u` restores the row with its numbers and asks
+    /// for nothing.
+    #[gpui::test]
+    fn dd_then_u_restores_the_row_with_its_numbers_and_no_request(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "bottom", None);
+        h.dispatch(&mut vcx, "delete", None);
+        assert_eq!(h.tree(&vcx).len(), 2);
+        assert!(
+            h.prices().is_empty(),
+            "a removal changes no remaining request"
+        );
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.tree(&vcx).len(), 3);
+        assert_eq!(
+            h.cell(&vcx, 2, "price"),
+            "12.50",
+            "its last result came back with it"
+        );
+        assert!(h.prices().is_empty(), "…so nothing is re-requested");
+        h.dispatch(&mut vcx, "redo", None);
+        assert_eq!(h.tree(&vcx).len(), 2);
+        assert!(h.dispatch(&mut vcx, "redo", None));
+        assert_eq!(h.footer(&vcx).as_deref(), Some("nothing to redo"));
+    }
+
+    #[gpui::test]
+    fn undo_of_a_strike_edit_restores_it_and_reprices(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        answer_all(&h, &mut vcx, 13.0);
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
+        assert_eq!(
+            h.prices().len(),
+            1,
+            "an instrument change is a request change (spec §9.3)"
+        );
+    }
+
+    #[gpui::test]
+    fn p_puts_the_yanked_row_with_fresh_ids_and_prices_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "yank_row", None);
+        h.dispatch(&mut vcx, "bottom", None);
+        h.dispatch(&mut vcx, "put_below", None);
+        assert_eq!(
+            h.tree(&vcx),
+            vec![
+                "SPX Z26 5000 C".to_string(),
+                "-5 SPX Z26 4800/5200 CS".to_string(),
+                "SPX Z26 4000 P".to_string(),
+                "SPX Z26 5000 C".to_string(),
+            ]
+        );
+        let ids = h
+            .tile
+            .read_with(&vcx, |t, _| (t.sheet.id(0), t.sheet.id(5)));
+        assert_ne!(ids.0, ids.1, "a put takes fresh ids");
+        assert_eq!(h.prices()[0].lines.len(), 1, "and asks for its own price");
+        // A package put from a leg lands at a root boundary.
+        h.dispatch(&mut vcx, "top", None);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "yank_row", None);
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "down", None); // first leg
+        h.dispatch(&mut vcx, "put_above", None);
+        let roots = h.tile.read_with(&vcx, |t, _| t.sheet.roots().count());
+        assert_eq!(roots, 5);
+    }
+
+    #[gpui::test]
+    fn shift_j_and_k_move_within_the_parent_and_off_the_end_is_refused(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "move_down", None);
+        assert_eq!(
+            h.tree(&vcx)[1],
+            "SPX Z26 5000 C",
+            "A hopped over the package"
+        );
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "the cursor follows its line"
+        );
+        h.dispatch(&mut vcx, "move_down", Some(5));
+        assert_eq!(h.footer(&vcx).as_deref(), Some("cannot move past the end"));
+        h.dispatch(&mut vcx, "top", None);
+        h.dispatch(&mut vcx, "move_down", None); // the package hops down
+        assert_eq!(h.tree(&vcx)[1], "-5 SPX Z26 4800/5200 CS");
+    }
+
+    #[gpui::test]
+    fn g_p_groups_roots_into_a_custom_package_and_g_u_ungroups(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
+        answer_all(&h, &mut vcx, 1.0);
+        h.dispatch(&mut vcx, "group", Some(2));
+        assert_eq!(
+            h.tree(&vcx)[0],
+            "CUSTOM SPX Z26",
+            "a custom package, opened"
+        );
+        assert_eq!(h.tree(&vcx).len(), 4);
+        assert_eq!(
+            h.cell(&vcx, 0, "price"),
+            "2.00",
+            "its sum: two legs of 1.00"
+        );
+        assert!(h.prices().is_empty(), "grouping changes no request");
+        h.dispatch(&mut vcx, "down", None); // a leg: g u acts on its package
+        h.dispatch(&mut vcx, "ungroup", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 3);
+        h.dispatch(&mut vcx, "group", Some(9));
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("group needs a contiguous run of top-level lines")
+        );
+    }
+
+    /// Spec §12: `:shift spot 2` reprices only the lines that inherit it.
+    #[gpui::test]
+    fn colon_shift_spot_reprices_only_inheriting_lines(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(
+            &h,
+            &mut vcx,
+            Edit::SetShift {
+                row: 0,
+                shift: crate::core::OwnShifts {
+                    spot_pct: Some(1.0),
+                    vol_pts: None,
+                },
+            },
+        );
+        answer_all(&h, &mut vcx, 12.5);
+        h.command(&mut vcx, "shift spot 2").unwrap();
+        let b = h.prices().remove(0);
+        assert_eq!(
+            b.lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![3, 4, 5],
+            "line 1 has its own spot shift"
+        );
+        assert!(h.header(&vcx).contains(&"spot +2%".to_string()));
+        h.command(&mut vcx, "shift spot clear").unwrap();
+        assert!(!h.header(&vcx).iter().any(|t| t.starts_with("spot")));
+    }
+
+    #[gpui::test]
+    fn colon_spot_rides_in_the_batch_and_clear_is_one_undo(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.command(&mut vcx, "spot spx 5100").unwrap();
+        let b = h.prices().remove(0);
+        assert_eq!(b.overrides.spot.get("SPX"), Some(&5100.0));
+        assert_eq!(b.lines.len(), 4, "every SPX line is restaled (spec §9.3)");
+        h.command(&mut vcx, "spot ndx 18000").unwrap();
+        answer_all(&h, &mut vcx, 12.5);
+        h.command(&mut vcx, "spot clear").unwrap();
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.sheet.overrides().spot.is_empty())
+        );
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.sheet.overrides().spot.len()),
+            2,
+            "one undo restores both"
+        );
+    }
+
+    #[gpui::test]
+    fn the_menu_opens_steps_and_picks_and_a_disabled_row_says_why(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        // Rows: Price all, Group, Ungroup, Undo, Redo, Delete row, then views.
+        h.dispatch(&mut vcx, "menu_down", Some(2)); // Ungroup: A is not in a package
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("not in a package"));
+        assert_eq!(
+            h.mode(&mut vcx),
+            "menu",
+            "a disabled row keeps the menu open"
+        );
+        h.dispatch(&mut vcx, "menu_close", None);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_pick", None); // Price all
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.prices()[0].lines.len(), 4);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", Some(7)); // the second view: barrier
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert!(h.columns(&vcx).contains(&"barrier".to_string()));
+    }
+
+    #[gpui::test]
+    fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let lines = [
+            "view barrier",
+            "shift spot 2",
+            "spot SPX 5100",
+            "price",
+            "refresh 10s",
+            "group",
+            "ungroup",
+        ];
+        for word in crate::core::commands::VERBS {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.split_whitespace().next() == Some(word)),
+                "no sweep line for `:{word}`"
+            );
+        }
+        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        for line in lines {
+            assert!(
+                crate::core::commands::parse(line).is_ok(),
+                "`{line}` no longer parses"
+            );
+            let _ = h.command(&mut vcx, line);
+            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            assert_eq!(
+                (after.scope, after.grouping, after.as_of),
+                (before.scope, before.grouping, before.as_of),
+                "`:{line}` moved the frame"
+            );
+            let (level, overlay) = h.diagnostics.update(&mut vcx, |d, _| {
+                (d.take_pending_level(), d.take_pending_overlay_toggle())
+            });
+            assert!(level.is_none() && !overlay, "`:{line}` reached the app");
+        }
     }
 }

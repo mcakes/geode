@@ -109,3 +109,72 @@ pub(crate) fn render_choice(
     )
     .with_priority(1)
 }
+
+/// One row of the action menu (spec §8.5's `.`; planning decision 22).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum MenuItem {
+    Action {
+        id: &'static str,
+        title: &'static str,
+        enabled: Result<(), &'static str>,
+    },
+    /// `label` is prepared when the menu opens (`view: barrier ✓` on the
+    /// current one), never formatted per frame.
+    View {
+        name: SharedString,
+        label: SharedString,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Menu {
+    pub items: Vec<MenuItem>,
+    pub highlighted: usize,
+}
+
+/// The `.` action menu (planning decision 22), anchored under the
+/// header's right edge by the caller. The pricer's own row door
+/// (`render_choice`'s shape) rather than the market-data popup, which
+/// this crate may not import (CLAUDE.md).
+pub(crate) fn render_menu(m: &Menu, tile: &Entity<PricerTile>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
+        .debug_selector(|| "pricer-menu".into())
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, _window, cx| tile.update(cx, |t, cx| t.close_menu(cx))
+        });
+    for (i, item) in m.items.iter().enumerate() {
+        let (label, enabled): (SharedString, bool) = match item {
+            MenuItem::Action { title, enabled, .. } => ((*title).into(), enabled.is_ok()),
+            MenuItem::View { label, .. } => (label.clone(), true),
+        };
+        list = list.child(
+            h_flex()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .rounded(theme.radius)
+                .items_center()
+                .when(i == m.highlighted, |d| {
+                    d.bg(theme.accent).text_color(theme.accent_foreground)
+                })
+                .when(i != m.highlighted && enabled, |d| {
+                    d.text_color(theme.popover_foreground)
+                })
+                .when(i != m.highlighted && !enabled, |d| {
+                    d.text_color(theme.muted_foreground)
+                })
+                .debug_selector(move || format!("pricer-menu-row-{i}"))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
+                    }
+                })
+                .child(label),
+        );
+    }
+    list
+}
