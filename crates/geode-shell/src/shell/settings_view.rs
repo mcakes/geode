@@ -454,7 +454,7 @@ fn apply_setting(
             // it.
             if value_ix == 0 {
                 shell.set_default_source(None, cx);
-            } else if let Some(name) = shell.fetch_sources.get(value_ix - 1).cloned() {
+            } else if let Some(name) = fetch_source_names(cx).get(value_ix - 1).cloned() {
                 shell.set_default_source(Some(name), cx);
             }
         }
@@ -546,7 +546,11 @@ const WIDTH: f32 = 640.0;
 /// model meets `ShellView`. Called fresh on every render ([`build`]) and
 /// every keystroke ([`handle_key`]); rows are never cached, so a step's
 /// effect (or a config hot reload's) is visible on the very next derive.
-fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
+///
+/// The fetch sources come from the `SeriesSettings` global, the same
+/// value an open timeseries tile reads, so the row and the tiles cannot
+/// disagree about which sources exist.
+fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
     derive_rows(
         &shell.services.theme.names(),
         shell.services.theme.active_name(),
@@ -555,8 +559,18 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
         shell.line_numbers,
         shell.add_direction,
         shell.default_source.as_deref(),
-        &shell.fetch_sources,
+        &fetch_source_names(cx),
     )
+}
+
+/// The configured fetch source names in doc order — the default-source
+/// row's values after `(none)`. The shell publishes the global before
+/// its first render; an absent one reads as no sources rather than a
+/// panic in `render`.
+fn fetch_source_names(cx: &App) -> Vec<String> {
+    cx.try_global::<crate::series::SeriesSettings>()
+        .map(crate::series::SeriesSettings::names)
+        .unwrap_or_default()
 }
 
 /// Open fresh settings state through the shared modal lifecycle, preserving any
@@ -609,7 +623,7 @@ fn handle_key(
     _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return false;
     };
@@ -735,7 +749,7 @@ fn on_row_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
@@ -766,7 +780,7 @@ fn on_value_chip_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
@@ -805,7 +819,7 @@ fn build(
     let Some(state) = shell.settings.as_ref() else {
         return div().into_any_element();
     };
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let theme = cx.theme();
     let row_paint = super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;

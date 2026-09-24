@@ -246,7 +246,6 @@ impl ShellView {
                 .is_none_or(|global| *global != series)
             {
                 self.default_source = series.default_source.clone();
-                self.fetch_sources = series.names();
                 cx.set_global(series);
             }
             // Republish a changed display clock and today's date. This does not

@@ -486,7 +486,6 @@ impl ShellView {
         self.default_source = source.clone();
         let mut series = crate::series::SeriesSettings::from_config(&self.services.config);
         series.default_source = source;
-        self.fetch_sources = series.names();
         cx.set_global(series);
         self.persist_default_source(cx);
         cx.notify();

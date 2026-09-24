@@ -16867,6 +16867,16 @@ run_mutation "series settings: the default source diagnostic names the sources" 
   geode-shell \
   the_default_source_is_read_and_diagnosed
 
+# The default-source row's value list comes from the `SeriesSettings`
+# global, `(none)` first; the pick indexes past it. Off by one, stepping
+# to a source writes its neighbour as the default.
+run_mutation "series settings: the settings row picks the source it shows" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            } else if let Some(name) = fetch_source_names(cx).get(value_ix - 1).cloned() {' \
+  '            } else if let Some(name) = fetch_source_names(cx).get(value_ix).cloned() {' \
+  geode-shell \
+  the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global
+
 # A tile may only name a FETCH-shaped source (a non-directory adapter
 # over a series dataset). Without the shape filter the picker offers the
 # desk's CSV directories and a pick sends a fetch nothing can answer.
