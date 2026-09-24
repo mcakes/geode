@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
 use geode_core::view::ColumnPresentation;
 
-use crate::dialogmode::DialogMode;
+use crate::dialogmode::{self, DialogMode};
 
 /// The one notice every mutating verb on a [`Domain::writable`] `false`
 /// domain shows — `render.rs`'s browse `n` gate, `handle_edit_key`'s
@@ -2709,10 +2709,24 @@ pub struct ObjectDialogState {
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// that field's `InputEvent::Change` subscription. The `Input` owns
     /// the text; this is the pure copy the rows are ranked against. It
-    /// survives leaving filter mode, because the ladder's first rung
-    /// keeps the query applied: leaving a search leaves you on the
-    /// match.
+    /// survives leaving filter mode by `enter`, which applies the search
+    /// and leaves you on the match; `escape` puts
+    /// [`Self::filter_entry_query`] back instead.
     pub query: String,
+    /// What the open stage's query ([`Self::effective_query`]) stood at
+    /// when filter mode was last entered — written only by
+    /// [`Self::enter_filter`] and read only by [`Self::exit_filter`], so
+    /// the `escape` that backs out of a search cannot revert to some
+    /// earlier visit's text.
+    ///
+    /// One field serves both query slots because a filter session can
+    /// never span a stage change: every stage transition sets
+    /// `DialogMode::Normal` explicitly ([`Self::enter_edit`],
+    /// `render::enter_column_stage`, `render::enter_values_stage`), so
+    /// the snapshot is always applied to the slot it was taken from. A
+    /// future transition that preserved `Filter` would revert one
+    /// stage's query to another stage's text.
+    pub filter_entry_query: String,
     /// `Normal` on open — bare letters are verbs, and the shared filter
     /// input is left blurred so they reach [`render::handle_key`] rather
     /// than being typed.
@@ -2772,6 +2786,7 @@ impl ObjectDialogState {
             stage: Stage::Browse,
             selected: 0,
             query: String::new(),
+            filter_entry_query: String::new(),
             mode: DialogMode::Normal,
             notice: None,
             click_opened_stage: false,
@@ -2850,7 +2865,8 @@ impl ObjectDialogState {
     /// leave an invisible stale filter when returning to browse.
     pub fn set_query(&mut self, query: String) {
         // Edit, Column, and Values share the draft's query and selection. Keep the
-        // stage sets here, in `effective_query`, and in `effective_selected` equal;
+        // stage sets here, in `effective_query`/`effective_selected`, and in their
+        // mutable counterparts equal;
         // otherwise the input can paint one filter while bulk changes use another.
         if matches!(
             self.stage,
@@ -2880,6 +2896,62 @@ impl ObjectDialogState {
         }
     }
 
+    /// The open stage's query slot itself, for the two transitions that
+    /// rewrite it. Same slot rule as [`Self::effective_query`], written
+    /// once here rather than at each call site, because a transition that
+    /// picked the wrong slot would revert a query nobody was filtering
+    /// by and leave the visible one standing.
+    fn effective_query_mut(&mut self) -> &mut String {
+        match (&self.stage, self.draft.as_mut()) {
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                &mut draft.query
+            }
+            _ => &mut self.query,
+        }
+    }
+
+    /// `/`: enter filter mode over the open stage's query, remembering
+    /// what it stood at so `escape` can put it back. The one door for
+    /// each stage's `/` and the filter row's click alike — a call site
+    /// that assigned [`DialogMode::Filter`] itself would leave the
+    /// snapshot from some earlier visit in place.
+    ///
+    /// The value field's own use of `DialogMode::Filter`
+    /// (`render::open_text_field`) deliberately does NOT come through
+    /// here: a field is text being typed, not a search, and its keys are
+    /// claimed by `render`'s `text_entry` branch before the filter
+    /// branch can read this snapshot at all.
+    pub fn enter_filter(&mut self) {
+        // Mode and snapshot are moved out and back so the query slot can
+        // be read beside them, the same trick `exit_filter` uses —
+        // rather than cloning the query on every `/`.
+        let mut mode = self.mode;
+        let mut entry = std::mem::take(&mut self.filter_entry_query);
+        dialogmode::enter_filter(&mut mode, &mut entry, self.effective_query());
+        self.mode = mode;
+        self.filter_entry_query = entry;
+    }
+
+    /// Leave filter mode: `enter` keeps the query as typed, `escape`
+    /// puts back the one [`Self::enter_filter`] recorded. Returns whether the query
+    /// changed — with the open
+    /// stage's cursor already moved to the top of the re-expanded list,
+    /// leaving the caller only the viewport to scroll. An `escape` with
+    /// nothing typed changes no text and so moves no cursor.
+    pub fn exit_filter(&mut self, exit: dialogmode::FilterExit) -> bool {
+        // The snapshot is moved out and back so the query slot can be
+        // borrowed mutably beside it; both live on `self`.
+        let entry = std::mem::take(&mut self.filter_entry_query);
+        let mut mode = self.mode;
+        let changed = dialogmode::exit_filter(&mut mode, &entry, self.effective_query_mut(), exit);
+        self.mode = mode;
+        self.filter_entry_query = entry;
+        if changed {
+            *self.effective_selected_mut() = 0;
+        }
+        changed
+    }
+
     /// The cursor of the open stage, in the same slot rule as
     /// [`Self::effective_query`]: the draft's in the edit, column and
     /// values stages, the state's own otherwise. What the change
@@ -2893,6 +2965,21 @@ impl ObjectDialogState {
                 draft.selected
             }
             _ => self.selected,
+        }
+    }
+
+    /// The open stage's cursor slot itself, for [`Self::exit_filter`]'s
+    /// move to the top of a list that changed under it. The `_mut`
+    /// sibling of [`Self::effective_selected`], written beside it rather
+    /// than inlined at the call site so the stage list stays in one
+    /// greppable place — see [`Self::set_query`] for what drifting apart
+    /// costs.
+    fn effective_selected_mut(&mut self) -> &mut usize {
+        match (&self.stage, self.draft.as_mut()) {
+            (Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }, Some(draft)) => {
+                &mut draft.selected
+            }
+            _ => &mut self.selected,
         }
     }
 

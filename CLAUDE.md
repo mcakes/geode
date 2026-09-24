@@ -81,6 +81,10 @@ CI runs formatting, Clippy, tests, benchmark compilation, and the shell
   tile; application and frame changes use registered actions.
 - Dialogs open through `shell::dialog::open_shell_dialog`. The pure dialog
   draft is the source of truth; `sync_dialog_text` is the text/focus bridge.
+- In object, settings, and keybinding dialog filters, Escape restores the entry
+  query and bare Enter keeps the typed query; neither opens a row or commits.
+  Use `dialogmode::{filter_exit, enter_filter, exit_filter}` for keyboard and
+  pointer transitions. Value fields, naming, and settings choices own their keys.
 - A surface dropping a focused input blurs it first. Tile focus movement arms
   the shell's focus restoration path.
 - Repeated elements use stable domain-derived IDs. Theme tokens and the rem

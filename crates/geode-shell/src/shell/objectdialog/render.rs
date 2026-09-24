@@ -179,10 +179,11 @@ fn handle_key(
 }
 
 /// Browse key routing. Normal mode consumes stray keys and uses the Escape ladder;
-/// Filter mode leaves printable text to the input and keeps the query when Escape
-/// returns to Normal. Enter opens the selected object in either mode. Tab is consumed
-/// so it cannot insert a literal tab into the filter. The ladder's close rung remains
-/// unclaimed for the shell's modal handler.
+/// Filter mode leaves printable text to the input. Escape restores the entry query;
+/// bare Enter keeps the typed query. Both return to Normal without opening a row.
+/// Normal-mode Enter opens the selected object. Tab is consumed so it cannot insert
+/// a literal tab into the filter. The ladder's close rung remains unclaimed for the
+/// shell's modal handler.
 fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     let rows = derive_rows(shell);
     // read before `state` takes its `&mut` borrow of `shell.object_dialog` below, whose
@@ -288,8 +289,9 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 // The one switch, thrown the other way — a pure mutation:
                 // `dialog::sync_dialog_text` gives the filter focus on
                 // this handler's return, and printable keys become text
-                // again.
-                state.mode = DialogMode::Filter;
+                // again. Through `enter_filter` so the query is recorded
+                // for the `escape` that backs out of the search.
+                state.enter_filter();
             }
             NormalCommand::Commit => {
                 open_selected(shell, cx);
@@ -346,25 +348,23 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
 
     // ---- Filter mode -------------------------------------------------
 
-    if ks.key == "escape" {
-        // The ladder's first rung, which must be claimed (`true`):
-        // falling through would close the whole dialog on the escape that
-        // was only meant to leave the search. The query stays applied;
-        // the blur `dialog::sync_dialog_text` performs on this handler's
-        // return is what makes the letters motions again.
-        state.mode = DialogMode::Normal;
+    if let Some(exit) = dialogmode::filter_exit(ks) {
+        // The ladder's first rung and its twin, both claimed (`true`):
+        // falling through on `escape` would close the whole dialog on the
+        // keystroke that was only meant to leave the search. `escape`
+        // puts the entry query back, `enter` keeps what was typed, and
+        // neither opens the row under the cursor — that is normal mode's
+        // own `enter`, one keystroke later. The
+        // blur `dialog::sync_dialog_text` performs on this handler's
+        // return is what makes the letters motions again, and it writes
+        // whichever query survives back into the `Input`.
+        if state.exit_filter(exit) {
+            // The list re-expands under a scroll offset still parked
+            // where the narrowed list left it; `exit_filter` has already
+            // put the cursor on the top match.
+            shell.object_dialog_scroll.scroll_to_item(0);
+        }
         cx.notify();
-        return true;
-    }
-
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        // `enter` is `NormalCommand::Commit`, and normal mode routes it
-        // to exactly the same place (the `Commit` arm above). Claimed
-        // here so the two modes open an object the same way — the
-        // keybinding dialog's own `enter` branch is what this mirrors,
-        // and a routing difference between the two dialogs is a
-        // difference somebody eventually has to debug.
-        open_selected(shell, cx);
         return true;
     }
 
@@ -1039,8 +1039,11 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// routes navigation and stepping while leaving text to the input. Normal mode uses the
 /// command table and consumes unrecognized keys.
 ///
-/// Escape leaves filtering, clears a query, returns to a parent stage, or closes
-/// according to the shared ladder. Closing or going back does not cancel queued edits.
+/// In filter mode, Escape restores the entry query and bare Enter keeps the typed
+/// query; both return to Normal without opening or committing a row. Value fields
+/// handle their own commit/cancel keys before filter routing. Normal-mode Escape
+/// clears a query, returns to a parent stage, or closes according to the shared
+/// ladder. Closing or going back does not cancel queued edits.
 /// Changes normally revalidate before committing. Reordering commits without
 /// revalidation because current reorderable domains have no order-sensitive draft
 /// diagnostic; adding one would require revalidation at that branch.
@@ -1141,21 +1144,21 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         .as_ref()
         .is_some_and(|state| state.mode == DialogMode::Filter);
     if filtering {
-        if ks.key == "escape" {
-            // `LeaveFilter`: back to normal, keeping the query applied —
-            // leaving a search leaves you on the match. The blur that
-            // makes the letters verbs again is
-            // `dialog::sync_dialog_text`'s, on this handler's return.
-            if let Some(state) = shell.object_dialog.as_mut() {
-                state.mode = DialogMode::Normal;
+        if let Some(exit) = dialogmode::filter_exit(ks) {
+            // Escape restores the entry query; Enter keeps the typed query.
+            // Neither commits or opens a row. Opening a member's column stage
+            // requires another Enter in normal mode. `sync_dialog_text` restores
+            // shell focus on return so letters become commands again.
+            let changed = shell
+                .object_dialog
+                .as_mut()
+                .is_some_and(|state| state.exit_filter(exit));
+            if changed {
+                // `exit_filter` has already put the draft's cursor on the
+                // top match; the viewport follows it for the reason every
+                // other query change does.
+                shell.object_dialog_scroll.scroll_to_item(0);
             }
-            cx.notify();
-            return true;
-        }
-        if ks.mods == Modifiers::NONE && ks.key == "enter" {
-            // Use the same selected-row commit path in either mode so Enter cannot
-            // behave differently under a filter.
-            commit_selected_row(shell, cx);
             cx.notify();
             return true;
         }
@@ -1223,9 +1226,9 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         });
         match step {
             Some(EscapeStep::ClearQuery) => {
-                // Reachable now: a filter typed into the edit stage's own query, then
-                // `escape` twice — the first rung (handled above, in the `filtering`
-                // branch) leaves filter mode keeping the query; this one drops it.
+                // A query retained by filter-mode Enter clears here. Filter-mode
+                // Escape restores the entry query, so this rung is skipped if the
+                // restored query is empty.
                 if let Some(draft) = draft_mut(shell) {
                     draft.query.clear();
                     draft.selected = 0;
@@ -1412,11 +1415,10 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             ),
         },
         NormalCommand::EnterFilter => {
-            // the same switch browse's own `/` throws, and the same pure mutation —
-            // `dialog::sync_dialog_text` gives the filter focus on this handler's
-            // return.
+            // Snapshot the active stage's query through the shared filter entry.
+            // `dialog::sync_dialog_text` gives the filter focus on return.
             if let Some(state) = shell.object_dialog.as_mut() {
-                state.mode = DialogMode::Filter;
+                state.enter_filter();
             }
         }
         // Use the same field-opening route as the `i` action button.
@@ -1506,7 +1508,7 @@ fn values_stage_target(shell: &ShellView) -> Option<String> {
 }
 
 /// `enter`'s answer for a row with nothing to open
-/// ([`commit_selected_row`]'s fallback, in either mode), and `i`'s for a
+/// ([`commit_selected_row`]'s normal-mode fallback), and `i`'s for a
 /// row it cannot open ([`open_text_field`]): name the verb that DOES
 /// change the selected row, or say the row has none.
 ///
@@ -1584,7 +1586,15 @@ fn open_field(shell: &mut ShellView) {
         && let Some(draft) = state.draft.as_mut()
     {
         draft.begin_chain_entry();
-        state.mode = DialogMode::Filter;
+        // Gated on a field having actually opened, the way
+        // `open_text_field`'s own `Step::Changed` check is:
+        // `begin_chain_entry` returns without setting `text_entry` on a
+        // draft with no `dimensions` field, and filter mode with no
+        // field open means the next `escape` reverts the draft's query
+        // to a filter snapshot instead of cancelling a field.
+        if draft.text_entry.is_some() {
+            state.mode = DialogMode::Filter;
+        }
     }
     // The row list just became the (shorter) completion list with the
     // cursor on row 0; the viewport follows.
@@ -2915,8 +2925,8 @@ fn build(
     // the field, not this handler, would consume.
     let naming = matches!(state.stage, Stage::Naming);
 
-    // Advertise only keys supported by the current stage and mode. Enter opens the
-    // selected object in either mode.
+    // Advertise only keys supported by the current stage and mode. Filter-mode
+    // Enter keeps the query; normal-mode Enter opens the selected object.
     let hints: Vec<Hint> = if state.confirm.is_some() {
         // The edit footer's own three lines: a question on screen is the
         // whole vocabulary until it is answered.
@@ -2975,8 +2985,11 @@ fn build(
                 Hint::new(HintRow::Move, &["up", "down"], "move"),
                 Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-                Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),
-                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+                // Filter exits affect the query only; opening a match requires
+                // another Enter in normal mode.
+                Hint::new(HintRow::Go, &["enter"], "keep the filter")
+                    .selector("objectdialog-hint-enter"),
+                Hint::new(HintRow::Go, &["escape"], "discard the filter"),
             ],
         }
     };
@@ -3812,7 +3825,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if state.domain.writable(&state.stage) {
             hints.extend(change_hint(true));
         }
-        hints.push(Hint::new(HintRow::Go, &["escape"], "back to normal"));
+        // Use the same query-only exit labels as Browse.
+        hints.push(Hint::new(HintRow::Go, &["enter"], "keep the filter"));
+        hints.push(Hint::new(HintRow::Go, &["escape"], "discard the filter"));
         hints
     } else if !state.domain.writable(&state.stage) {
         // a read-only domain's normal-mode vocabulary is reading and filtering alone —

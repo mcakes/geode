@@ -97,6 +97,31 @@ so a dialog opened from mouse-down keeps the focus it assigns. Dialog content
 is built from a borrowed `&ShellView` during render; it must not re-enter the
 entity with `Entity<ShellView>::read` while that entity is already rendering.
 
+## Dialog filtering
+
+Object dialogs (Browse, Edit, Column, and Values), Settings, and Keybindings
+share `dialogmode`'s filter transitions. `/` and a click on the frozen filter
+row both record the current query before focusing the input. Escape restores
+that entry query; bare Enter keeps the edited query. Both leave Filter mode
+without opening a row, committing an edit, starting key capture, or closing
+the dialog. A second Enter in Normal mode performs the selected row's normal
+action where supported: opening an object or nested editor, opening a Settings
+choice, or starting a Keybindings capture.
+
+`enter_filter`, `filter_exit`, and `exit_filter` own the snapshot and key rules;
+`sync_dialog_text` reconciles the resulting query and focus. Escape accepts
+modifiers, while the keep-query Enter must be unmodified. Restoring a different
+query resets selection and scroll to the first match; leaving unchanged text
+keeps selection. In Normal mode, subsequent Escape presses clear a query,
+return from a nested stage, then close the dialog.
+
+Naming, open object value fields, Settings typeahead, and keybinding capture
+have their own commit/cancel handling before filter routing. They can focus
+the same input or use the same mode value without adopting filter-exit
+semantics. Palette, dimension picker, and as-of surfaces likewise keep their
+own interaction rules. See [configuration dialogs](configuration-dialogs.md)
+and [keybinding editing](keymaps.md#editing-unbinding-and-reset).
+
 ## The shared frame
 
 `Frame` is a pure value held in a GPUI entity. It combines the global scope,

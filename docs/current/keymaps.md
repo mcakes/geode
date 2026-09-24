@@ -144,6 +144,14 @@ compiler still participate in the reload gate.
 
 ## Editing, unbinding, and reset
 
+The editor opens in Normal mode. `/` or clicking its frozen filter row enters
+Filter mode and records the current query. Escape restores that query; bare
+Enter keeps what was typed. Both leave filtering without starting a capture
+or changing a binding. A second Enter in Normal mode starts capture on the
+selected match. Capture has its own key handling; the filter exit rules apply
+only while searching the action list. See [dialog filtering](shell.md#dialog-filtering)
+for selection, focus, and Escape behavior shared with other dialogs.
+
 The keybinding editor writes only `<user_dir>/keymap.toml`. It preserves original
 context and key spellings because these identify entries in the source file:
 rendering `mod+h` as `alt+h`, or normalizing predicate whitespace, would target

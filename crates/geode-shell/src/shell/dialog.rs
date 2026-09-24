@@ -716,16 +716,13 @@ pub struct FrozenFilter<'a> {
     pub entity: Entity<ShellView>,
 }
 
-/// §17.1 rule 1: a mouse-down on the frozen filter row is the mouse form
-/// of `/`. A pure mutation — [`sync_dialog_text`] on the handler's return
-/// is what focuses the `Input`. On the keybinding dialog a capture in
-/// progress is cancelled first: a click on a text field is never a
-/// keystroke to bind, and `listening` wins over the mode in
-/// `dialogmode::focus_target`, so leaving it set would keep the keys on
-/// the shell root under a pill reading `filter`. On both modal dialogs
-/// that can arm a confirm (keybindings, object dialog) the click is
-/// dropped while one is armed (spec §20.1): a question owns the keys and
-/// the mouse alike until it is answered.
+/// Enter filter mode from the frozen row's mouse-down. The shared entry helper
+/// snapshots the query exactly as `/` does; [`sync_dialog_text`] reconciles focus
+/// after the handler returns.
+///
+/// Cancel a keybinding capture first so its focus priority cannot keep keys on the
+/// shell root while the dialog displays filter mode. An armed confirmation blocks
+/// this transition until answered.
 pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
     if let Some(state) = shell.keybindings.as_mut() {
         // Spec §20.1: not over an open question.
@@ -733,16 +730,16 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             return;
         }
         state.listening = None;
-        state.mode = DialogMode::Filter;
+        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
     } else if let Some(state) = shell.object_dialog.as_mut() {
-        // Spec §20.1: not over an open question. `build_edit` still paints
-        // the frozen row while a confirm is armed, so the guard lives here.
+        // `build_edit` still paints the frozen row during confirmation, so guard
+        // the transition here as well as in keyboard routing.
         if state.confirm.is_some() {
             return;
         }
-        state.mode = DialogMode::Filter;
+        state.enter_filter();
     } else if let Some(state) = shell.settings.as_mut() {
-        state.mode = DialogMode::Filter;
+        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
     }
 }
 

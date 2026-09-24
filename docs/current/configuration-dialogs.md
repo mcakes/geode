@@ -21,11 +21,25 @@ the current state after keyboard and pointer actions.
 | Column | Seven presentation fields projected over the same draft; returns to its object |
 | Values | Distinct values for one scope dimension; returns to its scope |
 
-Normal mode leaves the input blurred so bare keys act as commands. Filter
-mode focuses it for text; open value fields use the same input with their own
-commit/cancel behavior. Escape first leaves filter mode or cancels the open
-field, then clears a remaining query, then returns to the parent stage before
-closing. Cancelling typed field text does not cancel earlier queued edits.
+Normal mode leaves the input blurred so bare keys act as commands. In Browse,
+Edit, Column, and Values, `/` or a click on the frozen filter row enters Filter
+mode and records that stage's current query. Each entry takes a fresh snapshot.
+
+While filtering, Escape restores the entry query and bare Enter keeps the
+query as typed. Both return to Normal mode without opening the selected row,
+committing a value, or closing the dialog. If Escape changes the query, the
+selection and viewport return to the first match; an unchanged query preserves
+the selection. After keeping a filter, a second Enter performs the stage's
+normal action: Browse opens the selected object, and eligible Edit rows open
+Column or Values. Other rows retain their ordinary edit instructions.
+
+In Normal mode, Escape clears a remaining query, then returns to the parent
+stage, then closes. Open value fields and Naming handle their keys separately:
+Enter applies or chooses a field value, or validates and creates a name;
+Escape cancels that entry. They do not use the filter snapshot even though
+they focus the same input. Cancelling typed text or reverting a filter does
+not cancel earlier queued edits. The [shared filter contract](shell.md#dialog-filtering)
+also applies to Settings and Keybindings.
 
 Field shapes determine available operations: steps for booleans, choices and
 numbers; typed entry for permitted text/numeric fields; typeahead for choices;

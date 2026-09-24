@@ -604,22 +604,25 @@ fn j_and_k_move_in_the_settings_dialogs_normal_mode(cx: &mut gpui::TestAppContex
     );
 }
 
-/// The ladder, one visible step at a time: filter → normal keeping the
-/// query, → clear the query, → close. A dialog that skipped a rung would
-/// close on the first escape and lose the user's filter with it.
+/// After Enter keeps the settings filter, successive Escape presses clear
+/// the query and close the dialog in separate transitions.
 #[gpui::test]
 fn settings_escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("/ f o n t");
     cx.run_until_parked();
 
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter");
     let (mode, q) = shell.read_with(&cx, |s, _| {
         let st = s.settings.as_ref().unwrap();
         (st.mode, st.query.clone())
     });
     assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
-    assert_eq!(q, "font", "leaving filter must keep the query applied");
+    assert_eq!(q, "font", "enter must keep the query applied");
+    assert!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choice.is_none()),
+        "and must not open the selected row's typeahead on its way out"
+    );
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
         "and must blur the filter, or normal mode's letters would still type"
@@ -644,12 +647,47 @@ fn settings_escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppCon
         "x",
         "the field must have been emptied along with the mirrored query"
     );
-    cx.simulate_keystrokes("escape escape");
+    // Out of that filter session (`enter` keeps the `x`), then clear it.
+    cx.simulate_keystrokes("enter escape");
 
     cx.simulate_keystrokes("escape");
     assert!(
         shell.read_with(&cx, |s, _| s.modal.is_none()),
         "the third closes"
+    );
+}
+
+/// Escape restores the settings filter-entry query in state and Input
+/// without opening a typeahead.
+#[gpui::test]
+fn settings_escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("/ f o n t");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("zz");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    let (mode, query, choosing) = shell.read_with(&cx, |s, _| {
+        let st = s.settings.as_ref().unwrap();
+        (st.mode, st.query.clone(), st.choice.is_some())
+    });
+    assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
+    assert_eq!(query, "font", "escape puts back the entry query");
+    assert!(!choosing, "and opens no typeahead on its way out");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "font",
+        "the field follows the restored query"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "reverting a search never closes the dialog"
     );
 }
 

@@ -1,15 +1,19 @@
-//! The keybinding dialog: every registered action and its effective binding,
-//! editable in place.
+//! The keybinding dialog lists registered actions and their effective bindings, with
+//! rebinding, unbind, and reset operations.
 //!
-//! It opens in normal mode with the shared input blurred, so letters can invoke
-//! verbs such as unbind and reset. `/` enters fuzzy filter mode. Navigation is
-//! shared with other filtered lists; `enter` begins capture. Pure dialog state
-//! owns mode, query, selection, and capture. `dialog::sync_dialog_text` alone
-//! reconciles focus and the shared `InputState` after a transition.
+//! Normal mode keeps the shared input blurred so bare letters act as commands. `/`
+//! enters fuzzy list filtering and captures the entry query. Escape restores that
+//! query; bare Enter keeps the edited query. Both return to Normal without starting
+//! capture or closing the dialog. A subsequent Normal Enter starts capture on the
+//! selected row. Clicking a row can start capture directly.
 //!
-//! Rebinding validates and persists the complete user keymap through the
-//! ordered configuration write path. Rows are always derived from the current
-//! registry and effective keymap rather than cached across a reload.
+//! Capture owns raw keys ahead of list commands: bare Enter commits a nonempty sequence
+//! and bare Escape cancels. Pure dialog state owns mode, query, selection, and capture;
+//! `dialog::sync_dialog_text` reconciles focus and input afterward.
+//!
+//! Rebinding validates and persists the complete user keymap through the ordered
+//! configuration writer. Rows derive from the current registry and effective keymap
+//! rather than being cached across reloads.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -203,11 +207,8 @@ pub fn user_binding_count(bindings: &[Binding]) -> usize {
     bindings.iter().filter(|b| b.layer == Layer::User).count()
 }
 
-/// Persistent state for one open keybinding dialog session — the
-/// analogue of `palette::PaletteState`. Holds no `gpui` types (see the
-/// module doc's "Architecture" section for why the scroll handle lives
-/// beside this instead of inside it), so every transition here is
-/// unit-testable without a window.
+/// Pure state for one open keybinding dialog. The scroll handle stays on the shell,
+/// keeping state transitions testable without a window.
 #[derive(Debug)]
 pub struct KeybindingsState {
     /// Index into the **filtered** row list ([`visible_rows`]), not into
@@ -216,32 +217,20 @@ pub struct KeybindingsState {
     /// larger or counted step — spec §20.5). Row identity for clicks and
     /// rebinds is resolved through `visible_rows(..)[selected].row`.
     pub selected: usize,
-    /// `Some(pending)` while listening for a new binding — `pending` is
-    /// the keystroke sequence captured so far, appended to by
-    /// [`press_while_listening`] on every keystroke except a bare
-    /// `enter`/`escape`. `None` in ordinary list-navigation mode. While
-    /// this is `Some`, `ShellView::dialog_input` is blurred — not by any
-    /// site here, but because `dialogmode::focus_target` reads this ahead
-    /// of the mode and [`dialog::sync_dialog_text`] applies it — so raw
-    /// keystrokes reach this dialog instead of the filter (see the module
-    /// doc's "Rebind capture" note).
+    /// Captured sequence, extended by every key except bare Enter/Escape. Capture owns
+    /// routing before list-filter exits and forces the shared input to blur through
+    /// `sync_dialog_text`, so letters arrive as raw binding keys.
     pub listening: Option<Vec<Keystroke>>,
-    /// The filter query, mirrored here from `ShellView::dialog_input` by
-    /// the `InputEvent::Change` subscription in `ShellView::new`. The
-    /// `Input` owns the text; this is the pure copy the row list is
-    /// ranked against. It survives leaving filter mode — the first rung
-    /// of the `escape` ladder keeps the query applied, because leaving a
-    /// search should leave you on the match, not undo the search.
+    /// List-filter query mirrored from input changes and used to rank rows. Bare Enter
+    /// keeps it when leaving Filter; Escape restores `filter_entry_query`. These exits
+    /// neither start capture nor close the dialog.
     pub query: String,
-    /// Which mode this dialog is in.
-    /// `Normal` on open: bare letters are verbs, and `dialog_input` is
-    /// blurred in favour of the shell root so they reach [`handle_key`] —
-    /// the same switch rebind capture has always performed, held open
-    /// rather than momentary. This field is the whole truth about the
-    /// focused surface: nothing in this module moves focus itself, and
-    /// [`dialog::sync_dialog_text`] reconciles gpui to this after every
-    /// transition (spec §16.1), so the focused surface and the painted
-    /// mode cannot disagree.
+    /// Query captured on entering list Filter and restored by Escape. This snapshot
+    /// does not restore selection or participate in capture Enter/Escape handling.
+    pub filter_entry_query: String,
+    /// List mode, Normal on open. Normal sends commands to the shell root; Filter
+    /// accepts text input. Capture takes precedence over either mode and forces input
+    /// blur. `sync_dialog_text` reconciles these states with actual focus.
     pub mode: DialogMode,
     /// A one-line report about the keystroke *just* pressed, painted in
     /// the footer above the hint row and cleared by the next normal-mode
@@ -276,6 +265,7 @@ impl Default for KeybindingsState {
             selected: 0,
             listening: None,
             query: String::new(),
+            filter_entry_query: String::new(),
             mode: DialogMode::Normal,
             notice: None,
             confirm: None,
@@ -385,12 +375,9 @@ pub fn press_while_listening(pending: &mut Vec<Keystroke>, ks: &Keystroke) -> Ca
     CaptureOutcome::Continue
 }
 
-/// §17.1 rule 2: a click on a row is the mouse form of moving the cursor
-/// there and pressing `enter` — it selects and starts listening in one
-/// step. A click on a different row mid-capture retargets the capture;
-/// a click on the same row restarts it with the partial sequence
-/// dropped. (Until 2026-09-12 the first click only selected and a
-/// second on the same row listened — one step short for a mouse user.)
+/// Select a clicked row and start a fresh capture, discarding any partial sequence.
+/// This works in either list mode; keyboard Enter starts capture only in Normal, after
+/// accepting or cancelling any active list-filter session.
 pub fn click_listens(state: &mut KeybindingsState, clicked_ix: usize) {
     state.selected = clicked_ix;
     state.listening = Some(Vec::new());
@@ -557,63 +544,20 @@ fn arm_verb(
     }
 }
 
-/// The [`dialog::ModalKeyHandler`] for this dialog. Priority order:
+/// Route pending confirmation and capture before list-mode commands. Capture consumes
+/// raw keys, including its own bare Enter/Escape controls, so they cannot also accept
+/// or cancel a list filter.
 ///
-/// 1. while listening, every keystroke is offered to
-///    [`press_while_listening`] and swallowed unconditionally (`true`) —
-///    even `escape`, which must cancel the capture rather than falling
-///    through to `handle_key_down`'s "escape closes the modal". Capture
-///    keeps first refusal deliberately: it is a third, momentary mode
-///    whose whole job is to read raw keystrokes, so routing it through
-///    [`dialogmode::normal_command`] would turn the `j` a user is trying
-///    to bind into a motion;
-/// 2. in [`DialogMode::Normal`], `escape` walks
-///    [`dialogmode::escape_step`]'s ladder and every other keystroke goes
-///    through [`dialogmode::normal_command`] — including keys it does not
-///    claim, which are swallowed (`true`) rather than passed on: normal
-///    mode's contract is that a stray letter does nothing, and letting it
-///    fall through would hand it to whatever the shell does with that key
-///    next;
-/// 3. in [`DialogMode::Filter`] the pre-modal behaviour is unchanged,
-///    with one addition: `escape` leaves filter mode (keeping the query)
-///    instead of closing the dialog;
-/// 4. bare `enter` starts listening on the selected row, which blurs the
-///    filter input — through [`dialog::sync_dialog_text`] on this
-///    handler's return, not here — so the capture sees raw keystrokes
-///    (see the module doc's "Rebind capture"). Reached as
-///    [`NormalCommand::Commit`] in normal mode and directly in filter
-///    mode;
-/// 5. [`listfilter::nav_command`] motions move the selection within the
-///    *filtered* list, in both modes;
-/// 6. bare `tab`/`shift+tab` are claimed and dropped — returns `true`
-///    without acting. They are the settings dialog's stepping keys,
-///    reserved and deliberately inert here. Claiming them (not just
-///    falling through) is what actually makes them inert: with a focused
-///    `Input`, an unclaimed key continues to the window's text-input
-///    phase (spec §3) rather than simply vanishing, and
-///    `InputState::normalize_input` strips only `\n`/`\r` from an
-///    inserted edit — not `\t` — so an unclaimed `tab` would land in the
-///    filter as a literal tab character and collapse the list to "no
-///    matches";
-/// 7. in filter mode, everything else returns `false`, unhandled — which
-///    for a printable key is exactly right: the modal branch in
-///    `handle_key_down` only stops propagation for keys this handler
-///    claims, so an unclaimed character goes on to the focused `Input`'s
-///    own text-insertion phase (the same reasoning
-///    `handle_palette_key`'s catch-all arm carries). The one other
-///    `false` is the ladder's last rung — `escape` in normal mode with an
-///    empty query — which is how the shell's own modal branch gets to
-///    close the dialog.
+/// Normal Enter starts capture; Normal Escape clears an applied query or lets the shell
+/// close. Filter Escape restores the entry query and bare Enter keeps the edited query.
+/// Both filter exits return to Normal without capture or closure. Restoring different
+/// text resets selection and scrolling; keeping it retains the current match.
+/// Navigation remains bounded by the filtered rows.
 ///
-/// A commit that exactly re-captures the row's already-effective binding
-/// ([`is_same_key_recapture`]) skips [`spawn_rebind`] entirely — nothing
-/// would change on disk, so there's nothing to write.
-///
-/// Every arm here is a **pure mutation** of `KeybindingsState` (spec
-/// §16.1): none touches gpui focus or the shared `Input`'s text, which is
-/// why `window` is unused. `ShellView::handle_key_down` calls
-/// [`dialog::sync_dialog_text`] the moment this returns, claimed or not,
-/// and that is the one place either is moved.
+/// Consume Tab/Shift-Tab so they cannot insert literal tabs into the focused filter.
+/// Other Filter input passes through for text entry; unrecognized Normal commands are
+/// consumed. Re-capturing the effective binding skips persistence. Focus and input text
+/// are reconciled by `sync_dialog_text` after this handler.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -651,10 +595,9 @@ fn handle_key(
 
     if let Some(pending) = state.listening.as_mut() {
         let outcome = press_while_listening(pending, ks);
-        // Both ending arms are pure: clearing `listening` is the whole
-        // transition, and `dialog::sync_dialog_text` hands focus back to
-        // whichever surface the *underlying* mode owns (see the module
-        // doc's "Rebind capture") on this handler's return.
+        // Ending capture clears `listening`; shared input synchronization restores
+        // focus according to the underlying list mode. A capture started by clicking in
+        // Filter therefore returns to its filter input.
         match outcome {
             CaptureOutcome::Continue => {}
             CaptureOutcome::Cancel => {
@@ -751,8 +694,13 @@ fn handle_key(
                 // The one switch, thrown the other way — a pure mutation:
                 // `dialog::sync_dialog_text` gives the filter focus on
                 // this handler's return, and printable keys become text
-                // again.
-                state.mode = DialogMode::Filter;
+                // again. Through `enter_filter` so the query is recorded
+                // for the `escape` that backs out of the search.
+                dialogmode::enter_filter(
+                    &mut state.mode,
+                    &mut state.filter_entry_query,
+                    &state.query,
+                );
             }
             NormalCommand::Commit => {
                 begin_capture(state, visible.len());
@@ -774,25 +722,26 @@ fn handle_key(
         return true;
     }
 
-    // ---- Filter mode: the pre-modal behaviour, unchanged -------------
+    // ---- Filter mode -------------------------------------------------
 
-    if ks.key == "escape" {
-        // The ladder's first rung ([`EscapeStep::LeaveFilter`]), which
-        // must be claimed (`true`) — falling through would close the
-        // whole dialog on the escape that was only meant to leave the
-        // search. The query stays applied; the blur
-        // `dialog::sync_dialog_text` performs on this handler's return is
-        // what makes the letters verbs again. Modifier-agnostic for the
-        // reason given at the normal-mode guard above: a `shift+escape`
-        // that skipped straight to the close rung would lose the user's
-        // filter.
-        state.mode = DialogMode::Normal;
-        cx.notify();
-        return true;
-    }
-
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        begin_capture(state, visible.len());
+    if let Some(exit) = dialogmode::filter_exit(ks) {
+        // Claim both list-filter exits: Escape restores entry text and bare Enter keeps
+        // the current query. Return to Normal without starting capture or closing.
+        // Shared input synchronization restores text and blurs the input afterward.
+        let changed = dialogmode::exit_filter(
+            &mut state.mode,
+            &state.filter_entry_query,
+            &mut state.query,
+            exit,
+        );
+        if changed {
+            // The list re-expands under a scroll offset still parked
+            // where the narrowed list left it, so the cursor goes to the
+            // top match and the viewport follows — exactly what the
+            // `ClearQuery` rung does for the same reason.
+            state.selected = 0;
+            shell.keybindings_scroll.scroll_to_item(0);
+        }
         cx.notify();
         return true;
     }
@@ -805,14 +754,8 @@ fn handle_key(
         return true;
     }
 
-    // `tab`/`shift+tab` are reserved (they step values in the settings
-    // dialog, which has nothing to step here) — claimed and dropped
-    // rather than left unhandled, because leaving them unhandled would
-    // NOT make them inert: an unclaimed key continues past this handler
-    // to the filter's own text-input phase (see this function's own doc
-    // comment, item 7 — Task 3's renumbering moved that reasoning off
-    // item 4, which is now bare `enter`), and a literal tab character in
-    // the query would collapse the list to "no matches".
+    // Consume Tab/Shift-Tab without acting. Passing them through would insert a literal
+    // tab into the focused filter and change its matches.
     if ks.mods == Modifiers::NONE && ks.key == "tab" {
         return true;
     }
@@ -829,27 +772,10 @@ fn handle_key(
     false
 }
 
-/// Start a rebind capture on the selected row: the body both modes'
-/// `enter` shares, and the one place the capture's focus contract is
-/// stated.
-///
-/// Setting `listening` is the whole transition: `dialogmode::focus_target`
-/// reads it and hands the keys to the shell root whatever the mode says,
-/// so [`dialog::sync_dialog_text`] performs the blur on the handler's
-/// return. That is what lets the capture see raw keystrokes — with the
-/// filter focused, a bare letter would be consumed as text by
-/// gpui-component's `Input` before ever reaching [`handle_key`] (see the
-/// module doc's "Rebind capture").
-///
-/// A no-op on an empty list — `enter` must not start listening on a row
-/// that is not there (the "no matches" line is not a row).
-///
-/// Extracted rather than inlined twice because Task 4 edits the
-/// normal-mode `match` this is called from: two copies of a body that
-/// must stay identical would be a drift risk at exactly the wrong
-/// moment. Takes `state` rather than `&mut ShellView`, because every
-/// caller is already holding a `&mut` borrow of `shell.keybindings` when
-/// it gets here.
+/// Start capture on the selected row from Normal Enter. An empty filtered list has no
+/// target. Setting `listening` makes focus synchronization blur the input regardless of
+/// list mode, allowing raw keys to reach capture. Filter Enter returns to Normal first
+/// and does not call this function.
 fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
     if visible_len == 0 {
         return;
@@ -857,18 +783,10 @@ fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
     state.listening = Some(Vec::new());
 }
 
-/// Selection/listening logic for a real mouse click on the row for
-/// `clicked` (`ActionId`, resolved back to a position in the *filtered*
-/// list against freshly derived rows — rows are never cached, see the
-/// module doc). The gpui-facing wrapper around the pure
-/// [`click_listens`], and it moves focus the same way [`handle_key`]
-/// does — through [`dialog::sync_dialog_text`], the row-click seam of
-/// that function's five seam classes (spec §16.1/§16.6/§17.1 rule 3), which a click
-/// needs because it never passes through the key path at all. Every
-/// click now starts listening (§17.1 rule 2), so this always blurs the
-/// filter to let the capture see raw keystrokes — focusing the filter
-/// unconditionally here (as this did before the dialog went modal) would
-/// let a mouse click silently defeat normal mode.
+/// Resolve the clicked ActionId against freshly derived filtered rows and start a fresh
+/// capture through `click_listens`. Unlike list-filter Enter, a row click can start
+/// capture directly in either list mode. Synchronize input and focus afterward so
+/// capture receives raw keys.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &ActionId,
@@ -1546,8 +1464,10 @@ fn build(
                 Hint::new(HintRow::Move, &["up", "down"], "move"),
                 Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
-                Hint::new(HintRow::Edit, &["enter"], "rebind the selected row"),
-                Hint::new(HintRow::Go, &["escape"], "back to normal"),
+                // Both keys return to Normal without capture: keep the query or restore
+                // its entry text. A subsequent Normal Enter starts rebinding.
+                Hint::new(HintRow::Go, &["enter"], "keep the filter"),
+                Hint::new(HintRow::Go, &["escape"], "discard the filter"),
             ],
         }
     };

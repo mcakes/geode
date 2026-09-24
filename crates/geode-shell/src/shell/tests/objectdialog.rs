@@ -151,10 +151,8 @@ fn j_and_k_move_the_selection_in_normal_mode(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// `/` narrows the list, and then `escape` walks the ladder one visible
-/// rung at a time: leave filter keeping the query, clear the query,
-/// close. A dialog that skipped a rung would close on the first escape
-/// and lose the user's filter with it.
+/// After Enter keeps a filter and returns to normal mode, successive Escape
+/// presses clear the query and close the dialog, one transition at a time.
 #[gpui::test]
 fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -183,16 +181,21 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
          the painted list, not just be stored"
     );
 
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter");
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.mode),
         DialogMode::Normal,
-        "the first escape leaves filter mode"
+        "enter leaves filter mode"
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.query.clone()),
         "wide",
-        "keeping the query applied: leaving a search leaves you on the match"
+        "keeping the query applied: this is how a search is applied"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "and opening nothing — the edit stage is one keystroke further on"
     );
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
@@ -227,6 +230,68 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Escape restores the filter-entry query in both list state and Input,
+/// returns to normal mode, and leaves the dialog open.
+#[gpui::test]
+fn escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+
+    // A first search, applied with `enter`.
+    cx.simulate_keystrokes("/ w i d e enter");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "wide");
+
+    // A second search: the query is rubbed out to look for something
+    // else, the cursor moves down the wider list that comes back — and
+    // then the trader changes their mind.
+    cx.simulate_keystrokes("/");
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-row-tree").is_some(),
+        "sanity: rubbing out the query widened the list again"
+    );
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        1,
+        "sanity: the cursor is on a row the restored query will not show"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "escape leaves filter mode"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "wide",
+        "and puts back the query it was entered with"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        0,
+        "with the cursor on the top match of the list that came back"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "wide",
+        "the field is written from the restored query too, or the next \
+         `/` would resume the abandoned search"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-wide").is_some(),
+        "and the row the first search found is on screen again"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "reverting a search never closes the dialog"
+    );
+}
+
 /// The query the user cannot see must not still be ranking the list: a
 /// cleared query has to clear the `Input` itself, not only the mirrored
 /// copy the rows are ranked against.
@@ -235,7 +300,9 @@ fn clearing_the_query_clears_the_field_the_next_filter_session_sees(cx: &mut gpu
     let (shell, mut cx) = open_views_dialog(cx);
     cx.simulate_keystrokes("/ w i d e");
     cx.run_until_parked();
-    cx.simulate_keystrokes("escape escape");
+    // Enter keeps the query; Escape then clears it from normal mode.
+    // Escape directly from filter mode would instead restore the entry query.
+    cx.simulate_keystrokes("enter escape");
     cx.run_until_parked();
 
     cx.simulate_keystrokes("/");
@@ -1534,12 +1601,9 @@ fn delete_and_revert_refuse_on_an_object_no_user_layer_defines(cx: &mut gpui::Te
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
-/// An object opened out of a **filtered** list still gets the edit
-/// stage's own `escape`. With the mode left in `Filter`, `escape_step`
-/// takes the `LeaveFilter` rung, which this stage does not claim — so the
-/// shell's modal branch closed the whole dialog and the draft went with
-/// it, unconfirmed. Found by reading the ladder, not by the tests above:
-/// every one of them opens the object from normal mode.
+/// Opening an object by clicking a filtered row enters its edit stage.
+/// Escape must return to browsing without closing the whole dialog or losing
+/// the draft. Filter-mode Enter only keeps the query and leaves filtering.
 #[gpui::test]
 fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1550,14 +1614,13 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
 
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
+    click_selector(&mut cx, "objectdialog-row-tree");
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Edit {
             object: "tree".to_string()
         },
-        "enter opens the object from filter mode too"
+        "a click opens the object from filter mode too"
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.mode),
@@ -2716,7 +2779,7 @@ fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppCont
 /// `state.query`; the shared `Input` is a second, separate buffer
 /// (`set_value` does not emit the `Change` event that mirroring relies
 /// on), and the natural sequence — filter to check whether a name is
-/// taken, `escape` back to normal mode (which keeps the query applied),
+/// taken, `enter` back to normal mode (which keeps the query applied),
 /// then `n` — used to leave "tr" visibly sitting in a field `state.query`
 /// no longer knew about. Typing `ee` into that stale text used to create
 /// `tree` (an existing desk view, forked) instead of `ee`.
@@ -2730,12 +2793,12 @@ fn n_opens_an_empty_name_field_even_after_a_browse_filter(cx: &mut gpui::TestApp
     cx.simulate_keystrokes("t r");
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "tr");
-    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.query.clone()),
         "tr",
-        "leaving filter mode keeps the query applied"
+        "leaving filter mode by enter keeps the query applied"
     );
 
     cx.simulate_keystrokes("n");
@@ -4241,10 +4304,10 @@ fn i_on_views_still_gives_the_read_only_notice(cx: &mut gpui::TestAppContext) {
 
 /// `/` filters the edit stage's own rows, exactly as it does in browse:
 /// the field labels are ranked against the query, a hidden row's element
-/// does not paint, `escape` walks the whole ladder one visible rung at a
-/// time (leave filter keeping the query, clear the query, back a stage),
-/// and every verb along the way still acts on the row the trader is
-/// actually looking at.
+/// does not paint, `enter` leaves filter mode keeping the query and then
+/// `escape` walks the rest of the ladder one visible rung at a time
+/// (clear the query, back a stage), and every verb along the way still
+/// acts on the row the trader is actually looking at.
 #[gpui::test]
 fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4263,8 +4326,8 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
     );
     assert!(cx.debug_bounds("objectdialog-field-dataset").is_none());
 
-    // Leave filter, keep query.
-    cx.simulate_keystrokes("escape");
+    // Leave filter mode with Enter, retaining the query.
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(
@@ -4324,6 +4387,55 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
             "the cursor is back on the object just edited"
         );
     });
+}
+
+/// Escape restores the edit stage's own query and leaves that stage open.
+/// The browse query is separate state and must remain unchanged.
+#[gpui::test]
+fn escape_reverts_the_edit_stages_own_query(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("npv");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.query == "npv"),
+        "sanity: enter kept the edit stage's filter"
+    );
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("zzz");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(
+        edit_draft(&shell, &cx, |d| d.query == "npv"),
+        "escape puts back the query the second filter session started from"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.selected == 0),
+        "with the cursor on the top match of the list that came back"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "npv",
+        "and the field follows the restored draft query"
+    );
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Edit { .. }
+        ),
+        "reverting a search never leaves the stage"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.query.clone()).is_empty(),
+        "and never touches the browse query's own slot"
+    );
 }
 
 /// The mouse's half of §18.3's one switch. Clicking a row while the
@@ -4986,6 +5098,15 @@ fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestA
     cx.simulate_input("w");
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "w");
+    // Mouse entry captures the same query snapshot as `/`.
+    // The entry query here is empty, so Escape restores an empty filter.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "");
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and the dialog is still open — this was the revert rung, not a close"
+    );
 }
 
 /// And on the edit stage, whose frozen row is the draft's own (§18.3).
@@ -6645,11 +6766,20 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         Some(objectdialog::EditRow::Item { .. })
     )));
 
-    // And `enter` means the same thing in filter mode, which is how a
-    // trader reaches one column of a thirty-column view.
+    // From a filtered column list, the first Enter keeps the query and
+    // returns to normal mode; a second Enter opens the selected column.
     cx.simulate_keystrokes("/");
     cx.simulate_input("npv");
     cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Edit { .. }
+        ),
+        "the first enter only leaves the filter"
+    );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(matches!(
@@ -8486,7 +8616,8 @@ fn a_browse_removal_keeps_the_filter_applied(cx: &mut gpui::TestAppContext) {
         dir.path(),
         "config::sources",
     );
-    cx.simulate_keystrokes("/ m i n e escape");
+    // Enter keeps the filter; Escape would restore the empty entry query.
+    cx.simulate_keystrokes("/ m i n e enter");
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "mine");
     assert!(cx.debug_bounds("objectdialog-row-vols").is_none());
@@ -8640,7 +8771,7 @@ fn escape_under_a_browse_confirm_disarms_and_keeps_the_query(cx: &mut gpui::Test
         dir.path(),
         "config::sources",
     );
-    cx.simulate_keystrokes("/ m i n e escape d");
+    cx.simulate_keystrokes("/ m i n e enter d");
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-confirm").is_some());
 

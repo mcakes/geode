@@ -1,22 +1,18 @@
-//! The two-mode vocabulary shared by Geode's modal dialogs.
+//! Shared normal/filter modes for modal dialogs, independent of GPUI.
 //!
-//! A modal surface opens in [`DialogMode::Normal`], where no `Input` is
-//! focused and bare letters are verbs; `/` enters [`DialogMode::Filter`],
-//! which is exactly the always-focused filter that ships today. A surface
-//! that has no verbs to reach outside its filter is *filter-only* and
-//! never uses this module at all — the palette, the dimension picker and
-//! the as-of selector use their own filter-only state.
+//! Normal mode routes bare letters to dialog commands. Entering filter mode
+//! snapshots the current query and routes typing to the shared Input. Escape
+//! restores that snapshot; bare Enter keeps the edited query. Either exit returns
+//! to normal mode without acting on the selected row.
 //!
-//! No `gpui` here, in the mould of [`crate::vimnav`] and
-//! [`crate::listfilter`]: feed it shell-native [`Keystroke`]s and
-//! unit-test every transition without a window.
+//! Filter-only surfaces, including the palette, dimension picker, and as-of
+//! selector, own their input state separately and do not use this mode enum.
 
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
 use crate::vimnav::NavCommand;
 
-/// `Modifiers` has no `SHIFT` constant (only `NONE`/`CTRL`/`ALT`/`CMD`,
-/// see `keymap::keystroke`) — this mirrors `vimnav`'s own local `SHIFT`.
+/// Shift without Control, Alt, or Command.
 const SHIFT: Modifiers = Modifiers {
     ctrl: false,
     alt: false,
@@ -24,31 +20,27 @@ const SHIFT: Modifiers = Modifiers {
     cmd: false,
 };
 
-/// Which mode a modal dialog is in. A filter-only surface has no value of
-/// this type at all, rather than being permanently `Filter` — the
-/// distinction matters because such a surface's `escape` closes the modal
-/// instead of walking the ladder.
+/// Mode of a dialog with both commands and a text filter.
+/// Filter-only surfaces manage their own state and escape behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogMode {
     Normal,
     Filter,
 }
 
-/// One rung of the `escape` ladder (spec §5). Each rung changes something
-/// the user can see, so `escape` is never a keystroke that appears inert.
+/// First applicable escape transition: leave filter, clear query, leave stage, close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeStep {
-    /// Filter → normal, **keeping the query applied**: leaving a search
-    /// leaves you on the match, it does not undo the search.
+    /// Return to normal mode and restore the entry query through
+    /// [`FilterExit::Revert`]. Bare Enter instead keeps the edited query.
     LeaveFilter,
     ClearQuery,
     PreviousStage,
     Close,
 }
 
-/// The first rung that applies. `has_previous_stage` is the surface's own
-/// question (4c's `Edit` has one, `Browse` does not); the keybinding
-/// dialog always passes `false`.
+/// Choose the first applicable transition. The caller supplies whether a
+/// previous stage exists; this helper neither changes state nor moves focus.
 pub fn escape_step(mode: DialogMode, query_is_empty: bool, has_previous_stage: bool) -> EscapeStep {
     match mode {
         DialogMode::Filter => EscapeStep::LeaveFilter,
@@ -58,7 +50,61 @@ pub fn escape_step(mode: DialogMode, query_is_empty: bool, has_previous_stage: b
     }
 }
 
-/// Who holds the keyboard while a modal dialog is open (spec §16.3).
+/// Query policy when leaving filter mode. Both choices return to normal mode
+/// without activating the selected row; committing that row is a separate command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterExit {
+    /// Restore the query captured when this filter session began.
+    Revert,
+    /// Retain the edited query while returning bare letters to command handling.
+    Keep,
+}
+
+/// Recognize Escape with any modifiers as revert, and bare Enter as keep.
+/// Other keystrokes return `None` for the caller to route. This helper does not
+/// check the current mode; callers use it only while filtering.
+pub fn filter_exit(ks: &Keystroke) -> Option<FilterExit> {
+    if ks.key == "escape" {
+        return Some(FilterExit::Revert);
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        return Some(FilterExit::Keep);
+    }
+    None
+}
+
+/// Snapshot the current query and enter filter mode. Each call replaces the
+/// snapshot, so callers invoke this on an actual entry transition, including
+/// mouse entry, rather than while already editing the filter.
+pub fn enter_filter(mode: &mut DialogMode, entry: &mut String, query: &str) {
+    entry.clear();
+    entry.push_str(query);
+    *mode = DialogMode::Filter;
+}
+
+/// Set normal mode, restoring the entry query for revert or retaining it for
+/// keep. Return true only when revert changes the query text; a mode change alone
+/// returns false. The caller synchronizes Input/focus and, when text changed,
+/// resets selection and scrolling to match the restored result list.
+pub fn exit_filter(
+    mode: &mut DialogMode,
+    entry: &str,
+    query: &mut String,
+    exit: FilterExit,
+) -> bool {
+    *mode = DialogMode::Normal;
+    match exit {
+        FilterExit::Keep => false,
+        FilterExit::Revert if query == entry => false,
+        FilterExit::Revert => {
+            query.clear();
+            query.push_str(entry);
+            true
+        }
+    }
+}
+
+/// Keyboard owner for a dialog mode and key-capture state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusTarget {
     /// The shared filter `Input`: printable keys are text.
@@ -68,10 +114,9 @@ pub enum FocusTarget {
     Shell,
 }
 
-/// The one decision `dialog::sync_dialog_text` applies. `listening` is the
-/// keybinding dialog's capture state and wins over the mode: a capture
-/// must see every keystroke raw, and a focused `Input` would eat the
-/// printable ones as text before the dialog's handler ran.
+/// Select the focus owner used by `dialog::sync_dialog_text`. Key capture
+/// wins over filter mode so printable keystrokes reach the capture handler
+/// instead of becoming Input text. This helper does not move focus itself.
 pub fn focus_target(mode: DialogMode, listening: bool) -> FocusTarget {
     if listening {
         return FocusTarget::Shell;
@@ -85,26 +130,18 @@ pub fn focus_target(mode: DialogMode, listening: bool) -> FocusTarget {
 /// What a keystroke means in normal mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalCommand {
-    /// Movement, shared with filter mode so one hand learns one set.
+    /// Navigation shared with filter mode.
     Nav(NavCommand),
     EnterFilter,
     Commit,
     Toggle,
-    /// `shift+space`: step the selected row's value backward. The
-    /// vocabulary had a forward step (`Toggle`) and no way back — added
-    /// so a `Number` can be lowered and a `Choice` can reach the option
-    /// just behind it without wrapping all the way around.
+    /// Step the selected value backward with `h`, Shift-Space, or Shift-Tab.
     ToggleBack,
-    /// Move the selected *item* rather than the selection: `shift+j` /
-    /// `shift+k`. This is what replaces the pick-up sub-mode an earlier
-    /// draft of Phase 4c needed when no key was free.
+    /// Move the selected item down/up with Shift-J/Shift-K without moving only selection.
     MoveItem(i32),
     EditText,
-    /// A bare `1`–`9`: a jump to the object that digit names, on a
-    /// surface whose objects are numbered (the Groupings dialog's nine
-    /// slots). Never `0`, which names no slot (`ctrl+0` clears the
-    /// frame's slot rather than selecting one), and never a modified
-    /// digit — `ctrl+3` is the frame's own regroup chord.
+    /// A bare digit 1–9 for numbered objects, such as grouping slots.
+    /// Zero and modified digits are not numbered-object commands.
     Digit(u8),
     /// A bare letter the vocabulary does not claim — the surface's own
     /// verb (`s`, `d`, `r`, `n`) — or the one shifted verb, `shift+r`,
@@ -126,16 +163,10 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
             "j" => Some(NormalCommand::MoveItem(1)),
             "k" => Some(NormalCommand::MoveItem(-1)),
             "g" => Some(NormalCommand::Nav(NavCommand::Bottom)),
-            // `shift+tab` joins `shift+space` (user ruling 2026-09-13):
-            // the settings dialog has stepped on `tab`/`shift+tab` since
-            // before it went modal, and a hand that learned them there
-            // must not find them dead in the config dialogs.
+            // Shift-Tab and Shift-Space share backward value stepping.
             "space" | "tab" => Some(NormalCommand::ToggleBack),
-            // The one shifted verb: `shift+r` is "reset all" beside the
-            // keybindings dialog's `r` (2026-09-19). Spelled as the
-            // uppercase letter so a surface matches `Verb('R')` the way
-            // it matches `Verb('r')`; a surface with no `R` names it
-            // like any other letter it has no verb for.
+            // Represent Shift-R as the uppercase verb for reset-all.
+            // Surfaces without that verb can refuse it like other unclaimed verbs.
             "r" => Some(NormalCommand::Verb('R')),
             _ => None,
         };
@@ -149,13 +180,8 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
         "g" => Some(NormalCommand::Nav(NavCommand::Top)),
         "/" => Some(NormalCommand::EnterFilter),
         "enter" => Some(NormalCommand::Commit),
-        // The forward step and its three aliases (user ruling
-        // 2026-09-13). `l`/`h` are the vim pair a hand already reaches
-        // for beside `j`/`k`, and `tab`/`shift+tab` are what the settings
-        // dialog has always stepped with; claiming them here rather than
-        // per surface is what makes them work in every modal dialog at
-        // once. Neither `h` nor `l` reaches `Verb` any more — no surface
-        // claimed either letter, which is what made this safe.
+        // Share value-step aliases across dialogs. Bare h/l are commands,
+        // so they do not fall through to surface-specific letter verbs.
         "space" | "l" | "tab" => Some(NormalCommand::Toggle),
         "h" => Some(NormalCommand::ToggleBack),
         "i" => Some(NormalCommand::EditText),
@@ -196,8 +222,7 @@ mod tests {
         ks(key, Modifiers::NONE)
     }
 
-    /// The ladder of spec §5: every rung changes something visible, so a
-    /// dialog never eats an `escape` that appears to do nothing.
+    /// Escape chooses one transition at a time, in the documented priority order.
     #[test]
     fn the_escape_ladder_takes_the_first_step_that_applies() {
         use EscapeStep::*;
@@ -210,6 +235,86 @@ mod tests {
         assert_eq!(escape_step(DialogMode::Normal, true, true), PreviousStage);
         // Then, and only then, the modal closes.
         assert_eq!(escape_step(DialogMode::Normal, true, false), Close);
+    }
+
+    /// Escape reverts regardless of modifiers; only unmodified Enter keeps the query.
+    #[test]
+    fn escape_reverts_the_filter_and_enter_keeps_it() {
+        assert_eq!(filter_exit(&bare("escape")), Some(FilterExit::Revert));
+        assert_eq!(filter_exit(&ks("escape", SHIFT)), Some(FilterExit::Revert));
+        assert_eq!(filter_exit(&bare("enter")), Some(FilterExit::Keep));
+        assert_eq!(filter_exit(&ks("enter", Modifiers::CTRL)), None);
+        // Everything else is the filter `Input`'s, not this table's.
+        assert_eq!(filter_exit(&bare("j")), None);
+        assert_eq!(filter_exit(&bare("/")), None);
+    }
+
+    /// Reverting changed text reports true so callers can reset selection and scroll.
+    #[test]
+    fn leaving_by_escape_restores_the_query_entry_recorded() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = "vol".to_string();
+        enter_filter(&mut mode, &mut entry, &query);
+        assert_eq!(mode, DialogMode::Filter);
+        query.push_str("atility");
+        assert!(exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Revert
+        ));
+        assert_eq!(mode, DialogMode::Normal);
+        assert_eq!(query, "vol");
+    }
+
+    /// Keeping a filter returns to normal mode without changing the query.
+    #[test]
+    fn leaving_by_enter_keeps_what_filter_mode_typed() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = String::new();
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("delta");
+        assert!(!exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Keep
+        ));
+        assert_eq!(mode, DialogMode::Normal);
+        assert_eq!(query, "delta");
+    }
+
+    /// Reverting identical text reports no change so callers can retain the cursor.
+    #[test]
+    fn an_escape_with_nothing_typed_reports_no_change() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = "gamma".to_string();
+        enter_filter(&mut mode, &mut entry, &query);
+        assert!(!exit_filter(
+            &mut mode,
+            &entry,
+            &mut query,
+            FilterExit::Revert
+        ));
+        assert_eq!(query, "gamma");
+    }
+
+    /// Each filter entry snapshots the query retained by the previous session.
+    #[test]
+    fn each_entry_into_filter_mode_takes_its_own_snapshot() {
+        let mut mode = DialogMode::Normal;
+        let mut entry = String::new();
+        let mut query = String::new();
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("vega");
+        exit_filter(&mut mode, &entry, &mut query, FilterExit::Keep);
+        enter_filter(&mut mode, &mut entry, &query);
+        query.push_str("-hedge");
+        exit_filter(&mut mode, &entry, &mut query, FilterExit::Revert);
+        assert_eq!(query, "vega");
     }
 
     #[test]
@@ -230,15 +335,14 @@ mod tests {
         assert_eq!(normal_command(&ks("k", SHIFT)), Some(MoveItem(-1)));
     }
 
-    /// `shift+space` steps a value backward; the forward key and the
-    /// `shift+j`/`shift+k` item movers are unchanged by adding it.
+    /// Shift-Space steps values backward while Shift-J/Shift-K move items.
     #[test]
     fn shift_space_steps_a_value_backward() {
         assert_eq!(
             normal_command(&ks("space", SHIFT)),
             Some(NormalCommand::ToggleBack)
         );
-        // The forward key is unchanged, and shift+j/k still move items.
+        // Forward stepping and item movement remain distinct commands.
         assert_eq!(normal_command(&bare("space")), Some(NormalCommand::Toggle));
         assert_eq!(
             normal_command(&ks("j", SHIFT)),
@@ -246,15 +350,8 @@ mod tests {
         );
     }
 
-    /// User ruling 2026-09-13 ("I keep reaching for them"): `l`/`tab`
-    /// join `space` as the forward step and `h`/`shift+tab` join
-    /// `shift+space` as the backward one, here rather than per dialog, so
-    /// every modal surface — the settings dialog included — gains them
-    /// from one table.
-    ///
-    /// A MODIFIED `h` or `l` is not a step and not a verb either: the
-    /// chords belong to whatever is underneath, and `shift+h` would be a
-    /// capital letter a surface might one day want.
+    /// All value-step aliases share one table. Modified h/l return no command
+    /// so they cannot become accidental value steps or surface verbs.
     #[test]
     fn tab_and_h_and_l_step_a_value_beside_space() {
         use NormalCommand::*;
@@ -262,21 +359,17 @@ mod tests {
         assert_eq!(normal_command(&bare("tab")), Some(Toggle));
         assert_eq!(normal_command(&bare("h")), Some(ToggleBack));
         assert_eq!(normal_command(&ks("tab", SHIFT)), Some(ToggleBack));
-        // The keys they join are untouched.
+        // Space and Shift-Space use the same forward/backward commands.
         assert_eq!(normal_command(&bare("space")), Some(Toggle));
         assert_eq!(normal_command(&ks("space", SHIFT)), Some(ToggleBack));
-        // And neither is a `Verb` any more — a surface that had claimed
-        // `h` or `l` as its own letter would now be stepping instead,
-        // which is why nothing does.
+        // Modified h/l are neither value steps nor surface verbs.
         for mods in [Modifiers::CTRL, Modifiers::ALT, Modifiers::CMD, SHIFT] {
             assert_eq!(normal_command(&ks("h", mods)), None, "{mods:?}");
             assert_eq!(normal_command(&ks("l", mods)), None, "{mods:?}");
         }
     }
 
-    /// Arrows and the ctrl-steps keep working in normal mode: the two
-    /// modes share one navigation vocabulary, so a hand that learned
-    /// `ctrl+d` in the palette is not retrained at the dialog.
+    /// Normal mode shares arrows and Control navigation with the filter.
     #[test]
     fn normal_mode_still_honours_the_filter_modes_navigation() {
         use NormalCommand::*;
