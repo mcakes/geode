@@ -705,6 +705,8 @@ impl TimeseriesTile {
         }
     }
 
+    // ---- shared by every popup ---------------------------------------
+
     /// The ONE door a `(identity, source)` pair is added by — the `:add`
     /// line's and the picker's both, so the dataset check, its message
     /// and the `apply_changed` tail cannot drift between them.

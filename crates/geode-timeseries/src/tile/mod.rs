@@ -23,7 +23,8 @@
 //! `deliver` — staged behind the flip barrier when one is open over this
 //! tile, painted at once when it is not. `as_of` is the only frame
 //! counter followed (spec §6.5); `flip` is read in the frame observer
-//! and nowhere else, where it means "you may promote".
+//! and nowhere else, where it means "you may promote". That flow lives in
+//! [`data`]; every popup's open, keys, commit and close in [`popups`].
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -593,7 +594,7 @@ impl TimeseriesTile {
             "reset_view" => self.model.reset_view(),
             "jump_start" => self.model.jump_start(),
             "jump_end" => self.model.jump_end(),
-            // Every popup verb, through the one door below.
+            // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
             | "commit" | "cancel" | "insert_up" | "insert_down" => {
                 let handled = self.popup_verb(verb, n, window, cx);
