@@ -29,6 +29,7 @@ geode-widgets = { path = "crates/geode-widgets" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 geode-timeseries = { path = "crates/geode-timeseries" }
+geode-pricer = { path = "crates/geode-pricer" }
 
 # Logging versions match gpui's resolved `tracing` family, avoiding a second
 # copy. `tracing-appender` supplies the daily rolling file layer in

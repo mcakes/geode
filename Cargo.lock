@@ -2511,6 +2511,7 @@ dependencies = [
  "geode-diagnostics",
  "geode-documents",
  "geode-marketdata",
+ "geode-pricer",
  "geode-pricing",
  "geode-shell",
  "geode-timeseries",

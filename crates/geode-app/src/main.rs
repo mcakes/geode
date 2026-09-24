@@ -129,6 +129,10 @@ fn main() {
             // what gets `tab` as far as a focused TILE at all; this one
             // is the popup's, at its own depth.)
             geode_timeseries::init(cx);
+            // The line pricer's cell editor is a `DataTable` too, for the
+            // same reason: it owes the same reclaim while its grid holds
+            // gpui focus.
+            geode_pricer::init(cx);
 
             // The demo bus's adapter (market-data-documents plan, Task
             // 10): registered only under `--demo`, since it is the
@@ -671,6 +675,37 @@ impl ModuleFactory for TimeseriesFactoryHandle {
     }
 }
 
+/// Same shape as [`TimeseriesFactoryHandle`], for the line pricer: the
+/// bridge keeps a clone for its reload.
+struct PricerFactoryHandle(Rc<geode_pricer::content::PricerFactory>);
+
+impl ModuleFactory for PricerFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn contexts(&self) -> Vec<&'static str> {
+        self.0.contexts()
+    }
+    fn default_keymap(&self) -> Option<&'static str> {
+        self.0.default_keymap()
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
 /// `main`'s config-reload subscription (set up once a window exists, in
 /// the `cx.spawn` block below) also holds a clone, for `set_config`.
@@ -702,6 +737,24 @@ impl ModuleFactory for DiagnosticsFactoryHandle {
         self.0
             .create(tile, restored, frame, diagnostics, window, cx)
     }
+}
+
+/// Every builtin config doc: the shell's keymap, the pricer's two bundled
+/// views (line-pricer Part 2, planning decision 12 — a desk or user layer
+/// overrides a view by name), and the `--demo` layer.
+fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
+    let mut builtin = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
+        LayerDoc::builtin(
+            geode_pricer::core::PRICER_VIEWS_DOC,
+            geode_pricer::core::BUILTIN_VIEWS,
+        )
+        .expect("BUILTIN_VIEWS is well-formed TOML"),
+    ];
+    if let Some(root) = demo_root {
+        builtin.extend(demo::layer(&root.join("src")));
+    }
+    builtin
 }
 
 /// Load config, register the shell's and modules' builtin actions,
@@ -750,12 +803,7 @@ fn build_shell_services(
     Rc<DiagnosticsFactory>,
 ) {
     let (desk, user) = config_dirs();
-    let mut builtin = vec![
-        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
-    ];
-    if let Some(root) = demo_root {
-        builtin.extend(demo::layer(&root.join("src")));
-    }
+    let builtin = builtin_layer(demo_root);
     // `ShellServices::config_and_builtin` derives `config` and `builtin`
     // from one `ConfigSources`, so the two cannot disagree (see that
     // function's doc comment — reconstructing `builtin` separately from
@@ -865,6 +913,12 @@ fn build_shell_services(
         // `DataHandle`, so with no bridge there is nothing for it to ask
         // and the palette lists no "Timeseries: Split" row either.
         roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
+        // The line pricer (line-pricer spec §8), on the same condition
+        // and for the same reason as every module above: it prices its
+        // rows through the bridge's `DataHandle`, so with no bridge there
+        // is nothing for it to ask and the palette lists no "Pricer:
+        // Split" row either.
+        roster.add(Box::new(PricerFactoryHandle(bridge.pricer.clone())));
         bridge
     });
 
@@ -999,6 +1053,7 @@ fn user_config_dir(appdata: Option<String>, home: Option<String>) -> Option<Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::config::Config;
 
     #[test]
     fn appdata_wins_when_set() {
@@ -1049,6 +1104,59 @@ mod tests {
     #[test]
     fn an_unrecognised_flag_is_a_usage_error() {
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
+    }
+
+    #[test]
+    fn the_builtin_layer_carries_the_two_pricer_views() {
+        let builtin = builtin_layer(None);
+        let config = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let (views, diags) =
+            geode_pricer::core::Views::from_doc(config.doc("pricer_views").expect("the doc"));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["vanilla", "barrier"]
+        );
+    }
+
+    #[test]
+    fn the_roster_lists_the_pricer_and_registers_its_add_action() {
+        use geode_data::DataHandle;
+        use geode_shell::actions::ActionId;
+
+        let mut roster = ModuleRoster::new();
+        let (data, _rx) = DataHandle::for_tests();
+        roster.add(Box::new(PricerFactoryHandle(Rc::new(
+            geode_pricer::content::PricerFactory::new(
+                data,
+                Rc::new(geode_pricer::store::MemorySheetStore::default()),
+                geode_pricer::core::Views::builtin(),
+                geode_pricer::content::PricerSettings::default(),
+            ),
+        ))));
+        assert!(roster.kinds().contains(&"pricer"));
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.kinds());
+        roster.register_actions(&mut registry);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_pricer".to_string()))
+                .expect("an add-tile row")
+                .title,
+            "Pricer: Split"
+        );
+        assert!(
+            registry
+                .get(&ActionId("pricer::add_below".to_string()))
+                .is_some()
+        );
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(docs.len(), 1);
     }
 
     /// Task 12: the roster carries both document kinds' factories
@@ -1173,10 +1281,8 @@ mod tests {
     #[gpui::test]
     fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        let mut builtin = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
-        builtin.extend(demo::layer(&dir.path().join("src")));
         let (config, _) = ShellServices::config_and_builtin(ConfigSources {
-            builtin,
+            builtin: builtin_layer(Some(dir.path())),
             ..ConfigSources::default()
         });
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
@@ -1212,6 +1318,7 @@ mod tests {
         roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
         roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
         roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
+        roster.add(Box::new(PricerFactoryHandle(bridge.pricer.clone())));
         register_add_actions(&mut registry, &roster.kinds());
         roster.register_actions(&mut registry);
 
