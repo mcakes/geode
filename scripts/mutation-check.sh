@@ -14060,13 +14060,11 @@ run_mutation "objectdialog: an edit-row click is dropped while a confirm is arme
   '    if armed_confirm(shell).is_some() {
         return;
     }
-    if let Some(draft) = draft_mut(shell) {
-        // `position` is the FILTERED index' \
+    let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
   '    if armed_confirm(shell).is_some() {
         let _ = 0;
     }
-    if let Some(draft) = draft_mut(shell) {
-        // `position` is the FILTERED index' \
+    let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
@@ -14096,9 +14094,10 @@ run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec 
   i_and_n_have_buttons_that_do_what_their_keys_do
 
 # Spec §20.3: `i` is a button only where the selected row is one it
-# opens. Mutated to always offer it, a read-only `Text` row (Scopes'
-# `Selects` summary, RowVocabulary::Inert) paints a button that can only
-# answer with a notice. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
+# opens. Mutated to always offer it, a LIST ITEM row (a Scopes dimension,
+# RowVocabulary::Item) paints a button that can only answer with a
+# notice. An inert row would be the sharper witness, but since the
+# 2026-09-23 ruling the cursor cannot rest on one. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
 # multi-option `Choice` StepsAndTypes, so `i` legitimately paints there
 # now and that row can no longer tell this mutation apart from the real
 # code — `i_and_n_have_buttons_that_do_what_their_keys_do`'s own `Choice`
@@ -14108,7 +14107,7 @@ run_mutation "objectdialog: the i button is offered per row, not per domain (spe
   '    ) || state.domain == Domain::Groupings;' \
   '    ) || true;' \
   geode-shell \
-  the_i_button_is_withheld_on_a_read_only_text_row
+  the_i_button_is_withheld_on_a_list_item_row
 
 # Spec §20.3: the browse `n` button takes the key's own door. Mutated
 # away, the button syncs and notifies but opens nothing.
@@ -17193,6 +17192,81 @@ run_mutation "objectdialog: enter in browse filter mode is not an exit" \
         // The ladder'"'"'s first rung and its twin, both claimed (`true`):' \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
+
+# ---- The cursor rests only on rows with a verb (ruling 2026-09-23) ----
+
+# The predicate itself. Calling every row a stop puts the cursor back on
+# Groupings' `Slot` row, which is exactly what the ruling removed.
+run_mutation "objectdialog: every row is a cursor stop again" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
+        self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert' \
+  '    pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
+        true || self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert' \
+  geode-shell \
+  the_slot_and_dimensions_rows_are_not_cursor_stops
+
+# Its other half: a row that opens a stage is a stop even though every
+# value verb refuses it. Dropped, Schema's column rows stop being
+# reachable and its stage has no cursor at all.
+run_mutation "objectdialog: a row that only opens a stage is not a cursor stop" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || self.column_stage_target(domain, row).is_some()' \
+  '            || false' \
+  geode-shell \
+  a_row_that_opens_a_stage_is_a_stop_even_when_every_value_verb_refuses_it
+
+# The opening cursor. Without the settle, a Groupings slot opens with the
+# cursor on its number and the first `space` steps nothing.
+run_mutation "objectdialog: the edit stage opens on row 0 whatever it answers to" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        draft.settle_selection(self.domain);
+        // Every domain opens in normal mode' \
+  '        // Every domain opens in normal mode' \
+  geode-shell \
+  the_slot_and_dimensions_rows_are_not_cursor_stops
+
+# Motion. Mutated to plain `vimnav::apply`, `j` and `k` park on the
+# header rows again — the report this ruling came from.
+run_mutation "objectdialog: motion lands wherever vimnav puts it" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.snap_selection(domain, forward, wrap);' \
+  '        let _ = (forward, wrap);' \
+  geode-shell \
+  motion_skips_the_rows_that_answer_to_nothing
+
+# The query mirror's settle. A filter keystroke parks the cursor on the
+# top match, which can be a list header; without the settle the trader
+# types their way onto a row where every key does nothing.
+run_mutation "objectdialog: a filter keystroke can leave the cursor on a header" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if draft.text_entry.is_none() {
+                draft.settle_selection(self.domain);
+            }' \
+  '            if draft.text_entry.is_none() {
+                let _ = self.domain;
+            }' \
+  geode-shell \
+  a_filter_keystroke_never_leaves_the_cursor_on_a_header
+
+# The key handler's tail settle, which catches every way the row list
+# moves that is not a motion: a delivered Values list is the one an
+# existing test can see, since its rows replace the loading row wholesale.
+run_mutation "objectdialog: nothing settles the cursor after the list changes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    draft.settle_selection(Domain::Scopes);' \
+  '    let _ = Domain::Scopes;' \
+  geode-shell \
+  ticking_a_value_writes_the_selection_and_unticking_all_removes_it
+
+# The mouse half of the rule (§17.1 parity): a click on a row the
+# keyboard cannot reach must not put the cursor there either.
+run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => return,' \
+  '            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => {}' \
+  geode-shell \
+  a_click_on_the_slot_row_is_dropped
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

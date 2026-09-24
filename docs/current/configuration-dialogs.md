@@ -47,6 +47,22 @@ and membership or order operations for lists. Keyboard and pointer routes
 share the mutation helpers. A pending destructive confirmation blocks other
 row mutations, including clicks and drops.
 
+The edit selection only rests on a row that answers to something: a row whose
+vocabulary is not inert, or one whose Enter opens a Column or Values stage. A
+display-only text row, a list's own header row, a multi-choice row, and a
+one-option choice row are therefore painted but never selected — Groupings'
+slot number and dimensions header, Scopes' and Views' list headers, and
+Schema's derived dimensions. Schema's column rows stay selectable because
+Enter opens their column stage. Motion settles onto the next such row in the
+direction of travel, following the movement command's own wrap or clamp
+behavior, and a pointer click on a row that answers to nothing is dropped
+rather than moving the selection. Opening a stage, delivering distinct values,
+changing a filter, and rebuilding a draft after a failed write settle the
+selection the same way. In a list with no such row — a filter that leaves only
+headers, or a dataset of only derived dimensions — settling moves nothing, so
+the selection stays where the movement command put it; the footer already
+reports that row as inert.
+
 Column and Values stages stash the parent fields and fold changes back into
 the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
