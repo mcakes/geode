@@ -7,6 +7,7 @@ pub mod colour;
 pub mod config;
 pub mod dimensions;
 pub mod document;
+pub mod egress_config;
 pub mod format;
 pub mod groupings;
 pub mod health;
