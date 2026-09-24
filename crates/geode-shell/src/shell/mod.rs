@@ -103,22 +103,17 @@ pub struct ShellServices {
     pub mod_alias: Modifiers,
     pub workspaces: Workspaces,
     pub theme: ThemeService,
-    /// Where `ShellView::dispatch` saves the session file after a
-    /// workspace-mutating action (Task 3, spec: "state-as-config"). `None`
-    /// in contexts with no writable user config dir (e.g. some test setups)
-    /// — session persistence is then just skipped, never a panic.
+    /// Session file used by periodic and shutdown saves. `None` disables
+    /// session persistence; layout actions only mark pending state dirty.
     pub session_path: Option<PathBuf>,
     /// The modules the app compiled in (§9.1); the shell creates tile
     /// occupants through it and never names a module crate.
     pub roster: ModuleRoster,
-    /// Per-tile module kind and state restored from `session.toml`
-    /// (Task 4); consumed as occupants are created.
+    /// Module names and state from `session.toml`, consumed as the shell
+    /// creates occupants. Unavailable kinds retain their records separately.
     pub restored_tiles: crate::session::TileRecords,
-    /// The frame's own restored state (Phase 4a §3.6: scope, active slot,
-    /// as-of) from `session.toml`'s `[frame]` table, if the file had one
-    /// — `ShellView::new` applies it to the just-built frame. `None` for a
-    /// fresh session (no file, or one with no `[frame]` table yet) and in
-    /// every test setup that doesn't opt in.
+    /// Optional scope, grouping slot, and as-of from `[frame]`.
+    /// `ShellView::new` applies them and clears scope undo/redo history.
     pub restored_frame: Option<crate::session::FrameRecord>,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
     /// table — empty for a fresh session and in every test setup that
@@ -657,24 +652,17 @@ pub struct ShellView {
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
     last_reload: reload::ReloadOutcome,
-    /// Set on every successful workspace-mutating `dispatch`; cleared by
-    /// the background watcher's ~500ms tick (see `new`), which is also
-    /// where the actual file write happens — off the UI thread (Task 3 fix
-    /// round 1: the first cut of this wrote synchronously per dispatch,
-    /// which stalls the render thread on a slow filesystem under OS
-    /// key-repeat, e.g. holding shift+left at ~20-30 events/sec). Coalescing
-    /// onto the existing poll tick means at most one write per ~500ms
-    /// regardless of how many workspace actions fired in that window.
+    /// Layout changes awaiting snapshot extraction. The periodic watcher
+    /// clears this flag before serialization and writes in the background;
+    /// it is not a record of whether the disk write succeeded.
     session_dirty: bool,
-    /// The tile records written by the last flush (or, before the first
-    /// flush, empty), so a module state change — which never sets
-    /// `session_dirty`, that flag tracks the layout only — is still
-    /// noticed by the watcher's tick (Task 4).
+    /// Tile records from the last successfully serialized periodic snapshot,
+    /// initially empty. Compared every tick to catch module-only state changes.
+    /// Updated before disk I/O; a failed write does not reset this baseline.
     last_tiles_written: crate::session::TileRecords,
-    /// The frame's `(scope, grouping, as_of)` versions as of the last
-    /// flush (Phase 4a §3.6) — same reasoning as `last_tiles_written`
-    /// just above: a frame-only change (no workspace mutation, no tile
-    /// state change) must still be noticed by the watcher's tick.
+    /// Frame `(scope, grouping, as_of)` versions captured by the last
+    /// successfully serialized periodic snapshot, initially zero. Detects
+    /// frame-only changes; updated before the disk write completes.
     last_frame_versions_written: (u64, u64, u64),
     /// Set by a background path that closed the palette without a `Window`
     /// to restore focus with (today: only `apply_reload`'s palette-
@@ -1365,16 +1353,10 @@ impl ShellView {
                     let _ = this.update(cx, |_view, cx| cx.notify());
                 }
 
-                // Flush a dirty session (Task 3 fix round 1), coalesced
-                // onto this same ~500ms tick rather than writing per
-                // dispatch. `take_dirty_session_write` does the cheap part
-                // (TOML serialization) synchronously on the UI thread via
-                // `this.update`; the actual file write — real, potentially
-                // blocking I/O — runs on the background executor, so it
-                // can never stall the render thread no matter how slow the
-                // filesystem is. Runs unconditionally on every tick, ahead
-                // of the `continue`s below, so it's never skipped by the
-                // reload watcher's own early-outs.
+                // Extract session state on the UI thread and await its write on the
+                // background executor. Run before config-scan early returns so saving
+                // does not depend on a config change. Write failures are logged without
+                // restoring the snapshot's dirty flag or comparison baselines.
                 let Ok(pending_write) =
                     this.update(cx, |view, cx| view.take_dirty_session_write(cx))
                 else {
@@ -1588,15 +1570,9 @@ impl ShellView {
         })
         .detach();
 
-        // Restore a saved session's scope/slot/as-of (Task 3, spec §3.6
-        // "state-as-config"), applied directly to the just-built frame
-        // rather than threaded through `Frame::new` — `main.rs` restores
-        // the workspace layout the exact same way, after `services` is
-        // built. `clear_history` afterwards drops the undo entry
-        // `set_scope` just pushed: a restored session must not start with
-        // a phantom "undo" back to the empty scope nobody actually chose.
-        // The palette's usage history restored with the session, the same
-        // way as the frame record just below.
+        // Restore palette usage and frame state. Clearing scope history removes
+        // the undo entry created by `set_scope`, so startup does not offer an
+        // undo back to the initial empty scope.
         let palette_usage = services.restored_palette_usage.clone();
         if let Some(record) = services.restored_frame.clone() {
             frame.update(cx, |f, _cx| {

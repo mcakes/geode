@@ -1,5 +1,5 @@
-//! Session save/restore wiring: dirty tracking, the debounced write,
-//! and restoring tiles with safe ids.
+//! Session save/restore wiring: periodic snapshot extraction, persistence,
+//! and restoring tiles with safe IDs.
 
 use super::*;
 // Explicit: this file's own `mod session;` declaration in `tests/mod.rs`
@@ -7,7 +7,7 @@ use super::*;
 // below need this to resolve to the real module rather than to `self`.
 use crate::session;
 
-// --- Task 3: session save/restore wiring ----------------------------
+// --- Session save/restore wiring -----------------------------------
 
 pub(super) fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
     let mut services = test_services();
@@ -15,14 +15,9 @@ pub(super) fn test_services_with_session(session_path: std::path::PathBuf) -> Sh
     services
 }
 
-/// Fix round 1, Finding 1's regression: a workspace-mutating dispatch
-/// must mark the session dirty and return *without* touching the
-/// filesystem at all — no synchronous write on the UI thread, however
-/// many dispatches fire back to back (this is exactly what OS
-/// key-repeat does to `shift+left`, ~20-30 dispatches/sec while held). The
-/// file only appears once something actually flushes
-/// `take_dirty_session_write`'s pending write — see the end-to-end test
-/// below for that half.
+/// Workspace-mutating dispatch marks the session dirty without writing to
+/// disk. Repeated dispatches coalesce until the periodic flush extracts a
+/// snapshot, keeping filesystem work off the input path.
 #[gpui::test]
 fn dispatch_marks_the_session_dirty_without_writing_synchronously(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -78,21 +73,10 @@ fn dispatch_marks_the_session_dirty_without_writing_synchronously(cx: &mut gpui:
     );
 }
 
-/// End-to-end: real keystrokes dispatched through `ShellView` (not
-/// `apply_workspace_action` called directly) build a layout across two
-/// workspaces, marking the session dirty on each workspace-mutating
-/// dispatch (Task 3 fix round 1: no synchronous write — see the test
-/// above). The flush path (`take_dirty_session_write` +
-/// `session::write_atomic`, the same two calls the background watcher
-/// makes every ~500ms in production) is invoked directly here, since
-/// gpui's test executor never advances its simulated clock under
-/// `run_until_parked`. Loading the written file back with
-/// `session::load` — the exact function `main.rs` calls on startup —
-/// must reproduce the same layouts, and a further split on the
-/// restored `Workspaces` must allocate a `TileId` that collides with
-/// none of the restored ones (the whole reason `Workspaces::from_parts`
-/// computes `next_tile` from the restored tiles rather than resetting
-/// it to 0).
+/// Real shell keystrokes build layouts across two workspaces. Extract and
+/// write the pending snapshot directly, then load it through the startup
+/// reader. Restored layouts must match, and subsequent allocation must use
+/// IDs beyond the restored tiles. This drives the flush body, not its timer.
 #[gpui::test]
 fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -158,8 +142,7 @@ fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(cx: &mut gpui::
         session_path.exists(),
         "the flush must have written the file"
     );
-    // The atomic-write temp file (now pid+counter-suffixed, fix wave
-    // Fix 2) must not be left behind.
+    // Successful replacement consumes its temporary file.
     let leftover_tmp_files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|entry| entry.ok())
@@ -272,15 +255,8 @@ fn take_dirty_session_write_is_none_when_clean(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix round 1 (Task 4 review): the headline write trigger —
-/// `take_dirty_session_write`'s `tiles == self.last_tiles_written`
-/// half of its guard, not just `session_dirty` — was untested. A
-/// module state change alone (through the recording module's own
-/// `command`, the same path its `serialize` reads back) never touches
-/// `session_dirty`, so only that tiles comparison can notice it; this
-/// pins that a flush happens exactly once per state change, carrying
-/// the new state, and that a further call with nothing new returns
-/// `None` again.
+/// A module-only state change triggers one new snapshot without setting
+/// layout dirt. Repeated extraction without another change returns `None`.
 #[gpui::test]
 fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -341,11 +317,8 @@ fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::Te
     );
 }
 
-/// Task 4 (Phase 3 §3.5), two halves of the same contract:
-/// `current_tiles` reports a live occupant's own kind and whatever its
-/// `serialize` returns, and a `restored_tiles` record for a tile that
-/// really is in the restored `Workspaces` reaches that tile's factory
-/// as `Some(state)` when `ensure_occupants` creates it.
+/// Live occupants contribute their own kind and serialized state. Restored
+/// records for layout tiles reach the matching factory as `Some(state)`.
 #[gpui::test]
 fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     cx: &mut gpui::TestAppContext,
@@ -417,15 +390,8 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     );
 }
 
-/// End-to-end (design doc, "Tests"): a theme pick through the settings
-/// dialog's own apply seam, with a real `user_dir` wired up (a tempdir,
-/// exactly like `build_shell_services` wires the real
-/// `%APPDATA%`/`$HOME/.config` dir in `main.rs`), must leave the new
-/// name written into `<user_dir>/app.toml`'s `[theme]` table on disk —
-/// the whole point of the apply-then-persist seam
-/// (`ShellView::persist_theme`) replacing the removed session
-/// `theme_mode` mechanism. (Until 2026-09-12 this was a `mod+shift+t`
-/// keystroke flipping a mode; the chord and the mode are both retired.)
+/// Applying a theme through settings persists its name to the user-layer
+/// `app.toml` theme table, independently of session persistence.
 #[gpui::test]
 fn a_theme_pick_persists_the_new_name_to_the_user_config_file(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -467,13 +433,7 @@ fn a_theme_pick_persists_the_new_name_to_the_user_config_file(cx: &mut gpui::Tes
         let _ = window.draw(cx);
     });
 
-    // `persist_theme` (Finding 1, review fix round 1) hands the actual
-    // file write to `cx.background_executor()` rather than running it
-    // inline, so the file doesn't necessarily exist the instant the
-    // keystroke's synchronous dispatch returns — `run_until_parked`
-    // drives that detached background task to completion, same pattern
-    // the gpui testing reference uses for any detached background/async
-    // work.
+    // Drive the detached background persistence task before reading the file.
     cx.run_until_parked();
 
     assert_eq!(
@@ -499,13 +459,10 @@ fn a_theme_pick_persists_the_new_name_to_the_user_config_file(cx: &mut gpui::Tes
     );
 }
 
-// --- Phase 4a: [frame] restore --------------------------------------
+// --- Frame restoration --------------------------------------------
 
-/// `ShellServices::restored_frame` (Phase 4a §3.6) is applied to the
-/// just-built frame — scope and as-of land on it directly, with no
-/// leftover undo entry back to the empty scope nobody chose — and the
-/// first watcher-tick flush after that writes it straight back out to
-/// `[frame]`.
+/// Restore frame scope and as-of without an undo step back to empty scope.
+/// The next extracted session snapshot must carry those values in `[frame]`.
 #[gpui::test]
 fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_writes_it_back(
     cx: &mut gpui::TestAppContext,

@@ -1,29 +1,15 @@
-//! Session persistence for workspace layout and transient user state.
+//! Session persistence for workspace layout, occupants, frame state, and
+//! palette usage. Durable preferences such as theme belong in layered config.
 //!
-//! `session.toml` lives in the user configuration directory and remains
-//! declarative, hand-editable TOML. It stores workspaces, docks, stacks,
-//! occupants, frame state, and palette usage. Durable preferences such as the
-//! theme live in their ordinary layered configuration documents instead.
-//!
-//! Format choice: manual `toml::Table`/`toml::Value` construction, matching
-//! how `geode-core::config` already hand-builds and reads TOML elsewhere in
-//! this codebase (no serde derive) — `serde`/`serde_json` are already in the
-//! dependency graph (see `theme.rs`), but a derive-based `Deserialize`
-//! either panics/rejects on the exact hostile shapes this module must heal
-//! (a dangling `focused` id, drifted ratios) or requires as much custom
-//! `Deserialize` code as the manual version anyway, for a node encoding
-//! that's recursive and enum-tagged. Manual construction keeps one error
-//! path (`Result<_, Vec<String>>`) instead of two (serde's error type plus
-//! this module's own healing logic).
-//!
-//! Node encoding (nested tables mirroring [`Node`]):
+//! The file uses version 1 and nested tables. Workspace keys are indices 1–9;
+//! all materialized workspaces are written, including empty ones. Trees encode
+//! leaves, splits, and stacks with the same shape in main and dock regions:
 //! ```toml
 //! config_version = 1
 //! active = 1
 //!
 //! [workspaces.1]
 //! focused = 2
-//! # fullscreen = 3   # present only when a tile is fullscreen
 //!
 //! [workspaces.1.node]
 //! kind = "split"
@@ -35,83 +21,31 @@
 //! id = 1
 //!
 //! [[workspaces.1.node.children]]
-//! kind = "leaf"
-//! id = 2
-//! ```
-//!
-//! A `stack` node (tile-stacks spec §3) holds `members` (tile ids, two or
-//! more once healed) and `active` (index into `members`):
-//! ```toml
-//! [[workspaces.1.node.children]]
 //! kind = "stack"
-//! members = [3, 4, 5]
-//! active = 1
+//! members = [2, 3]
+//! active = 0
 //! ```
-//! An older build meets `kind = "stack"` as an unknown node kind, which
-//! `node_from_toml` reports as an error — but the two trees it can appear
-//! in diverge sharply from there. A stack in a workspace's MAIN tree
-//! propagates through `parse_workspace`'s `?` into `from_toml`'s
-//! `errors`, so `from_toml` returns `Err` and `load` answers a wholly
-//! fresh session (`fresh(errors)`): every workspace, every tile record
-//! and the palette usage history are discarded, and the next periodic
-//! flush overwrites the file with that empty state. A stack in a DOCK
-//! tree is caught inside `parse_docks`'s own `match node_from_toml { .. }`
-//! arm, which only warns and drops that one dock's tree — the main tree,
-//! the workspace's other docks and every other workspace survive intact.
 //!
-//! Dock-regions task adds two optional per-workspace shapes (absent in
-//! every pre-dock file, which therefore loads unchanged — no
-//! `config_version` bump; `from_toml` tolerates unknown keys in both
-//! directions): a `region` string (`"left"`/`"right"`/`"bottom"`; absent
-//! or `"main"` = focus in the main tree — only written when focus lives in
-//! a dock) and `[workspaces.N.docks.left/right/bottom]` tables. The
-//! dock-trees task made each dock a full tiling tree, so a dock table now
-//! carries the *same* recursive node encoding a workspace does — an
-//! optional `focused` (int) plus an optional `[….node]` subtree (both via
-//! the shared `node_to_toml`/`node_from_toml`/`Tree::from_parts` seams) —
-//! alongside `visible` (bool) and `size` (float 0.10..=0.50); never a
-//! `fullscreen` (dock trees can't have one; a hostile file's claim is
-//! ignored with a warning). Only docks that differ from the default
-//! (hidden, empty, default size) are written at all.
+//! Optional `region` selects a dock (`left`, `right`, or `bottom`); omission
+//! means main. Each `workspaces.N.docks.<side>` stores `node`, `focused`,
+//! `visible`, and `size`. Default docks are omitted. The legacy `tile = N`
+//! shape loads as a single-leaf tree; when both shapes exist, `node` wins with
+//! a warning. Dock fullscreen is unsupported and ignored with a warning.
 //!
-//! Legacy dock shape: the first dock-regions build (one tile per dock)
-//! wrote `tile = N` instead of a node subtree. That key still loads —
-//! healed into a single-leaf tree, silently (recorded choice: it's the
-//! expected output of the immediately-prior release, not corruption, so no
-//! warning; a file carrying BOTH `tile` and `node` picks the node and does
-//! warn, since no release ever wrote that shape).
+//! `workspaces.N.tiles.<id>` stores a module name and opaque state. `[frame]`
+//! stores scope, grouping slot, and as-of; `[palette.usage]` stores usage counts
+//! and timestamps. Unknown keys are ignored on read and not preserved on save.
 //!
-//! Dock corruption heals with a warning instead of failing the workspace
-//! (the docks are an adornment on the layout, never worth discarding the
-//! main tree over): a structurally invalid dock node drops that dock's
-//! tree, a duplicate tile claim (already in a main tree or an earlier dock
-//! tree, this workspace or any other) is removed from the dock's tree, a
-//! `region` pointing at a hidden dock falls back to `Main` (an empty
-//! but visible dock is a legal focus target — spec 2026-09-08 add-tile
-//! §8), and an out-of-range/NaN `size` resets to the default — see
-//! `Workspace::from_parts` / `Workspaces::from_parts` for the cross-tree
-//! healing seams themselves.
+//! An invalid main tree or session header rejects the entire session. Docks,
+//! tile records, frame fields, and palette usage recover locally where possible;
+//! see [`from_toml`]. [`load`] returns a fresh session on read or parse failure.
+//! Neither loading nor healing rewrites the file, but subsequent saves replace
+//! it with current state, without retaining a backup.
 //!
-//! Old session files written before this removal may still carry an
-//! `[extra]` table with a `theme_mode` key; `from_toml` never reads
-//! `extra` at all now, so it is simply ignored like any other unknown
-//! top-level key — the layout underneath it still loads.
-//!
-//! Every workspace present in [`Workspaces::spaces`] is written, empty ones
-//! included (mirrors the in-memory behavior: "workspaces materialize lazily
-//! on first switch and persist" — spec §3.6), so a session restore leaves
-//! the *set* of touched workspaces exactly as the user left it, not just the
-//! non-empty ones.
-//!
-//! Two more top-level tables ride the same file, each written only when
-//! there is something to write and read back as "nothing" when absent:
-//! `[frame]` (Phase 4a §3.6 — the global scope, active grouping slot and
-//! as-of, see [`FrameRecord`]) and `[palette.usage]` (2026-09-12 — the
-//! command palette's per-row use count and last-used stamp, see
-//! [`crate::palette_usage::PaletteUsage`]; it lives here rather than in a
-//! file of its own because the user config dir is mtime-watched for every
-//! `*.toml` but this one, and a separate file would trigger a config
-//! reload on every palette dispatch).
+//! Serialization is I/O-free. Periodic saves serialize on the UI thread and
+//! write on the background executor; shutdown saves synchronously. Session
+//! writes use atomic replacement, with the ordering and durability limits
+//! described by [`write_atomic`].
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -124,46 +58,26 @@ use crate::tiling::{
 use geode_core::query::AsOf;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
-/// Schema version written into every session file, and enforced on load
-/// exactly like `geode_core::config::load_layer` enforces `config_version`
-/// for desk/user config docs: present and matching → fine; present and
-/// different → the whole session is invalid (an `Err`, naming the version
-/// found — `from_toml`'s caller, `load`, treats that as "fresh start,
-/// warn"); missing entirely → a warning, but the rest of the file still
-/// gets parsed (mirrors `load_layer` treating a missing version as
-/// "assume current" rather than a hard failure).
+/// Version written by the serializer. A missing stamp warns and assumes this
+/// version; any present value other than the matching integer rejects the
+/// whole session.
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
-/// A tile's restored occupant kind and opaque module state (Phase 3 §3.5).
-/// Formalised here in Task 3 with `restored_tiles` always empty; Task 4
-/// fills it in from each workspace's `tiles` table and
-/// `ShellView::ensure_occupants` consumes it as tiles get their occupants.
-/// `state` is whatever the module's `serialize` returned; the shell never
-/// reads inside it.
+/// A tile's module name and opaque serialized state. Parsing retains the name
+/// without consulting the module roster. The shell passes state only to the
+/// factory registered for that name.
 ///
-/// `kind` is stored exactly as written in the file — `from_toml` has no
-/// module roster to check it against, so a `kind` from an unregistered or
-/// downgraded module round-trips here unchanged. Resolution happens one
-/// layer up, in `occupants::ensure_occupants`: when the roster has no
-/// factory for `kind`, the tile paints the placeholder (spec 2026-09-08
-/// add-tile §7.2). No other module is handed the record — a factory must
-/// never see state shaped for a different module — and there is no
-/// default kind for it to fall back to. The record itself is *kept*, in
-/// `ShellView::unplaced_records`, and `current_tiles` writes it back
-/// verbatim on every flush, so a session saved by a build with more
-/// modules survives a run of a build with fewer: turn the module back on
-/// and the tile comes back with its own state. The record is dropped only
-/// when its tile closes, or when the trader fills that placeholder with
-/// something else — then the live occupant's own record takes the id.
+/// An unavailable module displays a placeholder while its original record is
+/// retained in `ShellView::unplaced_records` and included in subsequent saves.
+/// Closing the tile drops that record; filling it with a module replaces it
+/// with the live occupant's record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,
     pub state: toml::Table,
 }
 
-/// Every tile's record, keyed by the raw `TileId` (`u64`) it belongs to —
-/// `BTreeMap` for deterministic iteration (matters for `to_toml`'s written
-/// key order, and for tests comparing round-tripped maps).
+/// Tile records keyed by raw `TileId`, ordered deterministically for serialization.
 pub type TileRecords = BTreeMap<u64, TileRecord>;
 
 /// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
@@ -174,25 +88,17 @@ pub struct Restored {
     pub workspaces: Workspaces,
     pub tiles: TileRecords,
     pub frame: Option<FrameRecord>,
-    /// The palette's usage history (`[palette.usage]`), empty for every
-    /// file written before it existed — a fresh history, never a warning.
+    /// Palette usage from `[palette.usage]`; absent history starts empty.
     pub palette_usage: PaletteUsage,
     pub warnings: Vec<String>,
 }
 
-/// The frame's own restored state (Phase 4a §3.6, §3.12): the global
-/// scope, the active grouping slot, and as-of. Written under session.toml's
-/// `[frame]` table by [`to_toml`] when a caller passes one, and read back
-/// by [`from_toml`] into [`Restored::frame`] — `ShellView::new` applies it
-/// to the just-built `Frame` and then clears the undo entry that push
-/// leaves behind (`Frame::clear_history`), so a restored session doesn't
-/// start with a phantom "undo" back to the empty scope nobody chose.
+/// Restorable frame state: scope, active grouping slot, and as-of. The shell
+/// applies it to the new frame and clears scope history so restoration does not
+/// create an undo step back to the initial empty scope.
 ///
-/// Deliberately not the whole `Frame`: undo/redo history, recent
-/// publishes, and saved scopes are either transient (nothing to undo back
-/// to yet) or already config (`scopes.toml`) — restoring them here would
-/// either mean nothing on a fresh process or duplicate what the config
-/// layer already owns.
+/// Undo/redo history and recent publishes are transient. Saved scopes come from
+/// configuration. These are not part of the session record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FrameRecord {
     pub scope: Scope,
@@ -201,9 +107,8 @@ pub struct FrameRecord {
 }
 
 impl FrameRecord {
-    /// The `[frame]` table `to_toml` writes — present-only-when-meaningful
-    /// like every other optional field in this file (`slot`/`as_of` are
-    /// omitted rather than written as their empty/live default).
+    /// Serialize frame fields, omitting empty dimension selections, an unset
+    /// slot, and live as-of. The caller decides whether to include `[frame]`.
     pub fn to_toml(&self) -> toml::Table {
         let mut t = toml::Table::new();
         let mut dims = toml::Table::new();
@@ -223,10 +128,7 @@ impl FrameRecord {
                 ),
             );
         }
-        // Phase 4b M13: omitted, not written empty, when there are no
-        // selections — `from_toml` already treats an absent `dimensions`
-        // key the same as an empty one, so writing it out for the common
-        // "no dimension scope" case only ever added dead bytes.
+        // An absent dimensions table restores as an empty selection.
         if !dims.is_empty() {
             t.insert("dimensions".into(), toml::Value::Table(dims));
         }
@@ -245,13 +147,10 @@ impl FrameRecord {
         t
     }
 
-    /// Lenient: a field that does not parse is dropped with a warning, the
-    /// rest of the record survives — same philosophy as the tiles/docks
-    /// healing elsewhere in this file. No schema/dataset validation here
-    /// (unlike `geode_core::scopes::saved_scopes_from_doc`): this layer
-    /// has no schema to check against, so a dangling column name simply
-    /// round-trips through unchanged, the same way a `TileRecord`'s
-    /// unrecognised `kind` does.
+    /// Restore usable fields without schema or dataset validation. Invalid
+    /// slots, expression syntax, date strings, and non-array dimension entries
+    /// warn; other wrong-type fields and non-string dimension values are ignored.
+    /// Unknown column names remain, and `Scope::impossible` resets to false.
     pub fn from_toml(t: &toml::Table, warnings: &mut Vec<String>) -> FrameRecord {
         let mut dimensions = Vec::new();
         if let Some(dims_table) = t.get("dimensions").and_then(|v| v.as_table()) {
@@ -324,15 +223,10 @@ impl FrameRecord {
     }
 }
 
-/// Serialize `workspaces` and each tile's `tiles` record into a session
-/// TOML table (pure, no I/O — see [`save`] for the file-writing wrapper).
-/// `tiles` may hold a record for an id belonging to any workspace; only
-/// records whose id actually lives in the workspace being written land
-/// under that workspace's `tiles` table — a stale entry (a tile since
-/// closed) is silently dropped, never written to a workspace it doesn't
-/// belong to. `frame` writes a top-level `[frame]` table (Phase 4a §3.6)
-/// when `Some`, and is omitted entirely (not written as an empty table)
-/// when `None` — every pre-4a session file keeps loading unchanged.
+/// Serialize all materialized workspaces without I/O. Write tile records only
+/// under the workspace whose main or dock tree contains the ID; omit stale
+/// records. Include `[frame]` whenever `frame` is `Some`, even if its table is
+/// empty, and palette usage only when nonempty.
 pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -368,12 +262,7 @@ pub fn to_toml(
                 toml::Value::Integer(tile_id_to_i64(fullscreen)),
             );
         }
-        // Dock-regions task. `region` is written only when focus actually
-        // lives in a dock (mirrors `focused`/`fullscreen`'s present-only-
-        // when-meaningful style; absent = "main"), and a dock table only
-        // when the dock differs from its default (hidden, empty, default
-        // size) — so a pre-dock-shaped session keeps writing byte-for-byte
-        // the same file it always did.
+        // Omit the main focus region and default docks; absence restores defaults.
         if let FocusRegion::Dock(side) = workspace.region() {
             ws_table.insert(
                 "region".to_string(),
@@ -386,9 +275,7 @@ pub fn to_toml(
                 continue;
             }
             let mut dock_table = toml::Table::new();
-            // Same recursive encoding as the workspace's own tree
-            // (dock-trees task); no `fullscreen` — dock trees never have
-            // one (see `Dock::from_parts`).
+            // Docks share the main tree's recursive encoding, without fullscreen.
             if let Some(node) = dock.tree().root() {
                 dock_table.insert("node".to_string(), node_to_toml(node));
             }
@@ -412,18 +299,9 @@ pub fn to_toml(
             ws_table.insert("docks".to_string(), toml::Value::Table(docks_table));
         }
 
-        // Task 4 (Phase 3 §3.5): a `tiles` table per workspace, keyed by
-        // tile id, module kind plus opaque state. Only ids that actually
-        // belong to this workspace (main tree or any dock) are considered
-        // — a record for an id that isn't here (a closed tile whose
-        // `current_tiles` snapshot hasn't been refreshed yet, or a hand-
-        // edited file) is simply not written; `from_toml` applies the same
-        // membership check symmetrically on the way back in. This writes
-        // whatever `tiles` currently holds for each id with no notion of
-        // where that record came from — see [`TileRecord`]'s own doc
-        // comment: if `id`'s original record named a kind the roster
-        // healed away on load, `tiles` by now holds the healed default
-        // kind with empty state instead, and that is what lands here.
+        // Only write records for this workspace's main and dock tiles. The
+        // records may come from live occupants or preserved unavailable modules;
+        // serialization does not resolve module names.
         let mut tiles_table = toml::Table::new();
         let mut here: Vec<TileId> = tree.tiles();
         for (_, dock) in workspace.docks().iter() {
@@ -458,8 +336,7 @@ pub fn to_toml(
         root.insert("frame".to_string(), toml::Value::Table(record.to_toml()));
     }
 
-    // The palette's usage history as `[palette.usage]` — omitted while
-    // empty, the same present-only-when-meaningful rule as `[frame]`.
+    // Omit empty usage history; an absent table restores as empty.
     if !palette_usage.is_empty() {
         let mut palette = toml::Table::new();
         palette.insert(
@@ -472,27 +349,21 @@ pub fn to_toml(
     root
 }
 
-/// Deserialize a session TOML table back into a [`Restored`] (pure, no
-/// I/O). Tolerant of unknown keys (only the fields documented at the top of
-/// this file are ever read — notably including a legacy `[extra]` table,
-/// e.g. a `theme_mode` key written by a build before theme changes moved to
-/// the user config layer: it is simply never looked at, so the layout
-/// underneath it still loads). Any structural corruption — a mismatched
-/// `config_version` (see [`SESSION_CONFIG_VERSION`]), a `Split` with a bad
-/// arity/ratio-length mismatch or a non-finite/non-positive ratio (see
-/// [`Tree::from_parts`]), an unparseable node, an out-of-range `active` —
-/// collects into the `Err` variant rather than partially applying;
-/// [`load`] treats that as "fresh start, warn". A dangling
-/// `focused`/`fullscreen` reference is healed silently by
-/// `Tree::from_parts`, not an error; a missing `config_version` is a
-/// warning that still lets the rest of the file parse.
+/// Parse session data without I/O, ignoring unknown keys. An unsupported
+/// version, invalid workspace index/shape, or unparseable or structurally
+/// invalid main tree rejects the entire session. [`load`] converts rejection
+/// to a fresh session with warnings.
 ///
-/// A `tiles` entry (Phase 3 §3.5, Task 4) is dropped, with a warning, when
-/// its key isn't a valid id, its id isn't a tile in that workspace's
-/// layout (main tree or any dock — a dangling record, e.g. from a tile
-/// closed since the file was written), it isn't a table, it has no
-/// `module`, or its `state` is present but not a table — never itself a
-/// reason to fail the whole session.
+/// Tree validation normalizes positive finite split ratios, heals stack
+/// membership and active indices, and drops dangling focus/fullscreen IDs.
+/// Workspace restoration supplies focus for nonempty trees. Invalid dock trees
+/// are dropped with warnings, and duplicate dock claims are pruned against
+/// main trees and earlier docks. A hidden focused dock uses a fallback region;
+/// a visible empty dock remains a valid focus target.
+///
+/// Malformed or locally dangling tile records warn and are dropped. Frame and
+/// palette fields recover independently; a missing version warns but still
+/// loads. Recovery does not imply schema validation of module or frame state.
 pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
     let mut warnings = Vec::new();
     match table.get("config_version") {
@@ -552,10 +423,7 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
     warnings.extend(heal_warnings);
 
-    // Phase 4a §3.6: the frame's own restored state, if the file had one.
-    // Absent entirely (every pre-4a file) means "nothing to restore", not
-    // an error; present but not a table is a warning, same tolerance the
-    // rest of this function extends to every other optional shape.
+    // An absent frame is not restored; a wrong-type frame warns and is ignored.
     let frame = match table.get("frame") {
         None => None,
         Some(toml::Value::Table(t)) => Some(FrameRecord::from_toml(t, &mut warnings)),
@@ -565,10 +433,8 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         }
     };
 
-    // The palette's usage history (`[palette.usage]`): absent in every
-    // file written before it existed, which is an empty history and no
-    // warning; a `palette` or `usage` that is not a table is a warning
-    // and an empty history, never a failed load.
+    // Absent usage is empty. Wrong-type palette or usage tables warn and
+    // recover independently of the layout.
     let palette_usage = match table.get("palette") {
         None => PaletteUsage::new(),
         Some(toml::Value::Table(palette)) => match palette.get("usage") {
@@ -628,11 +494,7 @@ fn parse_workspace(
     let tree =
         Tree::from_parts(root, focused, fullscreen).map_err(|e| format!("workspace {ix}: {e}"))?;
 
-    // Dock-regions task: docks and region are strictly optional — absent
-    // means "no docks, focus in Main", which is exactly what every pre-dock
-    // session file deserializes to. Everything hostile inside them heals
-    // with a warning rather than failing the workspace: the docks are an
-    // adornment on the layout, never worth discarding the tree over.
+    // Invalid dock data recovers locally so it cannot discard a valid main tree.
     let docks = parse_docks(ix, ws_table.get("docks"), warnings);
     let region = parse_region(ix, ws_table.get("region"), warnings);
 
@@ -646,11 +508,8 @@ fn parse_workspace(
             .map(|w| format!("workspace {ix}: {w}")),
     );
 
-    // Task 4 (Phase 3 §3.5): each tile's module record. Membership is
-    // checked against the *healed* workspace (main tree plus every dock),
-    // not the raw ids this function started from — a duplicate/dangling
-    // claim `Workspace::from_parts` already dropped above must not still
-    // accept a tile record keyed to it.
+    // Validate record membership after local workspace healing. Cross-workspace
+    // dock healing runs later in `Workspaces::from_parts`.
     if let Some(tiles_value) = ws_table.get("tiles") {
         match tiles_value.as_table() {
             None => warnings.push(format!("workspace {ix}: tiles is not a table; ignored")),
@@ -676,11 +535,8 @@ fn parse_workspace(
                         warnings.push(format!("workspace {ix}: tile {id} is not a table; ignored"));
                         continue;
                     };
-                    // Stored as-is, not checked against a module roster —
-                    // this layer has none. See [`TileRecord`]'s doc
-                    // comment for how an unrecognised `kind` is healed one
-                    // layer up, and rewritten as that healed default on
-                    // the next flush.
+                    // Keep the module name unchanged. The shell resolves it against the
+                    // roster and preserves unavailable modules behind placeholders.
                     let Some(kind) = t.get("module").and_then(|v| v.as_str()) else {
                         warnings.push(format!("workspace {ix}: tile {id} has no module; ignored"));
                         continue;
@@ -755,11 +611,8 @@ fn parse_docks(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) 
             ));
             return Dock::default();
         };
-        // The dock's tree: a recursive `node` subtree (dock-trees task),
-        // or — legacy, from the first dock-regions build — a bare
-        // `tile = N` healed into a single-leaf tree (silently: it's the
-        // prior release's expected output, not corruption; carrying BOTH
-        // shapes is corruption-adjacent, so that picks the node and warns).
+        // Accept a recursive node or the legacy single-tile encoding. If both
+        // are present, prefer the node and warn; a legacy-only tile loads silently.
         let node_value = dock_table.get("node");
         let legacy_tile = dock_table.get("tile");
         if node_value.is_some() && legacy_tile.is_some() {
@@ -864,11 +717,9 @@ fn parse_docks(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) 
 }
 
 fn tile_id_to_i64(id: TileId) -> i64 {
-    // TileId's u64 stays comfortably under i64::MAX for any realistic
-    // session (tile ids are allocated one at a time, in-process); a wrapped
-    // negative value round-trips through `parse_workspace`'s `.max(0)`
-    // clamp as 0, which just fails membership in `Tree::from_parts` and
-    // gets healed to None rather than panicking or misbehaving.
+    // TOML stores signed integers, so IDs must fit in i64 to round-trip.
+    // This cast does not check the bound; a wrapped negative leaf or stack ID
+    // is rejected on load. Normal allocation starts at small positive IDs.
     id.0 as i64
 }
 
@@ -1008,15 +859,9 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
     }
 }
 
-/// Pure serialization: `to_toml` + `toml::to_string_pretty`, wrapped into a
-/// single `Result` type. Cheap — a handful of small TOML tables — which is
-/// exactly why it's the half of session-saving that's safe to run
-/// synchronously on the UI thread; [`write_atomic`] is the other half (the
-/// actual file I/O) and must not be. This split exists for
-/// `ShellView`'s coalesced dirty-flag flush (Task 3 fix round 1: see
-/// `shell::mod`'s `take_dirty_session_write`), which serializes here on the
-/// UI thread and hands the resulting `String` to a background executor for
-/// [`write_atomic`].
+/// Serialize the current session without filesystem access. The periodic
+/// shell flush calls this on the UI thread, then sends the returned text to
+/// [`write_atomic`] on the background executor.
 pub fn to_string_pretty(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -1027,60 +872,27 @@ pub fn to_string_pretty(
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
-/// Atomically write already-serialized session `text` to `path`: a temp
-/// file in the same directory, `fsync`, then rename over `path` (rename is
-/// atomic on the same filesystem — a crash or concurrent read never
-/// observes a partial write). Creates the parent directory if it doesn't
-/// exist yet.
+/// Replace `path` via [`crate::config_write::write_file`]: create the parent
+/// if needed, write a unique sibling temporary file, sync it, and rename it.
+/// Concurrent readers see a complete old or new file. The directory is not
+/// fsynced, so system-failure durability is best-effort; errors may leave a
+/// temporary file. Writer errors are mapped to `std::io::Error::other`.
 ///
-/// This is real, potentially-blocking file I/O (Task 3 fix round 1: a
-/// review finding on the first cut of this module, which ran this inline
-/// on the UI thread once per workspace-mutating dispatch — holding e.g.
-/// shift+left at OS key-repeat, ~20-30 events/sec, could then stall the render
-/// thread on a slow filesystem). Callers driven by UI events must run this
-/// on a background executor, never inline — see `ShellView`'s ~500ms
-/// watcher-tick flush, which is the only per-dispatch path left after that
-/// fix; [`save`] (a synchronous, do-everything wrapper) remains fine for
-/// off-the-UI-thread callers: direct test use, and the best-effort
-/// `on_app_quit` final flush, which fires at most once, at shutdown.
+/// This performs blocking I/O. Periodic saves run it on the background executor;
+/// the quit hook calls it synchronously through [`save`]. Session writes bypass
+/// the config submission queue and directory transaction lock. Concurrent
+/// periodic and shutdown writes have no ordering guarantee: the last rename
+/// wins, potentially replacing a newer session with an older snapshot.
 ///
-/// The atomic write itself is [`crate::config_write::write_file`]'s (Phase
-/// 4c collapsed the three `write_atomic` copies into one door); this
-/// function is now only the session file's *boundary* onto it. Two things
-/// it keeps that the door cannot know:
-///
-/// * **`std::io::Result`.** Every caller of this function — `ShellView`'s
-///   background flush, `save`, the session tests — already speaks
-///   `io::Result`, so the door's `String` error is mapped back here rather
-///   than rippling a signature change through them. Nothing inspects the
-///   `ErrorKind`; the message is what reaches the `[session] warning:`
-///   line.
-/// * **A path, not a layer + doc name.** `session.toml` is per-machine
-///   session state, deliberately *excluded* from the layered config merge
-///   and from `reload::scan` (`reload::EXCLUDED_FILENAME`), so it must not
-///   go through `config_write::write`'s layer-and-doc-name door — which
-///   would imply it is a config document that hot-reloads like the others.
-///
-/// The temp filename the door derives for this path is
-/// `.session.toml.{pid}-{counter}.tmp` — the same name this function used
-/// to build itself, and still a non-`.toml` name so the reload watcher's
-/// `*.toml` glob (Task 1c-1, `reload::scan`) never even sees it mid-write,
-/// on top of `session.toml` itself already being excluded by name. See
-/// `config_write`'s `TMP_COUNTER` for the race that uniqueness closes and
-/// the residual rename ordering it deliberately leaves open — which for
-/// this file is at worst a stale-but-valid session (e.g. an old periodic
-/// flush's rename landing after the quit-time save's), exactly the
-/// tradeoff this module's "best-effort, never load-bearing" design accepts
-/// elsewhere (see `load`'s "never panic or block startup").
+/// Temporary files end in `.tmp`. The reload scanner also excludes the final
+/// `session.toml` filename, so session saves do not trigger config reloads.
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     crate::config_write::write_file(path, text).map_err(std::io::Error::other)
 }
 
-/// Serialize and atomically write in one synchronous call — for callers
-/// that don't need [`to_string_pretty`]/[`write_atomic`] split across a
-/// UI/background boundary (direct test use; `ShellView`'s best-effort
-/// `on_app_quit` flush, which is a one-shot at shutdown, not a per-keystroke
-/// hot path).
+/// Serialize and write synchronously. Used by the best-effort quit hook and
+/// callers that do not need the UI/background split of [`to_string_pretty`]
+/// and [`write_atomic`].
 pub fn save(
     path: &Path,
     workspaces: &Workspaces,
@@ -1093,13 +905,10 @@ pub fn save(
     write_atomic(path, &text)
 }
 
-/// Load the session file at `path`, tolerantly: a missing file is a fresh
-/// start with no warnings (first run, or the user deleted it — not an
-/// error); a file that fails to read, parse, or validate is also a fresh
-/// start, but with warning strings the caller should surface (main.rs
-/// prints one `[session] warning:` line each, same convention as config/
-/// keymap/theme diagnostics) — a bad session file must never panic or
-/// block startup.
+/// Read the file synchronously. A missing file returns a fresh session without
+/// warnings; read, TOML parse, or structural validation failure returns a fresh
+/// session with warning strings for the caller to report. Successful recovery
+/// retains its local warnings. Loading does not modify the file.
 pub fn load(path: &Path) -> Restored {
     let fresh = |warnings: Vec<String>| Restored {
         workspaces: Workspaces::new(),
@@ -1152,7 +961,7 @@ mod tests {
         ws
     }
 
-    // --- tiles (Phase 3 §3.5, Task 4) ------------------------------------
+    // --- Tile records --------------------------------------------------
 
     #[test]
     fn tiles_round_trip_with_their_kind_and_opaque_state() {
@@ -1246,7 +1055,7 @@ mod tests {
 
     #[test]
     fn a_session_without_tiles_still_loads_and_writes_no_tiles_table() {
-        // Every pre-Phase-3 session file.
+        // Tile records are optional even when a layout contains tiles.
         let ws = two_tile_workspaces();
         let text = to_string_pretty(&ws, &TileRecords::new(), None, &no_usage()).unwrap();
         assert!(!text.contains("tiles"), "{text}");
@@ -1408,11 +1217,7 @@ members = [1, -4]
 
     #[test]
     fn from_toml_tolerates_a_legacy_extra_theme_mode_table() {
-        // Old session files (written before theme changes moved to the
-        // user config layer) may carry `[extra]\ntheme_mode = "..."`.
-        // `from_toml` no longer reads `extra` at all — the layout must
-        // still load intact, with the legacy key simply ignored like any
-        // other unknown key.
+        // Unknown `[extra]` fields are ignored without discarding the layout.
         let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let mut extra_table = toml::Table::new();
         extra_table.insert(
@@ -1565,15 +1370,13 @@ members = [1, -4]
             vec!["missing config_version (assuming 1)".to_string()],
             "a dangling focused reference must not itself add a warning"
         );
-        // Dock-trees review fix: the dangling reference heals to the first
-        // tile (via `Workspace::from_parts`), not to None — a non-empty
-        // restored tree must always have a focused tile, or the move-back
-        // verb could hand a tile to a focus-less `split`.
+        // A dangling focus heals to the first tile via `Workspace::from_parts`.
+        // A nonempty restored main tree must have focus for tile movement.
         assert_eq!(ws.active().tree().focused(), Some(TileId(1)));
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
     }
 
-    // --- config_version (fix round 1, Finding 2) ------------------------
+    // --- Config version ------------------------------------------------
 
     #[test]
     fn from_toml_rejects_a_mismatched_config_version() {
@@ -1741,8 +1544,7 @@ members = [1, -4]
 
         save(&path, &ws, &TileRecords::new(), None, &no_usage()).unwrap();
         assert!(path.exists());
-        // The atomic-write temp file must not be left behind, whatever its
-        // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
+        // Successful replacement consumes its temporary file.
         let leftover_tmp_files: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|entry| entry.ok())
@@ -1829,13 +1631,12 @@ members = [1, -4]
         let _ = restored.active().tree().neighbor(Direction::Right);
     }
 
-    // --- docks (dock-regions task, trees per dock-trees task) ------------
+    // --- Docks ---------------------------------------------------------
 
     use crate::tiling::{DOCK_DEFAULT_SIZE, DockSide, FocusRegion};
 
-    /// One tile in the tree, a *split* (two-tile) visible left dock
-    /// (resized), focus on the dock — dock-trees task: the fixture
-    /// exercises the recursive dock encoding, not just a single leaf.
+    /// A main leaf and a resized, visible split dock with dock focus exercise
+    /// recursive dock serialization.
     fn docked_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
         ws.split_active(Orientation::Horizontal);
@@ -1886,14 +1687,8 @@ members = [1, -4]
         );
     }
 
-    /// Final-review Important 1: a *visible but empty* focused dock is a
-    /// legal state (spec 2026-09-08 add-tile §8 — `ctrl+[` shows and
-    /// focuses the left dock whether or not it holds tiles), so a session
-    /// written in that state must come back exactly as written, with no
-    /// warning. `Workspaces::from_parts`'s cross-workspace pass used to
-    /// heal on `focusable()` ("hidden *or empty*"), which moved focus
-    /// back to `Main` and made `main.rs` print a restore warning at every
-    /// launch after that entirely ordinary quit.
+    /// A visible empty dock is a valid focus target and must restore without
+    /// a warning or a change of focus region.
     #[test]
     fn an_empty_but_visible_focused_dock_round_trips_without_a_warning() {
         let mut ws = Workspaces::new();
@@ -1932,7 +1727,7 @@ members = [1, -4]
 
     #[test]
     fn a_default_dock_session_writes_no_dock_keys() {
-        // Pre-dock-shaped state must keep producing pre-dock-shaped files.
+        // Omit dock fields when all docks and the focus region are at defaults.
         let mut ws = Workspaces::new();
         ws.split_active(Orientation::Horizontal);
         let text = to_string_pretty(&ws, &TileRecords::new(), None, &no_usage()).unwrap();
@@ -2006,8 +1801,7 @@ members = [1, -4]
         assert_eq!(
             ws.active().region(),
             FocusRegion::Dock(DockSide::Left),
-            "the dock is emptied but still visible, so it keeps the region \
-             (spec 2026-09-08 add-tile §8)"
+            "the dock is emptied but still visible, so it keeps the region"
         );
     }
 
@@ -2072,11 +1866,8 @@ members = [1, -4]
 
     #[test]
     fn from_toml_clears_fullscreen_when_the_region_is_a_focusable_dock() {
-        // Review should-fix: a hand-edited file claiming tree fullscreen
-        // AND focus in a visible occupied dock — contradictory (unreachable
-        // live: fullscreen blocks focus from entering docks, and mod+f is
-        // a no-op while dock-focused). Heals by clearing fullscreen and
-        // keeping the dock focus, with a warning.
+        // Main-tree fullscreen and dock focus cannot coexist. Restore dock
+        // focus and clear fullscreen with a warning.
         let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             focused = 1
@@ -2192,14 +1983,11 @@ members = [1, -4]
         }
     }
 
-    // --- dock trees (dock-trees task) -------------------------------------
+    // --- Dock trees ----------------------------------------------------
 
     #[test]
     fn a_legacy_single_tile_dock_key_loads_as_a_single_leaf_tree() {
-        // The first dock-regions build wrote `tile = N`. It still loads —
-        // healed into a single-leaf tree with the tile focused, and
-        // *silently* (recorded choice: the prior release's own output is
-        // not corruption).
+        // A legacy `tile = N` loads as a focused single-leaf tree without warnings.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(
@@ -2391,12 +2179,8 @@ members = [1, -4]
 
     #[test]
     fn an_intra_dock_tree_duplicate_id_keeps_one_leaf_with_one_warning() {
-        // Review fix: a dock tree carrying the SAME id twice (parseable —
-        // node_from_toml has no duplicate check). First claim wins: one
-        // copy of the tile survives in place, the other is removed, and
-        // exactly one warning is emitted for the one healed duplicate
-        // (the pre-fix all-copies prune deleted both leaves and, walking
-        // a pre-removal snapshot, warned twice).
+        // A repeated dock ID keeps its first occurrence, removes the other,
+        // and emits one warning for the duplicate.
         let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [docks.left]
@@ -2467,7 +2251,7 @@ members = [1, -4]
         );
     }
 
-    // --- Phase 4a: [frame] ------------------------------------------
+    // --- Frame ---------------------------------------------------------
 
     fn sample_frame_record() -> FrameRecord {
         FrameRecord {
@@ -2511,11 +2295,7 @@ members = [1, -4]
 
     #[test]
     fn a_frame_record_with_no_dimension_selections_writes_no_dimensions_key() {
-        // Phase 4b M13: `to_toml` used to insert an empty `dimensions`
-        // table even when the scope selects nothing — dead bytes on
-        // every save for the (extremely common) "no dimension scope"
-        // case, since `from_toml` already treats an absent key the same
-        // as an empty one.
+        // Empty dimension selections are omitted; absence restores the same scope.
         let record = FrameRecord {
             scope: Scope::default(),
             active_slot: None,
@@ -2561,8 +2341,7 @@ members = [1, -4]
         assert!(!table.contains_key("palette"), "{table:?}");
     }
 
-    /// Every pre-existing session file has no `[palette]` table: that is
-    /// a fresh, empty history, not a warning.
+    /// An absent palette table restores empty usage without warnings.
     #[test]
     fn a_session_file_without_a_palette_table_restores_empty_usage_silently() {
         let table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());

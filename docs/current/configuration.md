@@ -60,7 +60,9 @@ The main configuration documents have distinct owners:
 
 Session state has its own reader. The generic config loader still reads any
 `session.toml` in a layer directory; changing it alone does not trigger reload,
-but it can be included when another watched file changes.
+but it can be included when another watched file changes. See
+[session persistence](shell.md#session-format) for its format, restoration,
+and save guarantees.
 
 The schema declares meaning rather than storage details. Measure columns name
 their aggregation grain. Document columns distinguish keys, attributes, and

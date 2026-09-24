@@ -19,17 +19,11 @@ use geode_core::query::QueryKey;
 use super::ShellView;
 
 impl ShellView {
-    /// Every non-placeholder occupant's tile record, gathered fresh from
-    /// `serialize` (Task 4, Phase 3 §3.5), plus every *unplaced* record —
-    /// one this build had no factory for, so the tile paints a
-    /// placeholder while the record it was restored from rides through
-    /// untouched (spec 2026-09-08 add-tile §7.2). A placeholder tile
-    /// carries no module state of its own, so it is never written from
-    /// the occupant side; without the unplaced records the very next
-    /// flush would drop a session saved by a build with more modules.
-    /// A live occupant always wins the id — `or_insert_with` never
-    /// overwrites one — and `ensure_occupants`/`add_tile` retain the map
-    /// to tiles that are still both live and unfilled.
+    /// Collect fresh serialized state from non-placeholder occupants, plus
+    /// preserved records for unavailable modules. Live occupants win an ID
+    /// collision. Placeholder occupants have no state of their own; retaining
+    /// unplaced records lets sessions survive builds with fewer modules.
+    /// Reconciliation and tile filling remove stale unplaced records.
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
         let mut tiles: session::TileRecords = self
             .occupants
@@ -244,12 +238,8 @@ impl ShellView {
             }
             let restored = self.services.restored_tiles.remove(&id.0);
             let pending = self.pending_tiles.remove(id);
-            // A factory found by the record's own `kind` is a real match —
-            // its `kind()` equals `restored.kind` by construction, so the
-            // restored state is meant for it (fix-round finding). A
-            // restored record outranks a pending request (they cannot
-            // coexist for one id in practice — restore never allocates a
-            // new id and `add_tile` never targets a restored one).
+            // Only the factory registered for this record's kind receives its state.
+            // A matched restored record takes precedence over a pending add request.
             let matched = restored
                 .as_ref()
                 .and_then(|r| self.services.roster.factory(&r.kind));
@@ -268,15 +258,9 @@ impl ShellView {
             let pending_state = pending_factory
                 .and(pending.as_ref())
                 .and_then(|p| p.state.as_ref());
-            // Restored beats pending beats placeholder (spec 2026-09-08
-            // add-tile §7.2). There is no default kind to fall back to:
-            // a tile nothing claims paints a placeholder, and if the
-            // reason is a restored record this build has no module for,
-            // that record is kept verbatim so the next session flush
-            // cannot forget it. (A pending request cannot coexist with a
-            // restored record for one id — see `matched`'s comment above
-            // — so "unmatched restored record" really does mean "this
-            // tile is about to be a placeholder".)
+            // Use a matching restored factory, then a pending factory, then a
+            // placeholder. Preserve unmatched restored records for later saves.
+            // Restore and add-tile allocation normally use disjoint IDs.
             if let (Some(record), None) = (&restored, matched) {
                 tracing::warn!(
                     target: "geode::session",

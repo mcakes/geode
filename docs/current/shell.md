@@ -187,11 +187,98 @@ reproduces the same count and maximum.
 
 ## Persistence and configuration
 
-The session file records workspace trees, docks, stacks, focused regions,
-module kinds with opaque module state, frame state, and palette usage. Parsing
-heals local layout damage where possible: invalid dock state should not cost a
-valid main workspace. A structurally invalid main tree causes a fresh session
-with diagnostics rather than a partially trusted layout.
+### Session format
+
+`session.toml` in the user configuration directory stores layout and transient
+state. It is loaded once at startup and excluded from configuration reload
+change detection. Theme and other durable preferences live in layered config.
+With no configured session path, the shell skips persistence.
+
+The writer emits `config_version = 1` and these records:
+
+| Record | Contents |
+|---|---|
+| `active` | Workspace index, 1–9 |
+| `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
+| `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
+| `workspaces.N.tiles.<id>` | Module name and its opaque state table |
+| `frame` | Dimension selections, text/expression scope, grouping slot, and as-of |
+| `palette.usage` | Per-row usage count and last-used timestamp |
+
+Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
+children, and ratios; stacks store tile IDs and the active member index. All
+materialized workspaces are saved, including empty ones. Default docks, empty
+module state, and empty usage history are omitted. Only tile records whose IDs
+belong to the workspace's main or dock trees are written.
+
+The legacy dock `tile = N` encoding loads silently as a single-leaf tree. If
+both `tile` and `node` appear, `node` wins with a warning. Unknown keys are
+ignored during loading and lost on the next save; serialization reconstructs
+the document and does not preserve comments. See
+[`session.rs`](../../crates/geode-shell/src/session.rs) for the node encoding.
+
+### Recovery and restoration
+
+A missing file starts a fresh session without warnings. An unreadable file,
+invalid TOML, or rejected session starts fresh with warnings logged by the app.
+A missing version warns and assumes version 1; any other present version value
+rejects the session. Loading and recovery do not rewrite or back up the file;
+a later save replaces it with the current state.
+
+| Problem | Recovery |
+|---|---|
+| Invalid workspace index, workspace shape, or main-tree structure | Reject the entire session, including tile records, frame state, and usage |
+| Positive finite split ratios with valid arity | Normalize the ratios |
+| Repeated/already-claimed stack members, invalid active index, or fewer than two surviving members | Prune members, reset the index, and collapse or remove the stack as needed |
+| Dangling focus or fullscreen ID | Drop the reference; give a nonempty tree a valid focused tile |
+| Invalid dock subtree | Drop that dock's tree with a warning; retain the workspace |
+| Duplicate dock tile claims | Main trees take priority, then earlier docks; prune duplicate dock claims with warnings |
+| Hidden focused dock | Choose a fallback region; visible empty docks remain valid focus targets |
+| Main fullscreen combined with dock focus | Clear fullscreen and keep dock focus, with a warning |
+| Malformed or locally dangling tile record | Warn and drop the record |
+| Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
+
+Frame restoration parses scope expressions but does not validate columns
+against the current schema. Invalid slots, expression syntax, date strings,
+and non-array dimension entries warn; some wrong-type fields and non-string
+dimension values are silently ignored. `Scope::impossible` is not persisted.
+The shell applies scope, slot, and as-of, then clears scope history. Undo/redo
+history and recent publishes start fresh; saved scopes come from config.
+
+The shell creates occupants from restored records through the module roster.
+Only the factory matching a record's module name receives its state. An
+unavailable module displays a placeholder and retains the original record for
+subsequent saves. Closing the tile discards it; filling the placeholder replaces
+it with the new occupant's state. Restored IDs seed subsequent tile allocation
+so ordinary additions do not reuse them.
+
+### Saving and failure behavior
+
+Workspace actions mark layout state dirty and return without session file I/O.
+The shared reload watcher checks for a session snapshot on its 500 ms tick,
+before any configuration-scan early return. It also compares serialized module
+state, frame versions, and palette usage versions, so those changes can trigger
+a save independently of layout dirt. This is periodic coalescing, not a timer
+reset after each action; other work adds to the interval.
+
+Snapshot collection and TOML serialization run on the UI thread. The watcher
+awaits the file write on the background executor before continuing its loop.
+The layout dirty flag clears before serialization, and comparison baselines
+advance when serialization succeeds, before disk I/O. A failed write is logged
+but does not retry unchanged state on the next tick. A serialization failure
+leaves comparison baselines unchanged, but a layout-only change can lose its
+dirty flag. These baselines track extracted snapshots, not confirmed saves.
+
+The quit hook saves current state synchronously regardless of dirty flags.
+Session writes use the shared atomic replacement primitive: a unique sibling
+temporary file, file sync, then rename. Readers see a complete old or new file;
+the directory is not synced, so durability across system failure is best-effort.
+Errors can leave temporary files. Session writes bypass the configuration
+submission queue and transaction lock. The quit hook does not join an in-flight
+periodic save, so the last rename can leave an older snapshot on disk. Separate
+processes writing the same session path likewise have no ordering guarantee.
+
+### Configuration writes and reloads
 
 Runtime configuration writes target only the user layer. `config_write` is
 the common door for ordered, atomic edits. Accepted writes to one directory

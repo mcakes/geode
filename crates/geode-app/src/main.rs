@@ -268,14 +268,9 @@ fn main() {
                 tracing::warn!(target: "geode::theme", "{warning}");
             }
 
-            // Restore the session (Task 3) before constructing ShellView:
-            // the saved workspace layout replaces the fresh `Workspaces::
-            // new()` set above. Pure layout state now — theme choices are
-            // ordinary config (`[theme]` in `app.toml`, written by
-            // `ShellView::persist_theme` via `theme::persist_to_user_config`)
-            // resolved by `apply_from_config` above like everything else, so
-            // there is no session-side theme re-application step to run
-            // here any more.
+            // Load layout, module records, frame state, and palette usage before
+            // constructing the shell. Themes are restored from layered config.
+            // Report session recovery warnings without aborting startup.
             if let Some(path) = &services.session_path {
                 let restored = session::load(path);
                 for warning in &restored.warnings {
@@ -287,17 +282,9 @@ fn main() {
                 services.restored_palette_usage = restored.palette_usage;
             }
 
-            // Best-effort flush on quit: `App::on_app_quit` exists at the
-            // pinned gpui rev (checked against the pinned release,
-            // `gpui-pre-0.3.5/src/app.rs`), so wire it up as a
-            // belt-and-suspenders save — the post-dispatch save in
-            // `ShellView::dispatch` already covers crash-robustness
-            // for every workspace-mutating action; this only additionally
-            // catches a workspace mutation made just before quitting, ahead
-            // of the background watcher's next ~500ms flush. (A theme
-            // change persists synchronously the moment it applies —
-            // `ShellView::persist_theme` — so it needs no quit-time flush
-            // of its own any more.)
+            // Save current session state synchronously at quit, including changes
+            // since the last periodic snapshot. This is best-effort and does not
+            // join any in-flight periodic session write; their renames may race.
             cx.on_app_quit(|cx| {
                 for window in cx.windows() {
                     if let Some(handle) = window.downcast::<Root>() {
