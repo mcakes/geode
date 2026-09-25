@@ -95,14 +95,15 @@ base included, is still what was submitted; an `Err` keeps it editing and shows
 `upload failed: <e>` until the next edit or upload.
 
 While a draft is `sent`, the next generation delivered for its key with a
-different source time is compared with the rows that went out, row by row in
-document order, over every column except a minted row label (`f64` within one
-ULP). Equal clears the draft, the panel follows the new generation, and the
+different source time is compared with the rows that went out as a multiset
+(both sides sorted by every compared column, since the store returns a
+document sorted by its axes while the rows went out in painted order), over
+every column except a minted row label (`f64` within one ULP). Equal clears the draft, the panel follows the new generation, and the
 header reads `sent HH:MM, confirmed HH:MM` until the next edit. Different
 keeps the draft `sent` over its base, reads `echo differs (N rows)`, and
 refuses edits until `:rebase` (which yields an unsent draft on the new
 generation) or `:revert`. The update policy does not apply to a sent draft. An
-upstream that reorders rows reads as differing. A delivered document that
+upstream that only reorders rows reads as confirmed. A delivered document that
 cannot be assembled reads `echo not comparable: <why>` and is held the same
 way. `sent` is not persisted: a sent draft restores with its edits, unsent.
 

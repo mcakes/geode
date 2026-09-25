@@ -15030,6 +15030,23 @@ run_mutation "upload: echo tolerates one ulp only" \
   'const ULPS: u64 = 2;' \
   geode-marketdata echo_accepts_one_ulp_and_refuses_two
 
+# The store hands a document back sorted by its axes; the sent rows are in
+# painted order. Mutated to compare positionally (no sort), an
+# out-of-order insert reads as "echo differs" on every successful upload.
+run_mutation "upload: echo compares rows as a multiset" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let (a, b) = (sorted(ours, n_ours), sorted(theirs, n_theirs));' \
+  '    let (a, b) = ((0..n_ours).collect::<Vec<_>>(), (0..n_theirs).collect::<Vec<_>>());' \
+  geode-marketdata echo_compares_rows_as_a_multiset_not_by_position
+
+# The same mutation against the real store's read-back: the echo of an
+# out-of-order insert, assembled from the document query, must confirm.
+run_mutation "upload: an out-of-order insert confirms through the real store" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let (a, b) = (sorted(ours, n_ours), sorted(theirs, n_theirs));' \
+  '    let (a, b) = ((0..n_ours).collect::<Vec<_>>(), (0..n_theirs).collect::<Vec<_>>());' \
+  geode-app an_out_of_order_insert_echoes_back_as_confirmed_through_the_real_store
+
 # ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
 
 # The delegate's one flag. Mutated to always show, a `RowLabel::Hidden`

@@ -288,32 +288,34 @@ fn tag(ty: ColumnType) -> &'static str {
 ///
 /// The minted label is Geode's, not the wire's: the kind writes no id and
 /// the echo arrives re-minted, so comparing it would make every upload
-/// that inserted a row "differ". Rows are compared in document order, so
-/// an upstream that reorders rows reads as differing — the trader then
-/// rebases or reverts, which is the safe side of the error. A column one
-/// side carries and the other lacks makes every compared row differ; each
-/// row only one side has counts once.
+/// that inserted a row "differ". Rows are compared as a MULTISET: both
+/// sides are sorted by the full tuple of compared columns and matched in
+/// one merge walk. The sent rows are in painted order while the store
+/// hands a document back sorted by its axes, so an out-of-order insert,
+/// an ex-date edited past a neighbour or a term inserted out of date order
+/// would otherwise read as differing on every successful upload. The
+/// count is the larger side's unmatched rows — one changed value is one
+/// row, a row only one side has counts once. The cost: an upstream that
+/// only reorders rows reads as confirmed. A column one side carries and
+/// the other lacks makes every row differ.
 pub fn echo_differs(spec: &PanelSpec, sent: &DocumentRows, delivered: &DocumentRows) -> usize {
     let minted = spec.rows.identity == RowIdentity::Minted;
     let skipped = minted.then_some(spec.rows.column);
-    let (ours, theirs) = (compared(sent, skipped), compared(delivered, skipped));
-    let same_columns = ours.len() == theirs.len()
-        && ours
-            .iter()
-            .all(|(name, _)| theirs.iter().any(|(n, _)| n == name));
-    let mut differs = sent.rows().abs_diff(delivered.rows());
-    for row in 0..sent.rows().min(delivered.rows()) {
-        let equal = same_columns
-            && ours.iter().all(|(name, a)| {
-                theirs
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .is_some_and(|(_, b)| cell_eq(a, b, row))
-            });
-        if !equal {
-            differs += 1;
-        }
-    }
+    let (ours, all_theirs) = (compared(sent, skipped), compared(delivered, skipped));
+    // `theirs` in `ours`' column order, so one index names one column on
+    // both sides; `None` when the two carry different columns.
+    let theirs: Option<Vec<&Column>> = (ours.len() == all_theirs.len())
+        .then(|| {
+            ours.iter()
+                .map(|(name, _)| all_theirs.iter().find(|(n, _)| n == name).map(|(_, c)| c))
+                .collect()
+        })
+        .flatten();
+    let ours: Vec<&Column> = ours.into_iter().map(|(_, c)| c).collect();
+    let mut differs = match theirs {
+        Some(theirs) => unmatched_rows(&ours, sent.rows(), &theirs, delivered.rows()),
+        None => sent.rows().max(delivered.rows()),
+    };
     let attrs_equal = sent.attributes.len() == delivered.attributes.len()
         && sent.attributes.iter().all(|(name, a)| {
             delivered
@@ -326,6 +328,93 @@ pub fn echo_differs(spec: &PanelSpec, sent: &DocumentRows, delivered: &DocumentR
         differs += 1;
     }
     differs
+}
+
+/// The multiset difference of two row sets over the same columns: each
+/// side's row indices sorted by the exact compared tuple, then one merge
+/// walk pairing rows equal within [`f64_close`]. Answers the larger side's
+/// count of rows left unpaired.
+fn unmatched_rows(ours: &[&Column], n_ours: usize, theirs: &[&Column], n_theirs: usize) -> usize {
+    use std::cmp::Ordering;
+    // The sort takes the EXACT order: the one-ULP tolerance is not
+    // transitive, and a comparator that is not a total order may panic
+    // in the standard sort.
+    let sorted = |cols: &[&Column], n: usize| {
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&i, &j| {
+            cols.iter()
+                .map(|c| cell_cmp(c, i, c, j))
+                .find(|o| o.is_ne())
+                .unwrap_or(Ordering::Equal)
+        });
+        idx
+    };
+    let (a, b) = (sorted(ours, n_ours), sorted(theirs, n_theirs));
+    let (mut i, mut j) = (0, 0);
+    let (mut only_ours, mut only_theirs) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match merge_order(ours, a[i], theirs, b[j]) {
+            Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+            Ordering::Less => {
+                only_ours += 1;
+                i += 1;
+            }
+            Ordering::Greater => {
+                only_theirs += 1;
+                j += 1;
+            }
+        }
+    }
+    only_ours += a.len() - i;
+    only_theirs += b.len() - j;
+    only_ours.max(only_theirs)
+}
+
+/// Row `i` of `a` against row `j` of `b` for the merge walk: `Equal` when
+/// every cell is the same value (`f64` within one ULP), otherwise the
+/// exact order of the first cell that is not.
+fn merge_order(a: &[&Column], i: usize, b: &[&Column], j: usize) -> std::cmp::Ordering {
+    for (x, y) in a.iter().zip(b) {
+        if cell_eq(x, i, y, j) {
+            continue;
+        }
+        // Not the same value, so never `Equal` — a missing cell included.
+        return cell_cmp(x, i, y, j).then(std::cmp::Ordering::Less);
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The exact total order of two cells (`f64` by `total_cmp`); a different
+/// tag orders by tag, a missing cell after a present one.
+fn cell_cmp(a: &Column, i: usize, b: &Column, j: usize) -> std::cmp::Ordering {
+    let rank = |c: &Column| match c {
+        Column::F64(_) => 0,
+        Column::I64(_) => 1,
+        Column::Utf8(_) => 2,
+        Column::Date(_) => 3,
+    };
+    fn by<T>(
+        a: &[T],
+        i: usize,
+        b: &[T],
+        j: usize,
+        f: impl Fn(&T, &T) -> std::cmp::Ordering,
+    ) -> std::cmp::Ordering {
+        match (a.get(i), b.get(j)) {
+            (Some(x), Some(y)) => f(x, y),
+            (x, y) => y.is_some().cmp(&x.is_some()),
+        }
+    }
+    match (a, b) {
+        (Column::F64(a), Column::F64(b)) => by(a, i, b, j, |x, y| x.total_cmp(y)),
+        (Column::I64(a), Column::I64(b)) => by(a, i, b, j, Ord::cmp),
+        (Column::Utf8(a), Column::Utf8(b)) => by(a, i, b, j, Ord::cmp),
+        (Column::Date(a), Column::Date(b)) => by(a, i, b, j, Ord::cmp),
+        _ => rank(a).cmp(&rank(b)),
+    }
 }
 
 /// A document's axes then values, less the column `skipped` names.
@@ -347,15 +436,15 @@ fn f64_close(a: f64, b: f64) -> bool {
     a == b || (same_sign && a.to_bits().abs_diff(b.to_bits()) <= ULPS)
 }
 
-fn cell_eq(a: &Column, b: &Column, row: usize) -> bool {
+fn cell_eq(a: &Column, i: usize, b: &Column, j: usize) -> bool {
     match (a, b) {
         (Column::F64(a), Column::F64(b)) => a
-            .get(row)
-            .zip(b.get(row))
+            .get(i)
+            .zip(b.get(j))
             .is_some_and(|(x, y)| f64_close(*x, *y)),
-        (Column::I64(a), Column::I64(b)) => a.get(row).is_some() && a.get(row) == b.get(row),
-        (Column::Utf8(a), Column::Utf8(b)) => a.get(row).is_some() && a.get(row) == b.get(row),
-        (Column::Date(a), Column::Date(b)) => a.get(row).is_some() && a.get(row) == b.get(row),
+        (Column::I64(a), Column::I64(b)) => a.get(i).is_some() && a.get(i) == b.get(j),
+        (Column::Utf8(a), Column::Utf8(b)) => a.get(i).is_some() && a.get(i) == b.get(j),
+        (Column::Date(a), Column::Date(b)) => a.get(i).is_some() && a.get(i) == b.get(j),
         _ => false,
     }
 }
@@ -747,6 +836,47 @@ role = "attribute"
                 "{step} ulp"
             );
         }
+    }
+
+    /// The store hands a document back sorted by its axes; the sent rows
+    /// are in painted order. The same rows in another order confirm, and a
+    /// changed value among reordered rows is still one row.
+    #[test]
+    fn echo_compares_rows_as_a_multiset_not_by_position() {
+        let sent = fixture_dividend_rows();
+        let n = sent.rows();
+        assert!(n >= 3, "the fixture has rows to reorder");
+        let order: Vec<usize> = (0..n).rev().collect();
+        let mut reordered = sent.clone();
+        for (_, col) in reordered.axes.iter_mut().chain(reordered.values.iter_mut()) {
+            *col = match col {
+                Column::F64(v) => Column::F64(order.iter().map(|&i| v[i]).collect()),
+                Column::I64(v) => Column::I64(order.iter().map(|&i| v[i]).collect()),
+                Column::Utf8(v) => Column::Utf8(order.iter().map(|&i| v[i].clone()).collect()),
+                Column::Date(v) => Column::Date(order.iter().map(|&i| v[i]).collect()),
+            };
+        }
+        assert_eq!(echo_differs(&DIVIDEND, &sent, &reordered), 0);
+        assert_eq!(echo_differs(&DIVIDEND, &reordered, &sent), 0);
+        // CVI's typed axis too: the long form reversed.
+        let cvi = fixture_cvi_rows();
+        let m = cvi.rows();
+        let back: Vec<usize> = (0..m).rev().collect();
+        let mut cvi_rev = cvi.clone();
+        for (_, col) in cvi_rev.axes.iter_mut().chain(cvi_rev.values.iter_mut()) {
+            *col = match col {
+                Column::F64(v) => Column::F64(back.iter().map(|&i| v[i]).collect()),
+                Column::I64(v) => Column::I64(back.iter().map(|&i| v[i]).collect()),
+                Column::Utf8(v) => Column::Utf8(back.iter().map(|&i| v[i].clone()).collect()),
+                Column::Date(v) => Column::Date(back.iter().map(|&i| v[i]).collect()),
+            };
+        }
+        assert_eq!(echo_differs(&CVI, &cvi, &cvi_rev), 0);
+
+        if let Column::F64(v) = &mut reordered.values[3].1 {
+            v[0] += 1.0;
+        }
+        assert_eq!(echo_differs(&DIVIDEND, &sent, &reordered), 1);
     }
 
     /// CVI's row axis is typed, not minted: a term is the wire's own
