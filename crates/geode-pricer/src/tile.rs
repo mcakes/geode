@@ -54,10 +54,19 @@ use std::time::{Duration, Instant};
 
 pub(crate) const LOADING: &str = "loading…";
 
-/// The one-shot wait before a refused submission asks again (planning
-/// decision 5): nothing else would ever resubmit with the refresh timer
-/// off.
+/// The wait before a refused submission asks again (planning decision
+/// 5): nothing else would ever resubmit with the refresh timer off.
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// The longest wait between retries: a data service that is gone for good
+/// is asked twice a minute, not every second forever.
+pub(crate) const RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// The wait after the `refusals`th consecutive refusal: `RETRY_AFTER`,
+/// doubled per refusal after the first, capped at `RETRY_CAP`.
+fn retry_delay(refusals: u32) -> Duration {
+    let doublings = refusals.saturating_sub(1).min(5);
+    (RETRY_AFTER * 2u32.pow(doublings)).min(RETRY_CAP)
+}
 pub(crate) const REFUSED: &str =
     "pricing request refused: the data service is busy or gone; retrying";
 
@@ -189,8 +198,13 @@ pub struct PricerTile {
     /// `loaded`, and what `serialize` writes meanwhile, so a session save
     /// mid-load never overwrites a good record.
     held_expanded: Option<Vec<LineId>>,
-    /// Transient header notice (an absent document, a refused request).
+    /// Transient header notice (an absent document, loading).
     pub(crate) notice: Option<SharedString>,
+    /// Consecutive refused submissions (0: none standing). While non-zero
+    /// the header shows `REFUSED` over `notice` without touching it, so
+    /// the notice it covered returns when the streak ends — an admitted
+    /// submission, or one with nothing left to ask for.
+    refusals: u32,
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
     /// The save state's own header slot (spec §7.3): `NOT_SAVED` after a
@@ -435,6 +449,7 @@ impl PricerTile {
             loading,
             held_expanded,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
+            refusals: 0,
             view_notice: None,
             save_blocked: blocked.is_some(),
             save_notice: blocked,
@@ -1097,6 +1112,14 @@ impl PricerTile {
             .iter()
             .any(|r| self.in_flight.get(&self.sheet.id(*r)) != Some(&self.sheet.revision(*r)));
         if !needed {
+            // A standing refusal with nothing left to ask for (its lines
+            // were answered, deleted or hidden away) would otherwise say
+            // "retrying" with no retry that could ever succeed.
+            if self.refusals > 0 {
+                self.end_refusals();
+                self.rebuild_chrome();
+                cx.notify();
+            }
             return;
         }
         let lines: Vec<PriceLine> = stale
@@ -1121,26 +1144,41 @@ impl PricerTile {
         });
         if queued {
             self.in_flight = flight;
-            self.retry_task = None;
-            if self.notice.as_ref().is_some_and(|n| n.as_ref() == REFUSED) {
-                self.notice = None;
-            }
+            self.end_refusals();
         } else {
-            // Planning decision 5: nothing else would ever resubmit.
+            // Planning decision 5: nothing else would ever resubmit. One
+            // log line per streak: a closed channel refuses every retry.
+            if self.refusals == 0 {
+                tracing::warn!(
+                    target: "geode::pricing",
+                    tile = self.id.0,
+                    "pricing request refused; retrying with backoff until one is admitted"
+                );
+            }
             self.in_flight.clear();
-            self.notice = Some(REFUSED.into());
+            self.refusals = self.refusals.saturating_add(1);
             self.arm_retry(cx);
         }
         self.rebuild_chrome();
         cx.notify();
     }
 
+    /// The streak is over: no notice over `notice`, no retry pending, and
+    /// the next refusal starts again at `RETRY_AFTER` with a log line.
+    fn end_refusals(&mut self) {
+        self.refusals = 0;
+        self.retry_task = None;
+    }
+
+    /// One retry at a time; an edit refused while one is pending waits on
+    /// it rather than re-arming a shorter one.
     fn arm_retry(&mut self, cx: &mut Context<Self>) {
         if self.retry_task.is_some() {
             return;
         }
+        let wait = retry_delay(self.refusals);
         self.retry_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(RETRY_AFTER).await;
+            cx.background_executor().timer(wait).await;
             let _ = this.update(cx, |t, cx| {
                 t.retry_task = None;
                 t.submit(cx);
@@ -1996,7 +2034,11 @@ impl PricerTile {
 
     pub(crate) fn rebuild_chrome(&mut self) {
         let settings: PricerSettings = self.shared.settings.borrow().clone();
-        let notice = self.notice.clone().or_else(|| self.view_notice.clone());
+        let notice = if self.refusals > 0 {
+            Some(REFUSED.into())
+        } else {
+            self.notice.clone().or_else(|| self.view_notice.clone())
+        };
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
@@ -2369,6 +2411,11 @@ pub(crate) mod tests {
         }
         pub fn close_channel(&self) {
             self.rx.borrow_mut().take();
+        }
+        /// Fill the bounded request queue so the next submission is
+        /// refused; `requests()` drains it and admits the next one.
+        pub fn fill_queue(&self) {
+            while self.data.cancel(QueryKey(u64::MAX)) {}
         }
         /// Every request since the last drain, `Cancel` included.
         pub fn requests(&self) -> Vec<Request> {
@@ -4329,6 +4376,72 @@ pub(crate) mod tests {
         h.tile
             .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
         assert_eq!(h.notice(&vcx), None);
+    }
+
+    /// A refusal whose lines then stop being stale (deleted) has nothing
+    /// to retry: the next submit clears the notice rather than leaving
+    /// "retrying" standing with no retry pending.
+    #[gpui::test]
+    fn a_refusal_with_nothing_left_to_price_clears(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.close_channel();
+        h.visible(&mut vcx, true);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        h.dispatch(&mut vcx, "delete", None);
+        assert_eq!(h.sheet_len(&vcx), 0);
+        settle(&mut vcx, RETRY_AFTER);
+        assert_eq!(h.notice(&vcx), None);
+    }
+
+    /// A refusal paints over the notice it found, never destroys it.
+    #[gpui::test]
+    fn a_standing_notice_survives_a_refusal_and_returns_after_it(cx: &mut gpui::TestAppContext) {
+        let mut record = toml::Table::new();
+        record.insert("sheet".into(), "gone".into());
+        let (h, mut vcx) = open_full(
+            cx,
+            Some(record),
+            MemorySheetStore::default(),
+            PricerSettings::default(),
+        );
+        h.visible(&mut vcx, true);
+        let gone = Some("sheet 'gone' was not found; opened empty".to_string());
+        assert_eq!(h.notice(&vcx), gone);
+        h.fill_queue();
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        let _ = h.requests(); // the queue drains
+        settle(&mut vcx, RETRY_AFTER);
+        assert_eq!(h.prices().len(), 1, "the retry was admitted");
+        assert_eq!(h.notice(&vcx), gone);
+    }
+
+    /// Each consecutive refusal doubles the wait: a closed channel asks
+    /// at 1 s, then 2 s later, not every second forever.
+    #[gpui::test]
+    fn consecutive_refusals_back_off(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.close_channel();
+        h.visible(&mut vcx, true);
+        let tag = |vcx: &VisualTestContext| h.tile.read_with(vcx, |t, _| t.tag);
+        let first = tag(&vcx);
+        settle(&mut vcx, RETRY_AFTER);
+        let second = tag(&vcx);
+        assert!(second > first, "the first retry fires at 1 s");
+        settle(&mut vcx, RETRY_AFTER);
+        assert_eq!(tag(&vcx), second, "the second does not fire 1 s later");
+        settle(&mut vcx, RETRY_AFTER);
+        assert!(tag(&vcx) > second, "but does by 2 s");
+    }
+
+    #[test]
+    fn the_retry_delay_doubles_to_a_thirty_second_cap() {
+        let secs: Vec<u64> = (1..=8).map(|n| retry_delay(n).as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
     }
 
     // ---- clicks while the entry field is open ----
