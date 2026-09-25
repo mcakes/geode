@@ -149,19 +149,24 @@ mod tests {
     /// colour and its ground already matched (`contrast_ratio` at 1:1,
     /// nothing for the bisection to move toward). Pin the fix at the
     /// helper `derive` calls: a colour equal to its own ground must still
-    /// reach `READABLE_RATIO` once floored toward a pole.
+    /// reach `READABLE_RATIO` once floored toward a pole. The light and
+    /// dark grounds pin WHICH pole: from either, only the pole with more
+    /// contrast can reach 3:1 (white on light grey peaks near 1.6:1).
     #[test]
     fn the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio() {
-        let ground = Rgb {
-            r: 0.5,
-            g: 0.5,
-            b: 0.5,
-        };
-        let floored = floor_toward_pole(to_hsla(ground), ground);
-        assert!(
-            contrast_ratio(to_rgb(floored), ground) >= READABLE_RATIO,
-            "a colour equal to its ground must still clear {READABLE_RATIO}:1 once floored"
-        );
+        for level in [0.2, 0.5, 0.8] {
+            let ground = Rgb {
+                r: level,
+                g: level,
+                b: level,
+            };
+            let floored = floor_toward_pole(to_hsla(ground), ground);
+            assert!(
+                contrast_ratio(to_rgb(floored), ground) >= READABLE_RATIO,
+                "a colour equal to a {level} grey ground must still clear \
+                 {READABLE_RATIO}:1 once floored"
+            );
+        }
     }
 
     #[gpui::test]
