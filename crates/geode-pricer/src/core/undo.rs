@@ -247,4 +247,44 @@ mod tests {
         );
         assert!(!stack.can_redo(), "nor does the earlier redo");
     }
+
+    /// The redo side's error path: two edits undone leave two redos
+    /// waiting. The next redo re-inserts a line the sheet already holds
+    /// (restored behind the stack's back), so it is refused — and the
+    /// later redo still waiting must go too, not replay against rows the
+    /// refusal left unaccounted for.
+    #[test]
+    fn a_refused_redo_drops_the_rest_of_both_sides() {
+        let mut s = Sheet::new("t");
+        let mut stack = UndoStack::default();
+        apply(
+            &mut stack,
+            &mut s,
+            Edit::Insert {
+                place: Place::Root { at: 0 },
+                rows: vec![line(spx(5000.0, OptionKind::Call), 1)],
+            },
+        );
+        apply(
+            &mut stack,
+            &mut s,
+            Edit::Insert {
+                place: Place::Root { at: 1 },
+                rows: vec![line(spx(4000.0, OptionKind::Put), 1)],
+            },
+        );
+        assert_eq!(stack.undo(&mut s), Ok(true));
+        assert_eq!(stack.undo(&mut s), Ok(true));
+        assert_eq!(s.len(), 0);
+        // Behind the stack's back: replay the next redo's own restore, so
+        // the line it re-inserts is already in the sheet.
+        let next = stack.peek(true).expect("two redos wait").inverse[0].clone();
+        s.apply(next).unwrap();
+        assert!(
+            matches!(stack.redo(&mut s), Err(EditError::IdInUse(_))),
+            "the redo's line is already in the sheet"
+        );
+        assert!(!stack.can_redo(), "the second redo does not survive");
+        assert!(!stack.can_undo(), "and nothing reached the done side");
+    }
 }

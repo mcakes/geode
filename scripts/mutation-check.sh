@@ -17707,6 +17707,27 @@ run_mutation "pricer tile: a submit ignores what is already in flight" \
   '            .any(|_| true);' \
   geode-pricer price_submits_nothing_while_every_line_is_in_flight
 
+# A refused redo drops the rest of both sides, as a refused undo does:
+# the redo still waiting would replay against rows the refusal moved.
+run_mutation "pricer undo: a refused redo clears the whole history" \
+  crates/geode-pricer/src/core/undo.rs \
+  '            Ok(undo) => {
+                self.done.push_back(undo);
+                Ok(true)
+            }
+            Err(e) => {
+                self.clear();
+                Err(e)
+            }' \
+  '            Ok(undo) => {
+                self.done.push_back(undo);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(e)
+            }' \
+  geode-pricer a_refused_redo_drops_the_rest_of_both_sides
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
