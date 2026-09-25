@@ -77,6 +77,7 @@ the measurement log for fixture and hardware details.
 | Market-data cell patch | 10,000 × five values | 116 ns |
 | Line-pricer sheet shift + undo | 1,000 rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 rows | 6.66 µs |
+| Line-pricer grid build | 1,000 rows, every package open | 1.85 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
 cell commits use the constant-time patch path; deliveries and structural row
@@ -95,6 +96,8 @@ changes still rebuild.
 - Chart decimation reuses buffers. GPUI path submission still clones the
   decimated path, and component axis painters allocate small tick vectors.
 - Density bars are uncached but capped at 2,000 quads per frame.
+- A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
+  entry change, never in render; paints are a per-theme memo.
 - Config dialogs derive small row sets on change. Large module tables use
   virtualization or prepared visible rows.
 

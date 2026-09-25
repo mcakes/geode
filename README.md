@@ -82,7 +82,7 @@ crates/
   geode-diagnostics  the diagnostics tile over health, generations, config and the log
   geode-documents    typed parsers and writers per document wire format
   geode-pricing      implementations of the pricing trait
-  geode-pricer       pure line-pricer sheet core (tile not built)
+  geode-pricer       the line pricer: pure sheet core and its tile
   geode-demo-data    deterministic synthetic risk data and documents
   geode-app          the `geode` binary: wires everything together
 docs/
@@ -142,8 +142,8 @@ required reading.
 
 The shell, data service, blotter, diagnostics, configuration dialogs,
 market-data editor, timeseries viewer, chart, shared date-time field, and
-line-pricer core are built. Market-data egress and the line-pricer tile and
-storage workflow are not built. There are no production vendor adapters; demo
+line-pricer tile are built. Market-data egress and the line pricer's durable
+sheet store are not built; pricer sheets live in memory for one run. There are no production vendor adapters; demo
 sources exercise each supported source shape. Some recent UI paths still need
 real-window display checks. The current subsystem guides record their specific
 limitations.

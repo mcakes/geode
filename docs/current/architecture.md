@@ -18,7 +18,7 @@ Dependencies point toward smaller and more stable crates:
                \        |                 /
                 └──── geode-core ─────────┘
 
-calculation leaves: geode-pricing, geode-pricer ──► geode-core
+calculation leaf: geode-pricing ─────────────────► geode-core
 pure presentation: geode-chart, geode-widgets ───► geode-core
 wire formats: geode-documents ───────────────────► geode-core
 ```
@@ -35,8 +35,8 @@ data service or on feature modules. `geode-data` owns sources, DuckDB, and
 background data work. It does not depend on the shell or feature modules.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, and `geode-diagnostics` implement the shell's module
-contract and may ask the data service through `DataHandle`. They do not depend
+`geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
+shell's module contract and may ask the data service through `DataHandle`. They do not depend
 on sibling features. `geode-app` constructs shared services, registers module
 factories, adapters, document kinds, and pricers, and opens the window.
 

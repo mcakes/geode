@@ -3,7 +3,8 @@
 //! and undo is per keystroke; `to_rows`/`from_rows` is per autosave and
 //! per restore; `grid_build_1000` is the prepared `GridModel` rebuild —
 //! the per-keystroke cost the table pays on every edit, delivery and
-//! expansion change. Medians go to docs/perf.md under "Line pricer core".
+//! expansion change. Medians go to docs/perf.md under "Line pricer core"
+//! (`grid_build_1000`: "Line pricer tile").
 
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};

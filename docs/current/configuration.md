@@ -299,6 +299,21 @@ filesystem naming is stable across configured display zones.
 capped at `warn`. Runtime level changes persist through the same ordered user
 configuration write path.
 
+## Pricing
+
+`[pricing]` in `app.toml` configures the line pricer. `adapter` names the
+pricer built into the binary; a change needs a restart. `refresh` is the
+pricer tile's default reprice interval: `30s` when absent, `"off"` to disable
+the timer, or any duration. A value that is neither warns at
+`app.pricing.refresh` and keeps 30 seconds. A reload applies `refresh` to every
+open pricer tile without a restart; a sheet's own `:refresh` still overrides
+it.
+
+`pricer_views` holds the pricer's named column views. The builtin layer
+carries the two bundled views; like other named objects, a desk or user entry
+replaces a whole view. A reload reaches open pricer tiles, and a tile whose
+view disappeared shows the first defined view with a header notice.
+
 ## Maintaining configuration
 
 When adding or changing a setting:
