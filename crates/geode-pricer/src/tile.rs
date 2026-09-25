@@ -2073,16 +2073,19 @@ impl PricerTile {
             t.delegate_mut().model = model;
             t.refresh(cx);
         });
-        self.sync_cursor(cx);
         // A rebuild moves grid rows, and a new plan moves columns: the
-        // editor follows its line and its column kind, or closes.
+        // editor follows its line and its column kind (the cursor with
+        // it), or closes. Before `sync_cursor`, so the cursor lands on the
+        // editor's column.
         self.follow_editor(cx);
+        self.sync_cursor(cx);
         self.sync_editor(cx);
     }
 
     /// A rebuild can move the plan (a view reload, `:view`) or the grid
     /// (an edit, a load) under an open editor. It follows its column KIND
-    /// to that column's new index; when the kind left the plan or the
+    /// to that column's new index, and the cursor column goes with it so
+    /// the field and the cursor highlight agree; when the kind left the plan or the
     /// line left the grid it closes with `MOVED` — it would otherwise
     /// paint over a different column, or stay focused painting nowhere.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
@@ -2092,7 +2095,10 @@ impl PricerTile {
         let (line, _, kind) = editor.target();
         let col = self.plan.columns.iter().position(|c| c.def.kind == kind);
         match col.filter(|_| self.model.grid_row_of(line).is_some()) {
-            Some(c) => editor.set_col(c),
+            Some(c) => {
+                editor.set_col(c);
+                self.cursor.col = c;
+            }
             None => self.drop_orphaned_editor(cx),
         }
     }
@@ -3799,6 +3805,11 @@ pub(crate) mod tests {
         assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying"]);
         assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
         assert_eq!(editor_paint_col(&h, &vcx), Some(1), "strike's new column");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor.col),
+            1,
+            "the cursor sits on the editor's column"
+        );
         let _ = centre_of(&mut vcx, "pricer-editor-0-2"); // tree column + 1
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.footer(&vcx), None, "the commit was not refused");

@@ -185,26 +185,26 @@ click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
 typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
 cell's value. Type and barrier type accept only their vocabulary, and `enter`
-commits the highlighted option. An open editor follows its column through a
-view change (a config reload or `:view`) that moves it; when the column leaves
-the view, or the line leaves the grid, the editor closes (blurred first) with
-`the cell moved; edit refused` in the footer, and nothing is committed. A
-click in
-the grid, including a package chevron, cancels an open editor or entry field
-and never commits it, and acts on the row it was painted on: the entry
-placeholder is a row, so closing it moves the rows below up, but a click below
-it still lands on (or toggles, or double-click edits) the row the trader
-aimed at. A click or double-click on the placeholder itself only closes it. A
-`:` command or a `/` search closes the menu and any open field first. An open
-menu re-checks its rows whenever the tile changes under it (a load answer, a
-config reload), keeping its highlight where it was. A click
-outside the grid leaves a text editor open until the next grid click or verb,
-as in the market-data panel; the typeahead popup closes on an outside click.
-Both the entry field and the cell editor blur before they drop, and no chord
-is bound while one is open, so `ctrl+k` still opens the palette. Either field
-puts the tile in insert mode, so bare and shifted letters and digits are typed
-into it and never reach a shell binding (`shift+d` would otherwise duplicate
-the tile).
+commits the highlighted option. An open editor follows its column, and the
+cursor with it, through a view change (a config reload or `:view`) that moves
+it. When the column leaves the view, or the line leaves the grid, the editor
+closes with `the cell moved; edit refused` in the footer and nothing is
+committed; that close has no window of its own, so the field is blurred at the
+end of the same update, before the next frame. A click in the grid, including a
+package chevron, cancels an open editor or entry field and never commits it,
+and acts on the row it was painted on: the entry placeholder is a row, so
+closing it moves the rows below up, but a click below it still lands on (or
+toggles, or double-click edits) the row the trader aimed at. A click or
+double-click on the placeholder itself only closes it. A `:` command or a `/`
+search closes the menu and any open field first. An open menu re-checks its
+rows whenever the tile changes under it (a load answer, a config reload),
+keeping its highlight where it was. A click outside the grid leaves a text
+editor open until the next grid click or verb, as in the market-data panel; the
+typeahead popup closes on an outside click. Both the entry field and the cell
+editor are blurred when they close, and no chord is bound while one is open, so
+`ctrl+k` still opens the palette. Either field puts the tile in insert mode, so
+bare and shifted letters and digits are typed into it and never reach a shell
+binding (`shift+d` would otherwise duplicate the tile).
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,

@@ -248,34 +248,30 @@ mod tests {
         assert!(!stack.can_redo(), "nor does the earlier redo");
     }
 
-    /// The redo side's error path: two edits undone leave two redos
-    /// waiting. The next redo re-inserts a line the sheet already holds
-    /// (restored behind the stack's back), so it is refused — and the
-    /// later redo still waiting must go too, not replay against rows the
+    /// The redo side's error path: three edits, the last two undone,
+    /// leave one entry on each side besides the redo about to fail. That
+    /// redo re-inserts a line the sheet already holds (restored behind
+    /// the stack's back), so it is refused — and the redo still waiting
+    /// and the undo still done must both go, not replay against rows the
     /// refusal left unaccounted for.
     #[test]
     fn a_refused_redo_drops_the_rest_of_both_sides() {
         let mut s = Sheet::new("t");
         let mut stack = UndoStack::default();
-        apply(
-            &mut stack,
-            &mut s,
-            Edit::Insert {
-                place: Place::Root { at: 0 },
-                rows: vec![line(spx(5000.0, OptionKind::Call), 1)],
-            },
-        );
-        apply(
-            &mut stack,
-            &mut s,
-            Edit::Insert {
-                place: Place::Root { at: 1 },
-                rows: vec![line(spx(4000.0, OptionKind::Put), 1)],
-            },
-        );
+        for (at, strike) in [(0, 5000.0), (1, 4000.0), (2, 3000.0)] {
+            apply(
+                &mut stack,
+                &mut s,
+                Edit::Insert {
+                    place: Place::Root { at },
+                    rows: vec![line(spx(strike, OptionKind::Call), 1)],
+                },
+            );
+        }
         assert_eq!(stack.undo(&mut s), Ok(true));
         assert_eq!(stack.undo(&mut s), Ok(true));
-        assert_eq!(s.len(), 0);
+        assert_eq!(s.len(), 1);
+        assert!(stack.can_undo(), "fixture: the first insert is still done");
         // Behind the stack's back: replay the next redo's own restore, so
         // the line it re-inserts is already in the sheet.
         let next = stack.peek(true).expect("two redos wait").inverse[0].clone();
@@ -285,6 +281,6 @@ mod tests {
             "the redo's line is already in the sheet"
         );
         assert!(!stack.can_redo(), "the second redo does not survive");
-        assert!(!stack.can_undo(), "and nothing reached the done side");
+        assert!(!stack.can_undo(), "nor does the done entry");
     }
 }

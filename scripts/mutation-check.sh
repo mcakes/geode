@@ -17738,12 +17738,32 @@ run_mutation "pricer bridge: an unchanged pricer config key skips the reload" \
   '                if last_key.borrow().as_ref() == Some(&key) {}' \
   geode-app a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone
 
+# The observer starts from the key the factory was built from, so even
+# the first unrelated reload of a session is skipped.
+run_mutation "pricer bridge: the reload observer is seeded with the startup key" \
+  crates/geode-app/src/bridge.rs \
+  '        let last_key = Rc::new(std::cell::RefCell::new(bridge.pricer_key.clone()));' \
+  '        let last_key = Rc::new(std::cell::RefCell::new(None::<PricerConfigKey>));' \
+  geode-app a_seeded_key_skips_the_first_reload_that_changes_no_pricer_setting
+
 # An open editor follows its column KIND through a rebuilt plan: left at
 # its old index it paints over whatever column now sits there.
 run_mutation "pricer tile: an open editor follows its column through a reload" \
   crates/geode-pricer/src/tile.rs \
-  '            Some(c) => editor.set_col(c),' \
-  '            Some(_) => {}' \
+  '            Some(c) => {
+                editor.set_col(c);
+                self.cursor.col = c;' \
+  '            Some(c) => {
+                self.cursor.col = c;' \
+  geode-pricer an_open_editor_follows_its_column_through_a_view_reload
+
+# The cursor follows the editor to its new column, so the field and the
+# cursor highlight sit on the same column.
+run_mutation "pricer tile: the cursor follows a re-pointed editor" \
+  crates/geode-pricer/src/tile.rs \
+  '                editor.set_col(c);
+                self.cursor.col = c;' \
+  '                editor.set_col(c);' \
   geode-pricer an_open_editor_follows_its_column_through_a_view_reload
 
 # An editor whose column left the plan closes; left open it stays focused
@@ -17780,6 +17800,14 @@ run_mutation "pricer tile: a re-checked menu clamps its highlight" \
   '                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
+
+# `start` carries the key the pricer factory was built from; without it
+# the observer's first unrelated reload reaches every tile.
+run_mutation "pricer bridge: start carries the startup pricer key" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer_key: Some(pricer_key),' \
+  '        pricer_key: None,' \
+  geode-app start_builds_a_timeseries_factory_beside_the_blotters
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

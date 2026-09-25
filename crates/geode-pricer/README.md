@@ -74,7 +74,8 @@ cargo bench -p geode-pricer
 - Both text inputs blur before they drop, and a click in the grid (a chevron
   included) cancels an open editor without committing it. `:` and `/` close
   the menu and any open field first.
-- Every rebuild re-points an open editor at its column kind's plan index, or
+- Every rebuild re-points an open editor (and the cursor column) at its column
+  kind's plan index, or
   closes it with `MOVED` (blurring through its window at the end of the effect
   cycle) when the kind left the plan or the line left the grid. Every chrome
   rebuild re-checks an open menu's rows.

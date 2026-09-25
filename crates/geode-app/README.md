@@ -81,5 +81,6 @@ cargo check -p geode-app --features profiling
 - `NamedColours::from_doc` diagnostics are reported only by the bridge's
   `data_setup` and `ConfigReloaded` arms.
 - The pricer hears every config reload through the frame's `config` counter
-  but reloads only when `pricer_config_key` changed, so an unrelated reload
+  but reloads only when `pricer_config_key` changed from the last applied key
+  (seeded with the startup key `start` carries on `Bridge`), so an unrelated reload
   neither restarts its tiles' refresh timers nor repeats a bad value's warning.

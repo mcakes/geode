@@ -1256,10 +1256,12 @@ four:
   `bridge::pricer_config_key` (merged `pricer_views` value, raw
   `[pricing] refresh`, resolved `stale_after`) with the last one it
   applied and does nothing when it is equal: no reload, timer restart,
-  warning or diagnostics note. The first reload after `attach` always
-  applies (the factory may have been built from another config).
-- *Editor column.* Every rebuild re-points an open editor at its column
-  kind's new plan index; when the kind left the plan or the line left
+  warning or diagnostics note. The observer is seeded with the key
+  `start` computed at setup (`Bridge::pricer_key`), so the first
+  unrelated reload of a session is skipped too; `None` lets the first
+  reload through.
+- *Editor column.* Every rebuild re-points an open editor, and the
+  cursor column, at its column kind's new plan index; when the kind left the plan or the line left
   the grid it closes with `MOVED`, blurred through the window it opened
   in at the end of the effect cycle (a rebuild has no `Window`).
 - *Menu states.* `rebuild_chrome` recomputes an open menu's rows,
