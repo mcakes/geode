@@ -32,22 +32,24 @@
 use std::rc::Rc;
 
 use geode_core::health::Health;
-use geode_core::series::{SeriesResult, SlotKind};
+use geode_core::series::{Frequency, SeriesResult, SlotKind};
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::fonts;
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
+use geode_shell::shell::listrow::row_paint;
 use geode_shell::shell::scale;
 use geode_widgets::datefield::{DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Entity, FocusHandle,
-    Focusable as _, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, px,
+    Focusable as _, Hsla, MouseButton, SharedString, Stateful, Window, anchored, deferred, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
 use crate::core::Preset;
+use crate::core::menu::MenuRow;
 use crate::core::model::{Colour, Model, SlotState};
 use crate::tile::TimeseriesTile;
 
@@ -90,6 +92,17 @@ pub(crate) enum Popup {
     Picker(PickerState),
     Expr(ExprField),
     Range(RangePopup),
+    /// The action list (mouse pass, 2026-09-24): every verb as a row,
+    /// fieldless like the series list, keyed by `popup == menu`.
+    Menu(MenuState),
+}
+
+/// The action menu's state: its prepared rows (`core::menu`, hints
+/// resolved at open) and the highlighted index the keyboard and the
+/// pointer share.
+pub(crate) struct MenuState {
+    pub rows: Vec<MenuRow>,
+    pub highlighted: usize,
 }
 
 impl Popup {
@@ -97,7 +110,7 @@ impl Popup {
     /// the tile's key context into `insert` mode.
     pub(crate) fn is_insert(&self) -> bool {
         match self {
-            Popup::Series(_) => false,
+            Popup::Series(_) | Popup::Menu(_) => false,
             // The range popup holds no `InputState`, but it DOES hold
             // the keyboard — its own focus handle, with the two date
             // fields' keys on it — so it is an insert popup in every
@@ -114,7 +127,7 @@ impl Popup {
         match self {
             // No field: the tile itself keeps the keyboard, which is
             // what lets `j`/`k` reach the matcher at all.
-            Popup::Series(_) => false,
+            Popup::Series(_) | Popup::Menu(_) => false,
             Popup::Picker(p) => p.input.read(cx).focus_handle(cx).is_focused(window),
             Popup::Expr(f) => f.input.read(cx).focus_handle(cx).is_focused(window),
             // Its own handle, not an `InputState`'s: the segmented
@@ -130,6 +143,7 @@ impl Popup {
     pub(crate) fn context_pair(&self) -> Option<&'static str> {
         match self {
             Popup::Series(_) => Some("series"),
+            Popup::Menu(_) => Some("menu"),
             Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => None,
         }
     }
@@ -206,6 +220,10 @@ pub(crate) struct RangePopup {
     /// opened — what decides whether a bare `1`..`7` is a PRESET or a
     /// digit (see [`RangePopup::digit_is_preset`]).
     pub edited: bool,
+    /// The frequency in force, mirrored from the model at open and on
+    /// every chip click so the frequency row paints the tick without
+    /// reading the model in `render`.
+    pub frequency: Frequency,
 }
 
 impl RangePopup {
@@ -568,6 +586,7 @@ pub(crate) fn render_series_popup(
         list = list.child(
             row_shell(
                 theme,
+                ElementId::NamedInteger(SharedString::new_static("ts-list-row"), i as u64),
                 highlighted,
                 move || format!("ts-list-row-{tile_id}-{i}"),
                 {
@@ -605,20 +624,26 @@ pub(crate) fn render_series_popup(
 }
 
 /// The one row every popup list paints: fixed height and inset, the
-/// cursor's fill when `highlighted`, and a left press that stops
-/// propagation — the chart beneath must not also take it — before
-/// running `on_down`.
+/// cursor's fill when `highlighted`, the shell's list-row hover fill
+/// under the pointer otherwise (`listrow::row_paint` — the design
+/// guide's "subtle pointer feedback, never the only cue"; the
+/// highlight stays the state, the hover only says the row is
+/// clickable), and a left press that stops propagation — the chart
+/// beneath must not also take it — before running `on_down`.
 ///
-/// No hover state: the highlight follows the CURSOR, and a second fill
-/// under the pointer would read as a second selection (the market-data
-/// popup's rows take none either).
+/// `id` is the row's stable identity, needed for the hover state:
+/// `(kind, index)` per popup, and a popup never shares a frame with
+/// another.
 fn row_shell(
     theme: &Theme,
+    id: ElementId,
     highlighted: bool,
     selector: impl FnOnce() -> String,
     on_down: impl Fn(&mut Window, &mut App) + 'static,
-) -> Div {
+) -> Stateful<Div> {
+    let hover = row_paint(theme).hover;
     h_flex()
+        .id(id)
         .h(scale::design(ROW_HEIGHT))
         .px(scale::design(ROW_INSET))
         .gap_2()
@@ -627,7 +652,10 @@ fn row_shell(
         .when(highlighted, |d| {
             d.bg(theme.accent).text_color(theme.accent_foreground)
         })
-        .when(!highlighted, |d| d.text_color(theme.popover_foreground))
+        .when(!highlighted, |d| {
+            d.text_color(theme.popover_foreground)
+                .hover(move |s| s.bg(hover))
+        })
         .debug_selector(selector)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
@@ -702,6 +730,7 @@ pub(crate) fn render_picker(
         list = list.child(
             row_shell(
                 theme,
+                ElementId::NamedInteger(SharedString::new_static("ts-picker-row"), row as u64),
                 highlighted,
                 move || format!("ts-picker-row-{tile_id}-{row}"),
                 {
@@ -729,12 +758,18 @@ pub(crate) fn render_picker(
         list = list.child(
             // The only thing `enter` can take while it is up, so it
             // paints lit.
-            row_shell(theme, true, move || format!("ts-picker-add-{tile_id}"), {
-                let tile = tile.clone();
-                move |window, cx| {
-                    tile.update(cx, |t, cx| t.commit_picker(window, cx));
-                }
-            })
+            row_shell(
+                theme,
+                ElementId::Name(SharedString::new_static("ts-picker-add")),
+                true,
+                move || format!("ts-picker-add-{tile_id}"),
+                {
+                    let tile = tile.clone();
+                    move |window, cx| {
+                        tile.update(cx, |t, cx| t.commit_picker(window, cx));
+                    }
+                },
+            )
             .child(add.clone()),
         );
     } else if p.list.painted_len() == 0 {
@@ -876,7 +911,8 @@ pub(crate) fn render_range(
             }
         })
         .child(range_row(p, Which::From, theme, tile))
-        .child(range_row(p, Which::To, theme, tile));
+        .child(range_row(p, Which::To, theme, tile))
+        .child(freq_row(p.frequency, theme, tile, tile_id));
 
     let mut presets = h_flex()
         .h(scale::design(ROW_HEIGHT))
@@ -932,6 +968,179 @@ pub(crate) fn render_range(
         );
     }
     anchor_popup(panel)
+}
+
+/// The range popup's frequency row (mouse pass, 2026-09-24): one chip
+/// per `Frequency`, the one in force filled, the rest bare. A click
+/// writes it at once through `range_freq_clicked` and the popup stays
+/// open — it is a setting the row shows, not a commit of the two
+/// dates. The keyboard's forms are `f`/`F` and `:freq`.
+fn freq_row(
+    current: Frequency,
+    theme: &Theme,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+) -> impl IntoElement {
+    let filled = chip_paint(theme, Tone::Neutral);
+    let filled_states = control::for_chip(theme, &filled, theme.popover);
+    let mut bare = chip_paint(theme, Tone::Neutral);
+    bare.fill = None;
+    bare.text = theme.muted_foreground;
+    let bare_states = control::for_chip(theme, &bare, theme.popover);
+    let mut row = h_flex()
+        .h(scale::design(ROW_HEIGHT))
+        .px(scale::design(ROW_INSET))
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .w(scale::design(LABEL_WIDTH))
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("freq"),
+        );
+    for (i, f) in Frequency::ALL.into_iter().enumerate() {
+        let word = f.as_str();
+        let on = f == current;
+        let (paint, states) = if on {
+            (&filled, filled_states)
+        } else {
+            (&bare, bare_states)
+        };
+        row = row.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("ts-range-freq"),
+                    i as u64,
+                ))
+                .debug_selector(move || format!("ts-range-freq-{tile_id}-{word}"))
+                .px_1()
+                .text_xs()
+                .rounded(theme.radius)
+                .text_color(paint.text)
+                .when_some(paint.fill, |d, fill| d.bg(fill))
+                .pointer_states(states)
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, _window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.range_freq_clicked(f, cx));
+                    }
+                })
+                .child(word),
+        );
+    }
+    row
+}
+
+/// Paint the action menu (mouse pass, 2026-09-24) on the series list's
+/// surface: one row per `MenuRow`, the highlighted one lit, a disabled
+/// one muted with its reason where its chord would be, a tick column
+/// ahead of a toggle's title. A hover moves the highlight (the mouse
+/// form of `j`/`k`), a click picks (`menu_pick`, `enter`'s own path).
+pub(crate) fn render_menu(
+    m: &MenuState,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> Deferred {
+    let theme = cx.theme();
+    let hover = row_paint(theme).hover;
+    let mut list = popover_surface(cx)
+        .debug_selector(move || format!("ts-menu-{tile_id}"))
+        .occlude()
+        .on_mouse_down_out({
+            let tile = tile.clone();
+            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+        });
+    for (i, row) in m.rows.iter().enumerate() {
+        list = list.child(match row {
+            MenuRow::Separator => div()
+                .my_0p5()
+                .mx_neg_1()
+                .border_b(px(2.))
+                .border_color(theme.border)
+                .into_any_element(),
+            MenuRow::Section(s) => div()
+                .px(scale::design(ROW_INSET))
+                .pt_1()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(s.clone())
+                .into_any_element(),
+            MenuRow::Action {
+                title,
+                hint,
+                enabled,
+                checked,
+                ..
+            } => {
+                let disabled = enabled.is_err();
+                let trailing: SharedString = match enabled {
+                    Err(r) => (*r).into(),
+                    Ok(()) => hint.clone(),
+                };
+                let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
+                let lit = i == m.highlighted && !disabled;
+                h_flex()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("ts-menu-row"),
+                        i as u64,
+                    ))
+                    .h(scale::design(ROW_HEIGHT))
+                    .px(scale::design(ROW_INSET))
+                    .rounded(theme.radius)
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .when(lit, |d| {
+                        d.bg(theme.accent).text_color(theme.accent_foreground)
+                    })
+                    .when(!lit, |d| {
+                        d.text_color(if disabled {
+                            theme.muted_foreground
+                        } else {
+                            theme.popover_foreground
+                        })
+                        .when(!disabled, |d| d.hover(move |s| s.bg(hover)))
+                    })
+                    .debug_selector(move || format!("ts-menu-row-{tile_id}-{i}"))
+                    // Stops, like every popup row: a click that picks a
+                    // row must not also run the shell's tile click under
+                    // the popup (the series list's own rule).
+                    .on_mouse_down(MouseButton::Left, {
+                        let tile = tile.clone();
+                        move |_, window, cx| {
+                            cx.stop_propagation();
+                            tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
+                        }
+                    })
+                    .on_mouse_move({
+                        let tile = tile.clone();
+                        move |_, _, cx| tile.update(cx, |t, cx| t.menu_hover(i, cx))
+                    })
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .when_some(tick, |d, tick| {
+                                d.child(div().w(scale::design(14.)).flex_shrink_0().child(tick))
+                            })
+                            .child(title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .when(lit, |d| d.text_color(theme.accent_foreground))
+                            .when(!lit, |d| d.text_color(theme.muted_foreground))
+                            .child(trailing),
+                    )
+                    .into_any_element()
+            }
+        });
+    }
+    anchor_popup(list)
 }
 
 #[cfg(test)]
