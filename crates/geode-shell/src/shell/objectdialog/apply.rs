@@ -649,6 +649,12 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
             }
             _ => rebuilt.selected = selected,
         }
+        // Every arm above sets the cursor from something the rebuilt draft did not
+        // choose — a column's name, row 0, or an index into the fields that were there
+        // before — so it can land on a row that answers to nothing. This is a selection
+        // RESET like any other and takes the same door (user ruling 2026-09-23); it is
+        // off the key path, so nothing else would settle it.
+        rebuilt.settle_selection(state.domain);
         state.draft = Some(rebuilt);
         state.notice = Some(format!("could not save — change reverted ({message})"));
     }

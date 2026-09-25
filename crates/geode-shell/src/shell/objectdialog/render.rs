@@ -869,6 +869,10 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         draft.column_ctx = None;
         return;
     }
+    // The installed fields open with the cursor on the first row that answers to
+    // something — `enter_edit`'s rule, applied at the stage's own door because a click
+    // reaches this function without passing through the key handler's settle.
+    draft.settle_selection(domain);
     state.stage = Stage::Column {
         object,
         column: column.to_string(),
@@ -964,6 +968,11 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     if !draft.enter_values(column, scopes::loading_field()) {
         return;
     }
+    // `enter_column_stage`'s rule at this stage's own door. The loading field is the
+    // only row here and answers to nothing, so the cursor stays on it until the values
+    // arrive — a list with no stop at all leaves the cursor where it is.
+    let domain = state.domain;
+    draft.settle_selection(domain);
     state.stage = Stage::Values {
         object,
         column: column.to_string(),
@@ -1048,6 +1057,38 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// revalidation because current reorderable domains have no order-sensitive draft
 /// diagnostic; adding one would require revalidation at that branch.
 fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+    // One settle for every arm below (user ruling 2026-09-23: the cursor rests only on
+    // rows that answer to something). A wrapper rather than a call in each arm because
+    // this handler returns from a dozen places, and the rows under the cursor change
+    // from more than the motion keys: a tick that adds a row, an `x` that removes one,
+    // a filter keystroke that re-ranks the list. The motion keys settle on their own,
+    // in the direction of travel (`Draft::move_selection`); this is what catches every
+    // other way the list can move underneath the cursor.
+    let claimed = handle_edit_key_inner(shell, ks, cx);
+    settle_edit_cursor(shell);
+    claimed
+}
+
+/// Put the edit stage's cursor back on a row that answers to something, if the last
+/// change left it on one that does not. A no-op on every other stage, and while a value
+/// field is open (its rows are the field's completions, not the object's rows).
+fn settle_edit_cursor(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let domain = state.domain;
+    if let Some(draft) = state.draft.as_mut()
+        && draft.text_entry.is_none()
+    {
+        draft.settle_selection(domain);
+    }
+}
+
+fn handle_edit_key_inner(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    cx: &mut Context<ShellView>,
+) -> bool {
     // The same notice door `handle_browse_key` opens with, for the same
     // reason: a notice reports on the keystroke that produced it.
     if let Some(state) = shell.object_dialog.as_mut()
@@ -1164,8 +1205,9 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         }
         if let Some(cmd) = listfilter::nav_command(ks) {
             let selected = shell.object_dialog.as_mut().and_then(|state| {
+                let domain = state.domain;
                 let draft = state.draft.as_mut()?;
-                draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), cmd);
+                draft.move_selection(domain, cmd);
                 Some(draft.selected)
             });
             if let Some(selected) = selected {
@@ -1323,8 +1365,9 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     match cmd {
         NormalCommand::Nav(nav) => {
             let selected = shell.object_dialog.as_mut().and_then(|state| {
+                let domain = state.domain;
                 let draft = state.draft.as_mut()?;
-                draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), nav);
+                draft.move_selection(domain, nav);
                 Some(draft.selected)
             });
             if let Some(selected) = selected {
@@ -1468,43 +1511,15 @@ fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 fn column_stage_target(shell: &ShellView) -> Option<String> {
     let state = shell.object_dialog.as_ref()?;
     let draft = state.draft.as_ref()?;
-    if draft.column().is_some() {
-        return None;
-    }
-    match (state.domain, draft.selected_row()?) {
-        (Domain::Views, row @ EditRow::Item { .. }) => Some(draft.row_label(row)),
-        (Domain::Schema, EditRow::Field(i)) => draft
-            .fields
-            .get(i)?
-            .key
-            .strip_prefix("columns.")
-            .map(str::to_string),
-        _ => None,
-    }
+    draft.column_stage_target(state.domain, draft.selected_row()?)
 }
 
 /// Resolve a Scopes dimension member or candidate to its Values-stage target. No target
 /// is available while a Values projection is already open.
 fn values_stage_target(shell: &ShellView) -> Option<String> {
     let state = shell.object_dialog.as_ref()?;
-    if state.domain != Domain::Scopes {
-        return None;
-    }
     let draft = state.draft.as_ref()?;
-    if draft.column().is_some() || draft.values().is_some() {
-        return None;
-    }
-    match draft.selected_row()? {
-        row @ (EditRow::Item { field, .. } | EditRow::Available { field, .. })
-            if draft
-                .fields
-                .get(field)
-                .is_some_and(|f| f.key == "dimensions") =>
-        {
-            Some(draft.row_label(row))
-        }
-        _ => None,
-    }
+    draft.values_stage_target(state.domain, draft.selected_row()?)
 }
 
 /// `enter`'s answer for a row with nothing to open
@@ -4382,12 +4397,26 @@ fn on_edit_row_clicked(
     if armed_confirm(shell).is_some() {
         return;
     }
+    let domain = shell.object_dialog.as_ref().map(|state| state.domain);
     if let Some(draft) = draft_mut(shell) {
         // `position` is the FILTERED index `build_edit` painted this row at, so the
         // bound to check — and the value to store, unchanged — is against
         // `visible_rows`, not the unfiltered `rows`.
         if position >= draft.visible_rows().len() {
             return;
+        }
+        // A click on a row the cursor cannot rest on does nothing at all (user ruling
+        // 2026-09-23) — not even move the cursor there. The mouse cannot reach a state
+        // the keyboard is not allowed to reach, which is the parity rule §17.1 states
+        // for every other row.
+        let rows = draft.rows();
+        let clicked = draft
+            .visible_rows()
+            .get(position)
+            .and_then(|m| rows.get(m.row).copied());
+        match (domain, clicked) {
+            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => return,
+            _ => {}
         }
         draft.selected = position;
     }
@@ -4713,6 +4742,14 @@ pub(in crate::shell) fn deliver_values(
     };
     draft.reseed_fields(fields);
     draft.selected = 0;
-    shell.object_dialog_scroll.scroll_to_item(0);
+    // The delivered values replace the loading row wholesale, so the cursor lands on
+    // the first of them rather than on the `Values` header above (user ruling
+    // 2026-09-23). A delivery arrives outside the key handler, so it settles here.
+    draft.settle_selection(Domain::Scopes);
+    // The viewport follows the cursor the settle chose, not row 0 — the two would
+    // disagree the moment a Values list ever opened with something above its first
+    // value.
+    let selected = draft.selected;
+    shell.object_dialog_scroll.scroll_to_item(selected);
     cx.notify();
 }

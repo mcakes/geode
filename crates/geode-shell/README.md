@@ -85,6 +85,12 @@ change most often hits:
   `prevent_default` inside that door.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
   the only thing that moves focus or writes the shared `Input`.
+- An edit-stage cursor rests only on a row that answers to something
+  (`Draft::is_cursor_stop`): motion goes through `Draft::move_selection`,
+  every other selection reset through `Draft::settle_selection`, and a click
+  on a row that answers to nothing is dropped. `effective_query`,
+  `effective_query_mut`, `effective_selected`, `effective_selected_mut` and
+  `set_query` must all name the same stages.
 - Every tile mouse-down path and every keyboard verb that moves tile focus
   re-arms `pending_focus_restore`. A module that drops a focused
   `InputState` must `window.blur(cx)` first, or every chord dies for the
