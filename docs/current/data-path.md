@@ -52,6 +52,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
+| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; a refused upload answers `Err("queue full")` at once. |
 | Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
 
 For queued files, resubmission can promote priority without adding another
@@ -74,9 +75,12 @@ accepted requests and join. Subscription workers unsubscribe, set a stop flag,
 and join without flushing documents still held by their coalescers. Discovery
 stops polling; the ingest runner finishes its current operation and exits
 without draining queued jobs. Submission to the runner itself has no shutdown
-refusal, so producer ordering is required. Shutdown is not a flush guarantee.
-Blocking adapter, parser, or filesystem calls can delay joins; panic
-containment does not cancel them. See
+refusal, so producer ordering is required. Egress workers close their queue
+first (refusing further submissions), then join; jobs already queued still
+run and answer, so shutdown can wait on a slow or stuck transport — see
+[egress and uploads](#egress-and-uploads) below. Shutdown is not a flush
+guarantee. Blocking adapter, parser, or filesystem calls can delay joins;
+panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
@@ -180,6 +184,49 @@ Concurrent state notifications have no ordering guarantee, and health
 callbacks must return promptly without panicking. See
 [`adapter/mod.rs`](../../crates/geode-data/src/adapter/mod.rs) and
 [`channel.rs`](../../crates/geode-data/src/adapter/channel.rs).
+
+## Egress and uploads
+
+An upload writes a document back out through a configured target's adapter —
+the mirror of a subscribed source's inbound path. `egress.toml` (see
+[configuration](configuration.md#egress-configuration)) resolves at startup
+against the adapter registry; `DataService::open` then spawns one worker
+thread per surviving target (`geode-egress-<name>`), each owning that
+adapter's own `Egress` handle. `Adapter::egress()` returns a fresh handle on
+every call: `egress::resolve` calls it once just to probe availability at
+startup, and spawning the worker calls it again to build the handle the
+worker keeps, so an adapter whose transport is not safely shared across
+owners (`ChannelAdapter` upgrades its own weak reference into a fresh handle
+holding a strong sender clone) never has to serve two callers from one
+instance.
+
+A worker drains its target's queue strictly in submission order, one upload
+at a time: a slow or stuck transport blocks only that target's own uploads,
+never the request loop or another target's worker. The queue holds up to
+`EGRESS_QUEUE_BOUND` (8) jobs waiting behind the one in flight; past that a
+submission answers `Err("egress '<target>': queue full")` at once rather
+than waiting.
+
+Every submitted upload answers exactly one `DataEvent::Upload(UploadOutcome)`,
+echoing the requester's key and tag. A refusal decided on the service thread
+— an unknown target, a target whose `documents` does not accept the
+requested document, an unregistered document kind, a `DocumentKind::write`
+failure, or a full or stopped queue — answers synchronously, before anything
+reaches a worker thread. An accepted job answers from its target's worker
+once the transport call returns. Every `Err` is prefixed `egress
+'<target>': ` and names the specific reason, so the requesting tile can
+report a failure without knowing the target's configuration.
+
+The document's key selects the write address: `EgressSpec::address`
+substitutes the document key's parts, joined by `/`, for `{key}` in the
+target's configured template; a template with no `{key}` is one fixed
+address for every key of that document.
+
+Shutdown closes every target's queue, refusing further submissions, then
+joins every worker thread — jobs already queued still run and answer before
+their worker exits, so shutdown can wait on a slow or stuck transport; run
+it off the UI thread, as every other `DataService` shutdown. See
+[`egress.rs`](../../crates/geode-data/src/egress.rs).
 
 ## Queries and time travel
 

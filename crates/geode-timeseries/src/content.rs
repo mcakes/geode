@@ -192,6 +192,8 @@ impl TileContent for TimeseriesContent {
             // This tile asks no view query and prices nothing; either
             // here is a routing bug.
             Delivery::Query(_) | Delivery::Price(_) => {}
+            // This tile never uploads; an outcome addressed here is a routing bug.
+            Delivery::Upload(_) => {}
         }
         let _ = window;
     }

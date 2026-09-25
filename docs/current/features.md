@@ -61,8 +61,80 @@ column labels, keeping stable intent across reordered documents. The module
 supports numeric, date, text, and closed-choice cells, row insertion/deletion,
 and kind-specific actions.
 
-Document egress is not built. `:upload` and related actions report that
-limitation rather than pretending to persist a draft upstream.
+A dividend row's label is Geode's own minted id (the ex date, or
+`<date>#n` for the `n`th row sharing that date), not a wire id — same-date
+rows are identified by their ordinal among that date's group. Rebase
+therefore refuses to carry any cell edit or deleted mark whose label
+belongs to a same-date group whose row count changed between the draft's
+base and the newer document, reporting it through the same dropped-edit
+notice as any other unresolved label, with the reason `row (same-day rows
+changed: <was> → <now>)`: a changed count means the ordinals shifted, and
+the label might now resolve onto a different dividend. Group sizes are
+captured from the painted model whenever it is the draft's own base
+(before a rebase, before an update-policy rebase, and before the session
+is written); a draft restored from a session written before this guard
+existed applies none. **Known limitation:** a pure reorder of two
+same-day dividends upstream, with the group's size unchanged, swaps their
+minted ids undetectably, so a rebased edit can land on the other row of
+the pair — closing this gap needs an upstream row key, which the desk's
+XSD may supply.
+
+`:upload [target]` (also the action list's `Upload` row) sends the draft to
+an egress target that accepts the panel's document. It is refused, naming
+why, for a clean, `Behind`, already-sent or incomplete draft, for a missing
+or ineligible target, while another upload from the panel is in flight (`an
+upload of <key> to <target> is in flight`), and while the panel is not live
+(`upload: the panel shows <time>, not live`): the frame's as-of is
+historical, or the generation on screen was delivered for a historical
+request. The second case covers the frame gone live before its live
+generation is painted — behind the barrier, or indefinitely when the live
+requery is refused or fails and the last good generation stays on screen.
+An upload is a whole document, and one assembled over an old generation
+would revert every untouched row upstream. `y` re-checks the same
+condition and sends nothing, naming why, if the panel is no longer live.
+Otherwise it assembles the document and asks
+`upload N cells, [K attributes, ]A rows added, D removed of <key> to
+<target>? (y/n)` in the
+header, where the question holds the keyboard: bare `y` submits, and any
+other key (consumed, chords included), a pointer press on the tile, or focus
+leaving the question cancels with `upload cancelled`. A delivery that
+changes the draft or the painted generation while the question stands (a
+rebase, a replace, or `Behind`) withdraws it at once with `upload cancelled:
+a new document arrived`, since the assembled rows belong to the superseded
+document. An `Ok` outcome marks the draft `sent HH:MM` only if the draft,
+base included, is still what was submitted; an `Err` keeps it editing and shows
+`upload failed: <e>` until the next edit or upload.
+
+Upload state belongs to the underlying that submitted it. Switching
+underlying while a draft is sent or its upload is in flight gives up that
+draft's echo check: it parks, and restores, as an unsent `Editing` draft,
+exactly as a session restore does, and the trader confirms upstream by eye or
+uploads again. An outcome that arrives for an underlying no longer shown is a
+notice naming it (`upload of <key> to <target> sent` or `... failed: <e>`) and
+never touches the draft on screen.
+
+While a draft is `sent`, the next generation delivered for its key with a
+different source time is compared with the rows that went out as a multiset
+(both sides sorted by every compared column, since the store returns a
+document sorted by its axes while the rows went out in painted order), over
+every column except a minted row label (`f64` within one ULP). Equal clears the draft, the panel follows the new generation, and the
+header reads `sent HH:MM, confirmed HH:MM` until the next edit. Different
+keeps the draft `sent` over its base, reads `echo differs (N rows)`, and
+refuses edits until `:rebase` (which yields an unsent draft on the new
+generation) or `:revert`. The update policy does not apply to a sent draft. An
+upstream that only reorders rows reads as confirmed. A delivered document that
+cannot be assembled reads `echo not comparable: <why>` and is held the same
+way. `:rebase` is refused while a sent draft awaits its echo with no
+difference held (it would re-arm an upload of edits already in flight). `sent`
+is not persisted: a sent draft restores with its edits, unsent.
+
+**Known limitations.** An upload is a whole document with no concurrency
+check: the last writer wins, so an upstream generation that lands between the
+panel's last delivery and the trader's `y` is overwritten. An echo that
+arrives before the transport's `Ok` is handled as an ordinary delivery of a
+draft still `Editing` (the update policy applies, as to any newer generation),
+and the late `Ok` then does not enter `Sent`; the demo bus answers `Ok` first,
+but a real transport may not.
 
 ## Timeseries
 
@@ -202,21 +274,26 @@ click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
 typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
 cell's value. Type and barrier type accept only their vocabulary, and `enter`
-commits the highlighted option. A commit whose line was deleted, or whose
-column moved under a view change, is refused with a footer message. A click in
-the grid, including a package chevron, cancels an open editor or entry field
-and never commits it, and acts on the row it was painted on: the entry
-placeholder is a row, so closing it moves the rows below up, but a click below
-it still lands on (or toggles, or double-click edits) the row the trader
-aimed at. A click or double-click on the placeholder itself only closes it. A
-`:` command or a `/` search closes the menu and any open field first. A click
-outside the grid leaves a text editor open until the next grid click or verb,
-as in the market-data panel; the typeahead popup closes on an outside click.
-Both the entry field and the cell editor blur before they drop, and no chord
-is bound while one is open, so `ctrl+k` still opens the palette. Either field
-puts the tile in insert mode, so bare and shifted letters and digits are typed
-into it and never reach a shell binding (`shift+d` would otherwise duplicate
-the tile).
+commits the highlighted option. An open editor follows its column, and the
+cursor with it, through a view change (a config reload or `:view`) that moves
+it. When the column leaves the view, or the line leaves the grid, the editor
+closes with `the cell moved; edit refused` in the footer and nothing is
+committed; that close has no window of its own, so the field is blurred at the
+end of the same update, before the next frame. A click in the grid, including a
+package chevron, cancels an open editor or entry field and never commits it,
+and acts on the row it was painted on: the entry placeholder is a row, so
+closing it moves the rows below up, but a click below it still lands on (or
+toggles, or double-click edits) the row the trader aimed at. A click or
+double-click on the placeholder itself only closes it. A `:` command or a `/`
+search closes the menu and any open field first. An open menu re-checks its
+rows whenever the tile changes under it (a load answer, a config reload),
+keeping its highlight where it was. A click outside the grid leaves a text
+editor open until the next grid click or verb, as in the market-data panel; the
+typeahead popup closes on an outside click. Both the entry field and the cell
+editor are blurred when they close, and no chord is bound while one is open, so
+`ctrl+k` still opens the palette. Either field puts the tile in insert mode, so
+bare and shifted letters and digits are typed into it and never reach a shell
+binding (`shift+d` would otherwise duplicate the tile).
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,

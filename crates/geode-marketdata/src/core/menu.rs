@@ -99,6 +99,8 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
                 Err("not built yet")
             } else if behind {
                 Err("rebase or revert first")
+            } else if matches!(i.badge, DraftBadge::Sent { .. }) {
+                Err("already sent")
             } else if !dirty {
                 Err("nothing to upload")
             } else {
@@ -265,6 +267,18 @@ mod tests {
             Clock::utc(),
         );
         assert_eq!(enabled(&clean, "Upload"), Err("nothing to upload"));
+    }
+
+    #[test]
+    fn a_sent_draft_greys_upload_until_the_next_edit() {
+        let mut i = inputs(DraftBadge::Sent {
+            at: "2026-09-14T14:09:00Z".into(),
+        });
+        i.upload_built = true;
+        assert_eq!(
+            enabled(&rows(&i, Clock::utc()), "Upload"),
+            Err("already sent")
+        );
     }
 
     #[test]

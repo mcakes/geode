@@ -50,21 +50,22 @@
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
-use crate::core::draft::{RowDelete, RowEdit, local_hhmm};
+use crate::core::draft::{RowDelete, RowEdit, bumped, local_hhmm};
 use crate::core::matrix::RowState;
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, FieldKey, MatrixModel, PanelSpec,
-    Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell, route,
+    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, DraftState, FieldKey, MatrixModel,
+    PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell,
+    route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
-use crate::header::{self, HeaderInputs, HeaderModel};
+use crate::header::{self, HeaderInputs, HeaderModel, Tone};
 use crate::popup::{
     ChoicePopup, MenuState, PickerRows, PickerState, Popup, render_menu, render_picker,
 };
 use geode_core::colour::{Rgb, contrast_ratio, readable_on};
-use geode_core::document::{Value, split_key};
+use geode_core::document::{DocumentRows, Value, split_key};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
@@ -73,7 +74,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -222,6 +223,13 @@ const CELL_MOVED: &str = "the document changed under the edit — nothing was wr
 /// forward, and the notice names both.
 const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
 
+/// What every edit door answers while a differing echo is held (egress
+/// spec §7): the panel paints the sent draft over its BASE while a newer
+/// generation — the upstream's answer — waits, which is `Behind`'s own
+/// situation, and an edit made there would be stamped against a document
+/// that is no longer the newest. The same two doors forward.
+const ECHO_REFUSED: &str = "the echo differs — :rebase or :revert first";
+
 /// What every edit door answers on a `Deleted` row (dividend spec §5.2):
 /// the row is still painted, struck through, so the cursor can land on
 /// it, but a value written into a row the draft is about to remove would
@@ -229,9 +237,105 @@ const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
 /// notice names it.
 pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it";
 
+/// What `:upload` answers while the draft is `Behind` (egress spec §6):
+/// an upload is of the document the trader has seen whole, and a `Behind`
+/// panel is painting a generation that is no longer the newest.
+const UPLOAD_BEHIND: &str =
+    "rebase or revert first: an upload must be of a document you have seen whole";
+
+/// The notice every non-`y` answer to the confirm leaves — a key, focus
+/// leaving the confirm, or a pointer press on the tile.
+const UPLOAD_CANCELLED: &str = "upload cancelled";
+
+/// The notice when a delivery moves the painted generation or the draft
+/// while the confirm stands: the prompt's document is no longer the one
+/// on screen, so the question is withdrawn at once rather than left
+/// painted until the next key.
+const UPLOAD_CANCELLED_ARRIVED: &str = "upload cancelled: a new document arrived";
+
+/// An armed `:upload` confirm (egress spec §6): the document is assembled
+/// at arm time, so what the prompt counts is exactly what `y` sends.
+///
+/// The confirm holds the keyboard on its own `focus` handle, tracked by
+/// the prompt the header paints, whose `on_key_down` runs before the
+/// shell root's listener ([`MarketDataTile::confirm_key`]). `_blur` is the
+/// focus-leaving half: any move of window focus off the prompt — a tile
+/// focus move, the palette, a click into the grid — cancels. Dropping
+/// this struct drops the subscription, so a confirm answered by a key
+/// never also hears its own blur.
+struct PendingUpload {
+    target: String,
+    rows: DocumentRows,
+    prompt: SharedString,
+    /// The draft as it was when the confirm was armed. A delivery can
+    /// land between the prompt and the answer (`Behind`, or a `replace`
+    /// policy dropping the edits); `y` against a draft that no longer
+    /// matches would send a document the trader is no longer looking at,
+    /// so it cancels instead. Compared WHOLE — `base` included: an
+    /// `:auto rebase` onto a same-shape newer generation leaves edits,
+    /// attrs, rows and state equal while the rows were assembled from
+    /// the superseded base.
+    draft: Draft,
+    focus: FocusHandle,
+    /// The window the prompt's `focus` lives in, so a delivery (which has
+    /// no `Window`) can still blur it before the confirm is dropped.
+    window: gpui::AnyWindowHandle,
+    _blur: gpui::Subscription,
+}
+
+/// The upload submitted and not yet answered: which underlying it sent
+/// and where. Kept across a key switch — the outcome still has to be
+/// reported, and naming the key it sent is what stops an answer for SPX
+/// from being read as NDX's.
+struct InFlightUpload {
+    key: Vec<String>,
+    target: String,
+}
+
+/// What the last echo of an upload said (egress spec §7), painted as its
+/// own header run rather than as the error-toned `notice`, which the next
+/// painting delivery clears: a confirmation is good news that stays up
+/// until the next edit, and a difference stays up for as long as the
+/// draft is `Sent` against it.
+#[derive(Debug, Clone)]
+enum Echo {
+    /// `sent HH:MM, confirmed HH:MM` — the draft has cleared; dropped by
+    /// [`MarketDataTile::rebuild_chrome`] at the next edit.
+    Confirmed(SharedString),
+    /// The generation that was compared and found different (`newer`, its
+    /// source time) and the line naming how many rows differ. The panel
+    /// keeps painting the base while this stands, and a redelivery of
+    /// `newer` is not compared again. Dropped the moment the draft leaves
+    /// `Sent` (`:rebase`, `:revert`, a further edit).
+    Differs { newer: String, text: SharedString },
+}
+
+/// What [`MarketDataTile::echo_of`] decided about one delivery.
+enum EchoStep {
+    /// Not an echo: the draft is not `Sent`, or this is its own base.
+    None,
+    /// The delivered document is what was sent; the draft has reverted.
+    Confirmed(SharedString),
+    /// It is not (or could not be compared); the draft stays `Sent`
+    /// over its base.
+    Held(Echo),
+    /// `Sent` with nothing to compare against: the draft went `Behind`.
+    Unchecked,
+}
+
 /// What `:rebase`/`:revert` answer outside `Behind` — there is no
 /// "newer" document to move onto or fall back to.
 const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
+
+/// What `:rebase` answers on a `Sent` draft with no differing echo held
+/// (controller ruling, egress spec §7 follow-up): the upload is still
+/// awaiting its echo upstream, so there is nothing newer to rebase onto.
+/// Running the ordinary rebase here would carry the draft back to
+/// `Editing` on the SAME generation and re-arm `:upload` of edits already
+/// in flight, a possible duplicate upload. `:revert` is the door named,
+/// since it drops the awaited echo along with the draft.
+const REBASE_AWAITING_ECHO: &str =
+    "nothing newer to rebase onto — the upload is awaiting its echo; :revert to drop it";
 
 /// What the row verbs (`o`, `shift+o`, `d d`; dividend spec §5.3) answer
 /// with the cursor in the attribute strip: an attribute is not a row, so
@@ -246,7 +350,7 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 /// One cell a `:bump` writes: where it is, the labels that make the edit
 /// portable across generations, and the value being added to — the shape
 /// [`Draft::bump`] consumes.
-type BumpCell = ((usize, usize), (String, String), f64);
+type BumpCell = ((usize, usize), (String, String), f64, ColumnType);
 
 /// The open cell or attribute editor (spec §8.6/§5.2): the input the
 /// trader is typing into, and what it was opened on.
@@ -402,6 +506,15 @@ pub struct MarketDataTile {
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
+    /// The eligible upload targets for this panel's own document: every
+    /// resolved `egress.toml` target whose `documents` list
+    /// names [`PanelSpec::document`], in `egress.toml` order — set once
+    /// at construction from `MarketDataFactory::create`'s own
+    /// `targets_for`, since the resolved list is a startup fact (egress
+    /// spec §10 amendment 2, restart-required like `sources.toml`), not
+    /// something a live reload changes. `:upload` resolves its target
+    /// against it and the command line completes from it.
+    egress_targets: Vec<SharedString>,
     /// The frame versions the last request was made under; `None` until
     /// the first.
     ///
@@ -560,6 +673,40 @@ pub struct MarketDataTile {
     /// so tests read it directly (`t.clock`) rather than reaching for the
     /// global themselves.
     pub(crate) clock: geode_core::clock::Clock,
+    /// The armed `:upload` confirm, if any (egress spec §6).
+    pending_upload: Option<PendingUpload>,
+    /// The rows of the upload last submitted — kept for the echo
+    /// (egress spec §7). Held only while that upload is in flight
+    /// (`submitted`) or the draft is `Sent` from it: `rebuild_chrome` drops
+    /// it otherwise, so a refused submit, a failed outcome, an edit made
+    /// in flight, a further edit, `:revert`, `:rebase` and a matching echo
+    /// all end it through one rule rather than one line per door. Nothing
+    /// outside `Sent` compares against it, and rows left behind by an
+    /// upload the draft has moved on from are rows nobody should.
+    sent: Option<DocumentRows>,
+    /// What the last echo said; see [`Echo`].
+    echo: Option<Echo>,
+    /// The draft as it was when the last upload was submitted. An `Ok`
+    /// outcome enters `Sent` only while the draft still matches it: an
+    /// edit made while the upload was in flight is unsent work, and
+    /// painting it as sent would claim a value went upstream that did
+    /// not. Dropped on a key switch: the draft it describes is parked
+    /// and gives up its echo check.
+    submitted: Option<Draft>,
+    /// The upload awaiting its outcome, if any. `:upload` is refused while
+    /// one is (a second submission would race the first's echo), and an
+    /// outcome for a key no longer shown is a notice that never touches
+    /// the current draft.
+    in_flight: Option<InFlightUpload>,
+    /// This tile's upload counter, echoed in the outcome; an outcome whose
+    /// tag is not the latest is ignored.
+    upload_tag: u64,
+    /// `upload failed: <e>`, painted in the header until the next edit or
+    /// upload, with the draft it failed on — the "next edit" is any
+    /// change to the draft's edits, attributes or rows, which
+    /// `rebuild_chrome` compares against, so no edit door has to
+    /// remember to clear it.
+    upload_error: Option<(SharedString, Draft)>,
 }
 
 impl MarketDataTile {
@@ -571,6 +718,7 @@ impl MarketDataTile {
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         stale_after: Rc<StdCell<Duration>>,
+        egress_targets: Vec<SharedString>,
         restored: Option<&toml::Table>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -808,6 +956,7 @@ impl MarketDataTile {
             parked,
             key,
             tag: 0,
+            egress_targets,
             acted: None,
             query_in_flight: false,
             publication: None,
@@ -832,6 +981,9 @@ impl MarketDataTile {
                 state: None,
                 incomplete: None,
                 notice: None,
+                upload_error: None,
+                echo: None,
+                prompt: None,
                 time: None,
                 stale: false,
             },
@@ -847,6 +999,13 @@ impl MarketDataTile {
                 .try_global::<geode_shell::clock::AppClock>()
                 .map(|c| c.0)
                 .unwrap_or_else(|| geode_core::clock::Clock::machine().0),
+            pending_upload: None,
+            sent: None,
+            echo: None,
+            submitted: None,
+            in_flight: None,
+            upload_tag: 0,
+            upload_error: None,
         };
         this.rebuild_chrome();
         // The delegate starts with the model this tile starts with (review
@@ -887,8 +1046,14 @@ impl MarketDataTile {
     /// typing in the picker, which is no better than taking it from the
     /// cell editor. Spec §7 named `ctrl+j`/`ctrl+k` in error; Task 8
     /// records the amendment.
+    ///
+    /// An armed `:upload` confirm is `insert` too, and wins over every
+    /// other state: its prompt holds the keyboard exactly as a field does,
+    /// and `insert` is what makes the shell withhold its root focus
+    /// restore while it does (`TileContent::holds_focus` below).
     pub fn key_context(&self) -> KeyContext {
-        let mode = if self.editor.is_some()
+        let mode = if self.pending_upload.is_some()
+            || self.editor.is_some()
             || matches!(self.popup, Some(Popup::Picker(_) | Popup::Choice(_)))
         {
             "insert"
@@ -917,7 +1082,11 @@ impl MarketDataTile {
             Some(Popup::Choice(c)) => c.input.read(cx).focus_handle(cx).is_focused(window),
             Some(Popup::Menu(_)) | None => false,
         };
-        editor || popup
+        let confirm = self
+            .pending_upload
+            .as_ref()
+            .is_some_and(|p| p.focus.is_focused(window));
+        editor || popup || confirm
     }
 
     // ---- the request -------------------------------------------------
@@ -1112,11 +1281,367 @@ impl MarketDataTile {
         self.changed(cx);
     }
 
+    /// An upload outcome routed to this tile (egress spec §6 "Outcome").
+    /// An outcome whose `tag` is not this tile's latest upload is ignored.
+    /// `Ok` enters `Sent` (the header reads `sent HH:MM`) — but only
+    /// while the draft still IS what was submitted: an edit made, or a
+    /// rebase applied, while the upload was in flight is unsent, so the
+    /// draft stays `Editing`. `Err` leaves the draft `Editing` and paints `upload
+    /// failed: <e>` until the next edit or upload.
+    ///
+    /// An outcome for an underlying no longer shown (the trader switched
+    /// away while it was in flight) is a notice naming key and target and
+    /// nothing else: the draft on screen, its error line and `sent` belong
+    /// to another document.
+    pub fn deliver_upload(&mut self, u: UploadDelivery, cx: &mut Context<Self>) {
+        if u.tag != self.upload_tag {
+            return;
+        }
+        let flight = self.in_flight.take();
+        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {
+            let key = display_key(&flight.key);
+            let target = flight.target;
+            let notice = match &u.result {
+                Ok(()) => format!("upload of {key} to {target} sent"),
+                Err(e) => format!("upload of {key} to {target} failed: {e}"),
+            };
+            tracing::info!(
+                target: "geode::ingest",
+                tile = self.id.0,
+                key = %key,
+                target = %target,
+                tag = u.tag,
+                ok = u.result.is_ok(),
+                "upload outcome for an underlying no longer shown"
+            );
+            self.notice = Some(notice.into());
+            self.changed(cx);
+            return;
+        }
+        let submitted = self.submitted.take();
+        match u.result {
+            Ok(()) => {
+                tracing::info!(
+                    target: "geode::ingest",
+                    tile = self.id.0,
+                    target = %u.target,
+                    tag = u.tag,
+                    "upload accepted"
+                );
+                // The WHOLE draft, `base` included: a rebase while the
+                // upload was in flight keeps the same edits on a base
+                // that was never sent.
+                let unchanged = submitted.is_some_and(|d| d == self.draft);
+                if unchanged && self.draft.state == DraftState::Editing {
+                    self.draft.state = DraftState::Sent {
+                        at: chrono::Utc::now().to_rfc3339(),
+                    };
+                    self.rebuild_model(cx);
+                }
+            }
+            Err(e) => {
+                tracing::info!(
+                    target: "geode::ingest",
+                    tile = self.id.0,
+                    target = %u.target,
+                    tag = u.tag,
+                    error = %e,
+                    "upload failed"
+                );
+                self.upload_error =
+                    Some((format!("upload failed: {e}").into(), self.draft.clone()));
+                self.sent = None;
+            }
+        }
+        self.changed(cx);
+    }
+
+    // ---- `:upload` (egress spec §6) ----------------------------------
+
+    /// `:upload [target]`, the menu's `Upload` row and the palette's
+    /// action: resolve the target, refuse what cannot be sent, assemble
+    /// the document and arm the y/n confirm. Nothing is sent here.
+    fn arm_upload(
+        &mut self,
+        target: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let document = self.spec.document;
+        let target = match target {
+            Some(t) => {
+                if !self.egress_targets.iter().any(|e| e.as_ref() == t) {
+                    return Err(format!("{t} does not accept {document}"));
+                }
+                t
+            }
+            None => match self.egress_targets.as_slice() {
+                [] => return Err(format!("no egress target accepts {document}")),
+                [one] => one.to_string(),
+                several => {
+                    let names: Vec<&str> = several.iter().map(|t| t.as_ref()).collect();
+                    return Err(format!("upload to which target? {}", names.join(", ")));
+                }
+            },
+        };
+        if let Some(flight) = &self.in_flight {
+            let (key, target) = (display_key(&flight.key), &flight.target);
+            return Err(format!("an upload of {key} to {target} is in flight"));
+        }
+        if self.draft.is_empty() {
+            return Err("nothing to upload".into());
+        }
+        if let Some(refusal) = self.not_live(cx) {
+            return Err(refusal);
+        }
+        if self.draft.is_behind() {
+            return Err(UPLOAD_BEHIND.into());
+        }
+        if self.draft.is_sent() {
+            return Err("already sent".into());
+        }
+        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+            0 => {}
+            1 => return Err("1 row incomplete".into()),
+            n => return Err(format!("{n} rows incomplete")),
+        }
+        let Some(snapshot) = self.painted_snapshot() else {
+            return Err("no document to upload".into());
+        };
+        let rows = crate::core::upload::assemble(&snapshot, self.spec, &self.model, &self.draft)?;
+        // An editor left open (orphaned by a focus move) is cancelled, as
+        // every other verb that is not its commit does: blur, then drop.
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        // A confirm already armed is replaced, never stacked.
+        self.disarm_upload(window, cx);
+        let cells = match self.draft.cell_count() {
+            1 => "1 cell".to_string(),
+            n => format!("{n} cells"),
+        };
+        let added = match self.draft.rows_added() {
+            1 => "1 row added".to_string(),
+            n => format!("{n} rows added"),
+        };
+        let attrs = match self.draft.attr_count() {
+            0 => String::new(),
+            1 => "1 attribute, ".to_string(),
+            n => format!("{n} attributes, "),
+        };
+        let key = self.key.as_deref().map(display_key).unwrap_or_default();
+        let prompt = format!(
+            "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
+            self.draft.rows_removed()
+        );
+        let focus = cx.focus_handle();
+        focus.focus(window, cx);
+        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if this.pending_upload.is_some() {
+                this.cancel_upload(window, cx);
+            }
+        });
+        self.pending_upload = Some(PendingUpload {
+            target,
+            rows,
+            prompt: prompt.into(),
+            draft: self.draft.clone(),
+            focus,
+            window: window.window_handle(),
+            _blur: blur,
+        });
+        self.notice = None;
+        self.changed(cx);
+        Ok(())
+    }
+
+    /// The confirm's own key handler, run from the prompt's `on_key_down`
+    /// in `header::render` — which sits on the focused element and so runs
+    /// before the shell root's listener. While a confirm is armed EVERY
+    /// key is consumed (answers `true`): bare `y` sends, anything else —
+    /// `n`, `escape`, a motion, a chord — cancels. A keystroke that
+    /// answers the question must not also act on the panel or the shell.
+    pub(crate) fn confirm_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_upload.is_none() {
+            return false;
+        }
+        let ks = &event.keystroke;
+        if ks.key == "y" && !ks.modifiers.modified() {
+            self.submit_upload(window, cx);
+        } else {
+            self.cancel_upload(window, cx);
+        }
+        true
+    }
+
+    /// A pointer press anywhere on the tile while a confirm is armed
+    /// cancels it (the tile root's capture-phase mouse-down): a press on
+    /// the header or the menu button moves no focus, so the blur half
+    /// alone would leave the question standing behind the click.
+    pub(crate) fn cancel_upload_on_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending_upload.is_some() {
+            self.cancel_upload(window, cx);
+        }
+    }
+
+    /// Drop the armed confirm, giving up the keyboard first when its
+    /// prompt holds it (a surface dropping a focused handle blurs it).
+    fn disarm_upload(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<PendingUpload> {
+        let pending = self.pending_upload.take()?;
+        if pending.focus.is_focused(window) {
+            window.blur(cx);
+        }
+        Some(pending)
+    }
+
+    fn cancel_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let _ = self.disarm_upload(window, cx);
+        self.notice = Some(UPLOAD_CANCELLED.into());
+        self.changed(cx);
+    }
+
+    /// Why an upload cannot be sent now, if it cannot: the frame asks
+    /// for a historical as-of, or the snapshot on screen (the one
+    /// `:upload` assembles) was delivered for one. An upload is a whole
+    /// document: one assembled over a historical generation would revert
+    /// every untouched row upstream. The second check covers the window
+    /// after the frame goes live, while the historical generation stays
+    /// painted until a live one is applied — briefly behind the barrier,
+    /// indefinitely if the live requery is refused or answers `Err`.
+    fn not_live(&self, cx: &App) -> Option<String> {
+        let now = chrono::Utc::now();
+        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {
+            let when = as_of_text(*at, now, self.clock);
+            return Some(format!("upload: the panel shows {when}, not live"));
+        }
+        let painted = self
+            .painted_snapshot()
+            .and_then(|s| s.provenance().as_of_request.clone());
+        if let Some(at) = painted {
+            let when = chrono::DateTime::parse_from_rfc3339(&at)
+                .map(|t| as_of_text(t.with_timezone(&chrono::Utc), now, self.clock))
+                .unwrap_or(at);
+            return Some(format!("upload: the panel shows {when}, not live"));
+        }
+        None
+    }
+
+    /// `y`: submit the document assembled at arm time. Refused by the data
+    /// tier's bounded queue → a notice and nothing kept as `sent`.
+    fn submit_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.disarm_upload(window, cx) else {
+            return;
+        };
+        // Re-checked at `y`: nothing that makes the panel historical
+        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx) {
+            self.notice = Some(refusal.into());
+            self.changed(cx);
+            return;
+        }
+        if pending.draft != self.draft {
+            self.notice = Some("upload cancelled: the draft changed under the question".into());
+            self.changed(cx);
+            return;
+        }
+        self.upload_tag += 1;
+        self.upload_error = None;
+        let key = self.key.as_deref().map(display_key).unwrap_or_default();
+        tracing::info!(
+            target: "geode::ingest",
+            key = %key,
+            target = %pending.target,
+            cells = self.draft.cell_count(),
+            rows_added = self.draft.rows_added(),
+            rows_removed = self.draft.rows_removed(),
+            "upload submitted"
+        );
+        self.sent = Some(pending.rows.clone());
+        self.submitted = Some(self.draft.clone());
+        self.in_flight = Some(InFlightUpload {
+            key: self.key.clone().unwrap_or_default(),
+            target: pending.target.clone(),
+        });
+        let queued = self.data.upload(geode_data::UploadParams {
+            key: QueryKey(self.id.0),
+            tag: self.upload_tag,
+            target: pending.target,
+            document: self.spec.document.into(),
+            rows: pending.rows,
+        });
+        if !queued {
+            self.notice = Some("upload refused: the data service is busy or gone".into());
+            self.sent = None;
+            self.submitted = None;
+            self.in_flight = None;
+        }
+        self.changed(cx);
+    }
+
     /// Put a delivered snapshot on screen: the draft's own view of the
     /// generation, the model, the cursor and the scroll. Called by
     /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
     /// a staged one, so the two paths cannot drift.
     fn apply(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
+        let painted = self.painted_snapshot().and_then(|s| source_time_of(&s));
+        self.apply_snapshot(snapshot, cx);
+        self.withdraw_upload_if_moved(painted, cx);
+    }
+
+    /// A confirm armed over one document must not stand over another: if
+    /// this delivery changed the painted generation or the draft (a
+    /// `rebase` or `replace` policy, or `Behind` under `hold`), the
+    /// question is withdrawn at once. `apply` has no `Window`, so the
+    /// prompt's focus is blurred through its recorded window handle,
+    /// deferred to the end of this update; the handle travels into the
+    /// deferral, so it is never dropped while still focused. `y`'s own
+    /// re-check in [`Self::submit_upload`] stays as the second line.
+    fn withdraw_upload_if_moved(&mut self, painted: Option<String>, cx: &mut Context<Self>) {
+        let now = self.painted_snapshot().and_then(|s| source_time_of(&s));
+        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
+        if !self.pending_upload.as_ref().is_some_and(moved) {
+            return;
+        }
+        let Some(pending) = self.pending_upload.take() else {
+            return;
+        };
+        let PendingUpload {
+            focus,
+            window,
+            _blur,
+            ..
+        } = pending;
+        // The blur subscription goes first, so the deferred blur below is
+        // not heard as a second cancel.
+        drop(_blur);
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if focus.is_focused(window) {
+                    window.blur(cx);
+                }
+            });
+        });
+        // The policy's own disclosure (`replace`'s count, `rebase`'s
+        // dropped edits) is kept behind the cancellation, never lost to it.
+        self.notice = Some(match self.notice.take() {
+            Some(n) => format!("{UPLOAD_CANCELLED_ARRIVED}; {n}").into(),
+            None => UPLOAD_CANCELLED_ARRIVED.into(),
+        });
+        self.changed(cx);
+    }
+
+    /// [`Self::apply`]'s body: everything a delivered snapshot does to the
+    /// panel, before the armed confirm is checked against it.
+    fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
         let as_of = source_time_of(&snapshot);
         // Everything below is decided on a COPY of the draft and built
         // before a single field is committed (M-2, final whole-branch
@@ -1127,7 +1652,19 @@ impl MarketDataTile {
         // never painted, and `:rebase` was left pointed at a document that
         // cannot be laid out as a grid.
         let mut draft = self.draft.clone();
-        let moved = as_of.as_ref().is_some_and(|t| draft.on_delivered(t));
+        let mut moved = as_of.as_ref().is_some_and(|t| draft.on_delivered(t));
+        // The echo (egress spec §7), decided on the same copy and committed
+        // with everything else below.
+        let echo = match self.echo_of(&snapshot, as_of.as_deref(), &mut draft) {
+            Ok(echo) => echo,
+            Err(unbuildable) => {
+                self.notice = Some(unbuildable.into());
+                return;
+            }
+        };
+        if matches!(echo, EchoStep::Unchecked) {
+            moved = true;
+        }
         // The update policy (spec §8.4, 2026-09-19) is applied HERE and
         // only here: `on_delivered` is the `hold` decision, and `Behind`
         // after it means "today's code would hold" — a draft with edits
@@ -1173,6 +1710,18 @@ impl MarketDataTile {
             match self.policy {
                 UpdatePolicy::Hold => unreachable!("guarded above"),
                 UpdatePolicy::Rebase => {
+                    // The rebase guard (spec §2, amendment 4) needs the
+                    // OUTGOING document's own group sizes before this
+                    // rebase moves `draft` onto the incoming one —
+                    // `painted_snapshot` is exactly what is on screen
+                    // right now (still `self.base_snapshot`/
+                    // `self.snapshot`, neither overwritten yet), and
+                    // `capture_groups_if_base` is what confirms it is
+                    // really this draft's base and not a fallback (its own
+                    // doc comment has the M-1 story). Skipped in silence
+                    // otherwise, the same "leave groups as they were" the
+                    // restore path below takes.
+                    self.capture_groups_if_base(&mut draft);
                     // Two builds, on purpose: `Draft::rebase` re-places
                     // the edits by the NEW document's row and column
                     // labels, which only a model of that document
@@ -1226,7 +1775,7 @@ impl MarketDataTile {
         // the base nor the newest, with the header naming a third. Under
         // `rebase`/`replace` the draft is no longer `Behind` by here, so
         // nothing is retained and the new document is painted.
-        let retained = if draft.is_behind() {
+        let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
                 None => self
@@ -1269,6 +1818,22 @@ impl MarketDataTile {
         // TO, so a `replace` disclosure is never lost to the clear.
         self.notice = notice;
         self.draft = draft;
+        match echo {
+            EchoStep::Confirmed(line) => {
+                self.sent = None;
+                self.echo = Some(Echo::Confirmed(line));
+            }
+            EchoStep::Held(differs) => self.echo = Some(differs),
+            // A delivery that compared nothing leaves a confirmation up
+            // (it stands until the next edit) but not a difference: that
+            // described a generation no longer held — the base itself
+            // came back, say.
+            EchoStep::None | EchoStep::Unchecked => {
+                if matches!(self.echo, Some(Echo::Differs { .. })) {
+                    self.echo = None;
+                }
+            }
+        }
         self.base_snapshot = retained;
         self.snapshot = Some(snapshot);
         self.model = model;
@@ -1331,6 +1896,77 @@ impl MarketDataTile {
         // different node ladder, and the table paints its header from the
         // column groups `refresh` rebuilds.
         self.install_model(cx);
+    }
+
+    /// The echo check (egress spec §7), run by [`Self::apply_snapshot`] on
+    /// its working copy of the draft before anything is committed.
+    ///
+    /// Only a `Sent` draft meeting a generation other than its base is
+    /// compared — `on_delivered` leaves such a draft `Sent`, so neither
+    /// `Behind` nor the update policy ever sees it. The delivered document
+    /// is assembled exactly as an upload would be (a clean model, an empty
+    /// draft) and compared with `sent`: equal reverts the copy and follows
+    /// the new generation; different keeps it `Sent` over its base. A
+    /// redelivery of the generation already found different is not
+    /// compared again (every publish anywhere redelivers). A delivered
+    /// document that cannot be assembled at all — empty, or a value of the
+    /// wrong type — cannot confirm anything and is held as a difference
+    /// that names why.
+    ///
+    /// `Sent` with no `sent` rows to compare (not reachable: `sent` is
+    /// dropped only once the draft leaves `Sent`) must not claim a
+    /// confirmation it cannot check: the copy goes `Behind`, the ordinary
+    /// disclosure, and the caller treats that as a real transition.
+    ///
+    /// `Err` is a delivered generation that cannot be laid out as a grid,
+    /// which the caller reports and commits nothing for — the same rule
+    /// as its own build below.
+    fn echo_of(
+        &self,
+        snapshot: &Snapshot,
+        as_of: Option<&str>,
+        draft: &mut Draft,
+    ) -> Result<EchoStep, String> {
+        let (DraftState::Sent { at }, Some(t)) = (&draft.state, as_of) else {
+            return Ok(EchoStep::None);
+        };
+        if draft.base.as_deref() == Some(t) {
+            return Ok(EchoStep::None);
+        }
+        let Some(sent) = self.sent.as_ref() else {
+            draft.state = DraftState::Behind {
+                newer: t.to_string(),
+            };
+            return Ok(EchoStep::Unchecked);
+        };
+        if let Some(held @ Echo::Differs { newer, .. }) = &self.echo
+            && newer == t
+        {
+            return Ok(EchoStep::Held(held.clone()));
+        }
+        let clean = MatrixModel::build(snapshot, self.spec, &Draft::default())?;
+        let held = |text: String| {
+            EchoStep::Held(Echo::Differs {
+                newer: t.to_string(),
+                text: text.into(),
+            })
+        };
+        let delivered =
+            match crate::core::upload::assemble(snapshot, self.spec, &clean, &Draft::default()) {
+                Ok(delivered) => delivered,
+                Err(e) => return Ok(held(format!("echo not comparable: {e}"))),
+            };
+        let differing = crate::core::upload::echo_differs(self.spec, sent, &delivered);
+        if differing == 0 {
+            let line = format!(
+                "sent {}, confirmed {}",
+                local_hhmm(at, self.clock),
+                local_hhmm(&chrono::Utc::now().to_rfc3339(), self.clock)
+            );
+            draft.revert();
+            return Ok(EchoStep::Confirmed(line.into()));
+        }
+        Ok(held(format!("echo differs ({differing} rows)")))
     }
 
     /// Apply a staged snapshot, if any — from the `flip` bump in the frame
@@ -1416,6 +2052,41 @@ impl MarketDataTile {
     /// is retained, else the newest delivered.
     fn painted_snapshot(&self) -> Option<Arc<Snapshot>> {
         self.base_snapshot.clone().or_else(|| self.snapshot.clone())
+    }
+
+    /// Capture `draft`'s same-day group sizes (spec §2's rebase guard,
+    /// amendment 4) against the snapshot on screen right now — but ONLY
+    /// when that snapshot really IS `draft`'s own base generation, never
+    /// merely `painted_snapshot()`'s best guess (review finding, controller
+    /// ruling: a capture site captures only when the model it is about to
+    /// count was built from a snapshot whose source time equals
+    /// `draft.base`).
+    ///
+    /// `painted_snapshot()` falls back to the NEWEST delivered snapshot
+    /// when no base is retained — the M-1 path in `apply`: a restored or
+    /// parked draft whose base generation was never delivered this
+    /// session at all. Trusting that fallback here would silently replace
+    /// a previously correct `groups` (captured against the true base, by
+    /// an earlier call or carried in from the session) with the NEWER
+    /// document's own sizes, disarming the guard it exists to run — a
+    /// same-day group that in truth changed size between the draft's real
+    /// base and the newer document would then read as unchanged. Skipped
+    /// in silence otherwise: leaving `groups` untouched is always the safe
+    /// choice, since a stale-but-correct-for-its-generation count only
+    /// ever makes the guard MORE willing to refuse, never less.
+    ///
+    /// Every capture site in this file calls this rather than
+    /// `Draft::capture_groups` directly, so the rule lives in one place.
+    fn capture_groups_if_base(&self, draft: &mut Draft) {
+        let Some(base) = self.painted_snapshot() else {
+            return;
+        };
+        if source_time_of(&base) != draft.base {
+            return;
+        }
+        if let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default()) {
+            draft.capture_groups(&base_model);
+        }
     }
 
     /// Rebuild the prepared grid. Called on a delivery and on a draft
@@ -1667,6 +2338,28 @@ impl MarketDataTile {
     /// dirty dot, each header attribute, the one short state run, the
     /// notice, and the generation's source time.
     fn rebuild_chrome(&mut self) {
+        if self
+            .upload_error
+            .as_ref()
+            .is_some_and(|(_, at)| !same_edits(at, &self.draft))
+        {
+            self.upload_error = None;
+        }
+        // `sent`'s one rule (see the field): kept for an upload in flight
+        // or a draft `Sent` from it, and for nothing else.
+        if self.submitted.is_none() && !self.draft.is_sent() {
+            self.sent = None;
+        }
+        // A confirmation stands until the next edit; a difference only
+        // while the draft is still `Sent` against it.
+        let echo_over = match &self.echo {
+            Some(Echo::Confirmed(_)) => !self.draft.is_empty(),
+            Some(Echo::Differs { .. }) => !self.draft.is_sent(),
+            None => false,
+        };
+        if echo_over {
+            self.echo = None;
+        }
         self.source_at = self
             .model
             .source_time
@@ -1680,6 +2373,12 @@ impl MarketDataTile {
             badge: self.draft.badge(),
             unresolved_restore: self.unresolved_restore,
             notice: self.notice.as_ref(),
+            upload_error: self.upload_error.as_ref().map(|(e, _)| e),
+            echo: self.echo.as_ref().map(|e| match e {
+                Echo::Confirmed(text) => (text, Tone::Time),
+                Echo::Differs { text, .. } => (text, Tone::Warn),
+            }),
+            prompt: self.pending_upload.as_ref().map(|p| &p.prompt),
             source_at: self.source_at,
             incomplete: self.draft.incomplete_rows(self.spec, &self.model.columns),
             clock: self.clock,
@@ -1971,12 +2670,12 @@ impl MarketDataTile {
                 self.set_policy(UpdatePolicy::Replace, cx);
                 false
             }
-            // `upload` is Part 4 — parsed and registered today so the
-            // palette and a keymap already reach it (spec §6.2), so
-            // dispatching it answers honestly rather than pretending it
-            // does nothing.
+            // The menu's `Upload` row and the palette's action: `:upload`
+            // with no argument (egress spec §6).
             "upload" => {
-                self.notice = Some("not built yet".into());
+                if let Err(e) = self.arm_upload(None, window, cx) {
+                    self.notice = Some(e.into());
+                }
                 true
             }
             _ if self
@@ -2003,6 +2702,21 @@ impl MarketDataTile {
     }
 
     // ---- the cell editor ---------------------------------------------
+
+    /// Why no edit can be made right now, if none can: the draft is
+    /// `Behind`, or a differing echo is held (egress spec §7). Both paint a
+    /// generation that is no longer the newest under the edits, and an
+    /// edit there would be stamped against it; `:rebase` and `:revert` are
+    /// the doors forward from either.
+    fn held_refusal(&self) -> Option<&'static str> {
+        if self.draft.is_behind() {
+            Some(BEHIND_REFUSED)
+        } else if self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. })) {
+            Some(ECHO_REFUSED)
+        } else {
+            None
+        }
+    }
 
     /// The generation an edit is recorded against, or why there can be no
     /// edit at all.
@@ -2062,8 +2776,8 @@ impl MarketDataTile {
             // the trader has typed.
             return;
         }
-        if self.draft.is_behind() {
-            self.notice = Some(BEHIND_REFUSED.into());
+        if let Some(refusal) = self.held_refusal() {
+            self.notice = Some(refusal.into());
             return;
         }
         let (text, target, wants_date) = match self.cursor {
@@ -2808,8 +3522,8 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        if self.draft.is_behind() {
-            return Err(BEHIND_REFUSED.to_string());
+        if let Some(refusal) = self.held_refusal() {
+            return Err(refusal.to_string());
         }
         let Cursor::Cell { row, .. } = self.cursor else {
             return Err(NOT_A_ROW.to_string());
@@ -2992,10 +3706,7 @@ impl MarketDataTile {
         let rows = menu::rows(
             &MenuInputs {
                 badge: self.draft.badge(),
-                // Upload is Part 4; every build before it greys the row with
-                // `not built yet` (spec §6.2's table) rather than pretending
-                // the panel can send anything anywhere.
-                upload_built: false,
+                upload_built: true,
                 policy: self.policy,
                 kind_title: self.spec.title,
                 kind_actions: self.spec.actions,
@@ -3357,8 +4068,8 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        if self.draft.is_behind() {
-            return Err(BEHIND_REFUSED.to_string());
+        if let Some(refusal) = self.held_refusal() {
+            return Err(refusal.to_string());
         }
         self.edit_base()?;
         let Cursor::Cell { row, col } = self.cursor else {
@@ -3419,7 +4130,7 @@ impl MarketDataTile {
         // the BEHIND-refusal notice — the one thing this verb is itself
         // the escape from — and leave anything else (a delivery error,
         // say) alone: it has nothing to do with reverting a draft.
-        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+        if matches!(self.notice.as_deref(), Some(BEHIND_REFUSED | ECHO_REFUSED)) {
             self.notice = None;
         }
         self.changed(cx);
@@ -3451,8 +4162,8 @@ impl MarketDataTile {
     /// `:bump` is arithmetic, and a schedule's non-numeric columns have
     /// nothing to add to either.
     fn bump(&mut self, delta: f64, axis: BumpAxis, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.draft.is_behind() {
-            return Err(BEHIND_REFUSED.to_string());
+        if let Some(refusal) = self.held_refusal() {
+            return Err(refusal.to_string());
         }
         let base = self.edit_base()?;
         let Cursor::Cell { row, col } = self.cursor else {
@@ -3484,9 +4195,30 @@ impl MarketDataTile {
                 Some(Value::Utf8(_) | Value::Date(_)) | None => None,
             })
         };
+        // Each cell's own declared type — `Draft::bumped`'s one typing
+        // rule, read off the spec rather than guessed from the painted
+        // value: `Columns::Values` names each column's own type by its
+        // grid position (`column_required`'s own convention — a flat
+        // model's columns are built from `flat_columns()` in that exact
+        // order); `Columns::Axis` gives every ladder cell the spec's
+        // `value_type`, except a leading slice-value cell, which is
+        // always `F64` regardless (`SliceValue`'s own doc comment: a
+        // slice value is f64 only).
+        let ty_of = |ci: usize| -> ColumnType {
+            match self.spec.columns {
+                Columns::Values(_) => self
+                    .spec
+                    .flat_columns()
+                    .get(ci)
+                    .map(|vc| vc.ty)
+                    .unwrap_or(self.spec.value_type),
+                Columns::Axis(_) if ci < self.model.slice_columns => ColumnType::F64,
+                Columns::Axis(_) => self.spec.value_type,
+            }
+        };
         let mut skipped = 0usize;
-        // Each cell to bump as (model cell, its current value).
-        let values: Vec<((usize, usize), f64)> = match axis {
+        // Each cell to bump as (model cell, its current value, its declared type).
+        let values: Vec<((usize, usize), f64, ColumnType)> = match axis {
             // A row bump walks the LADDER: the leading `slice_columns`
             // cells are the term's own forward/atm/skew, and bumping a
             // term's vols must not move its forward with them. A column
@@ -3503,7 +4235,7 @@ impl MarketDataTile {
                             skipped += 1;
                             return None;
                         }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
                     })
                     .collect()
             }
@@ -3511,6 +4243,7 @@ impl MarketDataTile {
                 if !matches!(self.model.kind_of(col), Some(CellKind::Number(_))) {
                     return Err("not a numeric column".to_string());
                 }
+                let ty = ty_of(col);
                 self.model
                     .rows
                     .iter()
@@ -3520,7 +4253,7 @@ impl MarketDataTile {
                         r.cells
                             .get(col)
                             .and_then(|cell| numeric_value(r.state, cell))
-                            .map(|v| ((ri, col), v))
+                            .map(|v| ((ri, col), v, ty))
                     })
                     .collect()
             }
@@ -3541,22 +4274,41 @@ impl MarketDataTile {
         // an inserted row's goes to its `RowEdit.cells` by label instead,
         // with the same arithmetic.
         let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
-        let mut inserted: Vec<((String, String), f64)> = Vec::new();
-        for (cell, value) in values {
+        let mut inserted: Vec<((String, String), f64, ColumnType)> = Vec::new();
+        for (cell, value, ty) in values {
             let labels = self.model.label_of(cell);
             let labels = (labels.0.to_string(), labels.1.to_string());
             let r = &self.model.rows[cell.0];
             match r.state {
-                RowState::Inserted => inserted.push((labels, value)),
+                RowState::Inserted => inserted.push((labels, value, ty)),
                 RowState::Document | RowState::Deleted => {
-                    document.push((r.cells[cell.1].cell_ref, labels, value));
+                    document.push((r.cells[cell.1].cell_ref, labels, value, ty));
                 }
             }
         }
-        self.draft.bump(document.into_iter(), delta, &base);
-        for ((row_label, col_label), value) in inserted {
-            self.draft
-                .set_row_cell(&row_label, &col_label, Value::F64(value + delta));
+        // Every cell's `bumped()` result is checked — document rows AND
+        // inserted rows together — before either write door opens
+        // (controller ruling): a mixed row with an I64 node
+        // behind an F64 one must not land the F64 cells through
+        // `Draft::bump` and only then hit the I64 refusal in the
+        // `set_row_cell` loop below, since a partial bump on a row an
+        // inserted-row cell shares with document cells is exactly the
+        // half-applied edit `Draft::bump`'s own check-then-write exists to
+        // rule out. `bumped` is a pure function of its four arguments, so
+        // validating it here and letting `Draft::bump`/`set_row_cell`
+        // recompute the identical result when they actually write is a
+        // second pass over a keystroke's worth of cells, not a risk of
+        // disagreement.
+        for (_, labels, value, ty) in &document {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }
+        for (labels, value, ty) in &inserted {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }
+        self.draft.bump(document.into_iter(), delta, &base)?;
+        for ((row_label, col_label), value, ty) in inserted {
+            let value = bumped(value, delta, ty, &col_label)?;
+            self.draft.set_row_cell(&row_label, &col_label, value);
         }
         self.rebuild_model(cx);
         self.changed(cx);
@@ -3574,10 +4326,36 @@ impl MarketDataTile {
     /// painted value, so the draft about to be replaced has nothing to
     /// contribute here and using it would only invite confusion about
     /// which draft a reader is looking at.
+    ///
+    /// From `Sent` too (egress spec §7): after a differing echo it moves
+    /// the sent edits onto the upstream's answer, and the draft is
+    /// `Editing` — unsent against that document — whatever it was before.
     fn rebase(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
-        if !self.draft.is_behind() {
+        if !self.draft.is_behind() && !self.draft.is_sent() {
             return Err(NOT_BEHIND.to_string());
         }
+        // A `Sent` draft only has somewhere to rebase onto once a
+        // differing echo is held — otherwise the upload is still in
+        // flight upstream and this would be a rebase onto the very
+        // generation already submitted (controller ruling).
+        if self.draft.is_sent() && !matches!(self.echo, Some(Echo::Differs { .. })) {
+            return Err(REBASE_AWAITING_ECHO.to_string());
+        }
+        // The rebase guard (spec §2, amendment 4) needs the group sizes
+        // of the document currently on screen — `painted_snapshot` while
+        // `Behind` — before `rebase` below moves the draft onto the newer
+        // one. Skipped, not refused, on a build failure or when the
+        // painted snapshot is not really this draft's base (the M-1 path
+        // — `capture_groups_if_base`'s own doc comment): the guard is a
+        // refinement of `rebase`'s own report, never a gate on running it
+        // at all. `self.draft` is taken out and put back rather than
+        // borrowed in place, since `capture_groups_if_base` also reads
+        // `self` (`painted_snapshot`, `spec`) and a method call cannot
+        // hold both an immutable borrow of `self` and a mutable one of
+        // `self.draft` at once.
+        let mut draft = std::mem::take(&mut self.draft);
+        self.capture_groups_if_base(&mut draft);
+        self.draft = draft;
         // Not `.expect(..)`: `Behind` implies a newer generation was
         // delivered, but this is a render-thread module, and an invariant
         // break here must read as a `:`-line refusal, never a crash.
@@ -3833,9 +4611,7 @@ impl MarketDataTile {
             Command::Revert => self.revert(cx),
             Command::Bump { delta, axis } => self.bump(delta, axis, cx),
             Command::Rebase => self.rebase(cx),
-            // Parsed, not executed: the grammar a trader types is the one
-            // Part 4 wires up.
-            Command::Upload => Err("upload is not built yet".into()),
+            Command::Upload(target) => self.arm_upload(target, window, cx),
             Command::Set { attr, value } => self.set_attr_command(&attr, value, cx),
             // A bare `auto` answers with the current policy through the
             // command line's own inline slot, `:set <attr>`'s contract:
@@ -3916,8 +4692,8 @@ impl MarketDataTile {
                 Err(format!("{attr} = {}", cell.text))
             }
             Some(value) => {
-                if self.draft.is_behind() {
-                    return Err(BEHIND_REFUSED.to_string());
+                if let Some(refusal) = self.held_refusal() {
+                    return Err(refusal.to_string());
                 }
                 let header_attr = self
                     .spec
@@ -3969,16 +4745,37 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // A question about the outgoing document must not stand over the
+        // incoming one.
+        let _ = self.disarm_upload(window, cx);
+        // The outgoing draft gives up its echo check (final-review
+        // ruling): it parks, and restores, as `Editing`, like a session
+        // restore — `sent` rows, the `submitted` snapshot and the error
+        // line all describe it, not the incoming draft. An upload still
+        // in flight keeps `in_flight`, so its outcome is reported by key.
+        self.sent = None;
+        self.submitted = None;
+        self.upload_error = None;
         // Park the outgoing draft under its own underlying. A non-empty
         // draft with NO key (a hand-edited session's `draft` with no
         // `underlying`) has nothing to park under and stays put — the
         // first underlying named claims it, exactly as the constructor
         // already leaves it waiting for one.
+        //
+        // The rebase guard's group sizes are captured here too (controller
+        // ruling), still under `capture_groups_if_base`'s same source-time
+        // rule: `self.painted_snapshot()`/`self.key` still name the
+        // OUTGOING underlying at this point (the reset a few lines below
+        // has not run yet), so a park is exactly one more place the
+        // painted model can be the draft's own base. `self.draft` is taken
+        // out and put back rather than borrowed in place, the same
+        // borrow-shape reason `fn rebase` does — see that call site.
         if let Some(outgoing) = self.key.take()
             && !self.draft.is_empty()
         {
-            self.parked.insert(outgoing, self.draft.to_toml());
-            self.draft = Draft::default();
+            let mut draft = std::mem::take(&mut self.draft);
+            self.capture_groups_if_base(&mut draft);
+            self.parked.insert(outgoing, draft.to_toml());
         }
         if let Some(table) = self.parked.remove(&key) {
             self.draft = Draft::from_toml(&table);
@@ -3986,6 +4783,8 @@ impl MarketDataTile {
         self.unresolved_restore = !self.draft.is_empty();
         self.key = Some(key);
         self.title = Self::compute_title(self.spec, self.key.as_deref());
+        // What an echo said belongs to the outgoing underlying's upload.
+        self.echo = None;
         self.snapshot = None;
         self.base_snapshot = None;
         // Including anything STAGED for the old key: a key change bumps no
@@ -4030,6 +4829,7 @@ impl MarketDataTile {
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
+        let targets: Vec<String> = self.egress_targets.iter().map(|t| t.to_string()).collect();
         let attrs: Vec<String> = self
             .spec
             .header
@@ -4040,8 +4840,13 @@ impl MarketDataTile {
             line,
             cursor,
             &self.catalog_keys(cx),
-            self.draft.is_behind(),
+            // `:rebase` is a verb of a `Sent` draft too (egress spec §7),
+            // but only once a differing echo is held — otherwise there is
+            // nothing newer to offer it for (controller ruling).
+            self.draft.is_behind()
+                || (self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. }))),
             &attrs,
+            &targets,
         )
     }
 
@@ -4128,12 +4933,25 @@ impl MarketDataTile {
         // shape that has no key to file it under.
         let mut drafts = toml::Table::new();
         if !self.draft.is_empty() {
+            // The rebase guard (spec §2, amendment 4) needs group sizes
+            // captured against the document currently painted — but only
+            // when `painted_snapshot` really NAMES the base rather than
+            // falling back to a newer arrival nobody's base ever was (the
+            // M-1 path — `capture_groups_if_base`'s own doc comment).
+            // Computed on a CLONE, not `self.draft` itself: `serialize`
+            // takes `&self`, and this is the one capture site with no
+            // `&mut` to write it back onto the live draft, so a same-day
+            // group that changed size while nobody ran `:rebase` this
+            // session is still caught on the NEXT restart rather than
+            // only on the next explicit rebase.
+            let mut draft = self.draft.clone();
+            self.capture_groups_if_base(&mut draft);
             match &self.key {
                 Some(key) => {
-                    drafts.insert(display_key(key), toml::Value::Table(self.draft.to_toml()));
+                    drafts.insert(display_key(key), toml::Value::Table(draft.to_toml()));
                 }
                 None => {
-                    t.insert("draft".into(), toml::Value::Table(self.draft.to_toml()));
+                    t.insert("draft".into(), toml::Value::Table(draft.to_toml()));
                 }
             }
         }
@@ -4338,6 +5156,11 @@ impl MarketDataTile {
     }
 
     #[cfg(test)]
+    pub(crate) fn upload_prompt(&self) -> Option<&str> {
+        self.pending_upload.as_ref().map(|p| p.prompt.as_ref())
+    }
+
+    #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
@@ -4398,10 +5221,30 @@ pub(crate) fn parse_display_key(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// `:rebase`'s notice about the edits it could not carry over — a row or
-/// column label the newer document no longer has. Each pair is spelled
-/// `row/col` (the same display separator a document key uses), since a
-/// bare pair of labels with nothing between them reads as one run-on word.
+/// Whether two drafts hold the same unsent work — cell edits, attribute
+/// edits and row inserts/deletes — whatever their state or base. What
+/// "the next edit" means to the upload error. Not a test of "the same
+/// document": the confirm and the `Ok` outcome compare whole drafts,
+/// since a rebase moves `base` and nothing else.
+fn same_edits(a: &Draft, b: &Draft) -> bool {
+    a.edits == b.edits && a.attrs == b.attrs && a.rows == b.rows
+}
+
+/// A historical as-of in the trader's clock, the way the as-of chip
+/// spells one: `HH:MM` today, `YYYY-MM-DD HH:MM` on any other day.
+fn as_of_text(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    clock: geode_core::clock::Clock,
+) -> String {
+    let local = clock.local(at);
+    if local.date_naive() == clock.local(now).date_naive() {
+        clock.hm(at)
+    } else {
+        local.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
 /// A delivered document's own source time — the identity a [`Draft`]
 /// compares its `base` against (§8.4: per-document `as_of`, never the
 /// dataset-wide `gen_id` a live query's provenance carries).
@@ -4413,6 +5256,10 @@ fn source_time_of(snapshot: &Snapshot) -> Option<String> {
         .and_then(|f| f.as_of.clone())
 }
 
+/// `:rebase`'s notice about the edits it could not carry over — a row or
+/// column label the newer document no longer has. Each pair is spelled
+/// `row/col` (the same display separator a document key uses), since a
+/// bare pair of labels with nothing between them reads as one run-on word.
 fn dropped_notice(dropped: &[(String, String)]) -> String {
     let n = dropped.len();
     let plural = if n == 1 { "" } else { "s" };
@@ -4483,6 +5330,7 @@ impl gpui::Render for MarketDataTile {
             &self.header,
             cursor_attr,
             editor,
+            self.pending_upload.as_ref().map(|p| &p.focus),
             menu_open,
             theme,
             &tones,
@@ -4537,9 +5385,19 @@ impl gpui::Render for MarketDataTile {
                 .stripe(false),
         );
 
+        // A pointer press anywhere on the tile cancels an armed `:upload`
+        // confirm — capture phase, so it runs before the press reaches
+        // whatever it was aimed at, and it never stops propagation (the
+        // press still does what it would have done).
+        let cancel_tile = tile.clone();
         v_flex()
             .size_full()
             .debug_selector(|| format!("tile-content-{}", self.id.0))
+            .when(self.pending_upload.is_some(), |el| {
+                el.capture_any_mouse_down(move |_, window, cx| {
+                    cancel_tile.update(cx, |t, cx| t.cancel_upload_on_pointer(window, cx));
+                })
+            })
             .child(header)
             .child(body)
     }
@@ -4553,7 +5411,7 @@ mod tests {
     use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
-    use crate::core::{CVI, DraftState};
+    use crate::core::{CVI, DIVIDEND, DraftState};
     use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::groupings::GroupingSlots;
@@ -4697,6 +5555,11 @@ mod tests {
     /// 0.01 × term index, `skew` = −1.0 − 0.1 × term index, repeated on
     /// every node row of the term.
     fn document_of(terms: &[&str], nodes: &[f64], as_of: &str) -> Snapshot {
+        document_with(terms, nodes, provenance(as_of))
+    }
+
+    /// [`document_of`] over a caller-supplied provenance.
+    fn document_with(terms: &[&str], nodes: &[f64], provenance: Provenance) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
         let mut slices: Vec<(f64, f64, f64)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
@@ -4751,12 +5614,21 @@ mod tests {
                 ),
             ],
             0,
-            provenance(as_of),
+            provenance,
         )
     }
 
     fn cvi(as_of: &str) -> Snapshot {
         document_of(&TERMS, &NODES, as_of)
+    }
+
+    /// [`cvi`] as the data tier delivers it for a HISTORICAL request:
+    /// `as_of_request` carries the requested instant, as
+    /// `query::read::provenance` records it for `AsOf::At`.
+    fn cvi_requested_at(as_of: &str, at: chrono::DateTime<chrono::Utc>) -> Snapshot {
+        let mut p = provenance(as_of);
+        p.as_of_request = Some(at.to_rfc3339());
+        document_with(&TERMS, &NODES, p)
     }
 
     /// The view under the window's `Root`: renders the tile, and nothing
@@ -4871,6 +5743,18 @@ mod tests {
         spec: &'static PanelSpec,
         restored: Option<toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_spec_with_egress(cx, spec, restored, Vec::new())
+    }
+
+    /// [`open_spec`] through a factory that knows `egress` — `(target,
+    /// documents)` pairs in `egress.toml` order, narrowed to the panel's
+    /// own document by the factory exactly as `geode-app` wires it.
+    fn open_spec_with_egress(
+        cx: &mut gpui::TestAppContext,
+        spec: &'static PanelSpec,
+        restored: Option<toml::Table>,
+        egress: Vec<(String, Vec<String>)>,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         // The shell's own reclaims ride along, exactly as `main.rs`
         // installs them after the component's init: the panel's editor is
@@ -4885,7 +5769,8 @@ mod tests {
         // — in the harness only, since the app always has this installed.
         cx.update(crate::init);
         let (data, rx) = DataHandle::for_tests();
-        let factory = MarketDataFactory::new(data.clone(), spec, Duration::from_secs(15 * 60));
+        let factory = MarketDataFactory::new(data.clone(), spec, Duration::from_secs(15 * 60))
+            .with_egress(Arc::new(egress));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
@@ -4953,6 +5838,59 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// The production route: `MarketDataFactory::create` narrows
+    /// its shared `egress` list to THIS panel's own document
+    /// (`targets_for`, pinned in isolation by `geode_marketdata::content`'s
+    /// own test) and the tile stores exactly that narrowed list — not the
+    /// whole resolved list, and not the other document's targets — the
+    /// list `:upload` resolves its target against.
+    #[gpui::test]
+    fn the_tile_stores_the_targets_its_factory_resolves_for_its_document(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (data, _rx) = DataHandle::for_tests();
+        let egress: Arc<Vec<(String, Vec<String>)>> = Arc::new(vec![
+            (
+                "sophis".to_string(),
+                vec!["cvi_params".to_string(), "dividend_schedule".to_string()],
+            ),
+            ("bbg".to_string(), vec!["dividend_schedule".to_string()]),
+        ]);
+        let factory =
+            MarketDataFactory::new(data, &CVI, Duration::from_secs(60)).with_egress(egress);
+        let slot: Rc<RefCell<Option<Entity<MarketDataTile>>>> = Rc::new(RefCell::new(None));
+        let out = slot.clone();
+        cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let frame =
+                    cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
+                let occupant = factory.create(TileId(TILE), None, frame, diagnostics, window, cx);
+                let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
+                *out.borrow_mut() = Some(tile.clone());
+                let host = cx.new(|_| Host {
+                    tile,
+                    clicks: Rc::new(StdCell::new(0)),
+                    moves: Rc::new(StdCell::new(0)),
+                    keys: Rc::new(StdCell::new(0)),
+                });
+                cx.new(|cx| gpui_component::Root::new(host, window, cx))
+            })
+        })
+        .unwrap();
+
+        let tile = slot.borrow_mut().take().expect("the factory built one");
+        cx.update(|cx| {
+            assert_eq!(
+                tile.read(cx).egress_targets,
+                vec![SharedString::from("sophis")],
+                "CVI's own document ('cvi_params') narrows the shared list to \
+                 the one target that accepts it, dropping 'bbg' (dividend only)"
+            );
+        });
     }
 
     impl Harness {
@@ -6654,7 +7592,7 @@ mod tests {
         );
         assert_eq!(
             h.tile.read_with(&vcx, |t, cx| t.completions("", 0, cx)),
-            commands::completions("", 0, &[], false, &[]),
+            commands::completions("", 0, &[], false, &[], &[]),
             "the verb position is the pure core's vocabulary"
         );
 
@@ -7205,6 +8143,129 @@ edits = [["2026-11-20", "-1", 9.5]]
             h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
             "nothing was written"
         );
+    }
+
+    /// The shipped `DIVIDEND` panel's own `Columns::Values` branch of
+    /// `ty_of`: a row bump lands `amount` as
+    /// `Value::F64` — proven against the REAL spec, not `SCHEDULE`'s
+    /// three-column stand-in, since `ty_of`'s positional read off
+    /// `spec.flat_columns()` is only as trustworthy as the spec it is
+    /// actually tested against. `ex`/`announced`/`pay` are `Date` and
+    /// `status` is a `Choice`, so the row bump reaches `amount` (index 3)
+    /// alone, the same shape `a_flat_panels_row_bump_moves_only_the_number_column`
+    /// proves over `SCHEDULE`.
+    #[gpui::test]
+    fn a_dividend_panels_row_bump_lands_amount_as_f64(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot(&[(
+                "D1",
+                "2026-12-18",
+                "2026-11-01",
+                "2027-01-05",
+                1.25,
+                "declared",
+            )])),
+        );
+
+        h.command(&mut vcx, "bump 1 row").expect("a bump on row 0");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().edits.get(&(0, 3)).cloned()),
+            Some(Value::F64(2.25)),
+            "amount is DIVIDEND's flat column 3 (ex, announced, pay, amount, status)"
+        );
+    }
+
+    /// An inserted row's own cells land at each column's DECLARED type,
+    /// not a blanket `Value::F64`: `amt` is
+    /// `F64`, `n` is `I64`, and a whole-number delta bumps both through
+    /// the production `:bump` route, `set_row_cell`'s own door.
+    #[gpui::test]
+    fn an_inserted_rows_bump_lands_each_cells_declared_type(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::mixed_snapshot(&[("M1", 1.0, 2)])),
+        );
+
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        // `insert_below` opens the new row's first cell (`amt`) in insert
+        // mode already; fill it, then move onto `n` and fill it too —
+        // the same edit → commit route `a_commit_on_an_inserted_row_writes_its_own_cells`
+        // uses.
+        h.set_editor(&mut vcx, "1.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+
+        h.command(&mut vcx, "bump 2 row")
+            .expect("a whole-number bump");
+        let cells = h
+            .tile
+            .read_with(&vcx, |t, _| match t.draft().row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.clone(),
+                other => panic!("new-1 is still an inserted row, got {other:?}"),
+            });
+        assert_eq!(cells.get("amt"), Some(&Value::F64(3.5)));
+        assert_eq!(cells.get("n"), Some(&Value::I64(4)));
+    }
+
+    /// Bump atomicity (controller ruling): a row bump across an inserted row's `F64` cell and `I64`
+    /// cell, with a FRACTIONAL delta the `I64` cell refuses, must not
+    /// land the `F64` cell first and then refuse — every cell's `bumped`
+    /// result is computed before either write door (`Draft::bump`,
+    /// `set_row_cell`) opens, so the refusal leaves BOTH cells exactly as
+    /// they were.
+    #[gpui::test]
+    fn a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::mixed_snapshot(&[("M1", 1.0, 2)])),
+        );
+
+        h.dispatch(&mut vcx, "insert_below", None);
+        vcx.run_until_parked();
+        h.set_editor(&mut vcx, "1.5");
+        h.dispatch(&mut vcx, "commit", None);
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(1, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "2");
+        h.dispatch(&mut vcx, "commit", None);
+
+        let err = h
+            .command(&mut vcx, "bump 0.5 row")
+            .expect_err("n cannot take a fractional delta");
+        assert_eq!(err, "bump: n takes whole numbers");
+        let cells = h
+            .tile
+            .read_with(&vcx, |t, _| match t.draft().row_state("new-1") {
+                Some(RowEdit::Inserted { cells, .. }) => cells.clone(),
+                other => panic!("new-1 is still an inserted row, got {other:?}"),
+            });
+        assert_eq!(
+            cells.get("amt"),
+            Some(&Value::F64(1.5)),
+            "amt must NOT have been bumped ahead of n's refusal"
+        );
+        assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
     }
 
     /// A session carrying an inserted row, a deleted row and a cell edit
@@ -8595,6 +9656,196 @@ deleted = true
         );
     }
 
+    /// The rebase guard (spec §2, amendment 4), through `:rebase` on a
+    /// real dividend panel: an edit keyed by a same-date ORDINAL
+    /// (`2026-09-18#2`) is refused when the newer document's group grew
+    /// from two rows to three, and the notice names the row and the size
+    /// change; the edit is gone rather than landing on whichever row
+    /// `2026-09-18#2` now happens to be.
+    #[gpui::test]
+    fn rebase_refuses_a_same_day_group_edit_through_the_command_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot(&[
+                (
+                    "2026-09-18",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    1.0,
+                    "declared",
+                ),
+                (
+                    "2026-09-18#2",
+                    "2026-09-18",
+                    "2026-08-01",
+                    "2026-10-01",
+                    2.0,
+                    "declared",
+                ),
+            ])),
+        );
+
+        // Row 1 ("2026-09-18#2"), the "amount" column (index 3).
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9.0");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 1);
+
+        // A newer generation: the same date now carries a THIRD row, so
+        // the group's ordinals have shifted.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot_at(
+                &[
+                    (
+                        "2026-09-18",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        1.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#2",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        2.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#3",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        3.0,
+                        "declared",
+                    ),
+                ],
+                NEWER,
+            )),
+        );
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+
+        let (len, chips) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
+        assert_eq!(len, 0, "the same-day group edit did not survive the rebase");
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.contains("2026-09-18#2") && c.contains("2 → 3")),
+            "{chips:?}"
+        );
+    }
+
+    /// The M-1 path (review finding 1): a draft restored from the session
+    /// carries `groups` captured against its TRUE base, and that base
+    /// generation is never delivered THIS session at all — the very first
+    /// delivery is a newer one, so `base_snapshot` is never retained and
+    /// `painted_snapshot()` falls back to that newer snapshot. A capture
+    /// site that trusted the fallback would silently overwrite the
+    /// restored `groups` with the newer document's own sizes (a group of
+    /// two reading as "was two" instead of the true base's two) and the
+    /// guard would never fire. `capture_groups_if_base` must instead
+    /// leave the session's `groups` untouched, so `:rebase` still refuses
+    /// the shifted edit.
+    #[gpui::test]
+    fn rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let restored: toml::Table = format!(
+            r#"
+underlying = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = [["2026-09-18#2", "amount", 9.0]]
+[draft.groups]
+"2026-09-18" = 2
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec(cx, &DIVIDEND, Some(restored));
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        // The FIRST delivery this tile has ever seen — `BASE` never
+        // arrives, so `base_snapshot` has nothing to retain and this is
+        // exactly the M-1 path. The same-date group has grown from the
+        // session's captured two rows to three.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::dividend_snapshot_at(
+                &[
+                    (
+                        "2026-09-18",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        1.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#2",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        2.0,
+                        "declared",
+                    ),
+                    (
+                        "2026-09-18#3",
+                        "2026-09-18",
+                        "2026-08-01",
+                        "2026-10-01",
+                        3.0,
+                        "declared",
+                    ),
+                ],
+                NEWER,
+            )),
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| matches!(
+                t.draft().state,
+                DraftState::Behind { .. }
+            )),
+            "the base was never delivered: this must be the M-1 path"
+        );
+
+        h.command(&mut vcx, "rebase")
+            .expect("behind: rebase applies");
+
+        let (len, chips) = h
+            .tile
+            .read_with(&vcx, |t, _| (t.draft().len(), t.header_texts()));
+        assert_eq!(
+            len, 0,
+            "the guard must still fire even though the painted snapshot \
+             was never this draft's base"
+        );
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.contains("2026-09-18#2") && c.contains("2 → 3")),
+            "{chips:?}"
+        );
+    }
+
     /// Outside `Behind` — a clean panel and one with edits still against
     /// the live document alike — there is no "newer" to move onto or
     /// fall back to.
@@ -9435,13 +10686,13 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", None); // Upload (greyed: not built yet)
+        h.dispatch(&mut vcx, "menu_down", None); // Upload (greyed: a clean draft)
         h.dispatch(&mut vcx, "menu_pick", None);
         assert_eq!(h.mode(&vcx), "menu");
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("not built yet".into())
+            Some("nothing to upload".into())
         );
     }
 
@@ -11955,5 +13206,1524 @@ edits = [["2026-11-20", "-1", 9.5]]
             5,
             "the unrelated publication cannot invalidate staged rows"
         );
+    }
+
+    // ---- `:upload` (egress spec §6) ------------------------------------
+
+    /// CVI's panel with one egress target, `sophis`, that accepts its
+    /// document (`cvi_params`) — and a second, `bbg`, that does not.
+    fn open_upload(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_spec_with_egress(
+            cx,
+            &CVI,
+            None,
+            vec![
+                ("sophis".into(), vec!["cvi_params".into()]),
+                ("bbg".into(), vec!["dividend_schedule".into()]),
+            ],
+        )
+    }
+
+    impl Harness {
+        /// The next UPLOAD request, skipping the document requests and
+        /// cancels a test's own setup puts on the same channel.
+        fn upload_request(&self) -> Option<geode_data::UploadParams> {
+            loop {
+                match self.rx.try_recv() {
+                    Ok(Request::Upload(params)) => return Some(params),
+                    Ok(_) => continue,
+                    Err(_) => return None,
+                }
+            }
+        }
+        fn deliver_upload(
+            &self,
+            vcx: &mut gpui::VisualTestContext,
+            tag: u64,
+            result: Result<(), String>,
+        ) {
+            let u = geode_shell::module::UploadDelivery {
+                key: QueryKey(TILE),
+                tag,
+                target: "sophis".into(),
+                result,
+            };
+            vcx.update(|window, cx| self.content.deliver(Delivery::Upload(u), window, cx));
+        }
+        /// One committed cell edit on the cursor cell.
+        fn edit_one_cell(&self, vcx: &mut gpui::VisualTestContext) {
+            self.dispatch(vcx, "edit", None);
+            self.set_editor(vcx, "4505.5");
+            self.dispatch(vcx, "commit", None);
+        }
+        fn upload_prompt(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile
+                .read_with(vcx, |t, _| t.upload_prompt().map(str::to_string))
+        }
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_on_a_clean_draft(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("nothing to upload".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+        assert!(h.upload_request().is_none());
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_on_a_behind_draft(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err(
+                "rebase or revert first: an upload must be of a document you have seen whole"
+                    .into()
+            )
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert!(h.upload_request().is_none());
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_with_an_incomplete_row(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.new-1]
+after = "D1"
+cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "text", value = "declared" }} }}
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec_with_egress(
+            cx,
+            &test_fixtures::SCHEDULE,
+            Some(restored),
+            vec![("sophis".into(), vec!["div_schedule".into()])],
+        );
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("1 row incomplete".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert!(h.upload_request().is_none());
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_with_no_eligible_target(cx: &mut gpui::TestAppContext) {
+        // No egress at all: nothing accepts the document.
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("no egress target accepts cvi_params".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+
+        // A named target that does not take this document.
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload bbg"),
+            Err("bbg does not accept cvi_params".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+
+        // Several eligible and no argument: the trader names one.
+        let (h, mut vcx) = open_spec_with_egress(
+            cx,
+            &CVI,
+            None,
+            vec![
+                ("sophis".into(), vec!["cvi_params".into()]),
+                ("bbg".into(), vec!["cvi_params".into()]),
+            ],
+        );
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("upload to which target? sophis, bbg".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert!(
+            h.command(&mut vcx, "upload bbg").is_ok(),
+            "a named one arms"
+        );
+    }
+
+    #[gpui::test]
+    fn upload_arms_a_confirm_and_y_submits_the_assembled_document(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let expected = h.tile.read_with(&vcx, |t, _| {
+            crate::core::upload::assemble(
+                &t.painted_snapshot().unwrap(),
+                t.spec,
+                t.model(),
+                t.draft(),
+            )
+            .unwrap()
+        });
+
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        let prompt = "upload 1 cell, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)";
+        assert_eq!(h.upload_prompt(&vcx).as_deref(), Some(prompt));
+        assert!(
+            h.header_texts(&vcx).contains(&prompt.to_string()),
+            "the header paints the question: {:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(h.mode(&vcx), "insert", "the confirm holds the keyboard");
+        assert!(
+            h.upload_request().is_none(),
+            "nothing sent before the answer"
+        );
+
+        let keys_before = h.host_keys();
+        type_keys(&mut vcx, "y");
+        let sent = h.upload_request().expect("y submits");
+        assert_eq!(sent.key, QueryKey(TILE));
+        assert_eq!(sent.tag, 1);
+        assert_eq!(sent.target, "sophis");
+        assert_eq!(sent.document, "cvi_params");
+        assert_eq!(sent.rows, expected, "assemble's own rows, whole");
+        assert_eq!(h.host_keys(), keys_before, "the y was the confirm's alone");
+        assert_eq!(h.upload_prompt(&vcx), None, "disarmed");
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(
+            !h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+            "Sent waits for the outcome"
+        );
+    }
+
+    #[gpui::test]
+    fn any_other_key_cancels_the_confirm_and_is_consumed(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        let keys_before = h.host_keys();
+        type_keys(&mut vcx, "n");
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled".into())
+        );
+        assert!(h.upload_request().is_none());
+        assert_eq!(h.host_keys(), keys_before, "n was consumed");
+
+        let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        type_keys(&mut vcx, "j");
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled".into())
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.cursor()),
+            cursor,
+            "j did not move"
+        );
+        assert_eq!(h.host_keys(), keys_before, "j was consumed too");
+        assert!(h.upload_request().is_none());
+    }
+
+    #[gpui::test]
+    fn focus_leaving_the_tile_cancels_the_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        // gpui diffs focus paths only for an ACTIVE window (the shell's
+        // scope-bar tests carry the same activation note).
+        vcx.update(|window, _cx| window.activate_window());
+        vcx.run_until_parked();
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()));
+        draw(&mut vcx);
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the prompt holds the keyboard"
+        );
+        // Focus moves elsewhere — as a tile-focus move's root restore, the
+        // palette or a click into the grid would move it.
+        vcx.update(|window, cx| window.blur(cx));
+        draw(&mut vcx);
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled".into())
+        );
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_none(), "a later y sends nothing");
+    }
+
+    #[gpui::test]
+    fn an_ok_outcome_enters_sent_and_the_header_reads_sent_hhmm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().unwrap().tag;
+        h.deliver_upload(&mut vcx, tag, Ok(()));
+        let (at, clock) = h.tile.read_with(&vcx, |t, _| match &t.draft().state {
+            DraftState::Sent { at } => (at.clone(), t.clock),
+            other => panic!("expected Sent, got {other:?}"),
+        });
+        assert!(chrono::DateTime::parse_from_rfc3339(&at).is_ok(), "{at}");
+        let want = format!("sent {}", crate::core::draft::local_hhmm(&at, clock));
+        assert!(
+            h.header_texts(&vcx).contains(&want),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.sent.is_some()),
+            "kept for the echo"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("already sent".into()),
+            "a Sent draft with no edit since"
+        );
+    }
+
+    #[gpui::test]
+    fn an_err_outcome_keeps_editing_and_shows_the_error(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().unwrap().tag;
+        h.deliver_upload(&mut vcx, tag, Err("sophis is down".into()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+        let err = "upload failed: sophis is down".to_string();
+        assert!(
+            h.header_texts(&vcx).contains(&err),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        // Escape clears a notice; the failure stays until the next edit.
+        h.dispatch(&mut vcx, "escape", None);
+        assert!(h.header_texts(&vcx).contains(&err));
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        assert!(
+            !h.header_texts(&vcx).contains(&err),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    #[gpui::test]
+    fn a_stale_upload_tag_is_ignored(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().unwrap().tag;
+        h.deliver_upload(&mut vcx, tag + 1, Ok(()));
+        h.deliver_upload(&mut vcx, tag - 1, Err("old".into()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.sent.is_some()),
+            "still awaiting its own outcome"
+        );
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("upload failed"))
+        );
+    }
+
+    /// An upload is a whole document: one assembled over a historical
+    /// generation would revert every untouched row upstream, so `:upload`
+    /// is refused unless the panel follows live — naming the as-of as the
+    /// as-of chip would, the time alone today, the date and time otherwise.
+    #[gpui::test]
+    fn upload_is_refused_under_a_historical_as_of(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let now = chrono::Utc::now();
+        for at in [
+            now - chrono::Duration::seconds(60),
+            now - chrono::Duration::days(3),
+        ] {
+            h.frame.update(&mut vcx, |f, cx| {
+                f.set_as_of(geode_core::query::AsOf::At(at));
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let when = as_of_text(at, chrono::Utc::now(), clock);
+            assert_eq!(
+                h.command(&mut vcx, "upload"),
+                Err(format!("upload: the panel shows {when}, not live"))
+            );
+            assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+            assert!(h.upload_request().is_none());
+        }
+        let today = as_of_text(now - chrono::Duration::seconds(60), now, clock);
+        assert_eq!(today.len(), "HH:MM".len(), "{today}");
+        let older = as_of_text(now - chrono::Duration::days(3), now, clock);
+        assert_eq!(older.len(), "YYYY-MM-DD HH:MM".len(), "{older}");
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::Live);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live again: armed");
+    }
+
+    /// The frame goes live, but the generation on screen — the one
+    /// `:upload` assembles — was delivered for a historical request and
+    /// stays painted until a live one is applied. Harness: frame `At`,
+    /// the historical document delivered, frame `Live` with its
+    /// requery left unanswered (`answer`: `None`) or answered `Err`
+    /// (`Some`). An edit, then `:upload`, is refused naming the painted
+    /// as-of, and nothing is sent.
+    fn upload_refused_over_a_painted_historical_generation(
+        cx: &mut gpui::TestAppContext,
+        answer: Option<&str>,
+    ) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let tag = h.document_request().expect("the historical request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi_requested_at(BASE, at)));
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::Live);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let live = h.document_request().expect("the live request").tag;
+        if let Some(error) = answer {
+            h.deliver_err(&mut vcx, live, error);
+        }
+        h.edit_one_cell(&mut vcx);
+        let when = as_of_text(at, chrono::Utc::now(), clock);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err(format!("upload: the panel shows {when}, not live"))
+        );
+        assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+        assert!(h.upload_request().is_none(), "nothing sent");
+
+        // Positive control: the live generation applied, `:upload` arms.
+        h.deliver(&mut vcx, live, Arc::new(cvi(BASE)));
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live painted: armed");
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_while_a_historical_generation_is_painted(cx: &mut gpui::TestAppContext) {
+        upload_refused_over_a_painted_historical_generation(cx, None);
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_when_the_live_requery_fails_over_a_historical_generation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        upload_refused_over_a_painted_historical_generation(cx, Some("disk gone"));
+    }
+
+    /// `y` re-checks: a confirm armed live, then the frame moved to a
+    /// historical as-of before the answer, sends nothing and says why.
+    #[gpui::test]
+    fn upload_confirm_rechecks_the_as_of_at_y(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_none(), "nothing sent");
+        let when = as_of_text(at, chrono::Utc::now(), clock);
+        let refusal = format!("upload: the panel shows {when}, not live");
+        assert!(
+            h.header_texts(&vcx).contains(&refusal),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// A second `:upload` while the first awaits its outcome is refused:
+    /// it would race the first's echo.
+    #[gpui::test]
+    fn upload_is_refused_while_an_upload_is_in_flight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().expect("submitted").tag;
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("an upload of SPX.Z to sophis is in flight".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert!(h.upload_request().is_none());
+        h.deliver_upload(&mut vcx, tag, Ok(()));
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Ok(()),
+            "answered: the next upload arms"
+        );
+    }
+
+    /// Upload SPX, switch to NDX with an edit of its own, then deliver
+    /// SPX's outcome: a notice naming SPX and the target, and nothing else
+    /// on NDX. Switching back, SPX's draft has given up its echo check —
+    /// it restores `Editing`, never `Sent`.
+    fn outcome_after_a_key_switch(
+        cx: &mut gpui::TestAppContext,
+        result: Result<(), String>,
+        notice: &str,
+    ) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().expect("submitted").tag;
+
+        h.command(&mut vcx, "key NDX.Z").expect("a valid key");
+        let request = h.document_request().expect("NDX requested").tag;
+        h.deliver(&mut vcx, request, Arc::new(cvi(BASE)));
+        h.edit_one_cell(&mut vcx);
+        let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.sent.is_none()),
+            "switch drops sent"
+        );
+
+        h.deliver_upload(&mut vcx, tag, result);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(notice.to_string())
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().clone()),
+            before,
+            "NDX's draft is untouched"
+        );
+        let texts = h.header_texts(&vcx);
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.starts_with("upload failed") || t.starts_with("sent ")),
+            "{texts:?}"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+
+        h.command(&mut vcx, "key SPX.Z").expect("back to SPX");
+        let request = h.document_request().expect("SPX requested").tag;
+        h.deliver(&mut vcx, request, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing,
+            "a switched-away draft restores unsent"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Ok(()),
+            "and may be sent again"
+        );
+    }
+
+    #[gpui::test]
+    fn an_err_outcome_after_a_key_switch_is_a_notice_naming_the_key(cx: &mut gpui::TestAppContext) {
+        outcome_after_a_key_switch(
+            cx,
+            Err("sophis is down".into()),
+            "upload of SPX.Z to sophis failed: sophis is down",
+        );
+    }
+
+    #[gpui::test]
+    fn an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key(cx: &mut gpui::TestAppContext) {
+        outcome_after_a_key_switch(cx, Ok(()), "upload of SPX.Z to sophis sent");
+    }
+
+    /// The confirm counts every kind of edit it is about to send, an
+    /// attribute included.
+    #[gpui::test]
+    fn the_confirm_counts_attribute_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        h.command(&mut vcx, "upload").unwrap();
+        assert_eq!(
+            h.upload_prompt(&vcx).as_deref(),
+            Some("upload 0 cells, 1 attribute, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)")
+        );
+    }
+
+    #[gpui::test]
+    fn a_refused_submit_says_so_and_sends_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        h.data.shutdown();
+        type_keys(&mut vcx, "y");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload refused: the data service is busy or gone".into())
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+    }
+
+    #[gpui::test]
+    fn the_menus_upload_row_arms_the_same_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", None); // Upload
+        h.dispatch(&mut vcx, "menu_pick", None);
+        draw(&mut vcx);
+        assert_eq!(
+            h.upload_prompt(&vcx).as_deref(),
+            Some("upload 1 cell, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)")
+        );
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_some());
+    }
+
+    #[gpui::test]
+    fn upload_completes_the_panels_eligible_targets(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        let c = vcx.update(|_, cx| h.content.completions("upload ", 7, cx));
+        assert_eq!(c, vec!["sophis".to_string()]);
+    }
+
+    #[gpui::test]
+    fn a_delivery_under_the_question_cancels_the_y(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert_eq!(h.upload_prompt(&vcx), None, "withdrawn on the delivery");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled: a new document arrived".into())
+        );
+        type_keys(&mut vcx, "y");
+        assert!(
+            h.upload_request().is_none(),
+            "the prompt's document is no longer the one on screen"
+        );
+    }
+
+    /// The critical case the whole-draft comparison exists for: under
+    /// `:auto rebase` a same-shape newer generation moves only `base` —
+    /// edits (keyed by index), attrs, rows and state all compare equal —
+    /// so an edits-only check let `y` send rows assembled from the
+    /// superseded base while the header named the newer one.
+    #[gpui::test]
+    fn a_rebase_under_the_question_withdraws_the_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        assert!(h.upload_prompt(&vcx).is_some(), "armed");
+        let prompt_focus = h.tile.read_with(&vcx, |t, _| {
+            t.pending_upload.as_ref().expect("armed").focus.clone()
+        });
+        assert!(vcx.update(|window, _| prompt_focus.is_focused(window)));
+        let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        let after = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(after.base.as_deref(), Some(NEWER), "rebased, not Behind");
+        assert!(!after.is_behind());
+        assert!(
+            same_edits(&before, &after) && before.state == after.state,
+            "the premise: only base moved"
+        );
+        assert_eq!(h.upload_prompt(&vcx), None, "withdrawn at once");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled: a new document arrived".into())
+        );
+        draw(&mut vcx);
+        assert!(
+            !vcx.update(|window, _| prompt_focus.is_focused(window)),
+            "the prompt's focus was blurred, not dropped while focused"
+        );
+        type_keys(&mut vcx, "y");
+        assert!(
+            h.upload_request().is_none(),
+            "y must not send the superseded base's rows"
+        );
+    }
+
+    /// `y`'s own re-check, the second line behind the withdrawal on
+    /// delivery: no production route moves the draft under a standing
+    /// question today (every key and press answers it, every delivery
+    /// withdraws it), so the draft is moved here directly — a `base`-only
+    /// move, the rebase shape an edits-only comparison misses.
+    #[gpui::test]
+    fn y_rechecks_the_whole_draft_base_included(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        h.tile.update(&mut vcx, |t, _| {
+            t.draft.base = Some(NEWER.to_string());
+        });
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_none(), "a moved base sends nothing");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled: the draft changed under the question".into())
+        );
+    }
+
+    #[gpui::test]
+    fn an_ok_after_a_rebase_in_flight_does_not_enter_sent(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let upload_tag = h.upload_request().expect("submitted").tag;
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().base.clone())
+                .as_deref(),
+            Some(NEWER),
+            "rebased while in flight"
+        );
+        h.deliver_upload(&mut vcx, upload_tag, Ok(()));
+        let state = h.tile.read_with(&vcx, |t, _| t.draft().state.clone());
+        assert_eq!(state, DraftState::Editing, "the newer base was never sent");
+    }
+
+    #[gpui::test]
+    fn a_pointer_press_on_the_tile_cancels_the_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        let at = centre_of(&mut vcx, &format!("marketdata-header-{TILE}"));
+        click_at(&mut vcx, at, 1);
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled".into())
+        );
+        assert!(h.upload_request().is_none());
+    }
+
+    // ---- the echo (egress spec §7) -------------------------------------
+
+    impl Harness {
+        /// `:upload`, `y` and an `Ok` outcome over the draft as it stands:
+        /// a `Sent` draft, answering the rows that went out.
+        fn upload_ok(&self, vcx: &mut gpui::VisualTestContext) -> DocumentRows {
+            self.command(vcx, "upload").expect("armed");
+            draw(vcx);
+            type_keys(vcx, "y");
+            let req = self.upload_request().expect("y submits");
+            self.deliver_upload(vcx, req.tag, Ok(()));
+            assert!(
+                self.tile.read_with(vcx, |t, _| t.draft().is_sent()),
+                "the premise: Sent"
+            );
+            req.rows
+        }
+        /// A further generation answering the panel's own latest request —
+        /// what the upstream's publish of the sent document arrives as.
+        fn echo(&self, vcx: &mut gpui::VisualTestContext, snapshot: Snapshot) {
+            let tag = self.tile.read_with(vcx, |t, _| t.tag);
+            self.deliver(vcx, tag, Arc::new(snapshot));
+        }
+        fn sent_at(&self, vcx: &gpui::VisualTestContext) -> String {
+            self.tile.read_with(vcx, |t, _| match &t.draft().state {
+                DraftState::Sent { at } => local_hhmm(at, t.clock),
+                other => panic!("expected Sent, got {other:?}"),
+            })
+        }
+        fn painted_as_of(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+            self.tile
+                .read_with(vcx, |t, _| t.model().source_time.clone())
+        }
+        fn sent_rows(&self, vcx: &gpui::VisualTestContext) -> Option<DocumentRows> {
+            self.tile.read_with(vcx, |t, _| t.sent.clone())
+        }
+    }
+
+    /// `rows` with one CVI `param` moved: the upstream answered something
+    /// other than what was sent, in exactly one row of the long form.
+    fn one_param_moved(rows: &DocumentRows) -> DocumentRows {
+        let mut echo = rows.clone();
+        let (_, column) = echo
+            .values
+            .iter_mut()
+            .find(|(name, _)| name == "param")
+            .expect("CVI carries param");
+        match column {
+            geode_core::document::Column::F64(v) => v[0] += 0.5,
+            other => panic!("param is F64, got {other:?}"),
+        }
+        echo
+    }
+
+    #[gpui::test]
+    fn a_matching_echo_clears_the_draft_and_says_confirmed(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let (text, edited) = h.cell(&vcx, 0, 0);
+        assert!(edited, "the premise: an edit on screen");
+        let sent = h.upload_ok(&mut vcx);
+        let at = h.sent_at(&vcx);
+
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, NEWER));
+
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(draft.is_empty(), "{draft:?}");
+        assert_eq!(draft.state, DraftState::Clean);
+        assert!(h.sent_rows(&vcx).is_none(), "the echo consumed it");
+        assert_eq!(
+            h.painted_as_of(&vcx).as_deref(),
+            Some(NEWER),
+            "the panel follows the echo"
+        );
+        assert_eq!(
+            h.cell(&vcx, 0, 0),
+            (text, false),
+            "the sent value, now the document's own"
+        );
+        let confirmed = format!("sent {at}, confirmed ");
+        let has_confirmed = |h: &Harness, vcx: &gpui::VisualTestContext| {
+            h.header_texts(vcx)
+                .iter()
+                .any(|t| t.starts_with(&confirmed))
+        };
+        assert!(has_confirmed(&h, &vcx), "{:?}", h.header_texts(&vcx));
+
+        // A redelivery of the same generation (any publish anywhere bumps
+        // the frame) does not take the line down; the next edit does.
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, NEWER));
+        assert!(has_confirmed(&h, &vcx), "{:?}", h.header_texts(&vcx));
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        assert!(!has_confirmed(&h, &vcx), "{:?}", h.header_texts(&vcx));
+    }
+
+    #[gpui::test]
+    fn a_differing_echo_keeps_sent_and_counts_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+
+        let echo = one_param_moved(&sent);
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &echo, NEWER));
+
+        let state = h.tile.read_with(&vcx, |t, _| t.draft().state.clone());
+        assert!(matches!(state, DraftState::Sent { .. }), "{state:?}");
+        assert!(
+            h.header_texts(&vcx)
+                .contains(&"echo differs (1 rows)".to_string()),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(
+            h.painted_as_of(&vcx).as_deref(),
+            Some(BASE),
+            "the base stays painted under the edits"
+        );
+        assert!(h.cell(&vcx, 0, 0).1, "the edit is still painted");
+        assert!(h.sent_rows(&vcx).is_some(), "kept for :rebase/:revert");
+
+        // The same generation redelivered changes nothing.
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &echo, NEWER));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_sent()));
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE));
+        assert!(
+            h.header_texts(&vcx)
+                .contains(&"echo differs (1 rows)".to_string()),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// A later generation that DOES match what was sent still confirms:
+    /// the comparison is against `sent` every time a new generation
+    /// arrives, not only the first.
+    #[gpui::test]
+    fn a_matching_echo_after_a_differing_one_still_confirms(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), NEWER),
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_sent()));
+        let later = "2026-09-12T14:09:00Z";
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, later));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(later));
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("echo differs")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// A routine same-generation requery (any publish anywhere bumps the
+    /// frame, and the demo bus redelivers every few seconds) must not be
+    /// read as the echo: `echo_of`'s own guard compares the delivered
+    /// source time with `draft.base`, not with `sent`, before it ever
+    /// looks at `self.sent`. Content that plainly differs from what was
+    /// sent proves the short-circuit rather than a coincidental match —
+    /// mutated away, this delivery would build and compare against
+    /// `sent` and read as a difference within seconds of every upload.
+    #[gpui::test]
+    fn a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+
+        // Same generation as `draft.base`, with content that would read as
+        // differing if it were ever compared.
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), BASE),
+        );
+
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+            "still Sent"
+        );
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("echo differs") || t.starts_with("echo not comparable")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(
+            h.painted_as_of(&vcx).as_deref(),
+            Some(BASE),
+            "still painting the base"
+        );
+        assert!(h.cell(&vcx, 0, 0).1, "the edit is still painted");
+        assert!(h.sent_rows(&vcx).is_some(), "kept for the real echo later");
+    }
+
+    /// Spec §7: a `Sent` draft is not a `Behind` one, and the update
+    /// policy governs `Behind` alone — `replace` must not drop a sent
+    /// draft whose echo differs, nor `rebase` move it.
+    #[gpui::test]
+    fn the_update_policy_does_not_apply_to_a_sent_draft(cx: &mut gpui::TestAppContext) {
+        for policy in ["replace", "rebase"] {
+            let (h, mut vcx) = open_upload(cx);
+            h.with_document(&mut vcx);
+            h.command(&mut vcx, &format!("auto {policy}")).unwrap();
+            h.edit_one_cell(&mut vcx);
+            let sent = h.upload_ok(&mut vcx);
+            h.echo(
+                &mut vcx,
+                test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), NEWER),
+            );
+            let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+            assert!(draft.is_sent(), "{policy}: {:?}", draft.state);
+            assert_eq!(draft.len(), 1, "{policy}: the edit is kept");
+            assert_eq!(draft.base.as_deref(), Some(BASE), "{policy}: not moved");
+            assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE), "{policy}");
+        }
+    }
+
+    /// `:rebase` from `Sent` only has somewhere to go once a differing
+    /// echo is held — this holds one first (`one_param_moved`), which is
+    /// also the premise `rebase_from_sent_without_a_held_echo_is_refused`
+    /// tests the absence of.
+    #[gpui::test]
+    fn rebase_from_sent_yields_editing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), NEWER),
+        );
+
+        assert_eq!(h.command(&mut vcx, "rebase"), Ok(()));
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.base.as_deref(), Some(NEWER));
+        assert_eq!(draft.len(), 1, "the edit moved onto the echo");
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(NEWER));
+        assert!(h.cell(&vcx, 0, 0).1, "painted as an edit again");
+        assert!(h.sent_rows(&vcx).is_none());
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("echo differs")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Ok(()),
+            "an Editing draft may be sent again"
+        );
+    }
+
+    /// Controller ruling: `:rebase` from `Sent` with no differing echo
+    /// held has nothing newer to rebase onto — the upload is still
+    /// awaiting its echo upstream. Refused rather than rebasing onto the
+    /// same generation, which would re-arm `:upload` of edits already in
+    /// flight (a possible duplicate upload). Completions agree: `rebase`
+    /// is not offered here.
+    #[gpui::test]
+    fn rebase_from_sent_without_a_held_echo_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.upload_ok(&mut vcx);
+
+        assert!(
+            !h.tile
+                .read_with(&vcx, |t, cx| t.completions("", 0, cx))
+                .contains(&"rebase".to_string()),
+            "no echo held: rebase is not offered"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "rebase"),
+            Err(
+                "nothing newer to rebase onto — the upload is awaiting its echo; :revert to drop it"
+                    .to_string()
+            )
+        );
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(draft.is_sent(), "{:?}", draft.state);
+        assert_eq!(draft.base.as_deref(), Some(BASE), "unchanged");
+        assert_eq!(draft.len(), 1, "the edit is unchanged");
+    }
+
+    #[gpui::test]
+    fn revert_from_sent_follows_the_echo(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), NEWER),
+        );
+
+        assert_eq!(h.command(&mut vcx, "revert"), Ok(()));
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Clean);
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(NEWER));
+        assert!(h.sent_rows(&vcx).is_none());
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("echo differs")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// Under a differing echo the panel paints the BASE while a newer
+    /// generation is held — `Behind`'s own situation — so an edit there is
+    /// refused the same way: `:rebase` or `:revert` first.
+    #[gpui::test]
+    fn an_edit_under_a_differing_echo_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), NEWER),
+        );
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(h.editor_value(&vcx).is_none(), "no editor opened");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(ECHO_REFUSED.to_string())
+        );
+        assert_eq!(h.command(&mut vcx, "bump 1"), Err(ECHO_REFUSED.to_string()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_sent()));
+    }
+
+    /// An edit made while the upload was in flight keeps the draft
+    /// `Editing` on `Ok` — and the rows kept for an echo go with it: no
+    /// `Sent` draft will ever compare against them.
+    #[gpui::test]
+    fn an_edit_in_flight_drops_the_kept_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().unwrap().tag;
+        assert!(h.sent_rows(&vcx).is_some(), "kept while in flight");
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        h.deliver_upload(&mut vcx, tag, Ok(()));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+        assert!(h.sent_rows(&vcx).is_none());
+    }
+
+    /// A further edit takes a `Sent` draft back to `Editing` (the draft's
+    /// own rule) and the sent rows with it.
+    #[gpui::test]
+    fn an_edit_after_sent_drops_the_kept_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.upload_ok(&mut vcx);
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing
+        );
+        assert!(h.sent_rows(&vcx).is_none());
+    }
+
+    /// The minted id is Geode's, not the wire's: an inserted `new-1` goes
+    /// out under that label (the kind writes no id) and comes back under
+    /// the upstream's own date-derived id — still a match.
+    #[gpui::test]
+    fn a_dividend_echo_matches_despite_reminted_labels(cx: &mut gpui::TestAppContext) {
+        let restored: toml::Table = format!(
+            r#"
+key = ["SPX.Z"]
+[draft]
+base = "{BASE}"
+edits = []
+[draft.rows.new-1]
+after = "D2"
+cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status = {{ type = "text", value = "estimated" }} }}
+"#
+        )
+        .parse()
+        .unwrap();
+        let (h, mut vcx) = open_spec_with_egress(
+            cx,
+            &test_fixtures::SCHEDULE,
+            Some(restored),
+            vec![("sophis".into(), vec!["div_schedule".into()])],
+        );
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, "estimated"),
+            ])),
+        );
+        let sent = h.upload_ok(&mut vcx);
+        let (_, ids) = &sent.axes[0];
+        assert_eq!(
+            ids,
+            &geode_core::document::Column::Utf8(vec!["D1".into(), "D2".into(), "new-1".into()]),
+            "the premise: the painted label went out"
+        );
+
+        h.echo(
+            &mut vcx,
+            test_fixtures::schedule_snapshot_at(
+                &[
+                    ("D1", "2026-12-18", 1.25, "declared"),
+                    ("D2", "2027-03-19", 0.5, "estimated"),
+                    ("2027-06-18#1", "2027-06-18", 0.75, "estimated"),
+                ],
+                NEWER,
+            ),
+        );
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Clean, "{draft:?}");
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(NEWER));
+        assert!(
+            h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.contains(", confirmed ")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
+    /// Amendment 5: `Sent` is not persisted — the session writes the
+    /// edits as for any draft, and they come back `Editing`, sendable.
+    #[gpui::test]
+    fn a_sent_draft_restores_as_editing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.upload_ok(&mut vcx);
+        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+
+        let (h, mut vcx) = open_spec_with_egress(
+            cx,
+            &CVI,
+            Some(written),
+            vec![("sophis".into(), vec!["cvi_params".into()])],
+        );
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.len(), 1);
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "sendable again");
+    }
+
+    /// Defensive: a `Sent` draft with no rows to compare against (no
+    /// production route leaves one — `sent` is dropped only once the draft
+    /// has left `Sent`) must not claim a confirmation it cannot check; it
+    /// goes `Behind`, the ordinary disclosure of a newer generation.
+    #[gpui::test]
+    fn a_sent_draft_with_nothing_to_compare_goes_behind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+        h.tile.update(&mut vcx, |t, _| t.sent = None);
+        h.echo(&mut vcx, test_fixtures::snapshot_of_at(&CVI, &sent, NEWER));
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(draft.is_behind(), "{:?}", draft.state);
+        assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE));
+    }
+
+    // ---- the confirm's end hands the keyboard back (shell-hosted) ------
+
+    /// Forwards every trait method to the real factory and keeps the tile
+    /// it creates — the one way a shell-hosted test can read the panel it
+    /// is typing at (the shell hands back only `&dyn ModuleFactory`).
+    struct Capturing {
+        inner: MarketDataFactory,
+        tile: Rc<RefCell<Option<Entity<MarketDataTile>>>>,
+    }
+
+    impl ModuleFactory for Capturing {
+        fn kind(&self) -> &'static str {
+            self.inner.kind()
+        }
+        fn register_actions(&self, registry: &mut geode_shell::actions::ActionRegistry) {
+            self.inner.register_actions(registry)
+        }
+        fn contexts(&self) -> Vec<&'static str> {
+            self.inner.contexts()
+        }
+        fn default_keymap(&self) -> Option<&'static str> {
+            self.inner.default_keymap()
+        }
+        fn create(
+            &self,
+            tile: TileId,
+            restored: Option<&toml::Table>,
+            frame: Entity<Frame>,
+            diagnostics: Entity<Diagnostics>,
+            window: &mut Window,
+            cx: &mut gpui::App,
+        ) -> geode_shell::module::TileOccupant {
+            let occupant = self
+                .inner
+                .create(tile, restored, frame, diagnostics, window, cx);
+            *self.tile.borrow_mut() = occupant.view.clone().downcast::<MarketDataTile>().ok();
+            occupant
+        }
+    }
+
+    /// The real shell over one CVI panel (tile 1) restored with a
+    /// one-cell draft and one egress target, its keymap built from the
+    /// shell's own builtin layer and the panel's own fragment exactly as
+    /// `main.rs` splices them — so every key below travels the production
+    /// route: gpui's dispatch, the shell root's listener, the keymap, the
+    /// tile's `dispatch`/command line.
+    fn open_in_shell(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::VisualTestContext,
+        Entity<geode_shell::shell::ShellView>,
+        Entity<MarketDataTile>,
+        Receiver<Request>,
+    ) {
+        use geode_core::config::{ConfigSources, LayerDoc};
+        use geode_shell::defaults::{
+            BUILTIN_KEYMAP, default_mod, register_add_actions, register_builtin_actions,
+        };
+        use geode_shell::shell::{ShellServices, ShellView};
+
+        cx.update(gpui_component::init);
+        cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
+        cx.update(crate::init);
+        let (data, rx) = DataHandle::for_tests();
+        let captured = Rc::new(RefCell::new(None));
+        let factory = Capturing {
+            inner: MarketDataFactory::new(data, &CVI, Duration::from_secs(15 * 60)).with_egress(
+                Arc::new(vec![("sophis".to_string(), vec!["cvi_params".to_string()])]),
+            ),
+            tile: captured.clone(),
+        };
+        let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
+        let mut registry = geode_shell::actions::ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        register_add_actions(&mut registry, &[CVI.kind]);
+        let mut roster = geode_shell::module::ModuleRoster::new();
+        roster.add(Box::new(factory));
+        roster.register_actions(&mut registry);
+        let (fragments, fragment_diags) = roster.keymap_fragments();
+        assert!(fragment_diags.is_empty(), "{fragment_diags:?}");
+        let spliced = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = geode_shell::keymap::build_keymap(&spliced, default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = geode_shell::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let mut session = geode_shell::session::to_toml(
+            &geode_shell::tiling::Workspaces::new(),
+            &geode_shell::session::TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = format!(
+            r#"
+focused = 1
+[node]
+kind = "leaf"
+id = 1
+[tiles.1]
+module = "{}"
+[tiles.1.state]
+underlying = ["SPX.Z"]
+[tiles.1.state.drafts."SPX.Z"]
+base = "{BASE}"
+edits = [["2026-11-20", "-1", 9.5]]
+"#,
+            CVI.kind
+        )
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws)) = session.get_mut("workspaces") {
+            ws.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&session).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+
+        let services = ShellServices {
+            config,
+            builtin,
+            registry,
+            keymap,
+            mod_alias: default_mod(),
+            workspaces: restored.workspaces,
+            theme,
+            session_path: None,
+            roster,
+            restored_tiles: restored.tiles,
+            restored_frame: None,
+            restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
+            log: None,
+            action_tail: Arc::new(std::sync::Mutex::new(
+                geode_shell::diagnostics::ActionTail::new(),
+            )),
+            keymap_diagnostics: Vec::new(),
+            keymap_fragments: fragments,
+            keymap_fragment_diagnostics: Vec::new(),
+        };
+        let shell_slot = Rc::new(RefCell::new(None));
+        let window = cx
+            .update(|cx| {
+                let shell_slot = shell_slot.clone();
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    *shell_slot.borrow_mut() = Some(view.clone());
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        // gpui diffs focus paths only for an ACTIVE window.
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx.run_until_parked();
+        let shell = shell_slot.borrow_mut().take().expect("the shell view");
+        let tile = captured
+            .borrow()
+            .clone()
+            .expect("the shell created the panel");
+        (vcx, shell, tile, rx)
+    }
+
+    /// Every way the upload confirm ends — `y`, a cancelling key — blurs
+    /// its prompt, leaving NO element focused. The tile must still answer
+    /// the very next keystroke with no click in between: `j` moves the
+    /// cursor through the shell's own key route.
+    #[gpui::test]
+    fn the_tile_answers_keys_after_the_upload_confirm_ends(cx: &mut gpui::TestAppContext) {
+        for answer in ["y", "n", "escape"] {
+            let (mut vcx, shell, tile, rx) = open_in_shell(cx);
+            // The panel's LATEST question: the shell's first frames can
+            // ask more than once (visibility, then the frame settling).
+            let mut asked = None;
+            while let Ok(request) = rx.try_recv() {
+                if let Request::Document(params) = request {
+                    asked = Some(params.tag);
+                }
+            }
+            let tag = asked.expect("the visible panel asked for its document");
+            assert_eq!(tag, tile.read_with(&vcx, |t, _| t.tag), "{answer}");
+            let outcome = QueryOutcome {
+                // The session's own tile id, not the harness's `TILE`.
+                key: QueryKey(1),
+                tag,
+                snapshot: Ok(Arc::new(cvi(BASE))),
+                submitted: Instant::now(),
+            };
+            vcx.update(|window, cx| {
+                shell.update(cx, |s, cx| s.deliver(Delivery::Query(outcome), window, cx))
+            });
+            draw(&mut vcx);
+            assert_eq!(
+                tile.read_with(&vcx, |t, _| t.draft().len()),
+                1,
+                "{answer}: the premise, a restored one-cell draft"
+            );
+
+            type_keys(&mut vcx, ":");
+            vcx.simulate_input("upload");
+            type_keys(&mut vcx, "enter");
+            assert!(
+                tile.read_with(&vcx, |t, _| t.upload_prompt().is_some()),
+                "{answer}: :upload armed the confirm; notice {:?}, header {:?}",
+                tile.read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+                tile.read_with(&vcx, |t, _| t.header_texts()),
+            );
+
+            type_keys(&mut vcx, answer);
+            assert!(
+                tile.read_with(&vcx, |t, _| t.upload_prompt().is_none()),
+                "{answer}: the confirm ended"
+            );
+            vcx.run_until_parked();
+            draw(&mut vcx);
+
+            let row = |vcx: &gpui::VisualTestContext| {
+                tile.read_with(vcx, |t, _| match t.cursor() {
+                    Cursor::Cell { row, .. } => row,
+                    Cursor::Attr(_) => usize::MAX,
+                })
+            };
+            let before = row(&vcx);
+            type_keys(&mut vcx, "j");
+            assert_eq!(
+                row(&vcx),
+                before + 1,
+                "{answer}: j reached the tile with no click after the confirm"
+            );
+        }
     }
 }

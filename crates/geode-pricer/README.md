@@ -74,6 +74,11 @@ cargo bench -p geode-pricer
 - Both text inputs blur before they drop, and a click in the grid (a chevron
   included) cancels an open editor without committing it. `:` and `/` close
   the menu and any open field first.
+- Every rebuild re-points an open editor (and the cursor column) at its column
+  kind's plan index, or
+  closes it with `MOVED` (blurring through its window at the end of the effect
+  cycle) when the kind left the plan or the line left the grid. Every chrome
+  rebuild re-checks an open menu's rows.
 - The tile arrives at flip barriers itself; it submits no view query.
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet accepted by the store (`dirty`) is saved

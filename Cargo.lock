@@ -2645,6 +2645,7 @@ dependencies = [
  "gpui-pre",
  "proptest",
  "toml 1.1.4+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

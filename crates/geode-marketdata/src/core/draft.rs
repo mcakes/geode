@@ -11,7 +11,7 @@
 //! delivery whose `as_of` differs from `base` is a newer generation and
 //! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
 
-use crate::core::matrix::MatrixModel;
+use crate::core::matrix::{MatrixModel, RowState};
 use crate::core::spec::{Columns, PanelSpec};
 use geode_core::document::Value;
 use geode_core::schema::ColumnType;
@@ -35,8 +35,10 @@ pub enum DraftState {
     /// `Editing` — see [`Draft::on_delivered`].
     Behind { newer: String },
     /// An upload succeeded; the edits are kept and painted as sent until
-    /// the echo clears them (§9.4, Part 4).
-    Sent,
+    /// the echo clears them (§9.4, Part 4). `at` is the upload's own RFC
+    /// 3339 time — the header's `sent HH:MM` (Part 4) names WHEN it went,
+    /// the same shape `Behind`'s `newer` already carries.
+    Sent { at: String },
 }
 
 /// What the header says about the draft at a glance (spec 2026-09-14 §4):
@@ -48,7 +50,7 @@ pub enum DraftBadge {
     Clean,
     Dirty,
     Behind { newer: String },
-    Sent,
+    Sent { at: String },
 }
 
 /// What a panel does when a DIFFERENT generation is delivered while its
@@ -167,6 +169,19 @@ pub struct Draft {
     /// `edits`/`attrs` for the same reason: one base, one state, one
     /// `len()`, one `revert`.
     pub rows: BTreeMap<String, RowEdit>,
+    /// The same-ex-date GROUP each edited label belonged to, and how many
+    /// rows that group held, in the base document (market-data spec §2's
+    /// rebase guard, amendment 4). A minted id like `2026-09-18#2` is an
+    /// ORDINAL among same-date rows, so an edit keyed by it is only safe
+    /// to carry across a rebase while that date's row count is unchanged
+    /// — a different count means the ordinals shifted and `#2` may now
+    /// name a different dividend. Captured by [`Draft::capture_groups`],
+    /// never by [`Draft::set`] (which has no model to read a count from),
+    /// at every point the tile has a model of the draft's own base in
+    /// hand; empty on a draft restored from a session that predates this
+    /// guard, which is exactly "apply no guard" (there is nothing to
+    /// compare a rebase's new count against).
+    pub groups: BTreeMap<String, usize>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
     /// never drift from `edits`: every door that writes one writes both.
@@ -208,7 +223,7 @@ impl Draft {
     }
 
     pub fn is_sent(&self) -> bool {
-        self.state == DraftState::Sent
+        matches!(self.state, DraftState::Sent { .. })
     }
 
     pub fn is_behind(&self) -> bool {
@@ -234,7 +249,7 @@ impl Draft {
         // `Behind` survives an edit: the panel is still painting the base
         // generation, so a further edit is against the same document.
         // `Sent` does not — the draft no longer matches what was sent.
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -263,7 +278,7 @@ impl Draft {
             self.base = Some(base.to_string());
         }
         self.attrs.insert(column.to_string(), value);
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -284,7 +299,7 @@ impl Draft {
                 cells: BTreeMap::new(),
             },
         );
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
     }
@@ -305,7 +320,7 @@ impl Draft {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
         }
-        if matches!(self.state, DraftState::Clean | DraftState::Sent) {
+        if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
         }
         let result = match self.rows.get(label) {
@@ -344,10 +359,18 @@ impl Draft {
     /// `Deleted` one) or a label with no row edit at all — since a cell
     /// edit on a row the draft did not insert belongs in `Draft::set`
     /// against the model's own grid index, not here.
+    ///
+    /// The same `Sent`-clears-on-a-further-edit rule `set` follows: a cell
+    /// written into an inserted row after an upload is unsent work the
+    /// echo has not seen, so the draft must not still read as sent once it
+    /// exists.
     pub fn set_row_cell(&mut self, label: &str, column_label: &str, value: Value) -> bool {
         match self.rows.get_mut(label) {
             Some(RowEdit::Inserted { cells, .. }) => {
                 cells.insert(column_label.to_string(), value);
+                if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
+                    self.state = DraftState::Editing;
+                }
                 true
             }
             _ => false,
@@ -491,13 +514,18 @@ impl Draft {
         self.labels.clear();
         self.attrs.clear();
         self.rows.clear();
+        self.groups.clear();
         self.base = None;
         self.state = DraftState::Clean;
         n
     }
 
     /// Add `delta` to each given cell's current value, answering how many
-    /// cells were written.
+    /// cells were written — or the first typing refusal, with NOTHING
+    /// written (spec 2026-09-23 amendment): `:bump 0.5` across a ladder
+    /// that mixes an `F64` node with an `I64` one must not land the F64
+    /// cells and then stop, since that is a partial bump the trader never
+    /// asked for and cannot see as partial from the header alone.
     ///
     /// The caller passes each cell's *current* value — what the model is
     /// painting, which is the draft's own value where one exists — so that
@@ -509,21 +537,30 @@ impl Draft {
     /// tile) reads each candidate cell's [`CellKind`] through
     /// [`MatrixModel::kind_of`] and passes only the `Number` ones —
     /// exactly the same door `f64_at`-vs-`display_at` reading in
-    /// `matrix::cell_of` decides by. A bumped cell always lands as
-    /// [`Value::F64`]: `delta` is itself an `f64`, and preserving an
-    /// `I64` cell's own type through a bump is not this slice's problem.
+    /// `matrix::cell_of` decides by. Each cell also carries its own
+    /// declared [`ColumnType`], read by the caller off the spec (or the
+    /// model's `value_type`), and [`bumped`] is the one rule for what
+    /// TYPE the result lands as.
     pub fn bump(
         &mut self,
-        cells: impl Iterator<Item = ((usize, usize), (String, String), f64)>,
+        cells: impl Iterator<Item = ((usize, usize), (String, String), f64, ColumnType)>,
         delta: f64,
         base: &str,
-    ) -> usize {
-        let mut n = 0;
-        for (cell, labels, current) in cells {
-            self.set(cell, labels, Value::F64(current + delta), base);
-            n += 1;
+    ) -> Result<usize, String> {
+        // Every cell's result is computed before anything is written —
+        // the collect below is the boundary between "checking" and
+        // "writing" — so a refusal partway through leaves the draft
+        // exactly as it was.
+        let mut writes = Vec::new();
+        for (cell, labels, current, ty) in cells {
+            let value = bumped(current, delta, ty, &labels.1)?;
+            writes.push((cell, labels, value));
         }
-        n
+        let n = writes.len();
+        for (cell, labels, value) in writes {
+            self.set(cell, labels, value, base);
+        }
+        Ok(n)
     }
 
     /// A generation was delivered. Answers whether the state changed, so
@@ -579,6 +616,38 @@ impl Draft {
         }
     }
 
+    /// Snapshot the same-date group sizes a rebase will need to guard
+    /// (spec §2's rebase guard, amendment 4): `base` must be a CLEAN model
+    /// (`Draft::default()`) of the document this draft's edits are
+    /// currently painted against — the tile calls this wherever the
+    /// painted model IS the draft's base, which `capture_groups`' own
+    /// caller decides, never this method.
+    ///
+    /// Restricted to the groups that hold a touched label — a cell edit's
+    /// row (via `labels`) or a `Deleted` mark's row — because an untouched
+    /// group's size is nobody's business here: only a touched label's
+    /// ordinal can land on the wrong row. Recomputing this way, rather
+    /// than merging into whatever `groups` already held, is what keeps a
+    /// second edit added to an already-guarded group from leaving a STALE
+    /// count behind for the first one's group after `rebase` calls this
+    /// again on the newer document (see `rebase`'s own tail).
+    pub fn capture_groups(&mut self, base: &MatrixModel) {
+        let now = group_sizes(base);
+        let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (row_label, _col_label) in self.labels.values() {
+            touched.insert(group_of(row_label).to_string());
+        }
+        for (label, edit) in &self.rows {
+            if matches!(edit, RowEdit::Deleted) {
+                touched.insert(group_of(label).to_string());
+            }
+        }
+        self.groups = now
+            .into_iter()
+            .filter(|(g, _)| touched.contains(g))
+            .collect();
+    }
+
     /// Re-apply the edits onto a newer generation's model, by label.
     ///
     /// Answers how many were kept and the labels of those dropped —
@@ -615,6 +684,15 @@ impl Draft {
             .map(|(ci, column)| (column.as_ref(), ci))
             .collect();
 
+        // Same-date group sizes in the NEWER document, read once — the
+        // rebase guard (spec §2, amendment 4) checks every touched
+        // label's group against this before resolving that label's own
+        // edit or `Deleted` mark, never after: a label whose group
+        // changed size is refused outright, with no fallback to "the row
+        // still resolves by name" (it might resolve, onto the wrong
+        // dividend).
+        let now = group_sizes(model_of_newer);
+
         let mut edits = BTreeMap::new();
         let mut labels = BTreeMap::new();
         let mut dropped = Vec::new();
@@ -626,6 +704,30 @@ impl Draft {
                 dropped.push((format!("row {}", cell.0), format!("column {}", cell.1)));
                 continue;
             };
+            // A same-date group this draft captured a size for, whose
+            // size in the newer document differs — but only while the
+            // group still has SOME row in the newer document: a group
+            // gone to zero means `row_label` cannot resolve either way,
+            // and the ordinary "no target" branch below already reports
+            // that (by column, the more specific of the two, e.g. a lone
+            // node dropped from a term that otherwise survives — see
+            // `rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one`).
+            // A NONZERO size that differs is the real hazard: the
+            // group's ordinals shifted, so `row_label` may now name a
+            // DIFFERENT row than the one this edit was made against.
+            // Checked before the label even looks for a target cell, and
+            // named rather than silently carried onto whatever
+            // `row_label` resolves to.
+            if let Some(&was) = self.groups.get(group_of(row_label)) {
+                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if size_now != 0 && was != size_now {
+                    dropped.push((
+                        row_label.clone(),
+                        format!("row (same-day rows changed: {was} → {size_now})"),
+                    ));
+                    continue;
+                }
+            }
             let target = rows
                 .get(row_label.as_str())
                 .zip(columns.get(col_label.as_str()))
@@ -694,6 +796,23 @@ impl Draft {
                 // dropped the row itself: there is nothing left to
                 // delete, so the edit is dropped and named.
                 RowEdit::Deleted => {
+                    // Same guard as a cell edit's, above, and for the
+                    // same reason and the same zero exception: `label` is
+                    // what the newer document is checked against just
+                    // below, and a NONZERO same-date group size that
+                    // moved means this label may no longer name the row
+                    // the trader marked deleted; a group gone to zero
+                    // leaves that check below to report it plainly.
+                    if let Some(&was) = self.groups.get(group_of(&label)) {
+                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if size_now != 0 && was != size_now {
+                            dropped.push((
+                                label,
+                                format!("row (same-day rows changed: {was} → {size_now})"),
+                            ));
+                            continue;
+                        }
+                    }
                     if rows.contains_key(label.as_str()) {
                         rows_out.insert(label, RowEdit::Deleted);
                     } else {
@@ -726,6 +845,12 @@ impl Draft {
         }
         self.rows = rows_out;
 
+        // The newer document is the new base: its own group sizes,
+        // restricted to whatever survived above, are what the NEXT
+        // rebase must compare against — not the sizes this one started
+        // with, which describe a document no longer on screen.
+        self.capture_groups(model_of_newer);
+
         self.base = model_of_newer.source_time.clone();
         self.state = if self.is_empty() {
             DraftState::Clean
@@ -746,7 +871,7 @@ impl Draft {
             DraftState::Behind { newer } => DraftBadge::Behind {
                 newer: newer.clone(),
             },
-            DraftState::Sent => DraftBadge::Sent,
+            DraftState::Sent { at } => DraftBadge::Sent { at: at.clone() },
         }
     }
 
@@ -834,6 +959,13 @@ impl Draft {
                 rows.insert(label.clone(), toml::Value::Table(row));
             }
             table.insert("rows".into(), toml::Value::Table(rows));
+        }
+        if !self.groups.is_empty() {
+            let mut groups = toml::Table::new();
+            for (group, size) in &self.groups {
+                groups.insert(group.clone(), toml::Value::Integer(*size as i64));
+            }
+            table.insert("groups".into(), toml::Value::Table(groups));
         }
         table
     }
@@ -929,6 +1061,19 @@ impl Draft {
                 row_edits.insert(label.clone(), RowEdit::Inserted { after, cells });
             }
         }
+        // Absent (a session written before this guard existed, or one
+        // with no groups worth recording) reads back empty, which is
+        // exactly the "apply no guard" behaviour amendment 4 asks for —
+        // no special-casing needed here beyond the ordinary absent-table
+        // default every other optional section already follows.
+        let mut groups = BTreeMap::new();
+        if let Some(toml::Value::Table(groups_table)) = t.get("groups") {
+            for (group, size) in groups_table {
+                if let Some(size) = size.as_integer() {
+                    groups.insert(group.clone(), size as usize);
+                }
+            }
+        }
         let state = if edits.is_empty() && attrs.is_empty() && row_edits.is_empty() {
             DraftState::Clean
         } else {
@@ -939,6 +1084,7 @@ impl Draft {
             edits,
             attrs,
             rows: row_edits,
+            groups,
             state,
             labels,
         }
@@ -1004,6 +1150,51 @@ pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> Stri
         Ok(t) => clock.hm(t.to_utc()),
         Err(_) => rfc3339.to_string(),
     }
+}
+
+/// `:bump`'s one typing rule: the result lands the column's declared type.
+/// An `I64` column takes whole-number deltas only; anything else is refused
+/// rather than rounded, since a rounded bump is a value the trader did not
+/// ask for. `column` is the label the caller's cell came from, named in the
+/// refusal because a ROW bump's own notice would otherwise say nothing
+/// about which node in the ladder objected.
+pub fn bumped(current: f64, delta: f64, ty: ColumnType, column: &str) -> Result<Value, String> {
+    match ty {
+        ColumnType::F64 => Ok(Value::F64(current + delta)),
+        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),
+        ColumnType::I64 => Err(format!("bump: {column} takes whole numbers")),
+        other => Err(format!("bump: {column} is not numeric ({other:?})")),
+    }
+}
+
+/// The same-ex-date group a minted row label belongs to (spec §2's rebase
+/// guard): the label up to its first `#`, or the whole label when it
+/// carries no ordinal at all — a group of one, the common case. `#` never
+/// appears in a date itself, so this is unambiguous for every id
+/// `mint_ids` produces (`<date>`, `<date>#2`, `<date>#3`, …).
+pub fn group_of(label: &str) -> &str {
+    match label.split_once('#') {
+        Some((group, _)) => group,
+        None => label,
+    }
+}
+
+/// How many rows each same-date group holds in `model`, counting a row
+/// exactly once whether the document carries it as-is
+/// ([`RowState::Document`]) or a draft has marked it deleted
+/// ([`RowState::Deleted`], still laid out until a rebase or an upload
+/// drops it) — both are rows upstream's own generation still accounts
+/// for. An [`RowState::Inserted`] row has no upstream ordinal to guard
+/// and is never counted; the guard's caller passes a CLEAN model
+/// (`Draft::default()`) precisely so none exists here regardless.
+pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
+    let mut sizes = BTreeMap::new();
+    for row in &model.rows {
+        if matches!(row.state, RowState::Document | RowState::Deleted) {
+            *sizes.entry(group_of(&row.label).to_string()).or_insert(0) += 1;
+        }
+    }
+    sizes
 }
 
 /// Parse a typed NUMERIC cell to the number a document holds.
@@ -1149,6 +1340,7 @@ mod tests {
             source_time: Some(source_time.to_string()),
             header: Vec::new(),
             slice_columns: 0,
+            column_values: Vec::new(),
             // `rebase` never reads a column's `CellKind` — only its label
             // — so an empty vec here is honest, not a shortcut.
             column_kinds: Vec::new(),
@@ -1259,6 +1451,25 @@ mod tests {
         );
     }
 
+    /// A `Sent` draft is compared against its echo by the tile (egress
+    /// spec §7), never moved to `Behind` here: a newer generation leaves it
+    /// `Sent`, so the update policy — which acts on `Behind` alone — never
+    /// sees it. `rebase` from `Sent` yields `Editing` like any other.
+    #[test]
+    fn a_sent_draft_stays_sent_on_delivery_and_rebases_to_editing() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.state = DraftState::Sent {
+            at: "2026-09-24T09:00:00Z".into(),
+        };
+        assert!(!draft.on_delivered(NEWER));
+        assert!(draft.is_sent());
+        let (kept, dropped) = draft.rebase(&model(&["T1"], &["-20"], NEWER));
+        assert_eq!((kept, dropped.len()), (1, 0));
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.base.as_deref(), Some(NEWER));
+    }
+
     #[test]
     fn on_delivered_does_nothing_to_a_clean_draft() {
         let mut draft = Draft::default();
@@ -1308,6 +1519,104 @@ mod tests {
     }
 
     #[test]
+    fn rebase_refuses_edits_in_a_same_day_group_that_changed_size() {
+        let base =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-12-18"]);
+        let newer = crate::core::test_fixtures::flat_model(&[
+            "2026-09-18",
+            "2026-09-18#2",
+            "2026-09-18#3",
+            "2026-12-18",
+        ]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        draft.set(
+            (2, 3),
+            ("2026-12-18".into(), "amount".into()),
+            Value::F64(2.0),
+            "t0",
+        );
+        draft.capture_groups(&base);
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(
+            dropped
+                .iter()
+                .any(|(l, why)| l == "2026-09-18#2" && why.contains("2 → 3")),
+            "{dropped:?}"
+        );
+        assert_eq!(draft.edits.len(), 1, "the 2026-12-18 edit survives");
+    }
+
+    /// The `Deleted` half of the same guard (draft.rs's `RowEdit::Deleted`
+    /// arm, review finding 2): a row marked deleted inside a captured
+    /// same-day group is refused the same way a cell edit in that group
+    /// is — the mark is dropped with the same-day reason rather than
+    /// carried onto whichever row the shifted ordinal now names, and the
+    /// row simply disappears from `rows` (nothing left to mark deleted
+    /// once its own identity is gone).
+    #[test]
+    fn rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size() {
+        let base =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-12-18"]);
+        let newer = crate::core::test_fixtures::flat_model(&[
+            "2026-09-18",
+            "2026-09-18#2",
+            "2026-09-18#3",
+            "2026-12-18",
+        ]);
+        let mut draft = Draft::default();
+        draft.delete_row("2026-09-18#2", "t0");
+        draft.capture_groups(&base);
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(
+            dropped
+                .iter()
+                .any(|(l, why)| l == "2026-09-18#2" && why.contains("2 → 3")),
+            "{dropped:?}"
+        );
+        assert!(
+            draft.rows.is_empty(),
+            "the deleted mark did not survive the rebase: {:?}",
+            draft.rows
+        );
+    }
+
+    #[test]
+    fn rebase_without_captured_groups_applies_no_guard() {
+        let newer =
+            crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2", "2026-09-18#3"]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        let (_, dropped) = draft.rebase(&newer);
+        assert!(dropped.is_empty(), "{dropped:?}");
+    }
+
+    #[test]
+    fn captured_groups_round_trip_through_the_session() {
+        let base = crate::core::test_fixtures::flat_model(&["2026-09-18", "2026-09-18#2"]);
+        let mut draft = Draft::default();
+        draft.set(
+            (1, 3),
+            ("2026-09-18#2".into(), "amount".into()),
+            Value::F64(1.0),
+            "t0",
+        );
+        draft.capture_groups(&base);
+        let back = Draft::from_toml(&draft.to_toml());
+        assert_eq!(back.groups, draft.groups);
+    }
+
+    #[test]
     fn revert_clears_the_edits_and_counts_them() {
         let mut draft = Draft::default();
         draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
@@ -1335,18 +1644,66 @@ mod tests {
     fn bump_adds_the_delta_to_each_cells_current_value() {
         let mut draft = Draft::default();
         let cells = vec![
-            ((0, 0), pair("T1", "-20"), 1.0),
-            ((0, 1), pair("T1", "-1"), 2.5),
+            ((0, 0), pair("T1", "-20"), 1.0, ColumnType::F64),
+            ((0, 1), pair("T1", "-1"), 2.5, ColumnType::F64),
         ];
-        assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), 2);
+        assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), Ok(2));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
         assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
-        let again = vec![((0, 0), pair("T1", "-20"), 1.5)];
-        assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), 1);
+        let again = vec![((0, 0), pair("T1", "-20"), 1.5, ColumnType::F64)];
+        assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), Ok(1));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
+    }
+
+    #[test]
+    fn bump_lands_the_declared_type() {
+        let mut draft = Draft::default();
+        let n = draft
+            .bump(
+                [
+                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
+                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                ]
+                .into_iter(),
+                2.0,
+                "t0",
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(draft.edits[&(0, 0)], Value::F64(3.5));
+        assert_eq!(draft.edits[&(0, 1)], Value::I64(5));
+    }
+
+    #[test]
+    fn bump_refuses_a_fractional_delta_on_an_integer_column_before_writing() {
+        let mut draft = Draft::default();
+        let err = draft
+            .bump(
+                [
+                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
+                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                ]
+                .into_iter(),
+                0.5,
+                "t0",
+            )
+            .unwrap_err();
+        assert!(err.contains("whole numbers") && err.contains("y"), "{err}");
+        assert!(draft.is_empty(), "no cell written on a refusal");
+    }
+
+    #[test]
+    fn set_row_cell_moves_a_sent_draft_back_to_editing() {
+        let mut draft = Draft::default();
+        draft.insert_row("new-1".into(), None, "t0");
+        draft.state = DraftState::Sent {
+            at: "2026-09-24T09:00:00Z".into(),
+        };
+        assert!(draft.set_row_cell("new-1", "amount", Value::F64(1.0)));
+        assert_eq!(draft.state, DraftState::Editing);
     }
 
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
@@ -1385,8 +1742,15 @@ mod tests {
         draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), BASE);
         assert_eq!(draft.count_phrase(), "3 cells");
 
-        draft.state = DraftState::Sent;
-        assert_eq!(draft.badge(), DraftBadge::Sent);
+        draft.state = DraftState::Sent {
+            at: BASE.to_string(),
+        };
+        assert_eq!(
+            draft.badge(),
+            DraftBadge::Sent {
+                at: BASE.to_string()
+            }
+        );
 
         draft.state = DraftState::Behind {
             newer: NEWER.to_string(),

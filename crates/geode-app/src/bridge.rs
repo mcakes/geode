@@ -7,6 +7,7 @@ use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
 use geode_core::config::{Config, Diagnostic, Severity, load_views};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::egress_config;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{SourceShape, parse_duration};
@@ -23,7 +24,7 @@ use geode_pricer::content::{PricerFactory, PricerSettings};
 use geode_pricer::core::{PRICER_VIEWS_DOC, Views};
 use geode_pricer::store::MemorySheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
-use geode_shell::module::Delivery;
+use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, Entity, WindowHandle};
@@ -51,6 +52,9 @@ pub struct DataSetup {
     /// The pricer's views and settings; `stale_after` is filled by `start`.
     pub pricer_views: Views,
     pub pricer_settings: PricerSettings,
+    /// What the pricer read out of this config (`pricer_config_key`), so
+    /// the reload observer can tell a reload that changed none of it.
+    pub pricer_key: PricerConfigKey,
 }
 
 /// Build setup when both datasets and views documents are present. Empty
@@ -81,6 +85,20 @@ pub fn data_setup(
         .doc("sources")
         .map(|doc| SourceSpec::from_doc(doc, &schema))
         .unwrap_or_default();
+    diagnostics.extend(d);
+    // `egress.toml` (egress spec §4, §10 amendments 1/2): typed, then
+    // resolved against `adapters` — the same registry this function's
+    // caller ultimately hands to `DataServiceConfig.adapters` below, read
+    // here (by reference) before that move. An unknown adapter or one
+    // with no egress side drops the target with a diagnostic; the
+    // survivors are what `DataServiceConfig.egress` carries and what
+    // `bridge::start` narrows per document for the market-data factories.
+    let (egress_specs, d) = config
+        .doc("egress")
+        .map(|doc| egress_config::from_doc(doc, &schema))
+        .unwrap_or_default();
+    diagnostics.extend(d);
+    let (egress, d) = geode_data::egress::resolve(egress_specs, &adapters);
     diagnostics.extend(d);
     let (colours, colour_diags) = config
         .doc("colours")
@@ -144,6 +162,7 @@ pub fn data_setup(
                 documents
             },
             pricer,
+            egress,
         },
         views,
         dimensions,
@@ -152,6 +171,7 @@ pub fn data_setup(
         local_datasets,
         pricer_views,
         pricer_settings,
+        pricer_key: pricer_config_key(config),
     })
 }
 
@@ -230,6 +250,27 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
     }
 }
 
+/// Exactly what the pricer reads out of a config: the merged
+/// `pricer_views` doc, the raw `[pricing] refresh` value and the resolved
+/// stale threshold. Two equal keys resolve to the same views and settings,
+/// so the reload observer skips a reload whose key is unchanged — a theme
+/// or keymap edit must not restart every tile's refresh timer or repeat a
+/// bad value's warning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricerConfigKey {
+    views: Option<toml::Table>,
+    refresh: Option<toml::Value>,
+    stale_after: Duration,
+}
+
+pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
+    PricerConfigKey {
+        views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
+        refresh: config.get("app", "pricing.refresh").cloned(),
+        stale_after: stale_after_from_config(config),
+    }
+}
+
 /// Workers offer state without waiting for the UI. Bursts coalesce in the
 /// mailbox; only a closed receiver refuses delivery. Count each refusal and
 /// log closure once, while allowing producers to continue their work.
@@ -273,6 +314,11 @@ pub struct Bridge {
     sources: Vec<(SourceSpec, SourceShape)>,
     /// Local dataset names used to exclude autosave from frame publication updates.
     pub local_datasets: Rc<HashSet<String>>,
+    /// The config key the pricer factory was built from; seeds the reload
+    /// observer, so a reload that changes nothing the pricer reads is
+    /// skipped from the first one. `None` when the factory's config is
+    /// unknown: the first reload then always applies.
+    pub pricer_key: Option<PricerConfigKey>,
 }
 
 /// Pair sources with their pipeline using the service's startup schema.
@@ -302,6 +348,24 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
+    // Target name → accepted document names, in `egress.toml`
+    // order — captured before `DataService::spawn` moves `setup.config`,
+    // and shared unmodified between the CVI and dividend factories built
+    // below over the SAME resolved list (`MarketDataFactory::create`
+    // narrows it per document with its own `targets_for`).
+    let egress_targets: Arc<Vec<(String, Vec<String>)>> = Arc::new(
+        setup
+            .config
+            .egress
+            .iter()
+            .map(|spec| {
+                (
+                    spec.name.clone(),
+                    spec.documents.iter().map(|(doc, _)| doc.clone()).collect(),
+                )
+            })
+            .collect(),
+    );
     let handle = DataService::spawn(setup.config, sink);
     // Both factories receive the same startup colours and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
@@ -318,6 +382,7 @@ pub fn start(
         stale_after,
     ));
     let mut pricer_settings = setup.pricer_settings.clone();
+    let pricer_key = setup.pricer_key.clone();
     pricer_settings.stale_after = stale_after;
     // Part 3's store is in-memory (line-pricer Part 3, planning decision
     // 8): a sheet survives closing and reopening a tile, not a restart.
@@ -328,19 +393,27 @@ pub fn start(
         pricer_settings,
     ));
     Bridge {
-        marketdata: Rc::new(MarketDataFactory::new(
-            handle.clone(),
-            &CVI,
-            // One threshold, one config key: a document's own freshness
-            // means exactly what a dataset's does to the blotter, and two
-            // keys for one idea would be two things to keep in step.
-            stale_after,
-        )),
+        marketdata: Rc::new(
+            MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                // One threshold, one config key: a document's own
+                // freshness means exactly what a dataset's does to the
+                // blotter, and two keys for one idea would be two things
+                // to keep in step.
+                stale_after,
+            )
+            .with_egress(egress_targets.clone()),
+        ),
         // The second document kind, over the same shared `marketdata`
         // context: `.without_keymap()` is what keeps `keymap_fragments`
-        // from splicing a second, identical `<module:{kind}>` layer.
+        // from splicing a second, identical `<module:{kind}>` layer. The
+        // same `egress_targets` `Arc`, narrowed to its own document by
+        // `create`.
         dividend: Rc::new(
-            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after).without_keymap(),
+            MarketDataFactory::new(handle.clone(), &DIVIDEND, stale_after)
+                .without_keymap()
+                .with_egress(egress_targets),
         ),
         timeseries,
         pricer,
@@ -350,6 +423,7 @@ pub fn start(
         dropped,
         sources,
         local_datasets,
+        pricer_key: Some(pricer_key),
     }
 }
 
@@ -571,17 +645,21 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     })
     .detach();
 
-    // The pricer refreshes on EVERY applied reload (planning decision 20):
+    // The pricer watches EVERY applied reload (planning decision 20):
     // `ShellEvent::ConfigReloaded` fires only for five named docs, and a
     // `pricer_views` or `[pricing] refresh` edit is neither. The frame's
     // `config` counter is the ungated signal (`main.rs`'s diagnostics
-    // factory observes it the same way).
+    // factory observes it the same way); `pricer_config_key` then gates
+    // it down to the reloads that change what the pricer reads.
     {
         let pricer = bridge.pricer.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
         let last = Rc::new(Cell::new(frame.read(cx).versions().config));
+        // Seeded with the key the factory was built from; `None` (a factory
+        // built from an unknown config) lets the first reload through.
+        let last_key = Rc::new(std::cell::RefCell::new(bridge.pricer_key.clone()));
         cx.observe(&frame, move |frame, cx| {
             let now = frame.read(cx).versions().config;
             if now == last.get() {
@@ -592,6 +670,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // `cx` mutably.
             let (views, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
+                let key = pricer_config_key(config);
+                if last_key.borrow().as_ref() == Some(&key) {
+                    return;
+                }
+                *last_key.borrow_mut() = Some(key);
                 let (views, diags) = pricer_views_from_config(config);
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 let mut diags = diags;
@@ -643,6 +726,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     });
                 }
                 match event {
+                    // Routed by the submitting tile's key, exactly as a
+                    // `Query`/`Series` outcome is: the tile that uploaded
+                    // is the one whose draft enters `Sent` or shows the
+                    // failure. `geode_data::egress` already logs the
+                    // outcome under `geode::ingest`.
+                    DataEvent::Upload(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::Upload(UploadDelivery {
+                                    key: outcome.key,
+                                    tag: outcome.tag,
+                                    target: outcome.target,
+                                    result: outcome.result,
+                                }),
+                                window,
+                                cx,
+                            )
+                        });
+                    }
                     DataEvent::Query(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Query(outcome), window, cx)
@@ -1165,6 +1267,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         }
     }
 
@@ -1194,6 +1297,51 @@ role = "key"
         assert_eq!(refresh, Some(DEFAULT_PRICING_REFRESH));
         let diag = diag.expect("a bad value warns");
         assert_eq!(diag.path.as_deref(), Some("app.pricing.refresh"));
+    }
+
+    /// The reload gate's key moves with exactly the three things the
+    /// pricer reads and with nothing else.
+    #[test]
+    fn the_pricer_config_key_changes_only_with_what_the_pricer_reads() {
+        let config = |app: &str, views: &str| {
+            Config::load(&ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("app", app).unwrap(),
+                    LayerDoc::builtin("pricer_views", views).unwrap(),
+                ],
+                desk: None,
+                user: None,
+            })
+        };
+        let app = "[theme]\nname = \"a\"\n[log]\nlevel = \"info\"\n\
+                   [pricing]\nrefresh = \"10s\"\n[blotter]\nstale_after = \"5m\"\n";
+        let views = "[slim]\ncolumns = [\"qty\", \"price\"]\n";
+        let base = pricer_config_key(&config(app, views));
+        assert_eq!(
+            pricer_config_key(&config(&app.replace("\"a\"", "\"b\""), views)),
+            base,
+            "a [theme] edit"
+        );
+        assert_eq!(
+            pricer_config_key(&config(&app.replace("\"info\"", "\"debug\""), views)),
+            base,
+            "a [log] edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""))),
+            base,
+            "a pricer_views edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(&app.replace("\"10s\"", "\"off\""), views)),
+            base,
+            "a [pricing] refresh edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(&app.replace("\"5m\"", "\"6m\""), views)),
+            base,
+            "a stale_after edit"
+        );
     }
 
     #[test]
@@ -1250,6 +1398,110 @@ role = "key"
         });
         vcx.run_until_parked();
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// A reload that changes nothing the pricer reads (a theme, keymap or
+    /// log-level edit) leaves the factory alone: no view re-resolution, no
+    /// refresh-timer restart, no repeated warning. The factory's views are
+    /// swapped for a sentinel behind the observer's back after the first
+    /// reload, so only a second `reload` could put `slim` back.
+    #[gpui::test]
+    fn a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let bump = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|_, cx| {
+                let frame = shell.read(cx).frame().clone();
+                frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+            });
+            vcx.run_until_parked();
+        };
+        bump(&mut vcx);
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["slim"],
+            "fixture: the first reload hands over the configured views"
+        );
+        vcx.update(|_, cx| {
+            bridge
+                .pricer
+                .reload(Views::builtin(), None, Duration::from_secs(1), cx)
+        });
+        bump(&mut vcx);
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["vanilla", "barrier"],
+            "an unchanged pricer config reloads nothing"
+        );
+        assert_eq!(bridge.pricer.settings().refresh, None);
+    }
+
+    /// Seeded with the startup key (what `start` carries), the observer
+    /// skips even the FIRST reload when nothing the pricer reads changed —
+    /// the first theme edit of a session must not restart every tile's
+    /// timer either. The factory here holds the bundled views while the
+    /// config says `slim`, so any reload at all would be visible.
+    #[gpui::test]
+    fn a_seeded_key_skips_the_first_reload_that_changes_no_pricer_setting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut bridge = test_bridge(handle);
+        bridge.pricer_key = Some(vcx.update(|_, cx| pricer_config_key(shell.read(cx).config())));
+        cx.update(|cx| attach(&bridge, window, cx));
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["vanilla", "barrier"],
+            "the first unchanged reload reached nothing"
+        );
     }
 
     /// A shell holding one restored pricer tile, its roster, actions and
@@ -1495,6 +1747,7 @@ role = "key"
             dropped: dropped.clone(),
             sources: Vec::new(),
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -1607,6 +1860,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
         tx.try_send(DataEvent::Price(geode_core::pricing::PriceOutcome {
@@ -1666,6 +1920,7 @@ role = "key"
             dropped: dropped.clone(),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -1791,6 +2046,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1855,6 +2111,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -1874,6 +2131,77 @@ role = "key"
                 r,
                 geode_shell::module::recording::Recorded::Delivered(tile, tag)
                     if tile.0 == 1 && *tag == 11
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// The drain loop routes a `DataEvent::Upload` into
+    /// `Delivery::Upload`, addressed to the submitting tile's key exactly
+    /// as a `Query`/`Series` outcome is — an arm that only logged would
+    /// leave the panel waiting for an outcome forever.
+    #[gpui::test]
+    fn an_upload_outcome_is_routed_to_its_tile(cx: &mut gpui::TestAppContext) {
+        let (services, log) = test_shell_services_with_a_recording_tile();
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = crate::events::channel();
+        let bridge = Bridge {
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            pricer: test_pricer(&handle),
+            pricer_key: None,
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        // The restored workspace's one tile is id 1, so that is the key
+        // this outcome is addressed to.
+        tx.try_send(DataEvent::Upload(geode_data::egress::UploadOutcome {
+            key: geode_core::query::QueryKey(1),
+            tag: 7,
+            target: "sophis".into(),
+            result: Ok(()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                geode_shell::module::recording::Recorded::Delivered(tile, tag)
+                    if tile.0 == 1 && *tag == 7
             )),
             "{:?}",
             log.borrow()
@@ -1918,6 +2246,7 @@ role = "key"
             dropped: dropped.clone(),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -1993,6 +2322,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -2075,6 +2405,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -2145,6 +2476,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -2206,6 +2538,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -2305,6 +2638,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -2371,6 +2705,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -2520,6 +2855,7 @@ role = "key"
                 SourceShape::Directory,
             )],
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 
@@ -2810,6 +3146,11 @@ role = "key"
         assert_eq!(bridge.factory.kind(), "blotter");
         assert_eq!(bridge.marketdata.kind(), "cvi");
         assert_eq!(bridge.dividend.kind(), "dividend");
+        assert_eq!(
+            bridge.pricer_key,
+            Some(pricer_config_key(&config)),
+            "the reload observer is seeded with the key the factory was built from"
+        );
     }
 
     #[test]
@@ -2866,6 +3207,7 @@ role = "key"
             dropped: Arc::new(AtomicU64::new(0)),
             sources: Vec::new(),
             local_datasets: Default::default(),
+            pricer_key: None,
         };
         cx.update(|cx| attach(&bridge, window, cx));
 

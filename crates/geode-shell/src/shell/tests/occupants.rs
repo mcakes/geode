@@ -71,6 +71,8 @@ mod watching {
                 // This tile asks no series query and holds no
                 // `(identity, source)` pair.
                 Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+                // This tile never uploads — nothing addressed here.
+                Delivery::Upload(_) => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {
@@ -1501,6 +1503,60 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
                     tag: 42,
                     snapshot: Err("test outcome".into()),
                     submitted: Instant::now(),
+                }),
+                window,
+                cx,
+            );
+        });
+    });
+
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Delivered(t, 42) if *t == first)
+        ),
+        "the addressed tile must be delivered to: {:?}",
+        log.borrow()
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Delivered(t, _) if *t == second
+        )),
+        "the other tile must not be delivered to: {:?}",
+        log.borrow()
+    );
+}
+
+/// The keyed variant egress adds: a `Delivery::
+/// Upload` reaches the tile that submitted it and no other, exactly as
+/// `Query`/`Price`/`Series` already do — `deliver`'s keyed arm must name
+/// it beside them, not drop it into the broadcast one.
+#[gpui::test]
+fn an_upload_delivery_reaches_its_tile_and_no_other(cx: &mut gpui::TestAppContext) {
+    use crate::module::{Delivery, UploadDelivery};
+    use geode_core::query::QueryKey;
+
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let second = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(first, second, "sanity: two distinct tiles are live");
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.deliver(
+                Delivery::Upload(UploadDelivery {
+                    key: QueryKey(first.0),
+                    tag: 42,
+                    target: "sophis".into(),
+                    result: Ok(()),
                 }),
                 window,
                 cx,

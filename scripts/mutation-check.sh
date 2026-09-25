@@ -1389,6 +1389,74 @@ run_mutation "sources: a pattern without a batch capture is dropped" \
   geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
+# ---- egress config (market-data egress spec §4)
+
+run_mutation "egress config: an unknown document is dropped" \
+  crates/geode-core/src/egress_config.rs \
+  '        if !schema.dataset(doc_name).is_some_and(|d| d.is_document()) {' \
+  '        if !schema.dataset(doc_name).is_some() {' \
+  geode-core \
+  a_documents_key_naming_no_document_dataset_is_an_error_and_the_target_is_dropped
+
+run_mutation "egress config: {key} is substituted" \
+  crates/geode-core/src/egress_config.rs \
+  '            .map(|(_, template)| template.replace("{key}", &key.join("/")))' \
+  '            .map(|(_, template)| template.clone())' \
+  geode-core \
+  address_substitutes_key_when_present_and_is_unchanged_without_it
+
+# Every real egress.toml carries `config_version = 1`; without the skip it
+# warns "not a table" on every desk and user file.
+run_mutation "egress config: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/egress_config.rs \
+  '        if name == "config_version" {
+            continue;
+        }
+        let Some(table) = value.as_table() else {' \
+  '        if false {
+            continue;
+        }
+        let Some(table) = value.as_table() else {' \
+  geode-core \
+  an_egress_config_version_header_is_not_a_spurious_diagnostic
+
+# ---- egress workers (market-data egress spec §5)
+
+run_mutation "egress: a write error answers Err" \
+  crates/geode-data/src/egress.rs \
+  '            Err(e) => return refuse(e.to_string()),' \
+  '            Err(_) => Vec::new(),' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+run_mutation "egress: an adapter error answers Err naming the target" \
+  crates/geode-data/src/egress.rs \
+  '            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  '            .map_err(|e| e.to_string());' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+run_mutation "egress: queue full answers Err" \
+  crates/geode-data/src/egress.rs \
+  '            Err(TrySendError::Full(_)) => Some("queue full"),' \
+  '            Err(TrySendError::Full(_)) => None,' \
+  geode-data \
+  a_full_queue_answers_err_at_once_and_the_queued_uploads_still_run
+
+run_mutation "egress: resolve drops an adapter without egress" \
+  crates/geode-data/src/egress.rs \
+  '            Some(adapter) if adapter.egress().is_none() => {' \
+  '            Some(adapter) if adapter.egress().is_none() && false => {' \
+  geode-data \
+  resolve_drops_an_unknown_adapter_and_one_without_egress
+
+run_mutation "events: an upload outcome keys on (tile, tag), not the tile alone" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::Upload(o) => Key::Upload(o.key, o.tag),' \
+  '        DataEvent::Upload(o) => Key::Upload(o.key, 0),' \
+  geode-app \
+  two_upload_outcomes_for_the_same_tile_are_both_delivered
+
 # ---- discovery scheduler (Phase 3 §5.3)
 
 run_mutation "scheduler: every source is polled immediately at start" \
@@ -9931,16 +9999,22 @@ run_mutation "cvi: write refuses a hole in the grid" \
   '        if false {' \
   geode-documents write_refuses_rows_that_are_not_a_full_grid
 
-# dividend: an upstream id beginning `new-` is refused on the way in
-# (design spec §5.3), because that prefix is reserved for a row a
-# trader's insert mints locally — accepting one silently would let a
-# fed id collide with a minted one, corrupting the draft's own
-# uniqueness invariant with no marker to show it.
-run_mutation "dividend: a new- id is refused" \
+# dividend: the ordinal is what keeps two same-day dividends distinct.
+# Mutated to the bare date, the second row takes the first's id and the
+# draft's edits for one land on the other.
+run_mutation "dividend: mint_ids numbers a repeated ex date" \
   crates/geode-documents/src/dividend.rs \
-  '                                if trimmed.starts_with(MINTED_PREFIX) {' \
-  '                                if false {' \
-  geode-documents a_new_prefixed_id_is_refused
+  '            if *n == 1 {' \
+  '            if true {' \
+  geode-documents mint_ids_numbers_same_day_rows_in_feed_order
+
+# dividend: the wire carries no id. Mutated to emit one, an upload
+# leaks Geode's internal row identity to Sophis.
+run_mutation "dividend: write emits no id" \
+  crates/geode-documents/src/dividend.rs \
+  '        w.write_event(Event::Start(BytesStart::new("dividend")))' \
+  '        leaf(&mut w, "id", "X")?; w.write_event(Event::Start(BytesStart::new("dividend")))' \
+  geode-documents write_emits_no_id_even_for_a_minted_label
 
 # dividend: a `status` outside the closed four-word set is refused on
 # parse, not passed through as an uncategorised value the panel would
@@ -11610,19 +11684,31 @@ run_mutation "mdtile: a panel with no catalog requests one" \
 # next launch — work lost silently, with the restored panel looking
 # perfectly healthy.
 #
-# Two lines, not one: `revert`'s own guard is the same
-# `if self.draft.is_empty() {` shape, and an ambiguous anchor mutates
-# whichever site comes first. Re-anchored 2026-09-19 (per-underlying
-# drafts): the current draft is now filed under `drafts.<key>` through a
-# `match` on the key, so the guard's second line changed.
+# Re-anchored 2026-09-24 (the rebase guard, egress amendment 4): the guard
+# is now followed by a group-capture block before the `match` on the key,
+# so the two-line anchor that used to reach `match &self.key {` no longer
+# does; the guard line alone is unique against `revert`'s own (the
+# opposite condition, `if self.draft.is_empty() {`).
 run_mutation "mdtile: serialize writes the draft" \
   crates/geode-marketdata/src/tile.rs \
-  '        if !self.draft.is_empty() {
-            match &self.key {' \
-  '        if false {
-            match &self.key {' \
+  '        if !self.draft.is_empty() {' \
+  '        if false {' \
   geode-marketdata \
   serialize_round_trips_key_and_draft
+
+# The rebase guard's group capture must skip a `painted_snapshot()` that
+# is not really the draft's own base (review finding 1: a restored/parked
+# draft whose base was never delivered this session falls back to the
+# NEWEST snapshot, and capturing against that silently disarms the guard
+# it exists to run). Mutated to always capture, the M-1 window test's
+# session-restored `groups` are overwritten by the newer document's own
+# sizes and the shifted edit is no longer refused.
+run_mutation "mdtile: a capture only counts the draft's true base" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if source_time_of(&base) != draft.base {' \
+  '        if false {' \
+  geode-marketdata \
+  rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
 
 # A delivery re-clamps the cursor, because a new generation can be
 # shorter than the one it replaces. Mutated away, the cursor sits past the
@@ -11903,7 +11989,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                             skipped += 1;
                             return None;
                         }
-                        numeric_value(r.state, cell).map(|v| ((row, ci), v))
+                        numeric_value(r.state, cell).map(|v| ((row, ci), v, ty_of(ci)))
                     })
                     .collect()
             }' \
@@ -11917,7 +12003,7 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
                     r.cells
                         .get(col)
                         .and_then(|cell| numeric_value(r.state, cell))
-                        .map(|v| ((ri, col), v))
+                        .map(|v| ((ri, col), v, ty_of(col)))
                 })
                 .collect(),' \
   geode-marketdata \
@@ -12002,12 +12088,12 @@ run_mutation "mddraft: rebase resolves labels against the newer document" \
 # will remap right out from under it.
 run_mutation "mddraft: editing is refused while the draft is behind" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.draft.is_behind() {
-            self.notice = Some(BEHIND_REFUSED.into());
+  '        if let Some(refusal) = self.held_refusal() {
+            self.notice = Some(refusal.into());
             return;
         }' \
-  '        if false {
-            self.notice = Some(BEHIND_REFUSED.into());
+  '        if let Some(refusal) = self.held_refusal().filter(|_| false) {
+            self.notice = Some(refusal.into());
             return;
         }' \
   geode-marketdata \
@@ -12041,7 +12127,7 @@ run_mutation "mddraft: revert while Behind drops the base snapshot" \
 # explain it.
 run_mutation "mdrevert: revert clears the behind-refusal notice it resolves" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+  '        if matches!(self.notice.as_deref(), Some(BEHIND_REFUSED | ECHO_REFUSED)) {
             self.notice = None;
         }' \
   '        if false {
@@ -13226,13 +13312,14 @@ run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its o
 # with `mode == insert` still claimed. Re-anchored 2026-09-19: the close
 # now sits ahead of the park (per-underlying drafts) rather than of the
 # key assignment; the comment line is what makes the anchor unique.
+# Re-anchored 2026-09-24: the upload confirm's disarm now follows the close.
 run_mutation "mdattr: a key change cancels an open editor" \
   crates/geode-marketdata/src/tile.rs \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        // Park the outgoing draft under its own underlying.' \
-  '        // Park the outgoing draft under its own underlying.' \
+        // A question about the outgoing document must not stand over the' \
+  '        // A question about the outgoing document must not stand over the' \
   geode-marketdata a_key_change_cancels_an_open_editor
 
 # B4: the attribute value's click was the one mouse door that left a
@@ -14820,6 +14907,66 @@ run_mutation "draft: rename_row re-hangs followers" \
   '        let _ = (from, to);' \
   geode-marketdata rename_row_rehangs_its_followers
 
+# A cell written on an inserted row after an upload is unsent work.
+# Mutated to leave `Sent`, a matching echo clears the draft and loses it.
+run_mutation "draft: set_row_cell leaves Sent" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {' \
+  '                if false {' \
+  geode-marketdata set_row_cell_moves_a_sent_draft_back_to_editing
+
+# An I64 column's bump lands I64. Mutated to F64, egress refuses the
+# type mismatch the first time an integer column is bumped.
+run_mutation "draft: bump lands the declared integer type" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
+  geode-marketdata bump_lands_the_declared_type
+
+# A same-day group whose size changed has shifted ordinals. Mutated to
+# skip the check, an edit keyed `<date>#2` lands on a different row.
+# (The bare `if size_now != 0 && was != size_now {` line alone matches
+# both this site and the `Deleted`-mark site below it, indentation
+# included, since one is a tail substring of the other — the preceding
+# `size_now` line, which names `row_label` here and `&label` there, is
+# what makes this anchor unique.)
+run_mutation "draft: rebase refuses a changed same-day group" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if size_now != 0 && was != size_now {' \
+  '                let size_now = now.get(group_of(row_label)).copied().unwrap_or(0);
+                if false {' \
+  geode-marketdata rebase_refuses_edits_in_a_same_day_group_that_changed_size
+
+# The `Deleted` half of the same guard (review finding 2): a row marked
+# deleted inside a same-day group whose size changed must be refused
+# too, not carried onto whichever row the shifted ordinal now names.
+# Mutated to skip the check (the `group_of(&label)` two-line anchor is
+# what makes this the Deleted-arm site rather than the cell-edit one
+# above it — see that entry's own comment).
+run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if size_now != 0 && was != size_now {' \
+  '                        let size_now = now.get(group_of(&label)).copied().unwrap_or(0);
+                        if false {' \
+  geode-marketdata rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size
+
+# `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
+# result before either write door opens.
+# Mutated away, a mixed F64/I64 inserted row writes its F64 cell through
+# `set_row_cell` before the I64 cell's fractional-delta refusal is ever
+# reached — a partial bump the trader never asked for.
+run_mutation "mdedit: an inserted-row bump checks every cell before writing any" \
+  crates/geode-marketdata/src/tile.rs \
+  '        for (labels, value, ty) in &inserted {
+            bumped(*value, delta, *ty, &labels.1)?;
+        }' \
+  '        for (labels, value, ty) in &inserted {
+            let _ = (labels, value, ty);
+        }' \
+  geode-marketdata a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing
+
 # `o` on a row that already has a follower re-hangs that follower onto
 # the NEW row (Task 8's review), so the new row sits immediately below
 # the cursor row. Mutated away, the two hang off the same anchor as
@@ -14843,6 +14990,58 @@ run_mutation "tile: a typed text label commits through parse_attr" \
   '                    Ok(value) => attr_text(&value),' \
   '                    Ok(_) => text.trim().to_string(),' \
   geode-marketdata o_on_an_integer_axis_opens_the_text_label_editor
+
+# ---- Upload assembly and the echo (egress spec §6, §7) -----------------
+
+# A row marked deleted is struck through on screen but must not be sent.
+# Mutated to keep every row, the deleted dividend goes upstream anyway.
+run_mutation "upload: assembly drops deleted rows" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '        .filter(|r| r.state != RowState::Deleted)' \
+  '        .filter(|_| true)' \
+  geode-marketdata a_dividend_draft_assembles_edits_deletes_and_inserts_in_painted_order
+
+# Every value goes at its declared type. Mutated to ignore a refused
+# push, a text edit in an f64 column assembles "successfully" into a
+# short column instead of being refused naming the row.
+run_mutation "upload: assembly checks the declared type" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    if !push(column, value) {' \
+  '    if !push(column, value) && false {' \
+  geode-marketdata assembly_refuses_an_empty_cell_and_a_wrong_tag_naming_the_row
+
+# The minted id is Geode's, not the wire's: the echo arrives re-minted.
+# Mutated to compare it, every echo of a minted document differs.
+run_mutation "upload: echo ignores the minted label" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let minted = spec.rows.identity == RowIdentity::Minted;' \
+  '    let minted = false;' \
+  geode-marketdata echo_ignores_the_minted_label_and_counts_differing_rows
+
+# One ULP is a wire round trip; two is a different number. Mutated to
+# two, a changed value confirms the upload.
+run_mutation "upload: echo tolerates one ulp only" \
+  crates/geode-marketdata/src/core/upload.rs \
+  'const ULPS: u64 = 1;' \
+  'const ULPS: u64 = 2;' \
+  geode-marketdata echo_accepts_one_ulp_and_refuses_two
+
+# The store hands a document back sorted by its axes; the sent rows are in
+# painted order. Mutated to compare positionally (no sort), an
+# out-of-order insert reads as "echo differs" on every successful upload.
+run_mutation "upload: echo compares rows as a multiset" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let (a, b) = (sorted(ours, n_ours), sorted(theirs, n_theirs));' \
+  '    let (a, b) = ((0..n_ours).collect::<Vec<_>>(), (0..n_theirs).collect::<Vec<_>>());' \
+  geode-marketdata echo_compares_rows_as_a_multiset_not_by_position
+
+# The same mutation against the real store's read-back: the echo of an
+# out-of-order insert, assembled from the document query, must confirm.
+run_mutation "upload: an out-of-order insert confirms through the real store" \
+  crates/geode-marketdata/src/core/upload.rs \
+  '    let (a, b) = (sorted(ours, n_ours), sorted(theirs, n_theirs));' \
+  '    let (a, b) = ((0..n_ours).collect::<Vec<_>>(), (0..n_theirs).collect::<Vec<_>>());' \
+  geode-app an_out_of_order_insert_echoes_back_as_confirmed_through_the_real_store
 
 # ---- Hidden row label (2026-09-20): dividend_id is not displayed ----
 
@@ -17271,6 +17470,480 @@ run_mutation "objectdialog: enter in browse filter mode is not an exit" \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
+# ---- market-data egress: Delivery::Upload and geode-app wiring ----
+
+# `Delivery::key()`'s per-variant answer, mutated to `None` for the new
+# variant — exactly the shape the `Series`/`Price` entries above use. A
+# `None` here would fall the outcome into `ShellView::deliver`'s
+# broadcast-or-drop path instead of routing it to the submitting tile.
+run_mutation "shell: an upload delivery routes by key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::Upload(u) => Some(u.key),' \
+  '            Delivery::Upload(_) => None,' \
+  geode-shell \
+  an_upload_delivery_reaches_its_tile_and_no_other
+
+# The bridge's own arm: a revert to a bare log-and-drop arm is silent, exactly the
+# SeriesFetched entry above guards the same failure mode for its own event.
+run_mutation "bridge: a DataEvent::Upload reaches the shell" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::Upload(outcome) => {
+                        shell.update(cx, |s, cx| {
+                            s.deliver(
+                                Delivery::Upload(UploadDelivery {
+                                    key: outcome.key,
+                                    tag: outcome.tag,
+                                    target: outcome.target,
+                                    result: outcome.result,
+                                }),
+                                window,
+                                cx,
+                            )
+                        });
+                    }' \
+  '                    DataEvent::Upload(_) => {}' \
+  geode-app \
+  an_upload_outcome_is_routed_to_its_tile
+
+# `data_setup` must pass the resolved egress list, not `Vec::new()`
+# (egress.toml unread); a revert to that is silent — no diagnostic, and every
+# resolved target simply vanishes from the running service.
+run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer,
+            egress,
+        },' \
+  '            pricer,
+            egress: Vec::new(),
+        },' \
+  geode-app \
+  the_demo_layer_produces_a_servable_data_setup
+
+# egress.toml joins sources/datasets in the restart-required list (egress
+# spec §10 amendment 2): a live reload never rebuilds the running egress
+# workers, so a changed `egress` doc must ask for a restart exactly as a
+# changed `sources` doc does — the label swap leaves the comparison
+# itself intact (same shape the sources/datasets entry above uses) but
+# the reported message no longer names "egress".
+run_mutation "frame: an egress change is a restart, not a silent apply" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("egress", &self.egress_baseline),' \
+  '                ("nonesuch", &self.egress_baseline),' \
+  geode-shell \
+  an_egress_change_asks_for_a_restart
+
+# `targets_for`'s own narrowing predicate: dropped, every resolved target
+# would appear eligible for every document, offering `:upload` a
+# target that does not actually accept the panel's document.
+run_mutation "marketdata: targets_for narrows to targets that accept the document" \
+  crates/geode-marketdata/src/content.rs \
+  '        .filter(|(_, documents)| documents.iter().any(|d| d == document))' \
+  '        .filter(|_| true)' \
+  geode-marketdata \
+  targets_for_narrows_to_one_document_and_keeps_egress_toml_order
+
+# The production wiring from factory to tile: `create` must narrow ITS
+# OWN factory's shared egress list to this panel's own document before
+# handing it to `MarketDataTile::new` — an empty list here would leave
+# every panel with no eligible upload target regardless of what
+# `egress.toml` actually resolved.
+run_mutation "marketdata: create narrows the factory's egress list to this panel's own document" \
+  crates/geode-marketdata/src/content.rs \
+  '        let egress_targets = targets_for(&self.egress, self.spec.document);' \
+  '        let egress_targets: Vec<SharedString> = Vec::new();' \
+  geode-marketdata \
+  the_tile_stores_the_targets_its_factory_resolves_for_its_document
+
+# `:upload` on a `Behind` draft (egress spec §6): refused, because an
+# upload must be of the document the trader has seen whole. Without the
+# refusal the panel would assemble and offer to send the base generation
+# while a newer one already sits under it.
+run_mutation "panel: upload refused while Behind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            return Err(UPLOAD_BEHIND.into());' \
+  '            let _ = UPLOAD_BEHIND;' \
+  geode-marketdata \
+  upload_is_refused_on_a_behind_draft
+
+# The armed confirm consumes the key that answers it: a `j` that cancels
+# must not also bubble to the shell root and move the cursor or feed the
+# keymap.
+run_mutation "panel: the confirm consumes a non-y key" \
+  crates/geode-marketdata/src/header.rs \
+  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) && false {' \
+  geode-marketdata \
+  any_other_key_cancels_the_confirm_and_is_consumed
+
+# An upload outcome whose tag is not the tile's latest is ignored: an older
+# upload's late `Ok` must not mark a newer draft sent.
+run_mutation "panel: a stale upload tag is ignored" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if u.tag != self.upload_tag {' \
+  '        if false {' \
+  geode-marketdata \
+  a_stale_upload_tag_is_ignored
+
+# `y` re-checks the WHOLE draft it was asked about, `base` included —
+# the second line behind the withdrawal on delivery. Mutated to the
+# edits-and-state comparison it replaced, a base-only move (an `:auto
+# rebase` onto a same-shape newer generation) sends rows assembled from
+# the superseded base.
+run_mutation "panel: upload y cancels when the draft changed under the question" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if pending.draft != self.draft {' \
+  '        if !same_edits(&pending.draft, &self.draft) || pending.draft.state != self.draft.state {' \
+  geode-marketdata \
+  y_rechecks_the_whole_draft_base_included
+
+# A delivery that moves the draft or the painted generation withdraws a
+# standing confirm at once. Mutated to ignore base (and the generation),
+# an `:auto rebase` onto a same-shape newer document leaves the stale
+# prompt painted over the newer header.
+run_mutation "panel: a rebase under the confirm withdraws it" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;' \
+  '        let moved = |p: &PendingUpload| !same_edits(&p.draft, &self.draft);' \
+  geode-marketdata \
+  a_rebase_under_the_question_withdraws_the_confirm
+
+# `Ok` enters `Sent` only over the draft that was submitted, base
+# included: a rebase while the upload was in flight is unsent work.
+run_mutation "panel: an Ok after an in-flight rebase is not Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let unchanged = submitted.is_some_and(|d| d == self.draft);' \
+  '                let unchanged = submitted.is_some_and(|d| same_edits(&d, &self.draft));' \
+  geode-marketdata \
+  an_ok_after_a_rebase_in_flight_does_not_enter_sent
+
+# The echo (egress spec §7): a delivered generation equal to what was sent
+# clears the draft and says `confirmed`. Mutated never to match, every
+# echo would read as differing and a confirmed upload would sit `Sent`.
+run_mutation "panel: a matching echo clears the draft" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if differing == 0 {' \
+  '        if false {' \
+  geode-marketdata \
+  a_matching_echo_clears_the_draft_and_says_confirmed
+
+# A differing echo keeps the draft `Sent` over its base. Mutated to revert
+# regardless, the trader's sent edits would vanish under an upstream that
+# answered something else.
+run_mutation "panel: a differing echo keeps Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '        Ok(held(format!("echo differs ({differing} rows)")))' \
+  '        draft.revert(); Ok(held(format!("echo differs ({differing} rows)")))' \
+  geode-marketdata \
+  a_differing_echo_keeps_sent_and_counts_rows
+
+# While a differing echo is held the panel keeps painting the base under
+# the sent edits (Behind's staging). Mutated to retain only for Behind, the
+# panel paints the upstream's answer under edits made against the base.
+run_mutation "panel: a differing echo keeps painting the base" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {' \
+  '        let retained = if draft.is_behind() {' \
+  geode-marketdata \
+  a_differing_echo_keeps_sent_and_counts_rows
+
+# An edit under a held differing echo is refused like one under Behind:
+# it would be stamped against a generation that is no longer the newest.
+run_mutation "panel: an edit under a differing echo is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. })) {' \
+  '        } else if false {' \
+  geode-marketdata \
+  an_edit_under_a_differing_echo_is_refused
+
+# `:rebase` is a verb of a `Sent` draft (after a differing echo) and yields
+# `Editing`. Mutated to the Behind-only gate, the trader's one forward door
+# from a differing echo other than `:revert` is refused.
+run_mutation "panel: rebase from Sent yields Editing" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.draft.is_behind() && !self.draft.is_sent() {' \
+  '        if !self.draft.is_behind() {' \
+  geode-marketdata \
+  rebase_from_sent_yields_editing
+
+# `sent` is kept only for an upload in flight or a `Sent` draft. Mutated to
+# keep it always, rows from an upload the draft has moved on from (an edit
+# made in flight) outlive the only state that compares against them.
+run_mutation "panel: an edit in flight drops the kept rows" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.submitted.is_none() && !self.draft.is_sent() {' \
+  '        if false {' \
+  geode-marketdata \
+  an_edit_in_flight_drops_the_kept_rows
+
+# The `confirmed` line stands until the next edit. Mutated never to clear,
+# it would claim a confirmation over unsent work.
+run_mutation "panel: the confirmed line clears at the next edit" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Some(Echo::Confirmed(_)) => !self.draft.is_empty(),' \
+  '            Some(Echo::Confirmed(_)) => false,' \
+  geode-marketdata \
+  a_matching_echo_clears_the_draft_and_says_confirmed
+
+# Every way the upload confirm ends blurs its prompt to NO focus, and the
+# shell's focus net hands the keyboard back to its root on the next frame,
+# so the tile answers the very next key with no click. Mutated to give the
+# keyboard up with `disable_focus` (which also forbids any later focus), the
+# net cannot restore it and `j` goes nowhere.
+run_mutation "panel: the tile answers keys after the upload confirm ends" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if pending.focus.is_focused(window) {' \
+  '        if pending.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
+  geode-marketdata \
+  the_tile_answers_keys_after_the_upload_confirm_ends
+
+# The echo guard (egress spec §7): a delivered generation equal to
+# `draft.base` is a routine same-generation requery, never the echo, and
+# is skipped before `self.sent` is even read. Mutated away, every such
+# redelivery would build and compare against `sent` and read as a
+# difference within seconds of every upload on the demo bus.
+run_mutation "panel: a redelivery of the base is not read as the echo" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if draft.base.as_deref() == Some(t) {' \
+  '        if false {' \
+  geode-marketdata \
+  a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo
+
+# Controller ruling: `:rebase` from `Sent` with no differing echo held has
+# nothing newer to rebase onto — the upload is awaiting its echo. Mutated
+# away, `:rebase` would run anyway and re-arm `:upload` of edits already
+# in flight upstream, a possible duplicate upload.
+run_mutation "panel: rebase from Sent without a held echo is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_sent() && !matches!(self.echo, Some(Echo::Differs { .. })) {' \
+  '        if false {' \
+  geode-marketdata \
+  rebase_from_sent_without_a_held_echo_is_refused
+
+# ---- upload: the final whole-branch review's contracts (egress spec §6-§8)
+
+# An upload is a whole document: one assembled over a historical generation
+# reverts every untouched row upstream. Mutated to ignore the as-of, a
+# historical panel arms the confirm.
+run_mutation "panel: upload is refused under a historical as-of" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {' \
+  '        if let Some(at) = None::<&chrono::DateTime<chrono::Utc>> {' \
+  geode-marketdata \
+  upload_is_refused_under_a_historical_as_of
+
+# The frame gone live does not make the painted generation live: until the
+# live one is applied (behind the barrier, or never when the requery is
+# refused or fails) the historical document stays on screen, and :upload
+# assembles what is painted. Mutated to ignore the painted provenance, an
+# edit over the historical generation arms the confirm.
+run_mutation "panel: upload is refused while a historical generation is painted" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(at) = painted {' \
+  '        if let Some(at) = painted.filter(|_| false) {' \
+  geode-marketdata \
+  upload_is_refused_while_a_historical_generation_is_painted
+
+# y re-checks the as-of: a frame moved to history between arming and
+# answering must send nothing. Mutated away, y submits.
+run_mutation "panel: upload confirm rechecks the as-of at y" \
+  crates/geode-marketdata/src/tile.rs \
+  '        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx) {' \
+  '        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx).filter(|_| false) {' \
+  geode-marketdata \
+  upload_confirm_rechecks_the_as_of_at_y
+
+# A second upload while the first awaits its outcome would race the first's
+# echo. Mutated away, a second :upload arms.
+run_mutation "panel: upload is refused while an upload is in flight" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(flight) = &self.in_flight {' \
+  '        if let Some(flight) = None::<&InFlightUpload> {' \
+  geode-marketdata \
+  upload_is_refused_while_an_upload_is_in_flight
+
+# An outcome for an underlying no longer shown names that key and target
+# and never touches the draft on screen. Mutated to treat every outcome as
+# the current key's, SPX's failure paints on NDX's header (and SPX's Ok
+# marks NDX's draft sent).
+run_mutation "panel: an outcome for a key no longer shown is a notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {' \
+  '        if let Some(flight) = flight.filter(|_| false) {' \
+  geode-marketdata \
+  outcome_after_a_key_switch_is_a_notice_naming_the_key
+
+# Switching away gives up the outgoing draft's echo check. Mutated to keep
+# `sent` and `submitted`, the kept rows outlive the switch.
+run_mutation "panel: a key switch drops the upload's sent rows" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.sent = None;
+        self.submitted = None;
+        self.upload_error = None;
+        // Park the outgoing draft' \
+  '        self.upload_error = None;
+        // Park the outgoing draft' \
+  geode-marketdata \
+  outcome_after_a_key_switch_is_a_notice_naming_the_key
+
+# The confirm names every kind of edit it sends. Mutated to omit a single
+# attribute, an attribute-only upload reads "0 cells".
+run_mutation "panel: the confirm counts attribute edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '            1 => "1 attribute, ".to_string(),' \
+  '            1 => String::new(),' \
+  geode-marketdata \
+  the_confirm_counts_attribute_edits
+
+# Focus leaving the tile cancels the confirm (spec §6). Mutated to ignore
+# the blur, the question stands behind whatever took the keyboard.
+run_mutation "panel: focus loss cancels the upload confirm" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if this.pending_upload.is_some() {' \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if false && this.pending_upload.is_some() {' \
+  geode-marketdata \
+  focus_leaving_the_tile_cancels_the_confirm
+
+# A Sent draft with no edit since is refused "already sent". Mutated away,
+# the same document arms a second time.
+run_mutation "panel: a sent draft is refused already sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_sent() {
+            return Err("already sent".into());' \
+  '        if false {
+            return Err("already sent".into());' \
+  geode-marketdata \
+  an_ok_outcome_enters_sent_and_the_header_reads_sent_hhmm
+
+# An incomplete inserted row is refused naming the count before assembly.
+# Mutated to skip the count, the refusal becomes assembly's empty-cell
+# message instead.
+run_mutation "panel: incomplete rows refuse the upload" \
+  crates/geode-marketdata/src/tile.rs \
+  '        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+            0 => {}' \
+  '        match 0 {
+            0 => {}' \
+  geode-marketdata \
+  upload_is_refused_with_an_incomplete_row
+
+# An Err outcome paints `upload failed: <e>` until the next edit. Mutated
+# to drop it, a failed upload is silent.
+run_mutation "panel: an Err outcome shows the inline upload error" \
+  crates/geode-marketdata/src/tile.rs \
+  '                self.upload_error =
+                    Some((format!("upload failed: {e}").into(), self.draft.clone()));' \
+  '                let _ = &e;' \
+  geode-marketdata \
+  an_err_outcome_keeps_editing_and_shows_the_error
+
+# `:bump` on an I64 column takes whole-number deltas only. Mutated to take
+# any delta, 3 + 0.5 lands a truncated 3 the trader never asked for.
+run_mutation "draft: bump refuses a fractional delta on an I64 column" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if true => Ok(Value::I64((current + delta) as i64)),' \
+  geode-marketdata \
+  bump_refuses_a_fractional_delta_on_an_integer_column_before_writing
+
+# DIVIDEND's announced/pay dates are required (ruling 2026-09-23): the
+# kind refuses a document without them. Mutated optional, an inserted row
+# without an announced date passes the incomplete check and fails upstream.
+run_mutation "spec: DIVIDEND requires the announced date" \
+  crates/geode-marketdata/src/core/spec.rs \
+  '            column: "announced_date",
+            label: "announced",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: true,' \
+  '            column: "announced_date",
+            label: "announced",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,' \
+  geode-marketdata \
+  dividend_dates_are_required
+
+run_mutation "spec: DIVIDEND requires the pay date" \
+  crates/geode-marketdata/src/core/spec.rs \
+  '            column: "pay_date",
+            label: "pay",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: true,' \
+  '            column: "pay_date",
+            label: "pay",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,' \
+  geode-marketdata \
+  dividend_dates_are_required
+
+# An upload to a target nobody configured answers Err naming it. Mutated to
+# return silently, the panel waits for an outcome that never comes.
+run_mutation "egress: an unknown target answers Err" \
+  crates/geode-data/src/egress.rs \
+  '        let Some(target) = self.targets.get(&p.target) else {
+            return refuse("unknown target".into());
+        };' \
+  '        let Some(target) = self.targets.get(&p.target) else {
+            return;
+        };' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+# One worker per target runs uploads in submission order: the later of two
+# uploads of one document must land last. Mutated to drain what is queued
+# and run each drained batch newest first, the order inverts.
+run_mutation "egress: uploads to one target run in submission order" \
+  crates/geode-data/src/egress.rs \
+  '    while let Ok(job) = jobs.recv() {
+        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        answer(
+            &sink,
+            &name,
+            &job.document,
+            &job.document_key,
+            job.key,
+            job.tag,
+            result,
+        );
+    }
+}' \
+  '    while let Ok(first) = jobs.recv() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut batch = vec![first];
+        while let Ok(more) = jobs.try_recv() {
+            batch.push(more);
+        }
+        for job in batch.into_iter().rev() {
+        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        answer(
+            &sink,
+            &name,
+            &job.document,
+            &job.document_key,
+            job.key,
+            job.tag,
+            result,
+        );
+        }
+    }
+}' \
+  geode-data \
+  uploads_to_one_target_run_in_submission_order
+
 # Line pricer Part 3 (tile): the repricing rules, the two inputs'
 # blur-then-drop, write-behind, the pending load, placement, the paint
 # floor and the reload. (The undo stack's fork and refused-inverse rules
@@ -17855,6 +18528,107 @@ run_mutation "timeseries mouse: the empty-state buttons dispatch their own verbs
   '    ("Add series…", "timeseries::add"),' \
   '    ("Add series…", "timeseries::expr"),' \
   geode-timeseries the_empty_state_buttons_open_the_picker_and_the_expression_field
+# A refused redo drops the rest of both sides, as a refused undo does:
+# the redo still waiting would replay against rows the refusal moved.
+run_mutation "pricer undo: a refused redo clears the whole history" \
+  crates/geode-pricer/src/core/undo.rs \
+  '            Ok(undo) => {
+                self.done.push_back(undo);
+                Ok(true)
+            }
+            Err(e) => {
+                self.clear();
+                Err(e)
+            }' \
+  '            Ok(undo) => {
+                self.done.push_back(undo);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(e)
+            }' \
+  geode-pricer a_refused_redo_drops_the_rest_of_both_sides
+
+# A reload that changes nothing the pricer reads must not reach the
+# factory: every tile would re-resolve and restart its refresh timer.
+run_mutation "pricer bridge: an unchanged pricer config key skips the reload" \
+  crates/geode-app/src/bridge.rs \
+  '                if last_key.borrow().as_ref() == Some(&key) {
+                    return;
+                }' \
+  '                if last_key.borrow().as_ref() == Some(&key) {}' \
+  geode-app a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone
+
+# The observer starts from the key the factory was built from, so even
+# the first unrelated reload of a session is skipped.
+run_mutation "pricer bridge: the reload observer is seeded with the startup key" \
+  crates/geode-app/src/bridge.rs \
+  '        let last_key = Rc::new(std::cell::RefCell::new(bridge.pricer_key.clone()));' \
+  '        let last_key = Rc::new(std::cell::RefCell::new(None::<PricerConfigKey>));' \
+  geode-app a_seeded_key_skips_the_first_reload_that_changes_no_pricer_setting
+
+# An open editor follows its column KIND through a rebuilt plan: left at
+# its old index it paints over whatever column now sits there.
+run_mutation "pricer tile: an open editor follows its column through a reload" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(c) => {
+                editor.set_col(c);
+                self.cursor.col = c;' \
+  '            Some(c) => {
+                self.cursor.col = c;' \
+  geode-pricer an_open_editor_follows_its_column_through_a_view_reload
+
+# The cursor follows the editor to its new column, so the field and the
+# cursor highlight sit on the same column.
+run_mutation "pricer tile: the cursor follows a re-pointed editor" \
+  crates/geode-pricer/src/tile.rs \
+  '                editor.set_col(c);
+                self.cursor.col = c;' \
+  '                editor.set_col(c);' \
+  geode-pricer an_open_editor_follows_its_column_through_a_view_reload
+
+# An editor whose column left the plan closes; left open it stays focused
+# over a column that is not the one it opened on.
+run_mutation "pricer tile: an editor whose column left the plan closes" \
+  crates/geode-pricer/src/tile.rs \
+  '            None => self.drop_orphaned_editor(cx),' \
+  '            None => {}' \
+  geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
+
+# The window-less close still blurs before the field drops.
+run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        window.blur(cx);
+                    }
+                });
+            });' \
+  '                    let _ = (input, window);
+                });
+            });' \
+  geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
+
+# An open menu's rows are re-checked on every chrome rebuild: a load
+# answer or reload changes them with no verb to close the menu.
+run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
+  crates/geode-pricer/src/tile.rs \
+  '                m.items = items;' \
+  '                let _ = items;' \
+  geode-pricer a_reload_under_an_open_menu_relists_its_views
+
+run_mutation "pricer tile: a re-checked menu clamps its highlight" \
+  crates/geode-pricer/src/tile.rs \
+  '                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));' \
+  '' \
+  geode-pricer a_reload_under_an_open_menu_relists_its_views
+
+# `start` carries the key the pricer factory was built from; without it
+# the observer's first unrelated reload reaches every tile.
+run_mutation "pricer bridge: start carries the startup pricer key" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer_key: Some(pricer_key),' \
+  '        pricer_key: None,' \
+  geode-app start_builds_a_timeseries_factory_beside_the_blotters
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
