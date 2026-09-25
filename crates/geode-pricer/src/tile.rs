@@ -643,7 +643,23 @@ impl PricerTile {
                 Ok(u) => undos.push(u),
                 Err(err) => {
                     for u in undos.iter().rev() {
-                        let _ = self.sheet.undo(u);
+                        // Each inverse was recorded against the rows its
+                        // edit left, so a refusal here means the sheet is
+                        // partly rolled back and the history may point at
+                        // rows that moved: drop it (`UndoStack`'s own rule
+                        // for a refused inverse) and stop unwinding.
+                        if let Err(back) = self.sheet.undo(u) {
+                            tracing::error!(
+                                target: "geode::pricing",
+                                tile = self.id.0,
+                                error = %back,
+                                refused = %err,
+                                "rolling back a refused multi-edit failed; the sheet is partly \
+                                 applied and the undo history is cleared"
+                            );
+                            self.undo.clear();
+                            break;
+                        }
                     }
                     self.after_edit(cx);
                     return Err(err);
