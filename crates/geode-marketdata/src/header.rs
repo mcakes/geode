@@ -183,6 +183,10 @@ pub(crate) struct HeaderInputs<'a> {
     /// `upload failed: <e>` (egress spec §6), held by the tile until the
     /// next edit or upload.
     pub upload_error: Option<&'a SharedString>,
+    /// What the last echo of an upload said (egress spec §7) and its tone:
+    /// `sent HH:MM, confirmed HH:MM` quietly, `echo differs (N rows)` as a
+    /// warning.
+    pub echo: Option<(&'a SharedString, Tone)>,
     /// The armed `:upload` confirm's question, `upload … to <target>?
     /// (y/n)`.
     pub prompt: Option<&'a SharedString>,
@@ -229,6 +233,9 @@ pub(crate) struct HeaderModel {
     /// `upload failed: <e>`, painted in the error tone ahead of the
     /// notice.
     pub upload_error: Option<SharedString>,
+    /// The echo's line, painted after the state and the incomplete-rows
+    /// chip, ahead of the upload error and the notice.
+    pub echo: Option<(SharedString, Tone)>,
     /// The armed upload confirm's question, painted last before the time
     /// on the element that holds the keyboard while it is armed.
     pub prompt: Option<SharedString>,
@@ -286,6 +293,7 @@ impl HeaderModel {
             incomplete,
             notice: i.notice.cloned(),
             upload_error: i.upload_error.cloned(),
+            echo: i.echo.map(|(text, tone)| (text.clone(), tone)),
             prompt: i.prompt.cloned(),
             time: i.source_at.map(|t| i.clock.hms(t).into()),
             stale: false,
@@ -310,6 +318,9 @@ impl HeaderModel {
             out.push(text.to_string());
         }
         if let Some((text, _)) = &self.incomplete {
+            out.push(text.to_string());
+        }
+        if let Some((text, _)) = &self.echo {
             out.push(text.to_string());
         }
         if let Some(e) = &self.upload_error {
@@ -506,6 +517,14 @@ pub(crate) fn render(
                 .child(text.clone()),
         );
     }
+    if let Some((text, tone)) = &h.echo {
+        row = row.child(
+            div()
+                .debug_selector(move || format!("marketdata-echo-{tile_id}"))
+                .text_color(tone_colour(*tone, false, theme, tones))
+                .child(text.clone()),
+        );
+    }
     if let Some(e) = &h.upload_error {
         row = row.child(
             div()
@@ -690,6 +709,7 @@ mod tests {
             unresolved_restore: false,
             notice: None,
             upload_error: None,
+            echo: None,
             prompt: None,
             source_at: None,
             incomplete: 0,

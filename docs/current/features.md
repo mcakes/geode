@@ -74,8 +74,19 @@ rebase, a replace, or `Behind`) withdraws it at once with `upload cancelled:
 a new document arrived`, since the assembled rows belong to the superseded
 document. An `Ok` outcome marks the draft `sent HH:MM` only if the draft,
 base included, is still what was submitted; an `Err` keeps it editing and shows
-`upload failed: <e>` until the next edit or upload. The echo that confirms a
-sent draft is not built yet.
+`upload failed: <e>` until the next edit or upload.
+
+While a draft is `sent`, the next generation delivered for its key with a
+different source time is compared with the rows that went out, row by row in
+document order, over every column except a minted row label (`f64` within one
+ULP). Equal clears the draft, the panel follows the new generation, and the
+header reads `sent HH:MM, confirmed HH:MM` until the next edit. Different
+keeps the draft `sent` over its base, reads `echo differs (N rows)`, and
+refuses edits until `:rebase` (which yields an unsent draft on the new
+generation) or `:revert`. The update policy does not apply to a sent draft. An
+upstream that reorders rows reads as differing. A delivered document that
+cannot be assembled reads `echo not comparable: <why>` and is held the same
+way. `sent` is not persisted: a sent draft restores with its edits, unsent.
 
 ## Timeseries
 

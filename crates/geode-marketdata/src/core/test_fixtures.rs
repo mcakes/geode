@@ -491,6 +491,16 @@ pub(crate) fn mixed_snapshot(rows: &[(&str, f64, i64)]) -> Snapshot {
 /// snapshot came from (the round trip compares like with like). The key
 /// column is `underlying_ref`, the one both shipped datasets declare.
 pub(crate) fn snapshot_of(spec: &PanelSpec, doc: &geode_core::document::DocumentRows) -> Snapshot {
+    snapshot_of_at(spec, doc, BASE)
+}
+
+/// [`snapshot_of`] stamped as a generation of the caller's choosing — the
+/// echo of an upload arrives as a NEW generation carrying the sent rows.
+pub(crate) fn snapshot_of_at(
+    spec: &PanelSpec,
+    doc: &geode_core::document::DocumentRows,
+    as_of: &str,
+) -> Snapshot {
     use geode_core::document::{Column, Value};
     let n = doc.rows();
     let column = |col: &Column| match col {
@@ -530,7 +540,7 @@ pub(crate) fn snapshot_of(spec: &PanelSpec, doc: &geode_core::document::Document
         Provenance {
             datasets: vec![Freshness {
                 dataset: spec.dataset.into(),
-                as_of: Some(BASE.into()),
+                as_of: Some(as_of.into()),
                 generation: 7,
             }],
             as_of_request: None,

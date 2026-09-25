@@ -1451,6 +1451,25 @@ mod tests {
         );
     }
 
+    /// A `Sent` draft is compared against its echo by the tile (egress
+    /// spec §7), never moved to `Behind` here: a newer generation leaves it
+    /// `Sent`, so the update policy — which acts on `Behind` alone — never
+    /// sees it. `rebase` from `Sent` yields `Editing` like any other.
+    #[test]
+    fn a_sent_draft_stays_sent_on_delivery_and_rebases_to_editing() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.state = DraftState::Sent {
+            at: "2026-09-24T09:00:00Z".into(),
+        };
+        assert!(!draft.on_delivered(NEWER));
+        assert!(draft.is_sent());
+        let (kept, dropped) = draft.rebase(&model(&["T1"], &["-20"], NEWER));
+        assert_eq!((kept, dropped.len()), (1, 0));
+        assert_eq!(draft.state, DraftState::Editing);
+        assert_eq!(draft.base.as_deref(), Some(NEWER));
+    }
+
     #[test]
     fn on_delivered_does_nothing_to_a_clean_draft() {
         let mut draft = Draft::default();

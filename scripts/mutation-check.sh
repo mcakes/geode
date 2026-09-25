@@ -12075,12 +12075,12 @@ run_mutation "mddraft: rebase resolves labels against the newer document" \
 # will remap right out from under it.
 run_mutation "mddraft: editing is refused while the draft is behind" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.draft.is_behind() {
-            self.notice = Some(BEHIND_REFUSED.into());
+  '        if let Some(refusal) = self.held_refusal() {
+            self.notice = Some(refusal.into());
             return;
         }' \
-  '        if false {
-            self.notice = Some(BEHIND_REFUSED.into());
+  '        if let Some(refusal) = self.held_refusal().filter(|_| false) {
+            self.notice = Some(refusal.into());
             return;
         }' \
   geode-marketdata \
@@ -12114,7 +12114,7 @@ run_mutation "mddraft: revert while Behind drops the base snapshot" \
 # explain it.
 run_mutation "mdrevert: revert clears the behind-refusal notice it resolves" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.notice.as_deref() == Some(BEHIND_REFUSED) {
+  '        if matches!(self.notice.as_deref(), Some(BEHIND_REFUSED | ECHO_REFUSED)) {
             self.notice = None;
         }' \
   '        if false {
@@ -17500,6 +17500,86 @@ run_mutation "panel: an Ok after an in-flight rebase is not Sent" \
   '                let unchanged = submitted.is_some_and(|d| same_edits(&d, &self.draft));' \
   geode-marketdata \
   an_ok_after_a_rebase_in_flight_does_not_enter_sent
+
+# The echo (egress spec §7): a delivered generation equal to what was sent
+# clears the draft and says `confirmed`. Mutated never to match, every
+# echo would read as differing and a confirmed upload would sit `Sent`.
+run_mutation "panel: a matching echo clears the draft" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if differing == 0 {' \
+  '        if false {' \
+  geode-marketdata \
+  a_matching_echo_clears_the_draft_and_says_confirmed
+
+# A differing echo keeps the draft `Sent` over its base. Mutated to revert
+# regardless, the trader's sent edits would vanish under an upstream that
+# answered something else.
+run_mutation "panel: a differing echo keeps Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '        Ok(held(format!("echo differs ({differing} rows)")))' \
+  '        draft.revert(); Ok(held(format!("echo differs ({differing} rows)")))' \
+  geode-marketdata \
+  a_differing_echo_keeps_sent_and_counts_rows
+
+# While a differing echo is held the panel keeps painting the base under
+# the sent edits (Behind's staging). Mutated to retain only for Behind, the
+# panel paints the upstream's answer under edits made against the base.
+run_mutation "panel: a differing echo keeps painting the base" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {' \
+  '        let retained = if draft.is_behind() {' \
+  geode-marketdata \
+  a_differing_echo_keeps_sent_and_counts_rows
+
+# An edit under a held differing echo is refused like one under Behind:
+# it would be stamped against a generation that is no longer the newest.
+run_mutation "panel: an edit under a differing echo is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        } else if self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. })) {' \
+  '        } else if false {' \
+  geode-marketdata \
+  an_edit_under_a_differing_echo_is_refused
+
+# `:rebase` is a verb of a `Sent` draft (after a differing echo) and yields
+# `Editing`. Mutated to the Behind-only gate, the trader's one forward door
+# from a differing echo other than `:revert` is refused.
+run_mutation "panel: rebase from Sent yields Editing" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !self.draft.is_behind() && !self.draft.is_sent() {' \
+  '        if !self.draft.is_behind() {' \
+  geode-marketdata \
+  rebase_from_sent_yields_editing
+
+# `sent` is kept only for an upload in flight or a `Sent` draft. Mutated to
+# keep it always, rows from an upload the draft has moved on from (an edit
+# made in flight) outlive the only state that compares against them.
+run_mutation "panel: an edit in flight drops the kept rows" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.submitted.is_none() && !self.draft.is_sent() {' \
+  '        if false {' \
+  geode-marketdata \
+  an_edit_in_flight_drops_the_kept_rows
+
+# The `confirmed` line stands until the next edit. Mutated never to clear,
+# it would claim a confirmation over unsent work.
+run_mutation "panel: the confirmed line clears at the next edit" \
+  crates/geode-marketdata/src/tile.rs \
+  '            Some(Echo::Confirmed(_)) => !self.draft.is_empty(),' \
+  '            Some(Echo::Confirmed(_)) => false,' \
+  geode-marketdata \
+  a_matching_echo_clears_the_draft_and_says_confirmed
+
+# Every way the upload confirm ends blurs its prompt to NO focus, and the
+# shell's focus net hands the keyboard back to its root on the next frame,
+# so the tile answers the very next key with no click. Mutated to give the
+# keyboard up with `disable_focus` (which also forbids any later focus), the
+# net cannot restore it and `j` goes nowhere.
+run_mutation "panel: the tile answers keys after the upload confirm ends" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if pending.focus.is_focused(window) {' \
+  '        if pending.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
+  geode-marketdata \
+  the_tile_answers_keys_after_the_upload_confirm_ends
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
