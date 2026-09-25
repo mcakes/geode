@@ -44,7 +44,9 @@ use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, Focusable as _, SharedString, Task, Window, div};
+use gpui::{
+    AnyWindowHandle, App, Context, Entity, Focusable as _, SharedString, Task, Window, div,
+};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
@@ -177,6 +179,12 @@ impl Editor {
             } => (*line, *col, *kind),
         }
     }
+
+    fn set_col(&mut self, to: usize) {
+        match self {
+            Editor::Text { col, .. } | Editor::Choice { col, .. } => *col = to,
+        }
+    }
 }
 
 pub struct PricerTile {
@@ -259,6 +267,9 @@ pub struct PricerTile {
     /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
     /// drops it. `None` outside insert mode.
     pub(crate) editor: Option<Editor>,
+    /// The window the editor last opened in: a rebuild that must close it
+    /// has no `Window` of its own to blur through (`drop_orphaned_editor`).
+    editor_window: Option<AnyWindowHandle>,
     /// The `.` action menu: `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
     /// What a cell press that closed the entry field resolved — its line,
@@ -474,6 +485,7 @@ impl PricerTile {
             save_task: None,
             entry: None,
             editor: None,
+            editor_window: None,
             menu: None,
             click_anchor: None,
             pressed: None,
@@ -885,6 +897,7 @@ impl PricerTile {
         };
         editor.input().read(cx).focus_handle(cx).focus(window, cx);
         self.editor = Some(editor);
+        self.editor_window = Some(window.window_handle());
         self.sync_editor(cx);
     }
 
@@ -2061,8 +2074,51 @@ impl PricerTile {
             t.refresh(cx);
         });
         self.sync_cursor(cx);
-        // A rebuild moves grid rows: the editor follows its line.
+        // A rebuild moves grid rows, and a new plan moves columns: the
+        // editor follows its line and its column kind, or closes.
+        self.follow_editor(cx);
         self.sync_editor(cx);
+    }
+
+    /// A rebuild can move the plan (a view reload, `:view`) or the grid
+    /// (an edit, a load) under an open editor. It follows its column KIND
+    /// to that column's new index; when the kind left the plan or the
+    /// line left the grid it closes with `MOVED` — it would otherwise
+    /// paint over a different column, or stay focused painting nowhere.
+    fn follow_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let (line, _, kind) = editor.target();
+        let col = self.plan.columns.iter().position(|c| c.def.kind == kind);
+        match col.filter(|_| self.model.grid_row_of(line).is_some()) {
+            Some(c) => editor.set_col(c),
+            None => self.drop_orphaned_editor(cx),
+        }
+    }
+
+    /// `close_editor` for a rebuild with no `Window` (a reload, a load, a
+    /// delivery): the field leaves the tile at once, and its blur runs at
+    /// the end of this effect cycle — when no window is mid-update —
+    /// through the window it opened in. The deferred closure holds the
+    /// field's last handle, so it is still blurred before it drops, and
+    /// only while it holds focus (a newer field is left alone).
+    fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.take() else {
+            return;
+        };
+        self.footer = Some(MOVED.into());
+        let input = editor.input().clone();
+        drop(editor);
+        if let Some(handle) = self.editor_window {
+            App::defer(cx, move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        window.blur(cx);
+                    }
+                });
+            });
+        }
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {
@@ -3674,8 +3730,11 @@ pub(crate) mod tests {
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
     }
 
+    /// An editor whose line leaves the grid closes at once rather than
+    /// staying focused with nothing painted: nothing it could commit
+    /// would reach the line it was opened on.
     #[gpui::test]
-    fn a_commit_whose_line_went_away_is_refused(cx: &mut gpui::TestAppContext) {
+    fn an_editor_whose_line_went_away_closes_with_moved(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "right", Some(3));
         h.dispatch(&mut vcx, "edit", None);
@@ -3683,9 +3742,77 @@ pub(crate) mod tests {
         h.tile
             .update(&mut vcx, |t, cx| t.apply_edit(Edit::Remove { at: 0 }, cx))
             .unwrap();
-        h.dispatch(&mut vcx, "commit", None);
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
         assert_eq!(h.footer(&vcx).as_deref(), Some(MOVED));
         assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+    }
+
+    fn slim_views(columns: &str) -> Views {
+        let doc = geode_core::config::merge_docs(
+            "pricer_views",
+            &[geode_core::config::LayerDoc::builtin(
+                "pricer_views",
+                &format!("[slim]\ncolumns = [{columns}]\n"),
+            )
+            .unwrap()],
+        );
+        let (views, diags) = Views::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        views
+    }
+
+    fn editor_paint_col(h: &Harness, vcx: &VisualTestContext) -> Option<usize> {
+        h.tile.read_with(vcx, |t, cx| {
+            t.table.read(cx).delegate().editor.as_ref().map(|e| e.col)
+        })
+    }
+
+    /// A reload that moves the edited column: the field follows its
+    /// column kind, paints over it, and its commit writes that column.
+    #[gpui::test]
+    fn an_open_editor_follows_its_column_through_a_view_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3)); // strike: plan column 3
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_paint_col(&h, &vcx), Some(3), "fixture");
+        set_editor(&h, &mut vcx, "5100");
+        let views = slim_views("\"qty\", \"strike\", \"underlying\"");
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, None, std::time::Duration::from_secs(60), cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying"]);
+        assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
+        assert_eq!(editor_paint_col(&h, &vcx), Some(1), "strike's new column");
+        let _ = centre_of(&mut vcx, "pricer-editor-0-2"); // tree column + 1
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx), None, "the commit was not refused");
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5100");
+    }
+
+    /// A reload that drops the edited column closes the field (blurred,
+    /// then dropped) and says why.
+    #[gpui::test]
+    fn a_view_reload_without_the_edited_column_closes_the_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.dispatch(&mut vcx, "edit", None);
+        assert!(focused(&mut vcx), "fixture: the field owns focus");
+        let views = slim_views("\"qty\", \"price\"");
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, None, std::time::Duration::from_secs(60), cx)
+        });
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(editor_paint_col(&h, &vcx), None, "nothing paints");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert_eq!(h.footer(&vcx).as_deref(), Some(MOVED));
+        assert_eq!(h.cell(&vcx, 0, "qty"), "1", "nothing was committed");
     }
 
     /// The typeahead paints under its cell (through `deferred`, over the

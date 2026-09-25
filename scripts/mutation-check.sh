@@ -17738,6 +17738,35 @@ run_mutation "pricer bridge: an unchanged pricer config key skips the reload" \
   '                if last_key.borrow().as_ref() == Some(&key) {}' \
   geode-app a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone
 
+# An open editor follows its column KIND through a rebuilt plan: left at
+# its old index it paints over whatever column now sits there.
+run_mutation "pricer tile: an open editor follows its column through a reload" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(c) => editor.set_col(c),' \
+  '            Some(_) => {}' \
+  geode-pricer an_open_editor_follows_its_column_through_a_view_reload
+
+# An editor whose column left the plan closes; left open it stays focused
+# over a column that is not the one it opened on.
+run_mutation "pricer tile: an editor whose column left the plan closes" \
+  crates/geode-pricer/src/tile.rs \
+  '            None => self.drop_orphaned_editor(cx),' \
+  '            None => {}' \
+  geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
+
+# The window-less close still blurs before the field drops.
+run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        window.blur(cx);
+                    }
+                });
+            });' \
+  '                    let _ = (input, window);
+                });
+            });' \
+  geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

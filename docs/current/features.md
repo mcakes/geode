@@ -185,8 +185,11 @@ click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
 typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
 cell's value. Type and barrier type accept only their vocabulary, and `enter`
-commits the highlighted option. A commit whose line was deleted, or whose
-column moved under a view change, is refused with a footer message. A click in
+commits the highlighted option. An open editor follows its column through a
+view change (a config reload or `:view`) that moves it; when the column leaves
+the view, or the line leaves the grid, the editor closes (blurred first) with
+`the cell moved; edit refused` in the footer, and nothing is committed. A
+click in
 the grid, including a package chevron, cancels an open editor or entry field
 and never commits it, and acts on the row it was painted on: the entry
 placeholder is a row, so closing it moves the rows below up, but a click below
