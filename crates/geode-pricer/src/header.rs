@@ -17,6 +17,11 @@ pub(crate) struct HeaderInputs<'a> {
     /// The tile's own notice, already chosen by precedence (a transient
     /// notice, then a view fallback); `None` lets a missing pricer speak.
     pub notice: Option<SharedString>,
+    /// The save state's own slot (a refused save, or a failed load that
+    /// blocks saving). Separate from `notice` so a pricing notice can
+    /// neither overwrite nor clear it; painted first, left of `notice`,
+    /// and both may show.
+    pub save: Option<SharedString>,
     pub settings: &'a PricerSettings,
     pub clock: Clock,
 }
@@ -34,8 +39,8 @@ pub(crate) struct HeaderModel {
     pub time: Option<SharedString>,
     pub time_stale: Option<SharedString>,
     pub notice: Option<SharedString>,
-    /// Set in `render` from `last_priced` and `stale_after`.
-    pub stale: bool,
+    /// The save state (see `HeaderInputs::save`).
+    pub save: Option<SharedString>,
 }
 
 /// `+2` / `−1.5`: a shift is a delta, so its sign is the information; the
@@ -83,7 +88,7 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         time_stale: time.as_ref().map(|t| format!("{t} stale").into()),
         time: time.map(Into::into),
         notice,
-        stale: false,
+        save: i.save,
     }
 }
 
@@ -93,6 +98,7 @@ impl HeaderModel {
     pub(crate) fn texts(&self) -> Vec<String> {
         let mut out = vec![self.name.to_string(), self.view.to_string()];
         out.extend(self.shifts.iter().map(|s| s.to_string()));
+        out.extend(self.save.iter().map(|s| s.to_string()));
         out.extend(self.notice.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.push(self.pricer.to_string());
@@ -109,8 +115,12 @@ use gpui::prelude::*;
 use gpui::{FontWeight, IntoElement, div};
 use gpui_component::{Theme, h_flex};
 
+/// `stale`: whether the last priced time is older than `stale_after` —
+/// computed by the caller per frame and passed in, so rendering never
+/// writes the prepared model.
 pub(crate) fn render(
     h: &HeaderModel,
+    stale: bool,
     theme: &Theme,
     stack: Option<&StackHandle>,
     tile: TileId,
@@ -145,6 +155,14 @@ pub(crate) fn render(
                 .child(s.clone())
         }))
         .child(div().flex_1())
+        .when_some(h.save.clone(), |el, n| {
+            el.child(
+                div()
+                    .text_color(warn)
+                    .debug_selector(|| "pricer-save-notice".into())
+                    .child(n),
+            )
+        })
         .when_some(h.notice.clone(), |el, n| {
             el.child(
                 div()
@@ -156,12 +174,12 @@ pub(crate) fn render(
         .when_some(h.pricing.clone(), |el, p| el.child(p))
         .child(h.pricer.clone())
         .when_some(
-            if h.stale {
+            if stale {
                 h.time_stale.clone()
             } else {
                 h.time.clone()
             },
-            |el, t| el.child(div().when(h.stale, |el| el.text_color(warn)).child(t)),
+            |el, t| el.child(div().when(stale, |el| el.text_color(warn)).child(t)),
         )
 }
 
@@ -210,6 +228,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            save: None,
             settings: &settings(false),
             clock: Clock::utc(),
         });
@@ -230,6 +249,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            save: None,
             settings: &settings(false),
             clock: Clock::utc(),
         });
@@ -244,6 +264,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            save: None,
             settings: &settings(true),
             clock: Clock::utc(),
         });
@@ -254,6 +275,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("loading…".into()),
+            save: None,
             settings: &settings(true),
             clock: Clock::utc(),
         });

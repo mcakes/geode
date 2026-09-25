@@ -67,6 +67,12 @@ pub(crate) const REFUSED: &str =
 pub(crate) const SAVE_IDLE: Duration = Duration::from_secs(1);
 pub(crate) const NOT_SAVED: &str = "sheet not saved: the store refused it; the next edit retries";
 
+/// The save slot's standing notice after a failed load (see
+/// `PricerTile::save_blocked`).
+fn blocked_notice(name: &str, why: &str) -> SharedString {
+    format!("sheet '{name}' did not load ({why}); edits are not saved").into()
+}
+
 /// `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b` steps — `vimnav`'s fixed ±5
 /// and ±10, the market-data panel's own constants, times the count.
 pub(crate) const HALF_PAGE: usize = 5;
@@ -127,7 +133,22 @@ pub(crate) enum Editor {
         list: ChoiceList,
         /// An unmatched query commits as typed (planning decision 17).
         free: bool,
+        /// The trader moved the highlight (`up`/`down`, a row click) since
+        /// the query last changed. In a `free` list, `enter` takes the
+        /// highlighted option only when this is set or the query IS that
+        /// option (case-insensitively): ranking is a subsequence match, so
+        /// an untouched highlight is a guess — `HSI` would commit `HSCEI`.
+        moved: bool,
     },
+}
+
+/// What an `enter` in the cell editor means before the cell parses it.
+enum Choice {
+    Value(String),
+    /// Close with the cell unchanged (an untouched, empty free list).
+    Keep,
+    /// A closed vocabulary with nothing matching the query.
+    NoMatch,
 }
 
 impl Editor {
@@ -168,10 +189,25 @@ pub struct PricerTile {
     /// `loaded`, and what `serialize` writes meanwhile, so a session save
     /// mid-load never overwrites a good record.
     held_expanded: Option<Vec<LineId>>,
-    /// Transient header notice (a load failure, a refused request).
+    /// Transient header notice (an absent document, a refused request).
     pub(crate) notice: Option<SharedString>,
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
+    /// The save state's own header slot (spec §7.3): `NOT_SAVED` after a
+    /// refused save, or `blocked_notice` after a failed load. Pricing
+    /// notices never write it and `escape` does not clear it; only an
+    /// accepted save does.
+    save_notice: Option<SharedString>,
+    /// A load FAILED (undecodable rows, or `loaded(Err(..))`): the sheet
+    /// shown is the fallback, and saving it would publish it over the real
+    /// document as the latest generation. `save_now` publishes nothing for
+    /// the life of the tile. A genuinely absent document (`Missing`,
+    /// `Ok(None)`) does not set this: §7.4 opens it empty under its name.
+    save_blocked: bool,
+    /// A change armed a save that no accepted save has published yet.
+    /// Cleared only by an accepted save, so `on_release` flushes a refused
+    /// save as well as one still waiting on its idle timer.
+    dirty: bool,
     /// A user error for the footer (spec §8.3); cleared by the next verb.
     pub(crate) footer: Option<SharedString>,
     /// What the footer paints: `footer`, else the cursor row's failure.
@@ -259,6 +295,7 @@ impl PricerTile {
     ) -> Self {
         let record = restored.map(Record::from_table).unwrap_or_default();
         let mut notices: Vec<String> = Vec::new();
+        let mut blocked: Option<SharedString> = None;
         let name = match record.sheet.as_deref() {
             Some(n) if !shared.open.borrow().contains(n) => n.to_string(),
             Some(n) => {
@@ -278,7 +315,7 @@ impl PricerTile {
                     (s, false)
                 }
                 Err(e) => {
-                    notices.push(format!("sheet '{name}' did not load: {e}"));
+                    blocked = Some(blocked_notice(&name, &e));
                     (fallback(&name, &record), false)
                 }
             },
@@ -321,9 +358,17 @@ impl PricerTile {
             this.on_table_event(event, window, cx)
         })
         .detach();
-        cx.subscribe(&table, |this, _, event: &ChevronClicked, cx| {
-            this.toggle_grid_row(event.0, cx)
-        })
+        // A chevron click is a click: it cancels an open entry or editor
+        // first, never commits it (global constraints), then toggles.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &ChevronClicked, window, cx| {
+                this.close_entry(window, cx);
+                this.close_editor(window, cx);
+                this.toggle_grid_row(event.0, cx)
+            },
+        )
         .detach();
         // Planning decision 6: arrive at every flip barrier at once.
         cx.observe(&frame, |this, frame, cx| {
@@ -358,8 +403,10 @@ impl PricerTile {
         // 8 and 12 add the cancel and the final save here.
         cx.on_release(|this: &mut PricerTile, _cx| {
             // Spec §7.3: the sheet is not lost until the tile is — a save
-            // still waiting on its idle timer runs now.
-            if this.save_task.take().is_some() {
+            // still waiting on its idle timer, or one the store refused,
+            // runs now (`save_now` itself refuses a blocked sheet).
+            this.save_task = None;
+            if this.dirty {
                 this.save_now();
             }
             this.data.cancel(QueryKey(this.id.0));
@@ -388,6 +435,9 @@ impl PricerTile {
             held_expanded,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
             view_notice: None,
+            save_blocked: blocked.is_some(),
+            save_notice: blocked,
+            dirty: false,
             footer: None,
             footer_text: None,
             header: HeaderModel::default(),
@@ -492,7 +542,12 @@ impl PricerTile {
     /// lengthening query walks forward and a shortened one walks back
     /// (vim's incsearch); `escape` returns to the origin.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
+        // `/` is a shell-owned binding, so `dispatch`'s own "any other
+        // verb closes the menu and the fields" guard never sees it
+        // (the market-data rule).
+        self.close_menu(cx);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);
         match event {
             FindEvent::Changed(query) => {
                 let origin = match &self.find {
@@ -754,8 +809,17 @@ impl PricerTile {
                             // The borrow of `list` ends before `sync_editor`.
                             let changed = match &mut this.editor {
                                 Some(Editor::Choice {
-                                    list, input: own, ..
-                                }) if &*own == input => list.set_query(&query),
+                                    list,
+                                    input: own,
+                                    moved,
+                                    ..
+                                }) if &*own == input => {
+                                    let changed = list.set_query(&query);
+                                    if changed {
+                                        *moved = false;
+                                    }
+                                    changed
+                                }
                                 _ => false,
                             };
                             if changed {
@@ -774,6 +838,7 @@ impl PricerTile {
                     input,
                     list,
                     free,
+                    moved: false,
                 }
             }
         };
@@ -796,17 +861,43 @@ impl PricerTile {
             let text = editor.input().read(cx).value().to_string();
             let target = editor.target();
             let value = match editor {
-                Editor::Text { .. } => Some(text),
-                Editor::Choice { list, free, .. } => {
+                Editor::Text { .. } => Choice::Value(text),
+                Editor::Choice {
+                    list, free, moved, ..
+                } => {
                     list.set_query(&text);
-                    match list.pick() {
-                        Some(i) => Some(list.options()[i].clone()),
-                        None if *free && !text.trim().is_empty() => Some(text),
-                        None => None,
+                    let highlighted = list.pick().map(|i| list.options()[i].clone());
+                    let typed = text.trim();
+                    if !*free {
+                        highlighted.map_or(Choice::NoMatch, Choice::Value)
+                    } else {
+                        // The highlight is only a subsequence guess until
+                        // the trader moves it or types it out in full.
+                        let take_highlight = *moved
+                            || highlighted
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));
+                        match highlighted {
+                            Some(o) if take_highlight => Choice::Value(o),
+                            _ if typed.is_empty() => Choice::Keep,
+                            _ => Choice::Value(typed.to_ascii_uppercase()),
+                        }
                     }
                 }
             };
             (value, target)
+        };
+        let value = match value {
+            Choice::Value(v) => Some(v),
+            // An untouched free list with nothing typed: the cell keeps
+            // its value; no edit, no undo entry, no save.
+            Choice::Keep => {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+                return;
+            }
+            Choice::NoMatch => None,
         };
         let Some(value) = value else {
             self.footer = Some("no option matches".into());
@@ -847,7 +938,11 @@ impl PricerTile {
     /// A click on a typeahead row: highlight it, then commit.
     pub(crate) fn choice_pick(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let picked = match &mut self.editor {
-            Some(Editor::Choice { list, input, .. }) => list.set_highlighted(row).then(|| {
+            Some(Editor::Choice {
+                list, input, moved, ..
+            }) => list.set_highlighted(row).then(|| {
+                // A row click is a deliberate choice, like `up`/`down`.
+                *moved = true;
                 (
                     input.clone(),
                     list.highlighted_text().unwrap_or_default().to_string(),
@@ -892,8 +987,9 @@ impl PricerTile {
                 }
             }
             // `up` moves the highlight up the list: a negative step.
-            Some(Editor::Choice { list, .. }) => {
+            Some(Editor::Choice { list, moved, .. }) => {
                 list.nav(NavCommand::Move(-steps));
+                *moved = true;
                 None
             }
             None => None,
@@ -950,6 +1046,7 @@ impl PricerTile {
         if self.loading {
             return;
         }
+        self.dirty = true;
         self.save_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SAVE_IDLE).await;
             let _ = this.update(cx, |t, cx| {
@@ -963,21 +1060,21 @@ impl PricerTile {
 
     /// The whole sheet, once. An empty sheet publishes nothing (the last
     /// non-empty generation stays as history, spec §7.2); a refusal paints
-    /// the header notice and the next burst retries.
+    /// the save slot and stays `dirty`, so the next burst or the close
+    /// retries. A sheet whose load failed publishes nothing at all: the
+    /// fallback would become the document's latest generation.
     pub(crate) fn save_now(&mut self) {
+        if self.save_blocked {
+            return;
+        }
         let Some(rows) = to_rows(&self.sheet) else {
             return;
         };
         if self.shared.store.save(&self.sheet.name, rows) {
-            if self
-                .notice
-                .as_ref()
-                .is_some_and(|n| n.as_ref() == NOT_SAVED)
-            {
-                self.notice = None;
-            }
+            self.dirty = false;
+            self.save_notice = None;
         } else {
-            self.notice = Some(NOT_SAVED.into());
+            self.save_notice = Some(NOT_SAVED.into());
         }
     }
 
@@ -1153,12 +1250,12 @@ impl PricerTile {
                     // over it. Nothing to undo into is the safe state.
                     self.undo.clear();
                 }
-                Err(e) => self.notice = Some(format!("sheet '{name}' did not load: {e}").into()),
+                Err(e) => self.block_saves(&name, &e),
             },
             Ok(None) => {
                 self.notice = Some(format!("sheet '{name}' was not found; opened empty").into())
             }
-            Err(e) => self.notice = Some(format!("sheet '{name}' did not load: {e}").into()),
+            Err(e) => self.block_saves(&name, &e),
         }
         if let Some(held) = self.held_expanded.take() {
             self.expansion = Expansion::from_ids(held);
@@ -1167,6 +1264,13 @@ impl PricerTile {
         self.resolve_plan();
         self.rebuild(cx);
         self.submit(cx);
+    }
+
+    /// A FAILED load (not an absent document): the fallback must never be
+    /// published over the real document (see `save_blocked`).
+    fn block_saves(&mut self, name: &str, why: &str) {
+        self.save_blocked = true;
+        self.save_notice = Some(blocked_notice(name, why));
     }
 
     /// A reload reached this tile (planning decision 20).
@@ -1643,6 +1747,7 @@ impl PricerTile {
                 if let Err(why) = self.set_view(&name, cx) {
                     self.footer = Some(why.into());
                 }
+                self.rebuild_chrome();
                 cx.notify();
             }
         }
@@ -1737,14 +1842,23 @@ impl PricerTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let _ = window;
+        // `:` is a shell-owned binding, so `dispatch`'s own "any other
+        // verb closes the menu and the fields" guard never sees it (the
+        // market-data rule).
+        self.close_menu(cx);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);
         match commands::parse(line)? {
             Command::View(name) => self.set_view(&name, cx),
             Command::Price => {
                 self.reprice_all(cx);
                 Ok(())
             }
+            // `:view` (in `set_view`) and `:refresh` change the sheet too:
+            // a pending load would replace them, so they refuse like the
+            // edits below.
             Command::Refresh(r) => {
+                self.refuse_while_loading()?;
                 self.sheet.refresh = r;
                 self.restart_timer(cx);
                 self.rebuild_chrome();
@@ -1793,6 +1907,7 @@ impl PricerTile {
     }
 
     fn set_view(&mut self, name: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        self.refuse_while_loading()?;
         {
             let views = self.shared.views.borrow();
             if views.get(name).is_none() {
@@ -1880,6 +1995,7 @@ impl PricerTile {
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
+            save: self.save_notice.clone(),
             settings: &settings,
             clock: self.clock,
         });
@@ -1998,7 +2114,7 @@ impl gpui::Render for PricerTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Staleness is a compare per frame, never a format (spec §9.4).
         let stale_after = self.shared.settings.borrow().stale_after;
-        self.header.stale = self.header.last_priced.is_some_and(|at| {
+        let stale = self.header.last_priced.is_some_and(|at| {
             chrono::Utc::now()
                 .signed_duration_since(at)
                 .to_std()
@@ -2007,7 +2123,7 @@ impl gpui::Render for PricerTile {
         });
         let theme = cx.theme();
         let tile = cx.entity();
-        let header = header::render(&self.header, theme, self.stack.as_ref(), self.id);
+        let header = header::render(&self.header, stale, theme, self.stack.as_ref(), self.id);
         // The menu is anchored off a zero-size, absolutely positioned
         // sibling at the header's own right edge (the market-data
         // arrangement) — `relative` on the wrapper is what makes that
@@ -2293,6 +2409,11 @@ pub(crate) mod tests {
         pub fn notice(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile
                 .read_with(vcx, |t, _| t.header.notice.as_ref().map(|n| n.to_string()))
+        }
+        /// The save state's own header slot.
+        pub fn save_notice(&self, vcx: &VisualTestContext) -> Option<String> {
+            self.tile
+                .read_with(vcx, |t, _| t.header.save.as_ref().map(|n| n.to_string()))
         }
         pub fn footer(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile
@@ -3722,6 +3843,20 @@ pub(crate) mod tests {
         assert_eq!(h.command(&mut vcx, "spot spx 5100"), loading);
         assert_eq!(h.command(&mut vcx, "group"), loading);
         assert_eq!(h.command(&mut vcx, "ungroup"), loading);
+        // `:view` and `:refresh` change the sheet as well: `loaded` would
+        // replace what they set, so they refuse too (whole-branch review).
+        assert_eq!(h.command(&mut vcx, "view barrier"), loading);
+        assert_eq!(h.command(&mut vcx, "refresh 10s"), loading);
+        // The menu's view rows: Price all, Group, Ungroup, Undo, Redo,
+        // Delete row, then views — the second view is row 7.
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", Some(7));
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("the sheet is still loading")
+        );
+        assert!(!h.columns(&vcx).contains(&"barrier".to_string()));
         // Seed the undo stack directly — every production edit path
         // already refuses while loading, this one included once fixed —
         // so `loaded` swapping the sheet has something to lose if it did
@@ -3847,11 +3982,11 @@ pub(crate) mod tests {
         h.store.set_refusing(true);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
         settle(&mut vcx, SAVE_IDLE);
-        assert_eq!(h.notice(&vcx).as_deref(), Some(NOT_SAVED));
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
         h.store.set_refusing(false);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 4 });
         settle(&mut vcx, SAVE_IDLE);
-        assert_eq!(h.notice(&vcx), None);
+        assert_eq!(h.save_notice(&vcx), None);
         assert_eq!(stored(&h).qty(0), 4);
     }
 
@@ -3905,5 +4040,227 @@ pub(crate) mod tests {
             title, "pricer · book",
             "the name was given back, so it opens under it"
         );
+    }
+
+    // ---- whole-branch review fixes ----
+
+    /// Three underlyings the sheet already holds: HSCEI, NKY, SPX.
+    const UNDERLYINGS: [&str; 3] = ["SPX Z26 5000 C", "HSCEI Z26 9000 C", "NKY Z26 30000 C"];
+
+    fn open_underlying(h: &Harness, vcx: &mut VisualTestContext) {
+        h.dispatch(vcx, "first_col", None);
+        h.dispatch(vcx, "right", None); // underlying
+        h.dispatch(vcx, "edit", None);
+        assert!(
+            h.tile
+                .read_with(vcx, |t, _| matches!(t.editor, Some(Editor::Choice { .. })))
+        );
+    }
+
+    /// Review finding: ranking is a subsequence match, so `HSI` ranks
+    /// `HSCEI` first. An untouched highlight is a guess: `enter` commits
+    /// the typed text unless the query IS the option or the trader moved
+    /// the highlight.
+    #[gpui::test]
+    fn a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &UNDERLYINGS);
+        open_underlying(&h, &mut vcx);
+        vcx.simulate_input("HSI");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.cell(&vcx, 0, "underlying"),
+            "HSI",
+            "a subsequence match is not the trader's answer"
+        );
+        open_underlying(&h, &mut vcx);
+        vcx.simulate_input("hscei");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.cell(&vcx, 0, "underlying"),
+            "HSCEI",
+            "the option itself, typed in any case"
+        );
+        // Row 0 is HSCEI now; the options are HSCEI and NKY. `K` matches
+        // only NKY, and is not it: only the moved highlight commits NKY.
+        open_underlying(&h, &mut vcx);
+        vcx.simulate_input("K");
+        h.draw(&mut vcx);
+        h.dispatch(&mut vcx, "insert_down", None);
+        let highlighted = h.tile.read_with(&vcx, |t, _| match &t.editor {
+            Some(Editor::Choice { list, .. }) => list.highlighted_text().map(str::to_string),
+            _ => None,
+        });
+        assert_eq!(highlighted.as_deref(), Some("NKY"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(
+            h.cell(&vcx, 0, "underlying"),
+            "NKY",
+            "a moved highlight is a choice"
+        );
+        // An untouched, empty query keeps the cell's value.
+        open_underlying(&h, &mut vcx);
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, "underlying"), "NKY");
+        assert_eq!(h.footer(&vcx), None);
+    }
+
+    /// Review finding: after a FAILED load, the next edit's save would
+    /// publish the near-empty fallback over the real document.
+    #[gpui::test]
+    fn a_failed_load_blocks_every_save_and_says_so_past_escape(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        let mut broken = store.get("book").unwrap();
+        broken.axes.clear();
+        assert!(store.save("book", broken.clone()));
+        let base = store.save_count();
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        let blocked = h.save_notice(&vcx).expect("a failed load says so");
+        assert!(
+            blocked.starts_with("sheet 'book' did not load (")
+                && blocked.ends_with("); edits are not saved"),
+            "{blocked}"
+        );
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.sheet_len(&vcx), 1, "the edit landed on the fallback");
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base, "nothing was published");
+        assert_eq!(h.store.get("book"), Some(broken));
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(
+            h.save_notice(&vcx),
+            Some(blocked),
+            "escape does not clear it"
+        );
+    }
+
+    /// The same block through a pending load answered with an error (Part
+    /// 4's store), and none for a genuinely absent document.
+    #[gpui::test]
+    fn a_pending_load_answered_with_an_error_blocks_saves_and_an_absent_one_does_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, record) = seeded(&BOOK);
+        let good = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Err("boom".into()), cx));
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some("sheet 'book' did not load (boom); edits are not saved")
+        );
+        let base = h.store.save_count();
+        h.command(&mut vcx, "refresh off").unwrap();
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base);
+        assert_eq!(h.store.get("book"), Some(good));
+
+        let (h2, mut vcx2) = {
+            let store = MemorySheetStore::default();
+            store.set_pending(true);
+            let mut record = toml::Table::new();
+            record.insert("sheet".into(), "gone".into());
+            open_full(cx, Some(record), store, PricerSettings::default())
+        };
+        h2.tile.update(&mut vcx2, |t, cx| t.loaded(Ok(None), cx));
+        assert_eq!(h2.save_notice(&vcx2), None);
+        h2.command(&mut vcx2, "refresh off").unwrap();
+        h2.dispatch(&mut vcx2, "add_below", None);
+        typed(&h2, &mut vcx2, "SPX Z26 5000 C");
+        h2.dispatch(&mut vcx2, "commit", None);
+        settle(&mut vcx2, SAVE_IDLE);
+        assert!(h2.store.get("gone").is_some(), "an absent document saves");
+    }
+
+    /// Review finding: after a refused save the idle task has fired, so a
+    /// close that flushed only a pending task dropped the unsaved sheet.
+    #[gpui::test]
+    fn closing_after_a_refused_save_flushes_the_unsaved_sheet(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.store.set_refusing(true);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
+        h.store.set_refusing(false);
+        let store = h.store.clone();
+        drop(h);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        drop(vcx);
+        let saved = crate::core::from_rows("book", &store.get("book").unwrap()).unwrap();
+        assert_eq!(saved.qty(0), 7, "the dirty sheet was saved on close");
+    }
+
+    /// Review finding: the save state had shared the pricing notice's
+    /// slot, so `REFUSED` overwrote it and a later good submit cleared it.
+    #[gpui::test]
+    fn a_refused_saves_notice_outlives_pricing_notices_and_escape(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.store.set_refusing(true);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
+        answer_all(&h, &mut vcx, 12.5);
+        h.dispatch(&mut vcx, "price", None);
+        let batches = h.prices();
+        assert!(!batches.is_empty(), "a successful submit");
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
+        for b in batches {
+            h.answer(&mut vcx, &b, 12.5);
+        }
+        h.close_channel();
+        h.dispatch(&mut vcx, "price", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some(NOT_SAVED),
+            "both show: the pricing notice never overwrites the save state"
+        );
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
+    }
+
+    /// Review finding: `:` and `/` are shell-owned and bypass `dispatch`,
+    /// so they must close the menu and the fields themselves.
+    #[gpui::test]
+    fn colon_and_find_close_the_menu_and_an_open_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        h.command(&mut vcx, "price").unwrap();
+        assert_eq!(h.mode(&mut vcx), "normal", "`:` closed the menu");
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        assert_eq!(h.mode(&mut vcx), "insert");
+        vcx.update(|window, cx| h.content.find(FindEvent::Changed("SPX".into()), window, cx));
+        assert_eq!(h.mode(&mut vcx), "normal", "`/` closed the editor");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
+    }
+
+    /// Review finding: a chevron click is a click — it cancels an open
+    /// editor before it toggles.
+    #[gpui::test]
+    fn a_chevron_click_cancels_an_open_editor(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        let at = centre_of(&mut vcx, "pricer-chevron-1");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
+        assert_eq!(h.tree(&vcx).len(), 5, "and the package toggled");
     }
 }

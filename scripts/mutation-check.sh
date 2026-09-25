@@ -17352,16 +17352,16 @@ run_mutation "pricer tile: a commit ignores that its line went away" \
 
 run_mutation "pricer tile: a refused save is silent" \
   crates/geode-pricer/src/tile.rs \
-  '            self.notice = Some(NOT_SAVED.into());' \
+  '            self.save_notice = Some(NOT_SAVED.into());' \
   '            let _ = NOT_SAVED;' \
   geode-pricer a_refused_save_notices_and_the_next_burst_retries
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            if this.save_task.take().is_some() {
+  '            if this.dirty {
                 this.save_now();
             }' \
-  '            let _ = this.save_task.take();' \
+  '            let _ = this.dirty;' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
 # A pending load (Part 4's production restore) holds the session record's
@@ -17456,6 +17456,41 @@ run_mutation "pricer app: a config reload never reaches the pricer" \
   '            pricer.reload(views, refresh, stale_after, cx);' \
   '            let _ = (views, refresh, stale_after);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
+
+# The free underlying typeahead: ranking is a subsequence match, so an
+# untouched highlight is a guess (`HSI` ranks `HSCEI`); `enter` takes it
+# only when the query equals it or the trader moved it.
+run_mutation "pricer tile: the free typeahead commits an unmoved subsequence guess" \
+  crates/geode-pricer/src/tile.rs \
+  '                        let take_highlight = *moved
+                            || highlighted
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
+  '                        let take_highlight = {
+                            let _ = moved;
+                            true
+                        };' \
+  geode-pricer a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved
+
+# A failed load shows a fallback; publishing it would make it the real
+# document's latest generation.
+run_mutation "pricer tile: a failed load's fallback is saved over the document" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_blocked {
+            return;
+        }
+        let Some(rows) = to_rows(&self.sheet) else {' \
+  '        let Some(rows) = to_rows(&self.sheet) else {' \
+  geode-pricer a_failed_load_blocks_every_save_and_says_so_past_escape
+
+# After a refused save the idle task has already fired: a close that
+# flushes only a pending task loses the unsaved sheet.
+run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
+  crates/geode-pricer/src/tile.rs \
+  '            this.save_task = None;
+            if this.dirty {' \
+  '            if this.save_task.take().is_some() {' \
+  geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -1152,8 +1152,8 @@ Execution deviations and rulings, found in review:
   market-data's. A click inside an open field's cell cancels, as
   market-data. A click outside the grid leaves a text editor open
   (market-data parity; a display check). The underlying typeahead
-  commits the highlighted option whenever the query ranks one; free text
-  only when nothing ranks.
+  first committed the highlighted option whenever the query ranked one;
+  the whole-branch review reversed that (below).
 - **Load refusals, put, menu (Task 11).** `:shift`/`:spot`/`:group`/
   `:ungroup` refuse while a load is pending, and `loaded` clears the undo
   stack (its inverses were recorded against the fallback sheet). A line
@@ -1162,11 +1162,42 @@ Execution deviations and rulings, found in review:
   `shell::listrow` (tokens, hover).
 - **Early harness entries (Task 4).** Seven entries for the undo stack
   and the `:` vocabulary landed with the core modules rather than here.
+- **Whole-branch review (2026-09-24).**
+  - *Typeahead ruling reversed.* Ranking is a case-insensitive
+    subsequence match, so `HSI` ranked `HSCEI` first and `enter`
+    committed a different real underlying. In the free underlying list
+    `enter` now takes the highlighted option only when the query equals
+    it case-insensitively or the highlight was moved (`up`/`down`, a
+    row click) since the query last changed (`Editor::Choice::moved`);
+    otherwise it commits the typed text upper-cased, and an untouched
+    empty query keeps the cell. Closed vocabularies are unchanged.
+  - *Failed loads block saves.* A decode error or `loaded(Err(..))`
+    sets `save_blocked`: `save_now` publishes nothing for the life of
+    the tile, so the fallback never becomes the document's latest
+    generation, and the save slot reads "sheet 'X' did not load (…);
+    edits are not saved". `Missing`/`Ok(None)` is not a failure (§7.4).
+  - *Unsaved sheets flush on close; the save state has its own slot.*
+    `dirty` is set by every armed save and cleared only by an accepted
+    one; `on_release` saves whenever it is set, so a refused save is no
+    longer lost on close. `NOT_SAVED` and the blocked notice live in a
+    header slot of their own, painted before the pricing notice (both
+    may show): `REFUSED` cannot overwrite it, a good submit cannot clear
+    it, and `escape` leaves it.
+  - *Minors fixed.* `:` and `/` close the menu, the entry and the editor
+    first (they bypass `dispatch`); a chevron click cancels an open
+    field before it toggles; `render` computes the stale mark locally
+    and passes it to `header::render` rather than writing the model;
+    the `pricer::escape` palette title is "Clear find and notice";
+    `:view`, `:refresh` and the menu's view rows refuse while loading;
+    a barrier nudge no longer keeps a `%` that `commit` refuses (only a
+    strike's `%` is kept).
 - **Staleness clock.** The header's stale mark compares UTC instants
   (`Utc::now`), not `AppClock`, which is a display zone; an idle tile
   with the refresh timer off shows `stale` on its next notify.
 
-Thirty harness entries cover Part 3: seven from Task 4 (`pricer undo:`
+Thirty-three harness entries cover Part 3 (three added by the
+whole-branch review: the typeahead guard, `save_blocked`, the dirty
+flush on close); the first thirty: seven from Task 4 (`pricer undo:`
 ×3, `pricer commands:` ×4) and twenty-three here (`pricer tile:` ×17,
 `pricer paint:` ×2, `pricer core:`, `pricer entry:`, `pricer cell:`,
 `pricer app:`), every one caught by its named test. The paint entries
@@ -1190,9 +1221,8 @@ Part 4 obligations:
 - Catalogue underlyings for the typeahead, if a source for them exists
   by then.
 
-Deferred minors, none blocking: the `REFUSED` and `NOT_SAVED` notices
-share one slot and overwrite each other, and `escape` clears either (or
-`loading…`) mid-flight; the 1 s retry is unbounded with no backoff; the
+Deferred minors, none blocking: `escape` clears `loading…` (or
+`REFUSED`) mid-flight; the 1 s retry is unbounded with no backoff; the
 config-counter observer re-reads and re-warns `[pricing] refresh` on
 every reload and restarts the timer even when the interval is unchanged;
 `dd`/`g u` then `u` restores a package collapsed; a config-reload view

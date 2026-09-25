@@ -226,16 +226,19 @@ pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result
 }
 
 /// `up`/`down` in an open numeric editor (spec §8.4): `steps` units of the
-/// TEXT's own precision (planning decision 2), a trailing `%` kept, an
-/// empty shift nudged from `0`.
+/// TEXT's own precision (planning decision 2), a strike's trailing `%`
+/// kept, an empty shift nudged from `0`. A barrier level is absolute
+/// (`commit` refuses a `%` on one), so a barrier's `%` is not a number to
+/// nudge either — the two answer the same text the same way.
 pub fn nudge(kind: ColumnKind, text: &str, steps: i64) -> Result<String, String> {
     let t = text.trim();
     match kind {
         ColumnKind::Qty => nudge_text(t, ColumnType::I64, None, steps),
-        ColumnKind::Strike | ColumnKind::Barrier => match t.strip_suffix('%') {
+        ColumnKind::Strike => match t.strip_suffix('%') {
             Some(n) => nudge_text(n, ColumnType::F64, None, steps).map(|s| format!("{s}%")),
             None => nudge_text(t, ColumnType::F64, None, steps),
         },
+        ColumnKind::Barrier => nudge_text(t, ColumnType::F64, None, steps),
         ColumnKind::SpotShift | ColumnKind::VolShift => nudge_text(
             if t.is_empty() { "0" } else { t },
             ColumnType::F64,
@@ -463,5 +466,16 @@ mod tests {
             "empty nudges from 0"
         );
         assert!(nudge(ColumnKind::Expiry, "Z26", 1).is_err());
+    }
+
+    /// Review finding: a barrier level is absolute. `commit` refuses
+    /// `4200%`, so `nudge` must not step it into another `%` text that
+    /// only a later commit would refuse.
+    #[test]
+    fn a_barrier_nudges_as_a_plain_level_and_refuses_a_percent_like_commit() {
+        assert_eq!(nudge(ColumnKind::Barrier, "4200", 1), Ok("4201".into()));
+        assert!(nudge(ColumnKind::Barrier, "95%", 1).is_err());
+        let b = barrier_line();
+        assert!(commit(&b, 0, ColumnKind::Barrier, "95%").is_err());
     }
 }

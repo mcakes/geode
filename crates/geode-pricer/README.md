@@ -62,7 +62,14 @@ cargo bench -p geode-pricer
   latest submission is dropped whole.
 - The grid model is built on change and installed through `install_model`
   only, never in render.
-- Both text inputs blur before they drop, and a click in the grid cancels an
-  open editor without committing it.
+- Both text inputs blur before they drop, and a click in the grid (a chevron
+  included) cancels an open editor without committing it. `:` and `/` close
+  the menu and any open field first.
 - The tile arrives at flip barriers itself; it submits no view query.
-- An empty sheet is never saved.
+- An empty sheet is never saved. A sheet whose load failed is never saved
+  (`save_blocked`); a change not yet accepted by the store (`dirty`) is saved
+  when the tile closes. The save state has its own header slot, which pricing
+  notices and `escape` never touch.
+- In the free underlying typeahead, `enter` takes the highlighted option only
+  when the query equals it case-insensitively or the highlight was moved;
+  otherwise it commits the typed text.

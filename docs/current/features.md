@@ -177,13 +177,19 @@ binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
 the same reason.
 
 The underlying, type, and barrier-type cells edit through a typeahead. The
-underlying list offers the sheet's own underlyings. When the query ranks an
-option, `enter` commits the highlighted option, so typing `SX` with `SX5E` on
-the sheet commits `SX5E`; only a query that ranks nothing commits as typed
-(upper-cased). Type and barrier type accept only their vocabulary. A commit
-whose line was deleted, or whose column moved under a view change, is refused
-with a footer message. A click in the grid cancels an open editor and never
-commits it. A click outside the grid leaves a text editor open until the next
+underlying list offers the sheet's own underlyings and also takes free text.
+Ranking is a case-insensitive subsequence match, so the top-ranked option is
+only a guess: `enter` commits the highlighted underlying only when the query
+equals it (in any case) or the highlight was moved with `up`/`down` or a row
+click since the query last changed. Otherwise the typed text is committed
+(upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
+typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
+cell's value. Type and barrier type accept only their vocabulary, and `enter`
+commits the highlighted option. A commit whose line was deleted, or whose
+column moved under a view change, is refused with a footer message. A click in
+the grid, including a package chevron, cancels an open editor or entry field
+and never commits it. A `:` command or a `/` search closes the menu and any
+open field first. A click outside the grid leaves a text editor open until the next
 grid click or verb, as in the market-data panel; the typeahead popup closes on
 an outside click. Both the entry field and the cell editor blur before they
 drop, and no chord is bound while one is open, so `ctrl+k` still opens the
@@ -192,8 +198,9 @@ palette.
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
 `group [n]`, and `ungroup`. `e`, `name`, `new`, and `rm` parse and refuse as
-not built yet. `shift`, `spot`, `group`, and `ungroup` are refused while the
-sheet is still loading.
+not built yet. `view`, `refresh`, `shift`, `spot`, `group`, and `ungroup` (and
+the menu's view rows) are refused while the sheet is still loading, because the
+loaded document would replace what they set.
 
 ### Repricing
 
@@ -213,9 +220,20 @@ itself because it submits no view query, so a scope change never waits on it.
 
 ### Persistence
 
-A sheet is saved as a whole document one idle second after its last change,
-and a pending save runs when the tile closes. A refused save paints a header
-notice and the next change retries. An empty sheet publishes nothing. The
+A sheet is saved as a whole document one idle second after its last change.
+Closing the tile saves any change not yet saved, whether it was still waiting
+on the idle timer or was refused by the store. A refused save paints a notice
+in the header's own save slot, separate from pricing notices: a refused pricing
+request cannot overwrite it, a later successful request cannot clear it, and
+`escape` does not clear it. Only an accepted save does. The next change and
+the close both retry. An empty sheet publishes nothing.
+
+If a sheet's document fails to load (its rows do not decode, or the store
+answers with an error), the tile shows an empty fallback and the save slot
+reads `sheet 'NAME' did not load (…); edits are not saved`. Nothing is
+published from that tile, so the fallback cannot become the document's latest
+generation. A name with no document is not a failure: it opens empty and saves
+normally. The
 session record keeps the sheet name, view, refresh setting, cursor line, and
 open packages. A new tile takes the next free `untitled-N` name, and names
 open in another tile are skipped.
