@@ -1382,7 +1382,11 @@ impl PricerTile {
             "find_prev" => self.repeat_find(FindDirection::Backward, n),
             "escape" => {
                 self.find = None;
-                self.notice = None;
+                // "loading…" is the only sign a load is pending; `loaded`
+                // clears it when the rows (or the refusal) arrive.
+                if !self.loading {
+                    self.notice = None;
+                }
             }
             "price" => {
                 self.reprice_all(cx);
@@ -4307,6 +4311,24 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
         assert_eq!(h.tree(&vcx).len(), 5, "and the package toggled");
+    }
+
+    // ---- notices ----
+
+    /// "loading…" is the only sign a load is in progress: `escape` may
+    /// clear find, never it.
+    #[gpui::test]
+    fn escape_keeps_the_loading_notice_until_the_rows_arrive(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
+        assert_eq!(h.notice(&vcx), None);
     }
 
     // ---- clicks while the entry field is open ----
