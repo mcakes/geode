@@ -38,3 +38,10 @@ cargo bench -p geode-documents     # document parse and write
 - A kind produces `DocumentRows` and writes them back byte for byte
   through the same trait, which is what lets the demo bus in `geode-app`
   exercise the real subscribed-source path with no broker.
+- `mint_ids` is the one door that assigns a dividend its `dividend_id`; a
+  minted id is stable only while its ex date and its ordinal among that
+  date's rows are unchanged, and never begins `new-` so it cannot collide
+  with a draft's own inserted-row labels. A pure upstream reorder of two
+  same-day rows, with the group's size unchanged, swaps their ids
+  undetectably — `DividendKind::write` never emits an id at all, so this is
+  purely a parse-time identity, not a wire contract.

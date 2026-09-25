@@ -61,6 +61,24 @@ column labels, keeping stable intent across reordered documents. The module
 supports numeric, date, text, and closed-choice cells, row insertion/deletion,
 and kind-specific actions.
 
+A dividend row's label is Geode's own minted id (the ex date, or
+`<date>#n` for the `n`th row sharing that date), not a wire id — same-date
+rows are identified by their ordinal among that date's group. Rebase
+therefore refuses to carry any cell edit or deleted mark whose label
+belongs to a same-date group whose row count changed between the draft's
+base and the newer document, reporting it through the same dropped-edit
+notice as any other unresolved label, with the reason `row (same-day rows
+changed: <was> → <now>)`: a changed count means the ordinals shifted, and
+the label might now resolve onto a different dividend. Group sizes are
+captured from the painted model whenever it is the draft's own base
+(before a rebase, before an update-policy rebase, and before the session
+is written); a draft restored from a session written before this guard
+existed applies none. **Known limitation:** a pure reorder of two
+same-day dividends upstream, with the group's size unchanged, swaps their
+minted ids undetectably, so a rebased edit can land on the other row of
+the pair — closing this gap needs an upstream row key, which the desk's
+XSD may supply.
+
 `:upload [target]` (also the action list's `Upload` row) sends the draft to
 an egress target that accepts the panel's document. It is refused, naming
 why, for a clean, `Behind`, already-sent or incomplete draft, and for a

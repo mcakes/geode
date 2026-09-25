@@ -99,3 +99,10 @@ often tripped:
   CSV metadata errors are currently skipped, so an empty poll does not prove
   path accessibility. Adapter queue admission likewise does not acknowledge
   storage publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
+- Every admitted upload answers exactly one `DataEvent::Upload`, from the
+  service thread for a refusal decided there or from the target's own worker
+  for a transport result — never both, never neither. `Adapter::egress()`
+  returns a fresh handle on every call, so a target's worker and `resolve`'s
+  own availability probe never share one instance. Egress shutdown joins each
+  worker after its queued jobs finish, so it can wait on a slow or stuck
+  transport; run it off the UI thread. See [egress and uploads](../../docs/current/data-path.md#egress-and-uploads).

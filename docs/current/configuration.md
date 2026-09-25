@@ -48,6 +48,7 @@ The main configuration documents have distinct owners:
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, and local publication |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
+| `egress.toml` | Upload targets: adapter and a per-document address template |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
@@ -159,6 +160,37 @@ Source and dataset edits require restart to rebuild runtime workers. See
 and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
 for runtime readiness, delivery, and failure behavior.
 
+## Egress configuration
+
+`egress.toml` has one top-level table per upload target, such as
+`[sophis]`. Each target names an `adapter` and a `documents` table mapping a
+document dataset name to an address template:
+
+```toml
+[sophis]
+adapter = "demo_bus"
+[sophis.documents]
+cvi_params = "marketdata/cvi/{key}"
+dividend_schedule = "marketdata/dividend/{key}"
+```
+
+`{key}` is replaced by the document key's parts joined with `/`; an address
+with no `{key}` is one fixed address for every key of that document. A
+missing `adapter` or `documents` field, a `documents` value that is missing,
+not a table, or empty, and a `documents` entry naming no document dataset or
+whose address is not a string, each drop that one target at the typed-reader
+stage with a diagnostic addressed to `egress.<name>[.<field>]`. Resolving the
+survivors against the adapter registry separately drops a target whose
+adapter name is not registered, or whose registered adapter has no egress
+side, with a diagnostic at `egress.<name>.adapter`; other targets still load
+either way. See [egress and uploads](data-path.md#egress-and-uploads) for the
+runtime worker, queueing, and failure semantics, and
+[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs) for parsing.
+
+Like `sources.toml`, `egress.toml` is restart-required: nothing reloads a
+resolved target's transport live, so a hot reload keeps the last valid set
+without applying it.
+
 ## Runtime edits
 
 The application writes only the user layer. Desk configuration is shared and
@@ -235,7 +267,7 @@ Accepted candidates update runtime state according to their inputs:
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colours | Emit `ConfigReloaded` for the app bridge |
-| Sources, datasets, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can
