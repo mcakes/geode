@@ -221,8 +221,8 @@ impl TileContent for MarketDataContent {
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
-            // Task 8's routing seam: `deliver_upload` is a stub until
-            // Task 9 wires the `Sent`/failure transition.
+            // An upload outcome: `Sent` on `Ok`, the header's
+            // `upload failed` on `Err`, a stale tag ignored.
             Delivery::Upload(u) => self.tile.update(cx, |t, cx| t.deliver_upload(u, cx)),
         }
     }
@@ -263,9 +263,8 @@ pub struct MarketDataFactory {
     /// [`Self::with_egress`]. `Arc`, not `Rc`: `geode-app` builds one list
     /// from `egress.toml` and shares it, unmodified, between the CVI and
     /// dividend factories built over the same resolved targets. `create`
-    /// narrows it to this spec's own document with [`targets_for`]; the
-    /// tile only stores the narrowed list (`:upload`, Task 9, is what
-    /// reads it).
+    /// narrows it to this spec's own document with [`targets_for`];
+    /// `:upload` resolves and completes its target from the narrowed list.
     egress: Arc<Vec<(String, Vec<String>)>>,
 }
 
@@ -320,8 +319,8 @@ impl MarketDataFactory {
     }
 }
 
-/// The eligible upload targets for one document (Task 8; `:upload`, Task
-/// 9, is what a trader reads this list through): every `egress` entry
+/// The eligible upload targets for one document (`:upload` resolves and
+/// completes its target from this list): every `egress` entry
 /// whose accepted documents name `document`, in `egress.toml`'s own
 /// order — the same order `resolve` and `from_doc` both preserve.
 fn targets_for(egress: &[(String, Vec<String>)], document: &str) -> Vec<SharedString> {

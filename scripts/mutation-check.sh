@@ -17439,6 +17439,47 @@ run_mutation "marketdata: create narrows the factory's egress list to this panel
   geode-marketdata \
   the_tile_stores_the_targets_its_factory_resolves_for_its_document
 
+# `:upload` on a `Behind` draft (egress spec §6): refused, because an
+# upload must be of the document the trader has seen whole. Without the
+# refusal the panel would assemble and offer to send the base generation
+# while a newer one already sits under it.
+run_mutation "panel: upload refused while Behind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            return Err(UPLOAD_BEHIND.into());' \
+  '            let _ = UPLOAD_BEHIND;' \
+  geode-marketdata \
+  upload_is_refused_on_a_behind_draft
+
+# The armed confirm consumes the key that answers it: a `j` that cancels
+# must not also bubble to the shell root and move the cursor or feed the
+# keymap.
+run_mutation "panel: the confirm consumes a non-y key" \
+  crates/geode-marketdata/src/header.rs \
+  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) && false {' \
+  geode-marketdata \
+  any_other_key_cancels_the_confirm_and_is_consumed
+
+# An upload outcome whose tag is not the tile's latest is ignored: an older
+# upload's late `Ok` must not mark a newer draft sent.
+run_mutation "panel: a stale upload tag is ignored" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if u.tag != self.upload_tag {' \
+  '        if false {' \
+  geode-marketdata \
+  a_stale_upload_tag_is_ignored
+
+# `y` re-checks the draft it was asked about: a delivery that moved the
+# draft (`Behind`, or a `replace` policy dropping the edits) while the
+# question stood cancels, rather than sending a document no longer on
+# screen.
+run_mutation "panel: upload y cancels when the draft changed under the question" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if !same_edits(&pending.draft, &self.draft) || pending.draft.state != self.draft.state {' \
+  '        if false {' \
+  geode-marketdata \
+  a_delivery_under_the_question_cancels_the_y
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

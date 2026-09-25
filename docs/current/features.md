@@ -61,8 +61,18 @@ column labels, keeping stable intent across reordered documents. The module
 supports numeric, date, text, and closed-choice cells, row insertion/deletion,
 and kind-specific actions.
 
-Document egress is not built. `:upload` and related actions report that
-limitation rather than pretending to persist a draft upstream.
+`:upload [target]` (also the action list's `Upload` row) sends the draft to
+an egress target that accepts the panel's document. It is refused, naming
+why, for a clean, `Behind`, already-sent or incomplete draft, and for a
+missing or ineligible target. Otherwise it assembles the document and asks
+`upload N cells, A rows added, D removed of <key> to <target>? (y/n)` in the
+header, where the question holds the keyboard: bare `y` submits, and any
+other key (consumed, chords included), a pointer press on the tile, or focus
+leaving the question cancels with `upload cancelled`. A delivery that
+changes the draft while the question stands cancels the `y`. An `Ok` outcome
+marks the draft `sent HH:MM`; an `Err` keeps it editing and shows
+`upload failed: <e>` until the next edit or upload. The echo that confirms a
+sent draft is not built yet.
 
 ## Timeseries
 

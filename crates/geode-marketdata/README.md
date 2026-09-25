@@ -5,7 +5,8 @@ document of a document dataset as a grid (pivoted on two axes, or a row
 per document row with the value columns laid flat) with a draft of unsent
 edits over the top. CVI is the one panel spec built; the roster kind is
 the panel's own (`cvi`) while every panel shares the `marketdata` key
-context. Egress is not built; `:upload` reports that limitation.
+context. `:upload [target]` sends the draft to an egress target after a
+y/n confirm (see `tile.rs`'s `arm_upload`).
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#market-data-documents).

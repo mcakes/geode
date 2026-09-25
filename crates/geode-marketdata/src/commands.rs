@@ -6,11 +6,9 @@
 //! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
 //! alias), `revert`, `bump <delta> [row|col]`, `rebase`,
 //! `upload`, `set <attr> [value...]`, `auto [hold|rebase|replace]`,
-//! `menu`. Every verb is built and
-//! executed by the tile (`MarketDataTile::command`) — `upload` alone
-//! parses here and answers "upload is not built yet" until Part 4
-//! (egress) lands it, so the grammar a trader types today is the grammar
-//! that will send.
+//! `menu`. Every verb is built and executed by the tile
+//! (`MarketDataTile::command`); `upload [target]` arms the panel's y/n
+//! confirm (egress spec §6).
 
 use crate::core::UpdatePolicy;
 use geode_core::document::KEY_SEPARATOR;
@@ -47,7 +45,10 @@ pub enum Command {
         axis: BumpAxis,
     },
     Rebase,
-    Upload,
+    /// `upload [target]`: the egress target named, or `None` to let the
+    /// tile pick the one eligible target (egress spec §6) — which target
+    /// is eligible is the tile's question, never this parser's.
+    Upload(Option<String>),
     /// Open the action list (spec §6.1), the typed door onto exactly what
     /// `.`/`⋯` open.
     Menu,
@@ -101,10 +102,6 @@ fn behind_only(verb: &str) -> bool {
 /// inline on the command line — the same contract every other module's
 /// `command` keeps.
 ///
-/// Parsing is deliberately complete even for `upload`, the one verb the
-/// tile does not yet execute (Part 4): a typo is still reported as a typo
-/// ("unknown command 'rebse'") rather than being indistinguishable from
-/// a verb that is merely not built yet.
 pub fn parse(line: &str) -> Result<Command, String> {
     let mut words = line.split_whitespace();
     match words.next() {
@@ -151,7 +148,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
             Ok(Command::Bump { delta, axis })
         }
         Some("rebase") => Ok(Command::Rebase),
-        Some("upload") => Ok(Command::Upload),
+        Some("upload") => {
+            let target = words.next().map(str::to_string);
+            if words.next().is_some() {
+                return Err("usage: upload [target]".to_string());
+            }
+            Ok(Command::Upload(target))
+        }
         Some("set") => {
             let attr = words
                 .next()
@@ -198,13 +201,16 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// (spec §8.3). `behind` is a fourth parameter the brief's
 /// sketch left out: the rule it implements is the brief's own, and this
 /// core has no `Draft` to read it off. `attrs` is the panel's own header
-/// attribute column names, in spec order, for `set`'s first word.
+/// attribute column names, in spec order, for `set`'s first word;
+/// `targets` the egress targets eligible for this panel's document, for
+/// `upload`'s.
 pub fn completions(
     line: &str,
     cursor: usize,
     keys: &[String],
     behind: bool,
     attrs: &[String],
+    targets: &[String],
 ) -> Vec<String> {
     // The caller's cursor should land on a char boundary; this pure core
     // must not panic on the slice below if it ever does not — the same
@@ -232,6 +238,7 @@ pub fn completions(
             .collect(),
         ["underlying"] | ["key"] => keys.to_vec(),
         ["set"] => attrs.to_vec(),
+        ["upload"] => targets.to_vec(),
         ["auto"] => policy_words(),
         // `bump`'s delta is a number nothing can complete; its axis is a
         // two-word vocabulary.
@@ -288,7 +295,6 @@ mod tests {
     fn the_other_verbs_parse_and_an_unknown_one_is_named() {
         assert_eq!(parse("revert"), Ok(Command::Revert));
         assert_eq!(parse("rebase"), Ok(Command::Rebase));
-        assert_eq!(parse("upload"), Ok(Command::Upload));
         assert_eq!(parse("rebse"), Err("unknown command 'rebse'".to_string()));
         assert_eq!(parse("   "), Err("empty command".to_string()));
     }
@@ -297,7 +303,7 @@ mod tests {
     fn completions_offer_the_verbs_then_the_catalog_keys() {
         let keys = vec!["NDX.Z".to_string(), "SPX.Z".to_string()];
         assert_eq!(
-            completions("", 0, &keys, false, &[]),
+            completions("", 0, &keys, false, &[], &[]),
             vec![
                 "underlying",
                 "revert",
@@ -310,7 +316,7 @@ mod tests {
             "rebase is offered only while behind"
         );
         assert_eq!(
-            completions("", 0, &keys, true, &[]),
+            completions("", 0, &keys, true, &[], &[]),
             vec![
                 "underlying",
                 "revert",
@@ -322,28 +328,28 @@ mod tests {
                 "menu"
             ]
         );
-        assert_eq!(completions("key ", 4, &keys, false, &[]), keys);
+        assert_eq!(completions("key ", 4, &keys, false, &[], &[]), keys);
         assert_eq!(
-            completions("underlying ", 11, &keys, false, &[]),
+            completions("underlying ", 11, &keys, false, &[], &[]),
             keys,
             "both underlying and key (the alias) complete with catalog keys"
         );
         assert_eq!(
-            completions("underlying SP", 13, &keys, false, &[]),
+            completions("underlying SP", 13, &keys, false, &[], &[]),
             keys,
             "the whole vocabulary, unfiltered — the shell ranks it"
         );
         assert_eq!(
-            completions("bump 1 ", 7, &keys, false, &[]),
+            completions("bump 1 ", 7, &keys, false, &[], &[]),
             vec!["row", "col"]
         );
         assert_eq!(
-            completions("bump ", 5, &keys, false, &[]),
+            completions("bump ", 5, &keys, false, &[], &[]),
             Vec::<String>::new(),
             "nothing completes a number"
         );
         assert_eq!(
-            completions("revert ", 7, &keys, false, &[]),
+            completions("revert ", 7, &keys, false, &[], &[]),
             Vec::<String>::new()
         );
     }
@@ -352,7 +358,7 @@ mod tests {
     fn a_cursor_off_a_char_boundary_does_not_panic() {
         let keys = vec!["SPX.Z".to_string()];
         // `é` is two bytes: a cursor at 2 lands mid-char.
-        assert!(!completions("kéy", 2, &keys, false, &[]).is_empty());
+        assert!(!completions("kéy", 2, &keys, false, &[], &[]).is_empty());
     }
 
     #[test]
@@ -367,7 +373,7 @@ mod tests {
 
     #[test]
     fn completions_offer_underlying_and_never_the_key_alias() {
-        let verbs = completions("", 0, &[], false, &[]);
+        let verbs = completions("", 0, &[], false, &[], &[]);
         assert_eq!(verbs[0], "underlying");
         assert!(!verbs.iter().any(|v| v == "key"), "{verbs:?}");
     }
@@ -430,11 +436,11 @@ mod tests {
     #[test]
     fn auto_completes_the_three_policies() {
         assert_eq!(
-            completions("auto ", 5, &[], false, &[]),
+            completions("auto ", 5, &[], false, &[], &[]),
             vec!["hold", "rebase", "replace"]
         );
         assert_eq!(
-            completions("auto re", 7, &[], false, &[]),
+            completions("auto re", 7, &[], false, &[], &[]),
             vec!["hold", "rebase", "replace"],
             "the whole vocabulary — the shell ranks it"
         );
@@ -448,7 +454,38 @@ mod tests {
             &[],
             false,
             &["anchor_date".into(), "spot_ref".into()],
+            &[],
         );
         assert_eq!(c, vec!["anchor_date", "spot_ref"]);
+    }
+
+    #[test]
+    fn upload_parses_with_and_without_a_target() {
+        assert_eq!(parse("upload"), Ok(Command::Upload(None)));
+        assert_eq!(
+            parse("upload sophis"),
+            Ok(Command::Upload(Some("sophis".into())))
+        );
+        assert_eq!(
+            parse("upload sophis bbg"),
+            Err("usage: upload [target]".into()),
+            "one target per upload"
+        );
+    }
+
+    #[test]
+    fn upload_completes_the_eligible_targets() {
+        let targets = vec!["sophis".to_string(), "bbg".to_string()];
+        assert_eq!(
+            completions("upload ", 7, &[], false, &[], &targets),
+            targets,
+            "the eligible targets, in egress order"
+        );
+        assert!(
+            completions("", 0, &[], false, &[], &targets)
+                .iter()
+                .any(|v| v == "upload"),
+            "upload is offered as a verb"
+        );
     }
 }

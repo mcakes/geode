@@ -180,6 +180,12 @@ pub(crate) struct HeaderInputs<'a> {
     pub badge: DraftBadge,
     pub unresolved_restore: bool,
     pub notice: Option<&'a SharedString>,
+    /// `upload failed: <e>` (egress spec §6), held by the tile until the
+    /// next edit or upload.
+    pub upload_error: Option<&'a SharedString>,
+    /// The armed `:upload` confirm's question, `upload … to <target>?
+    /// (y/n)`.
+    pub prompt: Option<&'a SharedString>,
     pub source_at: Option<DateTime<Utc>>,
     /// `Draft::incomplete_rows` — inserted rows with a required cell
     /// still empty (spec §5.2).
@@ -220,6 +226,12 @@ pub(crate) struct HeaderModel {
     /// the two through the same arm.
     pub incomplete: Option<(SharedString, Tone)>,
     pub notice: Option<SharedString>,
+    /// `upload failed: <e>`, painted in the error tone ahead of the
+    /// notice.
+    pub upload_error: Option<SharedString>,
+    /// The armed upload confirm's question, painted last before the time
+    /// on the element that holds the keyboard while it is armed.
+    pub prompt: Option<SharedString>,
     /// The generation's source time, `HH:MM:SS` on the trader's own clock.
     pub time: Option<SharedString>,
     /// The tile's own clock reading, applied at paint (`render`'s job,
@@ -273,6 +285,8 @@ impl HeaderModel {
             state,
             incomplete,
             notice: i.notice.cloned(),
+            upload_error: i.upload_error.cloned(),
+            prompt: i.prompt.cloned(),
             time: i.source_at.map(|t| i.clock.hms(t).into()),
             stale: false,
         }
@@ -298,8 +312,14 @@ impl HeaderModel {
         if let Some((text, _)) = &self.incomplete {
             out.push(text.to_string());
         }
+        if let Some(e) = &self.upload_error {
+            out.push(e.to_string());
+        }
         if let Some(n) = &self.notice {
             out.push(n.to_string());
+        }
+        if let Some(p) = &self.prompt {
+            out.push(p.to_string());
         }
         if let Some(t) = &self.time {
             out.push(if self.stale {
@@ -327,6 +347,7 @@ pub(crate) fn render(
     h: &HeaderModel,
     cursor_attr: Option<usize>,
     editor: Option<(usize, EditorPaint<'_>)>,
+    confirm: Option<&FocusHandle>,
     menu_open: bool,
     theme: &Theme,
     tones: &FlooredTones,
@@ -485,11 +506,40 @@ pub(crate) fn render(
                 .child(text.clone()),
         );
     }
+    if let Some(e) = &h.upload_error {
+        row = row.child(
+            div()
+                .debug_selector(move || format!("marketdata-upload-error-{tile_id}"))
+                .text_color(tone_colour(Tone::Error, false, theme, tones))
+                .child(e.clone()),
+        );
+    }
     if let Some(n) = &h.notice {
         row = row.child(
             div()
                 .text_color(tone_colour(Tone::Error, false, theme, tones))
                 .child(n.clone()),
+        );
+    }
+    // The armed `:upload` confirm (egress spec §6): the question in the
+    // primary text tone — a decision awaiting the trader, not a warning —
+    // on the element that holds the keyboard while it stands. Its
+    // `on_key_down` sits on the focused element and so runs before the
+    // shell root's listener; every key is the confirm's
+    // (`MarketDataTile::confirm_key`), so propagation always stops.
+    if let (Some(p), Some(focus)) = (&h.prompt, confirm) {
+        let tile = tile.clone();
+        row = row.child(
+            div()
+                .track_focus(focus)
+                .debug_selector(move || format!("marketdata-upload-confirm-{tile_id}"))
+                .text_color(tone_colour(Tone::Key, false, theme, tones))
+                .child(p.clone())
+                .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                        cx.stop_propagation();
+                    }
+                }),
         );
     }
 
@@ -639,6 +689,8 @@ mod tests {
             badge,
             unresolved_restore: false,
             notice: None,
+            upload_error: None,
+            prompt: None,
             source_at: None,
             incomplete: 0,
             clock: Clock::utc(),
