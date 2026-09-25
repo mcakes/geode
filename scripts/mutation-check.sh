@@ -18470,9 +18470,52 @@ run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
 
 run_mutation "pricer tile: a re-checked menu clamps its highlight" \
   crates/geode-pricer/src/tile.rs \
-  '                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));' \
+  '                m.highlighted = crate::popup::snap(&items, m.highlighted);' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
+
+# The menu's highlight steps over separators and section headers: a
+# highlight on structure makes `enter` pick nothing.
+run_mutation "pricer popup: menu steps land on pickable rows only" \
+  crates/geode-pricer/src/popup.rs \
+  '        .filter_map(|(i, r)| r.pickable().then_some(i))' \
+  '        .filter_map(|(i, _r)| Some(i))' \
+  geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
+
+# A hover over structure must not take the highlight either.
+run_mutation "pricer tile: a hover over a separator leaves the highlight" \
+  crates/geode-pricer/src/tile.rs \
+  '        if m.highlighted == index || !m.items.get(index).is_some_and(MenuItem::pickable) {' \
+  '        if m.highlighted == index || index >= m.items.len() {' \
+  geode-pricer a_pointer_move_over_a_menu_row_moves_the_highlight
+
+# The empty table says "Loading sheet…" only while the tile is loading:
+# the delegate's mirror is the one path that flag reaches the paint.
+run_mutation "pricer tile: the delegate mirrors loading" \
+  crates/geode-pricer/src/tile.rs \
+  '            t.delegate_mut().loading = loading;' \
+  '            let _ = loading;' \
+  geode-pricer an_empty_table_names_the_next_action_or_that_it_is_loading
+
+# A failed line is counted in the header, not only coloured.
+run_mutation "pricer header: failed lines are counted" \
+  crates/geode-pricer/src/header.rs \
+  '        .filter(|r| s.is_line(*r) && matches!(s.state(*r), LineState::Failed(_)))' \
+  '        .filter(|r| s.is_line(*r) && matches!(s.state(*r), LineState::Stale))' \
+  geode-pricer the_header_names_the_sheet_view_shifts_and_pricing_count
+
+# A typeahead hover moves the highlight but is not a choice: setting
+# `moved` would let `enter` commit the row under a passing pointer.
+run_mutation "pricer tile: a typeahead hover is not a choice" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(Editor::Choice { list, .. }) => {
+                list.highlighted() != row && list.set_highlighted(row)
+            }' \
+  '            Some(Editor::Choice { list, moved, .. }) => {
+                *moved = true;
+                list.highlighted() != row && list.set_highlighted(row)
+            }' \
+  geode-pricer a_pointer_move_over_a_typeahead_row_moves_its_highlight
 
 # `start` carries the key the pricer factory was built from; without it
 # the observer's first unrelated reload reaches every tile.

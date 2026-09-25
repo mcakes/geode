@@ -85,5 +85,16 @@ cargo bench -p geode-pricer
   when the tile closes. The save state has its own header slot, which pricing
   notices and `escape` never touch.
 - In the free underlying typeahead, `enter` takes the highlighted option only
-  when the query equals it case-insensitively or the highlight was moved;
-  otherwise it commits the typed text.
+  when the query equals it case-insensitively or the highlight was moved with
+  a key or a click; a pointer hover moves the highlight but does not count as
+  moving it, so otherwise `enter` commits the typed text.
+- A row's own ground (package, entry) is painted by `render_tr` on the row,
+  never per cell, so the table's hover and selected-row fills stay visible.
+- Every text colour the tile adds is floored against the ground it paints on
+  and swept over every bundled theme with no exception list (`paint`),
+  including the action menu's four.
+- A menu command's title is its palette title (`content::action_title`); the
+  menu's highlight never rests on a separator or section header.
+- Default column labels and widths fit a worst-case value at the largest font
+  size (`delegate`'s fit test): a right-aligned cell that overflows loses its
+  leading digits.

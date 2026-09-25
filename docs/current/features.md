@@ -220,10 +220,26 @@ the application roster.
 
 ### The tile
 
-The tile shows one named sheet under a single dense header: the sheet name,
-its view, any sheet-wide shift chips, `N pricing…` while lines are stale, the
-configured pricer's name, and the last priced time, which reads `stale` once
-it is older than the shell's `stale_after`. Lines and packages are rows of one
+The tile (titled `Pricer · <sheet>`) shows one named sheet under a single
+dense header: the sheet name with `view <name>`, any sheet-wide shift chips
+(`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
+while lines are stale, `N failed` in danger text while any line's last answer
+was a failure, `pricer <name>`, the last priced time, which reads `stale` once
+it is older than the shell's `stale_after`, and a `⋯` button at the trailing
+edge that opens and closes the action menu (the pointer's `.`). A pending load
+paints `loading…` muted in the header and `Loading sheet…` in the empty table;
+an empty loaded sheet says `No lines — press o to add one`. A pricer this
+binary lacks is named in danger text with its recovery (`set [pricing]
+adapter and restart`).
+
+Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
+type`, `priced at`), and the default widths fit each label and a worst-case
+value (`-123,456.7890` for a greek) at the largest font size; a view's `label`
+and `width` still override them. Both bundled views end in a `status` column,
+which says `pricing…` on a stale line and a failed line's reason, so neither
+state is shown by colour alone. The tree column reserves a fixed chevron slot
+on every row, so roots share one leading edge and legs sit one step in; the
+entry row opens at the depth it will land at, and a long label ends in `…`. Lines and packages are rows of one
 table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
@@ -242,7 +258,7 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
-| `.` | The action menu: price all, group, ungroup, undo, redo, delete row, and one row per view |
+| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer and skips separators and section headers |
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
