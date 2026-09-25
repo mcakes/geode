@@ -240,6 +240,12 @@ const UPLOAD_BEHIND: &str =
 /// leaving the confirm, or a pointer press on the tile.
 const UPLOAD_CANCELLED: &str = "upload cancelled";
 
+/// The notice when a delivery moves the painted generation or the draft
+/// while the confirm stands: the prompt's document is no longer the one
+/// on screen, so the question is withdrawn at once rather than left
+/// painted until the next key.
+const UPLOAD_CANCELLED_ARRIVED: &str = "upload cancelled: a new document arrived";
+
 /// An armed `:upload` confirm (egress spec §6): the document is assembled
 /// at arm time, so what the prompt counts is exactly what `y` sends.
 ///
@@ -258,9 +264,15 @@ struct PendingUpload {
     /// land between the prompt and the answer (`Behind`, or a `replace`
     /// policy dropping the edits); `y` against a draft that no longer
     /// matches would send a document the trader is no longer looking at,
-    /// so it cancels instead.
+    /// so it cancels instead. Compared WHOLE — `base` included: an
+    /// `:auto rebase` onto a same-shape newer generation leaves edits,
+    /// attrs, rows and state equal while the rows were assembled from
+    /// the superseded base.
     draft: Draft,
     focus: FocusHandle,
+    /// The window the prompt's `focus` lives in, so a delivery (which has
+    /// no `Window`) can still blur it before the confirm is dropped.
+    window: gpui::AnyWindowHandle,
     _blur: gpui::Subscription,
 }
 
@@ -1198,9 +1210,9 @@ impl MarketDataTile {
     /// An upload outcome routed to this tile (egress spec §6 "Outcome").
     /// An outcome whose `tag` is not this tile's latest upload is ignored.
     /// `Ok` enters `Sent` (the header reads `sent HH:MM`) — but only
-    /// while the draft still holds exactly what was submitted: an edit
-    /// made while the upload was in flight is unsent, so the draft stays
-    /// `Editing`. `Err` leaves the draft `Editing` and paints `upload
+    /// while the draft still IS what was submitted: an edit made, or a
+    /// rebase applied, while the upload was in flight is unsent, so the
+    /// draft stays `Editing`. `Err` leaves the draft `Editing` and paints `upload
     /// failed: <e>` until the next edit or upload.
     pub fn deliver_upload(&mut self, u: UploadDelivery, cx: &mut Context<Self>) {
         if u.tag != self.upload_tag {
@@ -1216,7 +1228,10 @@ impl MarketDataTile {
                     tag = u.tag,
                     "upload accepted"
                 );
-                let unchanged = submitted.is_some_and(|d| same_edits(&d, &self.draft));
+                // The WHOLE draft, `base` included: a rebase while the
+                // upload was in flight keeps the same edits on a base
+                // that was never sent.
+                let unchanged = submitted.is_some_and(|d| d == self.draft);
                 if unchanged && self.draft.state == DraftState::Editing {
                     self.draft.state = DraftState::Sent {
                         at: chrono::Utc::now().to_rfc3339(),
@@ -1320,6 +1335,7 @@ impl MarketDataTile {
             prompt: prompt.into(),
             draft: self.draft.clone(),
             focus,
+            window: window.window_handle(),
             _blur: blur,
         });
         self.notice = None;
@@ -1387,7 +1403,7 @@ impl MarketDataTile {
         let Some(pending) = self.disarm_upload(window, cx) else {
             return;
         };
-        if !same_edits(&pending.draft, &self.draft) || pending.draft.state != self.draft.state {
+        if pending.draft != self.draft {
             self.notice = Some("upload cancelled: the draft changed under the question".into());
             self.changed(cx);
             return;
@@ -1426,6 +1442,56 @@ impl MarketDataTile {
     /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
     /// a staged one, so the two paths cannot drift.
     fn apply(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
+        let painted = self.painted_snapshot().and_then(|s| source_time_of(&s));
+        self.apply_snapshot(snapshot, cx);
+        self.withdraw_upload_if_moved(painted, cx);
+    }
+
+    /// A confirm armed over one document must not stand over another: if
+    /// this delivery changed the painted generation or the draft (a
+    /// `rebase` or `replace` policy, or `Behind` under `hold`), the
+    /// question is withdrawn at once. `apply` has no `Window`, so the
+    /// prompt's focus is blurred through its recorded window handle,
+    /// deferred to the end of this update; the handle travels into the
+    /// deferral, so it is never dropped while still focused. `y`'s own
+    /// re-check in [`Self::submit_upload`] stays as the second line.
+    fn withdraw_upload_if_moved(&mut self, painted: Option<String>, cx: &mut Context<Self>) {
+        let now = self.painted_snapshot().and_then(|s| source_time_of(&s));
+        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
+        if !self.pending_upload.as_ref().is_some_and(moved) {
+            return;
+        }
+        let Some(pending) = self.pending_upload.take() else {
+            return;
+        };
+        let PendingUpload {
+            focus,
+            window,
+            _blur,
+            ..
+        } = pending;
+        // The blur subscription goes first, so the deferred blur below is
+        // not heard as a second cancel.
+        drop(_blur);
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if focus.is_focused(window) {
+                    window.blur(cx);
+                }
+            });
+        });
+        // The policy's own disclosure (`replace`'s count, `rebase`'s
+        // dropped edits) is kept behind the cancellation, never lost to it.
+        self.notice = Some(match self.notice.take() {
+            Some(n) => format!("{UPLOAD_CANCELLED_ARRIVED}; {n}").into(),
+            None => UPLOAD_CANCELLED_ARRIVED.into(),
+        });
+        self.changed(cx);
+    }
+
+    /// [`Self::apply`]'s body: everything a delivered snapshot does to the
+    /// panel, before the armed confirm is checked against it.
+    fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
         let as_of = source_time_of(&snapshot);
         // Everything below is decided on a COPY of the draft and built
         // before a single field is committed (M-2, final whole-branch
@@ -4844,20 +4910,18 @@ pub(crate) fn parse_display_key(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// `:rebase`'s notice about the edits it could not carry over — a row or
-/// column label the newer document no longer has. Each pair is spelled
-/// `row/col` (the same display separator a document key uses), since a
-/// bare pair of labels with nothing between them reads as one run-on word.
-/// A delivered document's own source time — the identity a [`Draft`]
-/// compares its `base` against (§8.4: per-document `as_of`, never the
-/// dataset-wide `gen_id` a live query's provenance carries).
 /// Whether two drafts hold the same unsent work — cell edits, attribute
 /// edits and row inserts/deletes — whatever their state or base. What
-/// "the next edit" means to the upload error and the `Ok` outcome.
+/// "the next edit" means to the upload error. Not a test of "the same
+/// document": the confirm and the `Ok` outcome compare whole drafts,
+/// since a rebase moves `base` and nothing else.
 fn same_edits(a: &Draft, b: &Draft) -> bool {
     a.edits == b.edits && a.attrs == b.attrs && a.rows == b.rows
 }
 
+/// A delivered document's own source time — the identity a [`Draft`]
+/// compares its `base` against (§8.4: per-document `as_of`, never the
+/// dataset-wide `gen_id` a live query's provenance carries).
 fn source_time_of(snapshot: &Snapshot) -> Option<String> {
     snapshot
         .provenance()
@@ -4866,6 +4930,10 @@ fn source_time_of(snapshot: &Snapshot) -> Option<String> {
         .and_then(|f| f.as_of.clone())
 }
 
+/// `:rebase`'s notice about the edits it could not carry over — a row or
+/// column label the newer document no longer has. Each pair is spelled
+/// `row/col` (the same display separator a document key uses), since a
+/// bare pair of labels with nothing between them reads as one run-on word.
 fn dropped_notice(dropped: &[(String, String)]) -> String {
     let n = dropped.len();
     let plural = if n == 1 { "" } else { "s" };
@@ -13226,16 +13294,111 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let tag = h.tile.read_with(&vcx, |t, _| t.tag);
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+        assert_eq!(h.upload_prompt(&vcx), None, "withdrawn on the delivery");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled: a new document arrived".into())
+        );
         type_keys(&mut vcx, "y");
         assert!(
             h.upload_request().is_none(),
             "the prompt's document is no longer the one on screen"
         );
+    }
+
+    /// The critical case the whole-draft comparison exists for: under
+    /// `:auto rebase` a same-shape newer generation moves only `base` —
+    /// edits (keyed by index), attrs, rows and state all compare equal —
+    /// so an edits-only check let `y` send rows assembled from the
+    /// superseded base while the header named the newer one.
+    #[gpui::test]
+    fn a_rebase_under_the_question_withdraws_the_confirm(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        assert!(h.upload_prompt(&vcx).is_some(), "armed");
+        let prompt_focus = h.tile.read_with(&vcx, |t, _| {
+            t.pending_upload.as_ref().expect("armed").focus.clone()
+        });
+        assert!(vcx.update(|window, _| prompt_focus.is_focused(window)));
+        let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        let after = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert_eq!(after.base.as_deref(), Some(NEWER), "rebased, not Behind");
+        assert!(!after.is_behind());
+        assert!(
+            same_edits(&before, &after) && before.state == after.state,
+            "the premise: only base moved"
+        );
+        assert_eq!(h.upload_prompt(&vcx), None, "withdrawn at once");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload cancelled: a new document arrived".into())
+        );
+        draw(&mut vcx);
+        assert!(
+            !vcx.update(|window, _| prompt_focus.is_focused(window)),
+            "the prompt's focus was blurred, not dropped while focused"
+        );
+        type_keys(&mut vcx, "y");
+        assert!(
+            h.upload_request().is_none(),
+            "y must not send the superseded base's rows"
+        );
+    }
+
+    /// `y`'s own re-check, the second line behind the withdrawal on
+    /// delivery: no production route moves the draft under a standing
+    /// question today (every key and press answers it, every delivery
+    /// withdraws it), so the draft is moved here directly — a `base`-only
+    /// move, the rebase shape an edits-only comparison misses.
+    #[gpui::test]
+    fn y_rechecks_the_whole_draft_base_included(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        h.tile.update(&mut vcx, |t, _| {
+            t.draft.base = Some(NEWER.to_string());
+        });
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_none(), "a moved base sends nothing");
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
             Some("upload cancelled: the draft changed under the question".into())
         );
+    }
+
+    #[gpui::test]
+    fn an_ok_after_a_rebase_in_flight_does_not_enter_sent(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let upload_tag = h.upload_request().expect("submitted").tag;
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.draft().base.clone())
+                .as_deref(),
+            Some(NEWER),
+            "rebased while in flight"
+        );
+        h.deliver_upload(&mut vcx, upload_tag, Ok(()));
+        let state = h.tile.read_with(&vcx, |t, _| t.draft().state.clone());
+        assert_eq!(state, DraftState::Editing, "the newer base was never sent");
     }
 
     #[gpui::test]

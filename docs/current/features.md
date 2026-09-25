@@ -69,8 +69,11 @@ missing or ineligible target. Otherwise it assembles the document and asks
 header, where the question holds the keyboard: bare `y` submits, and any
 other key (consumed, chords included), a pointer press on the tile, or focus
 leaving the question cancels with `upload cancelled`. A delivery that
-changes the draft while the question stands cancels the `y`. An `Ok` outcome
-marks the draft `sent HH:MM`; an `Err` keeps it editing and shows
+changes the draft or the painted generation while the question stands (a
+rebase, a replace, or `Behind`) withdraws it at once with `upload cancelled:
+a new document arrived`, since the assembled rows belong to the superseded
+document. An `Ok` outcome marks the draft `sent HH:MM` only if the draft,
+base included, is still what was submitted; an `Err` keeps it editing and shows
 `upload failed: <e>` until the next edit or upload. The echo that confirms a
 sent draft is not built yet.
 

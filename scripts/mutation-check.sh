@@ -17469,16 +17469,37 @@ run_mutation "panel: a stale upload tag is ignored" \
   geode-marketdata \
   a_stale_upload_tag_is_ignored
 
-# `y` re-checks the draft it was asked about: a delivery that moved the
-# draft (`Behind`, or a `replace` policy dropping the edits) while the
-# question stood cancels, rather than sending a document no longer on
-# screen.
+# `y` re-checks the WHOLE draft it was asked about, `base` included —
+# the second line behind the withdrawal on delivery. Mutated to the
+# edits-and-state comparison it replaced, a base-only move (an `:auto
+# rebase` onto a same-shape newer generation) sends rows assembled from
+# the superseded base.
 run_mutation "panel: upload y cancels when the draft changed under the question" \
   crates/geode-marketdata/src/tile.rs \
+  '        if pending.draft != self.draft {' \
   '        if !same_edits(&pending.draft, &self.draft) || pending.draft.state != self.draft.state {' \
-  '        if false {' \
   geode-marketdata \
-  a_delivery_under_the_question_cancels_the_y
+  y_rechecks_the_whole_draft_base_included
+
+# A delivery that moves the draft or the painted generation withdraws a
+# standing confirm at once. Mutated to ignore base (and the generation),
+# an `:auto rebase` onto a same-shape newer document leaves the stale
+# prompt painted over the newer header.
+run_mutation "panel: a rebase under the confirm withdraws it" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;' \
+  '        let moved = |p: &PendingUpload| !same_edits(&p.draft, &self.draft);' \
+  geode-marketdata \
+  a_rebase_under_the_question_withdraws_the_confirm
+
+# `Ok` enters `Sent` only over the draft that was submitted, base
+# included: a rebase while the upload was in flight is unsent work.
+run_mutation "panel: an Ok after an in-flight rebase is not Sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '                let unchanged = submitted.is_some_and(|d| d == self.draft);' \
+  '                let unchanged = submitted.is_some_and(|d| same_edits(&d, &self.draft));' \
+  geode-marketdata \
+  an_ok_after_a_rebase_in_flight_does_not_enter_sent
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
