@@ -17767,6 +17767,20 @@ run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
             });' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
 
+# An open menu's rows are re-checked on every chrome rebuild: a load
+# answer or reload changes them with no verb to close the menu.
+run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
+  crates/geode-pricer/src/tile.rs \
+  '                m.items = items;' \
+  '                let _ = items;' \
+  geode-pricer a_reload_under_an_open_menu_relists_its_views
+
+run_mutation "pricer tile: a re-checked menu clamps its highlight" \
+  crates/geode-pricer/src/tile.rs \
+  '                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));' \
+  '' \
+  geode-pricer a_reload_under_an_open_menu_relists_its_views
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

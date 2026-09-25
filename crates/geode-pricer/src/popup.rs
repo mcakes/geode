@@ -119,8 +119,9 @@ pub(crate) enum MenuItem {
         title: &'static str,
         enabled: Result<(), &'static str>,
     },
-    /// `label` is prepared when the menu opens (`view: barrier ✓` on the
-    /// current one), never formatted per frame.
+    /// `label` is prepared when the menu opens or the tile's chrome is
+    /// rebuilt (`view: barrier ✓` on the current one), never formatted
+    /// per frame.
     View {
         name: SharedString,
         label: SharedString,

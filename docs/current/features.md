@@ -195,7 +195,9 @@ and never commits it, and acts on the row it was painted on: the entry
 placeholder is a row, so closing it moves the rows below up, but a click below
 it still lands on (or toggles, or double-click edits) the row the trader
 aimed at. A click or double-click on the placeholder itself only closes it. A
-`:` command or a `/` search closes the menu and any open field first. A click
+`:` command or a `/` search closes the menu and any open field first. An open
+menu re-checks its rows whenever the tile changes under it (a load answer, a
+config reload), keeping its highlight where it was. A click
 outside the grid leaves a text editor open until the next grid click or verb,
 as in the market-data panel; the typeahead popup closes on an outside click.
 Both the entry field and the cell editor blur before they drop, and no chord

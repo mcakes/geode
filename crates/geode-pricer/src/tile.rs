@@ -2143,6 +2143,18 @@ impl PricerTile {
                 _ => None,
             }
         });
+        // An open menu's rows are prepared state like the header: a load
+        // answer, a reload or a delivery can change what they would say
+        // without a verb closing the menu, so they are re-checked here
+        // rather than trusted from when it opened. The highlight keeps its
+        // index, clamped to the new list.
+        if self.menu.is_some() {
+            let items = self.menu_items();
+            if let Some(m) = self.menu.as_mut() {
+                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));
+                m.items = items;
+            }
+        }
     }
 
     // ---- the cursor -------------------------------------------------------
@@ -4045,6 +4057,69 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(7)); // the second view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
+    }
+
+    /// A load answer under an open menu (the menu opens while the
+    /// sheet is loading) re-checks its rows: `Delete row`, disabled on
+    /// the empty fallback, is enabled once the rows arrive, and picking
+    /// it deletes.
+    #[gpui::test]
+    fn a_load_answer_under_an_open_menu_rechecks_its_rows(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", Some(5)); // Delete row
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("no row"),
+            "fixture: nothing to delete while loading"
+        );
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
+        assert_eq!(h.mode(&mut vcx), "menu", "the answer leaves the menu open");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+            Some(5),
+            "the highlight stays where it was"
+        );
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert_eq!(h.footer(&vcx), None, "Delete row was not refused");
+        assert_eq!(h.sheet_len(&vcx), 0, "the loaded row was deleted");
+    }
+
+    /// A reload under an open menu re-lists its view rows, and the
+    /// highlight is clamped to the shorter list.
+    #[gpui::test]
+    fn a_reload_under_an_open_menu_relists_its_views(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "menu", None);
+        h.dispatch(&mut vcx, "menu_down", Some(7)); // view: barrier, the last row
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                slim_views("\"qty\", \"price\""),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
+        });
+        let (views, highlighted) = h.tile.read_with(&vcx, |t, _| {
+            let m = t.menu.as_ref().expect("the menu stays open");
+            let views: Vec<String> = m
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    MenuItem::View { label, .. } => Some(label.to_string()),
+                    MenuItem::Action { .. } => None,
+                })
+                .collect();
+            (views, m.highlighted)
+        });
+        assert_eq!(views, vec!["view: slim"]);
+        assert_eq!(highlighted, 6, "clamped to the last row");
     }
 
     #[gpui::test]
