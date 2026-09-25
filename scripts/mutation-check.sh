@@ -17728,6 +17728,16 @@ run_mutation "pricer undo: a refused redo clears the whole history" \
             }' \
   geode-pricer a_refused_redo_drops_the_rest_of_both_sides
 
+# A reload that changes nothing the pricer reads must not reach the
+# factory: every tile would re-resolve and restart its refresh timer.
+run_mutation "pricer bridge: an unchanged pricer config key skips the reload" \
+  crates/geode-app/src/bridge.rs \
+  '                if last_key.borrow().as_ref() == Some(&key) {
+                    return;
+                }' \
+  '                if last_key.borrow().as_ref() == Some(&key) {}' \
+  geode-app a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

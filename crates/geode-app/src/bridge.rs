@@ -230,6 +230,27 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
     }
 }
 
+/// Exactly what the pricer reads out of a config: the merged
+/// `pricer_views` doc, the raw `[pricing] refresh` value and the resolved
+/// stale threshold. Two equal keys resolve to the same views and settings,
+/// so the reload observer skips a reload whose key is unchanged — a theme
+/// or keymap edit must not restart every tile's refresh timer or repeat a
+/// bad value's warning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PricerConfigKey {
+    views: Option<toml::Table>,
+    refresh: Option<toml::Value>,
+    stale_after: Duration,
+}
+
+pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
+    PricerConfigKey {
+        views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
+        refresh: config.get("app", "pricing.refresh").cloned(),
+        stale_after: stale_after_from_config(config),
+    }
+}
+
 /// Workers offer state without waiting for the UI. Bursts coalesce in the
 /// mailbox; only a closed receiver refuses delivery. Count each refusal and
 /// log closure once, while allowing producers to continue their work.
@@ -571,17 +592,21 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     })
     .detach();
 
-    // The pricer refreshes on EVERY applied reload (planning decision 20):
+    // The pricer watches EVERY applied reload (planning decision 20):
     // `ShellEvent::ConfigReloaded` fires only for five named docs, and a
     // `pricer_views` or `[pricing] refresh` edit is neither. The frame's
     // `config` counter is the ungated signal (`main.rs`'s diagnostics
-    // factory observes it the same way).
+    // factory observes it the same way); `pricer_config_key` then gates
+    // it down to the reloads that change what the pricer reads.
     {
         let pricer = bridge.pricer.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
         let last = Rc::new(Cell::new(frame.read(cx).versions().config));
+        // Unseeded, so the first applied reload always reaches the factory:
+        // it may have been built from a different config than the shell's.
+        let last_key: Rc<std::cell::RefCell<Option<PricerConfigKey>>> = Rc::default();
         cx.observe(&frame, move |frame, cx| {
             let now = frame.read(cx).versions().config;
             if now == last.get() {
@@ -592,6 +617,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // `cx` mutably.
             let (views, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
+                let key = pricer_config_key(config);
+                if last_key.borrow().as_ref() == Some(&key) {
+                    return;
+                }
+                *last_key.borrow_mut() = Some(key);
                 let (views, diags) = pricer_views_from_config(config);
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
                 let mut diags = diags;
@@ -1196,6 +1226,51 @@ role = "key"
         assert_eq!(diag.path.as_deref(), Some("app.pricing.refresh"));
     }
 
+    /// The reload gate's key moves with exactly the three things the
+    /// pricer reads and with nothing else.
+    #[test]
+    fn the_pricer_config_key_changes_only_with_what_the_pricer_reads() {
+        let config = |app: &str, views: &str| {
+            Config::load(&ConfigSources {
+                builtin: vec![
+                    LayerDoc::builtin("app", app).unwrap(),
+                    LayerDoc::builtin("pricer_views", views).unwrap(),
+                ],
+                desk: None,
+                user: None,
+            })
+        };
+        let app = "[theme]\nname = \"a\"\n[log]\nlevel = \"info\"\n\
+                   [pricing]\nrefresh = \"10s\"\n[blotter]\nstale_after = \"5m\"\n";
+        let views = "[slim]\ncolumns = [\"qty\", \"price\"]\n";
+        let base = pricer_config_key(&config(app, views));
+        assert_eq!(
+            pricer_config_key(&config(&app.replace("\"a\"", "\"b\""), views)),
+            base,
+            "a [theme] edit"
+        );
+        assert_eq!(
+            pricer_config_key(&config(&app.replace("\"info\"", "\"debug\""), views)),
+            base,
+            "a [log] edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""))),
+            base,
+            "a pricer_views edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(&app.replace("\"10s\"", "\"off\""), views)),
+            base,
+            "a [pricing] refresh edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(&app.replace("\"5m\"", "\"6m\""), views)),
+            base,
+            "a stale_after edit"
+        );
+    }
+
     #[test]
     fn pricer_views_fall_back_to_the_bundled_two_with_no_doc() {
         let config = Config::load(&ConfigSources {
@@ -1250,6 +1325,65 @@ role = "key"
         });
         vcx.run_until_parked();
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// A reload that changes nothing the pricer reads (a theme, keymap or
+    /// log-level edit) leaves the factory alone: no view re-resolution, no
+    /// refresh-timer restart, no repeated warning. The factory's views are
+    /// swapped for a sentinel behind the observer's back after the first
+    /// reload, so only a second `reload` could put `slim` back.
+    #[gpui::test]
+    fn a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let bump = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|_, cx| {
+                let frame = shell.read(cx).frame().clone();
+                frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+            });
+            vcx.run_until_parked();
+        };
+        bump(&mut vcx);
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["slim"],
+            "fixture: the first reload hands over the configured views"
+        );
+        vcx.update(|_, cx| {
+            bridge
+                .pricer
+                .reload(Views::builtin(), None, Duration::from_secs(1), cx)
+        });
+        bump(&mut vcx);
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["vanilla", "barrier"],
+            "an unchanged pricer config reloads nothing"
+        );
+        assert_eq!(bridge.pricer.settings().refresh, None);
     }
 
     /// A shell holding one restored pricer tile, its roster, actions and
