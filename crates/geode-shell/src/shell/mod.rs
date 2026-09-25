@@ -873,6 +873,11 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
+    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
+    /// the `egress` doc (egress spec §10 amendment 2): nothing reloads a
+    /// resolved target's transport live, so `egress.toml` is restart-
+    /// required exactly as `sources.toml` is.
+    egress_baseline: Vec<LayerDoc>,
     /// The `[pricing] adapter` key (inside the `app` doc) the data
     /// engine's pricer was actually chosen from at startup (line-pricer
     /// §5.5, `crates/geode-app/src/bridge.rs::data_setup`) — same purpose
@@ -1586,6 +1591,7 @@ impl ShellView {
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
+        let egress_baseline = services.config.layered_docs("egress").to_vec();
         // Same reasoning, for the `[pricing] adapter` key the data
         // engine's pricer was chosen from (line-pricer §5.5) — see
         // `pricing_baseline`'s field doc.
@@ -1649,6 +1655,7 @@ impl ShellView {
             restart_required: None,
             sources_baseline,
             datasets_baseline,
+            egress_baseline,
             pricing_baseline,
             pickable,
             picker: None,

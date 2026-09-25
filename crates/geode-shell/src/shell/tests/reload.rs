@@ -1122,6 +1122,48 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     );
 }
 
+/// Egress spec §10 amendment 2: `egress.toml` is restart-required exactly
+/// as `sources.toml` is — nothing reloads a resolved target's transport
+/// live, so a reload whose `egress` doc no longer matches the baseline
+/// the data engine actually started with must ask for a restart.
+#[gpui::test]
+fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    let mut with_egress = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "egress",
+                "[sophis]\nadapter = \"demo_bus\"\n[sophis.documents]\ncvi_params = \"marketdata/cvi\"\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_egress), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("egress"))),
+        "{:?}",
+        events.borrow()
+    );
+}
+
 /// line-pricer §5.5: the pricer the data engine runs is chosen at startup
 /// from `[pricing] adapter`, so a reload that changes that table needs a
 /// restart on the same terms `sources`/`datasets` already follow —

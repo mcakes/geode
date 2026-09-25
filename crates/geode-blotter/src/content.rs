@@ -129,6 +129,8 @@ impl TileContent for BlotterContent {
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+            // This tile never uploads; an outcome addressed here is a routing bug.
+            Delivery::Upload(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

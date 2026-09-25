@@ -15,6 +15,7 @@ pub mod menu;
 pub mod spec;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+pub mod upload;
 
 pub use cursor::Cursor;
 pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};

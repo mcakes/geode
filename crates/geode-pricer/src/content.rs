@@ -234,6 +234,8 @@ impl TileContent for PricerContent {
             // so any of these is a routing bug.
             Delivery::Query(_) => {}
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
+            // The pricer uploads no document.
+            Delivery::Upload(_) => {}
         }
     }
 

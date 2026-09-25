@@ -4,6 +4,7 @@
 
 use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
+use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
@@ -24,6 +25,7 @@ use chrono::{DateTime, Utc};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::check_kind_against;
+use geode_core::egress_config::EgressSpec;
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
@@ -58,6 +60,10 @@ pub struct DataServiceConfig {
     pub documents: DocumentRegistry,
     /// Pricing implementation registered by `geode-app`.
     pub pricer: PricerConfig,
+    /// Upload targets, already passed through `egress::resolve`. Each gets
+    /// its own worker thread at open; empty means every upload answers
+    /// "unknown target".
+    pub egress: Vec<EgressSpec>,
 }
 
 /// Outcomes and state changes delivered through the service's event sink.
@@ -115,6 +121,9 @@ pub enum DataEvent {
     },
     /// Configuration problems found at open or view reload.
     Diagnostics(Vec<Diagnostic>),
+    /// Upload result, addressed by the requesting tile's key. Every
+    /// admitted upload request answers exactly one.
+    Upload(UploadOutcome),
 }
 
 /// Nonblocking delivery into the caller's latest-state mailbox. `false` means
@@ -501,6 +510,9 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
+    /// One worker per upload target. They only answer the sink, so they
+    /// stop first and depend on nothing below.
+    egress: EgressWorkers,
     /// Workers precede their consumers in field drop order. Fetchers and
     /// subscriptions can submit to ingest; they must stop before the writer.
     /// Explicit shutdown follows the same producer-before-consumer order.
@@ -1196,6 +1208,8 @@ impl DataService {
             .iter()
             .flat_map(|v| v.validate(&config.schema, &config.dimensions))
             .collect();
+        let egress =
+            EgressWorkers::spawn(&config.egress, &config.adapters, Arc::clone(&stored_sink));
         Ok(DataService {
             read_config: Arc::new(ReadConfig {
                 schema: Arc::new(config.schema.clone()),
@@ -1204,6 +1218,7 @@ impl DataService {
             config,
             sink: stored_sink,
             diagnostics,
+            egress,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
             identities,
@@ -1346,6 +1361,12 @@ impl DataService {
                 column: params.column.clone(),
             },
         }))
+    }
+
+    /// Write one document and queue it on its target's worker. Every outcome,
+    /// including a refusal decided here, arrives as one `DataEvent::Upload`.
+    pub fn upload(&self, params: UploadParams) {
+        self.egress.upload(params, &self.config.documents);
     }
 
     /// Queue a document query through the shared pool, with the same per-key
@@ -1674,6 +1695,9 @@ impl DataService {
     }
 
     pub fn shutdown(&self) {
+        // Upload workers first: they answer only the sink, and an upload
+        // echoing onto a bus should not arrive after its subscriptions stop.
+        self.egress.shutdown();
         // Fetch workers before the subscriptions, for the same reason
         // the subscriptions come before the runner: a worker's outcome
         // sink submits series jobs into the ingest runner, so it must
@@ -1750,6 +1774,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -1824,6 +1849,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -1857,6 +1883,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::with(Arc::new(crate::pricing::worker::tests::FakePricer {
                 asked: Default::default(),
                 delay,
@@ -2184,6 +2211,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents,
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -2321,6 +2349,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -2553,6 +2582,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: Default::default(),
                 documents: Default::default(),
+                egress: Vec::new(),
                 pricer: PricerConfig::default(),
             },
             sink,
@@ -2785,6 +2815,7 @@ mod tests {
             sources: vec![spec],
             adapters,
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -3300,6 +3331,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: Default::default(),
                 documents: Default::default(),
+                egress: Vec::new(),
                 pricer: PricerConfig::default(),
             },
             sink,
@@ -3333,6 +3365,7 @@ mod tests {
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .expect("a broken view must not stop the service opening")
@@ -3584,6 +3617,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -3652,6 +3686,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -3750,6 +3785,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -3826,6 +3862,7 @@ mod tests {
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -3946,6 +3983,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -4028,6 +4066,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -4127,6 +4166,7 @@ source_name = "NPV"
             sources: vec![carried_source(src, poll)],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         }
     }
@@ -4921,6 +4961,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -5019,6 +5060,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -5112,6 +5154,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -5220,6 +5263,7 @@ source_name = "NPV"
             }],
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -5292,6 +5336,7 @@ source_name = "NPV"
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();
@@ -5348,6 +5393,7 @@ source_name = "NPV"
             sources: Vec::new(),
             adapters: Default::default(),
             documents: Default::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         })
         .unwrap();

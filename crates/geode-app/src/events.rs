@@ -4,6 +4,10 @@
 //! Replacing an entry preserves its position among other pending keys, so this
 //! is not a chronological event log. See `docs/current/request-delivery.md`.
 //!
+//! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
+//! uploads from the same tile never coalesce: each is a separate user action
+//! and the spec promises every upload exactly one answer, not just the latest.
+//!
 //! A one-slot channel carries only wakeups. Full wakeup capacity does not refuse
 //! state, but pending entries have no fixed key-count cap. Sender acceptance
 //! does not acknowledge that the window has applied the event.
@@ -20,6 +24,12 @@ enum Key {
     Distinct(QueryKey),
     Catalog(QueryKey),
     Price(QueryKey),
+    /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
+    /// user actions and each answers exactly once. Keying on the tile would
+    /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
+    /// still-undelivered outcome (e.g. a failure) when a later upload from
+    /// the same tile answers before the first is read.
+    Upload(QueryKey, u64),
     Published(String, String),
     Fetched(String, String, bool),
     Load,
@@ -35,6 +45,7 @@ fn key(event: &DataEvent) -> Key {
         DataEvent::Distinct(o) => Key::Distinct(o.key),
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
+        DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
         }
@@ -57,6 +68,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Distinct(o) => Some(o.tag),
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
+        DataEvent::Upload(o) => Some(o.tag),
         _ => None,
     }
 }
@@ -255,6 +267,32 @@ mod tests {
             DataEvent::SeriesFetched { result: Ok(0), .. }
         ));
         assert!(rx.recv().await.is_err());
+    }
+
+    #[gpui::test]
+    async fn two_upload_outcomes_for_the_same_tile_are_both_delivered() {
+        // Uploads are separate user actions, not a retriable request: a
+        // failed upload followed by a successful one must not coalesce into
+        // only the latest, the way a tagged query answer would.
+        let (tx, rx) = channel();
+        let outcome = |tag, result: Result<(), &str>| {
+            DataEvent::Upload(geode_data::egress::UploadOutcome {
+                key: QueryKey(1),
+                tag,
+                target: "sophis".into(),
+                result: result.map_err(str::to_string),
+            })
+        };
+        tx.try_send(outcome(1, Err("write error"))).unwrap();
+        tx.try_send(outcome(2, Ok(()))).unwrap();
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Upload(o) if o.tag == 1 && o.result == Err("write error".into())
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Upload(o) if o.tag == 2 && o.result == Ok(())
+        ));
     }
 
     #[gpui::test]

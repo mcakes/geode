@@ -14,8 +14,9 @@
 //! that requests its document through `DataHandle`, the `TableDelegate`
 //! its body is painted through, and the `TileContent`/`ModuleFactory` pair
 //! the shell hosts it through. Cell editing (insert mode, `:bump`, `:revert`) and the
-//! draft states (`Behind`, `:rebase`) are both here. Egress is not built;
-//! `:upload` reports that limitation.
+//! draft states (`Behind`, `:rebase`) are both here, and so is `:upload`:
+//! a y/n confirm, submission through `DataHandle::upload`, and the
+//! `Sent`/failure outcome.
 
 pub mod commands;
 pub mod content;

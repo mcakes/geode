@@ -5,6 +5,7 @@
 
 pub mod adapter;
 pub mod documents;
+pub mod egress;
 pub mod handle;
 pub mod health;
 pub mod ingest;
@@ -14,6 +15,7 @@ pub mod service;
 pub mod source;
 pub mod store;
 
+pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
 pub use service::{DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams};
