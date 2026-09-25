@@ -1405,6 +1405,21 @@ run_mutation "egress config: {key} is substituted" \
   geode-core \
   address_substitutes_key_when_present_and_is_unchanged_without_it
 
+# Every real egress.toml carries `config_version = 1`; without the skip it
+# warns "not a table" on every desk and user file.
+run_mutation "egress config: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/egress_config.rs \
+  '        if name == "config_version" {
+            continue;
+        }
+        let Some(table) = value.as_table() else {' \
+  '        if false {
+            continue;
+        }
+        let Some(table) = value.as_table() else {' \
+  geode-core \
+  an_egress_config_version_header_is_not_a_spurious_diagnostic
+
 # ---- egress workers (market-data egress, Task 7)
 
 run_mutation "egress: a write error answers Err" \

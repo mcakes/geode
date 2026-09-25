@@ -90,6 +90,12 @@ pub fn from_doc(doc: &MergedDoc, schema: &SchemaSpec) -> (Vec<EgressSpec>, Vec<D
     let mut diags = Vec::new();
 
     for (name, value) in &doc.value {
+        // The document's version stamp, not a target: every real file
+        // carries one, and warning about it would put a spurious
+        // diagnostic on every desk or user `egress.toml`.
+        if name == "config_version" {
+            continue;
+        }
         let Some(table) = value.as_table() else {
             diags.push(diag(Severity::Warning, name, None, "not a table"));
             continue;
@@ -423,6 +429,26 @@ dividend_schedule = "bbg/dividends"
             None,
             "an unknown document names no target"
         );
+    }
+
+    #[test]
+    fn an_egress_config_version_header_is_not_a_spurious_diagnostic() {
+        let (specs, diags) = from(
+            r#"
+config_version = 1
+
+[sophis]
+adapter = "demo_bus"
+[sophis.documents]
+cvi_params = "marketdata/cvi/{key}"
+"#,
+        );
+        assert!(
+            diags.is_empty(),
+            "config_version is not a target and not a complaint: {diags:?}"
+        );
+        assert_eq!(specs.len(), 1, "{specs:?}");
+        assert_eq!(specs[0].name, "sophis");
     }
 
     #[test]
