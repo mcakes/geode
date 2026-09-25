@@ -286,8 +286,9 @@ mod tests {
     }
 
     /// Two producers (three CVI keys, two dividend keys) — the burst
-    /// covers all five, producer order then key order, and the cadence loop's first two publishes are one of each prefix
-    /// (the round-robin schedule's first row).
+    /// covers all five, producer order then key order, and the cadence
+    /// loop's first two publishes are one of each prefix (the round-robin
+    /// schedule's first row).
     #[test]
     fn the_bus_publishes_every_key_once_at_start_then_on_its_cadence() {
         let (adapter, feed) = ChannelAdapter::new("demo_bus");
@@ -417,8 +418,9 @@ mod tests {
         );
     }
 
-    /// The egress end-to-end check: a headless upload-then-echo loop through the real `DataService` built from the
-    /// demo config — no internal mutator stands in for any hop. The path
+    /// The egress end-to-end check: a headless upload-then-echo loop
+    /// through the real `DataService` built from the demo config — no
+    /// internal mutator stands in for any hop. The path
     /// exercised: `service.upload` resolves the `[sophis]` egress target
     /// and hands written bytes to `ChannelEgress`; that publish lands on
     /// `marketdata/dividend/XYZ`, which the `[dividend]` source's own
