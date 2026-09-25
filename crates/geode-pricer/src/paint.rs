@@ -8,6 +8,14 @@
 //! `GridModel` stays theme-free. The tile re-derives it when the theme
 //! global changes (an observer, never a per-cell check).
 //!
+//! A row's text is floored against every ground the row can wear: its
+//! own (the table, or a package's `secondary`) and the two the table
+//! paints over it in place of that ground — `table_hover` under the
+//! pointer and the selected-row fill on the cursor row
+//! (`Paints::row_grounds`). Floored against its own ground alone, muted
+//! and danger text fell under the floor on hover or selection on 23
+//! bundled themes.
+//!
 //! Each floor moves toward whichever of pure black or pure white
 //! contrasts more with the ground it paints on (the market-data
 //! `FlooredTones` idiom, `geode-marketdata/src/tile.rs`) — one pole for
@@ -20,7 +28,7 @@
 //! against one of the two poles, so this floor always lands.
 
 use crate::core::columns::CellState;
-use geode_core::colour::{Rgb, contrast_ratio, readable_on};
+use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::colours::{over, to_hsla, to_rgb};
 use gpui::Hsla;
@@ -54,6 +62,30 @@ fn floor_toward_pole(c: Hsla, bg: Rgb) -> Hsla {
     to_hsla(readable_on(to_rgb(c), bg, pole(bg)))
 }
 
+/// Floor `c` against every ground in `grounds` — a row's text paints on
+/// its own ground, the table's hover ground and its selected-row ground,
+/// whichever the row is in, so it must read on all of them. Each pass
+/// floors against the ground `c` currently contrasts least with, toward
+/// that ground's pole; the grounds a theme gives one row share a pole in
+/// practice, so a move toward it never undoes an earlier floor. Bounded:
+/// a theme whose grounds split poles would stop at the last pass, and the
+/// full-theme sweep would name it.
+fn floor_on_all(c: Hsla, grounds: &[Rgb]) -> Hsla {
+    let mut c = c;
+    for _ in 0..grounds.len() {
+        let Some(worst) = grounds
+            .iter()
+            .copied()
+            .filter(|g| contrast_ratio(to_rgb(c), *g) < READABLE_RATIO)
+            .min_by(|a, b| contrast_ratio(to_rgb(c), *a).total_cmp(&contrast_ratio(to_rgb(c), *b)))
+        else {
+            break;
+        };
+        c = floor_toward_pole(c, worst);
+    }
+    c
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Paints {
     pub own: Hsla,
@@ -61,13 +93,18 @@ pub struct Paints {
     pub danger: Hsla,
     /// Opaque: `secondary` composited over the table ground.
     pub package_ground: Hsla,
+    /// Opaque: `table_hover` over the table ground — what the table
+    /// paints on a row under the pointer, replacing the row's own ground
+    /// (a package's included). The chevron's only interactive ground.
+    pub row_hover: Hsla,
     pub package_own: Hsla,
     pub package_muted: Hsla,
     pub package_danger: Hsla,
     /// The action menu's text (`render_menu`): `popover_foreground` and
     /// `muted_foreground` (disabled rows, the section header, the
     /// trailing key lane) floored on the popover, and the highlighted
-    /// row's `accent_foreground` and muted floored on `accent` over it.
+    /// enabled row's `accent_foreground` and key lane floored on `accent`
+    /// over it (a disabled row never takes the fill).
     pub menu_text: Hsla,
     pub menu_muted: Hsla,
     pub menu_active_text: Hsla,
@@ -80,19 +117,42 @@ impl Paints {
         let package: Rgb = over(theme.secondary, ground);
         let danger = chip_paint(theme, Tone::DangerText).text;
         let (popover, active) = Self::menu_grounds(theme);
+        // A row's text reads on its own ground and on the two the table
+        // paints over it (hover, selected), which replace it.
+        let [hover, selected] = Self::row_grounds(theme);
+        let line = [ground, hover, selected];
+        let pkg = [package, hover, selected];
         Paints {
-            own: floor_toward_pole(theme.foreground, ground),
-            muted: floor_toward_pole(theme.muted_foreground, ground),
-            danger: floor_toward_pole(danger, ground),
+            own: floor_on_all(theme.foreground, &line),
+            muted: floor_on_all(theme.muted_foreground, &line),
+            danger: floor_on_all(danger, &line),
             package_ground: to_hsla(package),
-            package_own: floor_toward_pole(theme.foreground, package),
-            package_muted: floor_toward_pole(theme.muted_foreground, package),
-            package_danger: floor_toward_pole(danger, package),
+            row_hover: to_hsla(hover),
+            package_own: floor_on_all(theme.foreground, &pkg),
+            package_muted: floor_on_all(theme.muted_foreground, &pkg),
+            package_danger: floor_on_all(danger, &pkg),
             menu_text: floor_toward_pole(theme.popover_foreground, popover),
             menu_muted: floor_toward_pole(theme.muted_foreground, popover),
             menu_active_text: floor_toward_pole(theme.accent_foreground, active),
             menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
         }
+    }
+
+    /// The table ground, and the two grounds the table itself paints on
+    /// a row over it, replacing the row's own: `[hover, selected]`. The
+    /// selected row wears `table_active`, or `accent` when the theme's
+    /// `list.active_highlight` is off (gpui-component's `TableState`).
+    pub(crate) fn row_grounds(theme: &Theme) -> [Rgb; 2] {
+        let ground: Rgb = over(theme.table, to_rgb(theme.background));
+        let selected = if theme.list.active_highlight {
+            *theme.tokens.table_active
+        } else {
+            *theme.tokens.accent
+        };
+        [
+            over(*theme.tokens.table_hover, ground),
+            over(selected, ground),
+        ]
     }
 
     /// The popover over the window background, and the highlighted row's
@@ -119,6 +179,11 @@ mod tests {
     use super::*;
     use geode_core::colour::{READABLE_RATIO, contrast_ratio};
     use gpui_component::{ActiveTheme as _, Theme};
+
+    /// A test-only label with the sweep's `&'static str` type.
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
 
     /// Spec §8.2: every paint the pricer adds, swept over every bundled
     /// theme with NO exception list — each text colour against the ground
@@ -152,7 +217,24 @@ mod tests {
                     ("menu muted", p.menu_muted, popover),
                     ("menu active text", p.menu_active_text, active),
                     ("menu active muted", p.menu_active_muted, active),
-                ] {
+                ]
+                .into_iter()
+                .chain(
+                    Paints::row_grounds(theme)
+                        .into_iter()
+                        .zip(["hover", "selected"])
+                        .flat_map(|(bg, which)| {
+                            [
+                                ("own", p.own),
+                                ("muted", p.muted),
+                                ("danger", p.danger),
+                                ("package own", p.package_own),
+                                ("package muted", p.package_muted),
+                                ("package danger", p.package_danger),
+                            ]
+                            .map(|(label, text)| (leak(format!("{label} on {which}")), text, bg))
+                        }),
+                ) {
                     checked += 1;
                     let ratio = contrast_ratio(to_rgb(text), bg);
                     if ratio < READABLE_RATIO {
@@ -162,7 +244,7 @@ mod tests {
             });
         }
         assert!(
-            checked >= 10 * 40,
+            checked >= 22 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(

@@ -5199,4 +5199,38 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal", "a second click closes it");
     }
+
+    /// A disabled row answers the pointer with no fill (the guide's "no
+    /// misleading hover response", market-data's rule): the highlight
+    /// lands on it, its paint has no fill, and a pick there still refuses
+    /// with the reason and keeps the menu open.
+    #[gpui::test]
+    fn a_pointer_over_a_disabled_menu_row_lands_without_a_fill(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "menu", None);
+        let at = centre_of(&mut vcx, "pricer-menu-row-3"); // Ungroup: A is a root line
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        let (highlighted, enabled, paint, paints) = h.tile.read_with(&vcx, |t, cx| {
+            let m = t.menu.as_ref().expect("the menu is open");
+            let enabled = matches!(
+                m.items[m.highlighted],
+                MenuItem::Action {
+                    enabled: Ok(()),
+                    ..
+                }
+            );
+            let paints = t.table.read(cx).delegate().paints;
+            let paint = crate::popup::menu_row_paint(true, enabled, &paints, cx.theme().accent);
+            (m.highlighted, enabled, paint, paints)
+        });
+        assert_eq!(highlighted, 3, "the pointer's row takes the highlight");
+        assert!(!enabled, "fixture: Ungroup is disabled here");
+        assert_eq!(paint.fill, None, "no fill on a disabled row");
+        assert_eq!(paint.text, paints.menu_muted);
+        let at = centre_of(&mut vcx, "pricer-menu-row-3");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("not in a package"));
+        assert_eq!(h.mode(&mut vcx), "menu", "a refused pick keeps the menu");
+    }
 }

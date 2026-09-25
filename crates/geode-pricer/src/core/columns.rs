@@ -83,7 +83,7 @@ pub(crate) const SHIFT: ColumnFormat = ColumnFormat {
 /// A price: the measure default (two places, grouped, sign-coloured).
 const PRICE: ColumnFormat = ColumnFormat::MEASURE;
 /// A greek: four places, grouped, sign-coloured. Its columns are wide
-/// enough for `-123,456.7890` (see the fit test): a right-aligned cell
+/// enough for `-1,234,567.8900` (see the fit test): a right-aligned cell
 /// that overflows loses its LEADING digits, which reads as a plausible
 /// wrong number rather than a clipped one.
 const GREEK: ColumnFormat = ColumnFormat {
@@ -121,7 +121,7 @@ use Applies::{BarrierLines, EveryLine, EveryRow};
 /// type carries a `String` (`Colour::Named`) is not promotable to a
 /// `'static` borrow.
 pub static COLUMNS: [ColumnDef; 17] = [
-    def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 48.0),
+    def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 56.0),
     def(
         "underlying",
         "underlying",
@@ -201,7 +201,7 @@ pub static COLUMNS: [ColumnDef; 17] = [
         false,
         EveryRow,
         PRICE,
-        104.0,
+        112.0,
     ),
     def(
         "delta",
@@ -210,7 +210,7 @@ pub static COLUMNS: [ColumnDef; 17] = [
         false,
         EveryRow,
         GREEK,
-        112.0,
+        128.0,
     ),
     def(
         "gamma",
@@ -219,7 +219,7 @@ pub static COLUMNS: [ColumnDef; 17] = [
         false,
         EveryRow,
         GREEK,
-        112.0,
+        128.0,
     ),
     def(
         "vega",
@@ -228,7 +228,7 @@ pub static COLUMNS: [ColumnDef; 17] = [
         false,
         EveryRow,
         GREEK,
-        112.0,
+        128.0,
     ),
     def(
         "theta",
@@ -237,9 +237,9 @@ pub static COLUMNS: [ColumnDef; 17] = [
         false,
         EveryRow,
         GREEK,
-        112.0,
+        128.0,
     ),
-    def("rho", "rho", ColumnKind::Rho, false, EveryRow, GREEK, 112.0),
+    def("rho", "rho", ColumnKind::Rho, false, EveryRow, GREEK, 128.0),
     def(
         "priced_at",
         "priced at",

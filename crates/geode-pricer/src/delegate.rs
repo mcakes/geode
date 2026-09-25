@@ -111,14 +111,16 @@ impl SheetDelegate {
         }
     }
 
-    /// The chevron only ever sits on a package row, so its states are
-    /// computed against the package ground with the package's floored
-    /// muted text — the colours it actually paints on and in.
+    /// The chevron's hover and pressed states only ever show under the
+    /// pointer, and a row under the pointer wears the table's hover
+    /// ground in place of its own (`render_tr`'s ground is replaced), so
+    /// they are computed against `row_hover` — its only interactive
+    /// ground — with the package's muted text, which is floored there too.
     fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
         let inputs = control::ControlInputs::new(
             theme,
             control::Rest::Bare,
-            self.paints.package_ground,
+            self.paints.row_hover,
             self.paints.package_muted,
         );
         match &self.chevron {
@@ -357,10 +359,27 @@ impl TableDelegate for SheetDelegate {
                 })
                 .into_any_element()
             }
+            // A left-aligned cell (text: status, underlying, expiry…) ends
+            // in `…` rather than clipping mid-glyph — a failure's reason
+            // is read whole in the footer. A number never does: dropping
+            // its trailing digits is as wrong as dropping its leading ones,
+            // so the widths are sized to fit it instead (the fit test).
             None => el
                 .when_some(row.cells.get(plan_col), |el, cell| {
-                    el.text_color(paints.text(cell.state, package))
-                        .child(cell.text.clone())
+                    let text = cell.text.clone();
+                    el.text_color(paints.text(cell.state, package)).map(|el| {
+                        if right {
+                            el.child(text)
+                        } else {
+                            el.child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(text),
+                            )
+                        }
+                    })
                 })
                 .into_any_element(),
         }
@@ -369,7 +388,8 @@ impl TableDelegate for SheetDelegate {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::columns::{COLUMNS, ColumnKind};
+    use crate::core::columns::{COLUMNS, ColumnDef, ColumnKind, signed};
+    use geode_core::format::format_number;
     use geode_shell::fontsize::FontSize;
     use gpui_component::Size;
 
@@ -377,45 +397,52 @@ mod tests {
     const MONO_ADVANCE_EM: f32 = 0.6;
     /// gpui-component's table paints its text at `text_sm`.
     const TABLE_TEXT_REM: f32 = 0.875;
+    /// `border_1` on the cursor cell, both sides.
+    const CURSOR_BORDER: f32 = 2.0;
 
-    /// The widest value a column is expected to paint, beside its label.
-    /// A right-aligned cell that overflows loses its LEADING characters
-    /// (`-12,345.6789` reads `2,345.6789`), so a width that fits only the
-    /// usual case is a plausible-wrong number waiting for a big book.
-    fn worst_case(kind: ColumnKind) -> &'static str {
-        match kind {
-            ColumnKind::Qty => "-1000",
-            ColumnKind::Underlying => "SX5E",
-            ColumnKind::Expiry => "20DEC26",
-            ColumnKind::Strike | ColumnKind::Barrier => "12345.5",
-            ColumnKind::Type => "C",
-            ColumnKind::BarrierType => "DO",
-            ColumnKind::SpotShift | ColumnKind::VolShift => "-100.0",
-            ColumnKind::Price => "-1,234,567.89",
-            ColumnKind::Delta
+    /// The widest value a column is expected to paint, produced the way
+    /// the cell produces it (`format_number` at the column's default
+    /// format, `signed` for a shift) from representative extremes. A
+    /// right-aligned cell that overflows loses its LEADING characters
+    /// (`-1,234,567.89` reads `1,234,567.89`), so a width that fits only
+    /// the usual case is a plausible-wrong number waiting for a big book.
+    fn worst_case(def: &ColumnDef) -> String {
+        let fmt = |v: f64| format_number(v, &def.default_format).text;
+        match def.kind {
+            ColumnKind::Qty => fmt(-10000.0),
+            ColumnKind::Strike | ColumnKind::Barrier => fmt(12345.67),
+            ColumnKind::SpotShift | ColumnKind::VolShift => signed(-99.9, &def.default_format),
+            ColumnKind::Price
+            | ColumnKind::Delta
             | ColumnKind::Gamma
             | ColumnKind::Vega
             | ColumnKind::Theta
-            | ColumnKind::Rho => "-123,456.7890",
-            ColumnKind::PricedAt => "23:59:59",
-            // Prose: a failure's reason may be longer than any width and
-            // is read in the footer too.
-            ColumnKind::Status => "pricing…",
+            | ColumnKind::Rho => fmt(-1_234_567.89),
+            // Text, not numbers: the longest the grammar renders.
+            ColumnKind::Underlying => "SX5E".into(),
+            ColumnKind::Expiry => "20DEC26".into(),
+            ColumnKind::Type => "C".into(),
+            ColumnKind::BarrierType => "DO".into(),
+            ColumnKind::PricedAt => "23:59:59".into(),
+            // Prose: a failure's reason may be longer than any width; it
+            // ends in `…` and is read whole in the footer.
+            ColumnKind::Status => "pricing…".into(),
         }
     }
 
     /// Column widths are pixels (`view_presentation.toml`'s contract) and
     /// do not follow the rem, so each default label and worst-case value
     /// must fit its width at the LARGEST font size, inside the XSmall
-    /// cell padding.
+    /// cell padding and the cursor cell's `border_1` (which takes layout
+    /// width: the cursor is exactly where a trader reads the number).
     #[test]
     fn every_default_label_and_worst_case_value_fits_its_width() {
         let advance = FontSize::Large.rem_px() * TABLE_TEXT_REM * MONO_ADVANCE_EM;
         let pad = Size::XSmall.table_cell_padding();
-        let padding = f32::from(pad.left) + f32::from(pad.right);
+        let padding = f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER;
         let mut failures = Vec::new();
         for c in &COLUMNS {
-            for text in [c.label, worst_case(c.kind)] {
+            for text in [c.label.to_string(), worst_case(c)] {
                 let need = text.chars().count() as f32 * advance + padding;
                 if need > c.default_width {
                     failures.push(format!(

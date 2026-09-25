@@ -92,9 +92,20 @@ cargo bench -p geode-pricer
   never per cell, so the table's hover and selected-row fills stay visible.
 - Every text colour the tile adds is floored against the ground it paints on
   and swept over every bundled theme with no exception list (`paint`),
-  including the action menu's four.
+  including the action menu's four. A row's text is floored on every ground
+  the row can wear: its own, the table's hover ground and the selected-row
+  ground (which replace it).
+- A disabled menu row never takes the highlight fill (market-data's rule).
 - A menu command's title is its palette title (`content::action_title`); the
   menu's highlight never rests on a separator or section header.
 - Default column labels and widths fit a worst-case value at the largest font
   size (`delegate`'s fit test): a right-aligned cell that overflows loses its
   leading digits.
+
+## Known limitations
+
+- The action menu's key hints are the default bindings, written into the
+  menu; a user rebind is not reflected there. The market-data action list has
+  the same limitation.
+- Column widths are pixels and do not follow the font size; the defaults are
+  sized for the largest step, so they are generous at the smaller ones.

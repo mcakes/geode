@@ -18490,6 +18490,24 @@ run_mutation "pricer tile: the delegate mirrors loading" \
   '            let _ = loading;' \
   geode-pricer an_empty_table_names_the_next_action_or_that_it_is_loading
 
+# A disabled menu row never takes the highlight fill: a fill there is a
+# misleading hover response on a row that will only refuse.
+run_mutation "pricer popup: a disabled menu row takes no fill" \
+  crates/geode-pricer/src/popup.rs \
+  '        (_, false) => MenuRowPaint {
+            fill: None,' \
+  '        (_, false) => MenuRowPaint {
+            fill: Some(accent),' \
+  geode-pricer a_pointer_over_a_disabled_menu_row_lands_without_a_fill
+
+# Row text is floored on the hover and selected-row grounds too: the
+# table paints them in place of the row's own ground.
+run_mutation "pricer paint: row text floors on hover and selection" \
+  crates/geode-pricer/src/paint.rs \
+  '        let line = [ground, hover, selected];' \
+  '        let line = [ground];' \
+  geode-pricer every_pricer_paint_is_readable_on_every_bundled_theme
+
 # A failed line is counted in the header, not only coloured.
 run_mutation "pricer header: failed lines are counted" \
   crates/geode-pricer/src/header.rs \

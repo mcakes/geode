@@ -234,13 +234,17 @@ adapter and restart`).
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
 type`, `priced at`), and the default widths fit each label and a worst-case
-value (`-123,456.7890` for a greek) at the largest font size; a view's `label`
-and `width` still override them. Both bundled views end in a `status` column,
-which says `pricing…` on a stale line and a failed line's reason, so neither
-state is shown by colour alone. The tree column reserves a fixed chevron slot
-on every row, so roots share one leading edge and legs sit one step in; the
-entry row opens at the depth it will land at, and a long label ends in `…`. Lines and packages are rows of one
-table; a package row sums its legs and opens and closes like a tree node
+value (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price), inside the
+cursor cell's border, at the largest font size; a view's `label` and `width`
+still override them. Both bundled views end in a `status` column, which says
+`pricing…` on a stale line and a failed line's reason, so neither state is
+shown by colour alone. The tree column reserves a fixed chevron slot on every
+row, so roots share one leading edge and legs sit one step in; the entry row
+opens at the depth it will land at. A long tree label or text cell ends in
+`…`; a number never truncates. Cell text is floored to the readable ratio on
+the row's own ground and on the table's hover and selected-row grounds.
+
+Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. Package rows are read-only in every
@@ -258,7 +262,7 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
-| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer and skips separators and section headers |
+| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer and skips separators and section headers; a disabled row takes no fill, and `enter` or a click there names the reason. Key hints are the default bindings; a rebind is not reflected |
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for

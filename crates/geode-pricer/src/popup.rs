@@ -8,8 +8,8 @@ use geode_shell::choice::ChoiceList;
 use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnchoredPositionMode, App, Div, Entity, MouseButton, SharedString, anchored, deferred,
-    div, px,
+    Anchor, AnchoredPositionMode, App, Div, Entity, Hsla, MouseButton, SharedString, anchored,
+    deferred, div, px,
 };
 use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
 
@@ -185,6 +185,46 @@ pub(crate) fn snap(items: &[MenuItem], at: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// What one menu row paints: its fill, its title's colour and its
+/// trailing lane's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MenuRowPaint {
+    pub fill: Option<Hsla>,
+    pub text: Hsla,
+    pub lane: Hsla,
+}
+
+/// The market-data list's rule (`MenuItemElement`'s): the `accent` fill
+/// only on a highlighted ENABLED row. A disabled row never answers the
+/// pointer or the keyboard with a fill — the design guide's "no
+/// misleading hover/pressed response" — so the highlight still LANDS on
+/// it (`enter` there answers with the reason, which its trailing lane
+/// already shows) but it paints muted on the bare popover.
+pub(crate) fn menu_row_paint(
+    highlighted: bool,
+    enabled: bool,
+    paints: &Paints,
+    accent: Hsla,
+) -> MenuRowPaint {
+    match (highlighted, enabled) {
+        (true, true) => MenuRowPaint {
+            fill: Some(accent),
+            text: paints.menu_active_text,
+            lane: paints.menu_active_muted,
+        },
+        (false, true) => MenuRowPaint {
+            fill: None,
+            text: paints.menu_text,
+            lane: paints.menu_muted,
+        },
+        (_, false) => MenuRowPaint {
+            fill: None,
+            text: paints.menu_muted,
+            lane: paints.menu_muted,
+        },
+    }
+}
+
 /// The `.` action menu (planning decision 22), anchored under the
 /// header's right edge by the caller. The pricer's own row door
 /// (`render_choice`'s shape) rather than the market-data popup, which
@@ -195,10 +235,8 @@ pub(crate) fn snap(items: &[MenuItem], at: usize) -> usize {
 ///
 /// The menu family's highlight (`shell::listrow`'s doc: menus wear
 /// `accent`, lists the list pair), moved by the pointer as by `j`/`k`,
-/// so there is no separate hover fill to disagree with it. A disabled
-/// row keeps the highlight fill when the keyboard lands on it (the trader
-/// must see where `enter` would answer) but paints muted text, and its
-/// trailing lane names why it is disabled. Every text colour here is
+/// so there is no separate hover fill to disagree with it. See
+/// [`menu_row_paint`] for a disabled row. Every text colour here is
 /// floored against the ground it paints on (`Paints`'s menu colours).
 pub(crate) fn render_menu(
     m: &Menu,
@@ -251,13 +289,7 @@ pub(crate) fn render_menu(
                 },
                 MenuItem::View { name, current } => (name.clone(), "", true, Some(*current)),
             };
-        let highlighted = i == m.highlighted;
-        let (text, lane_text) = match (highlighted, enabled) {
-            (true, true) => (paints.menu_active_text, paints.menu_active_muted),
-            (true, false) => (paints.menu_active_muted, paints.menu_active_muted),
-            (false, true) => (paints.menu_text, paints.menu_muted),
-            (false, false) => (paints.menu_muted, paints.menu_muted),
-        };
+        let paint = menu_row_paint(i == m.highlighted, enabled, paints, theme.accent);
         let row = h_flex()
             .h(scale::design(ROW_HEIGHT))
             .px(scale::design(ROW_INSET))
@@ -265,8 +297,8 @@ pub(crate) fn render_menu(
             .items_center()
             .justify_between()
             .gap_4()
-            .when(highlighted, |d| d.bg(theme.accent))
-            .text_color(text)
+            .when_some(paint.fill, |d, fill| d.bg(fill))
+            .text_color(paint.text)
             .debug_selector(move || format!("pricer-menu-row-{i}"))
             .on_mouse_down(MouseButton::Left, {
                 let tile = tile.clone();
@@ -297,7 +329,7 @@ pub(crate) fn render_menu(
             )
             .child(
                 div()
-                    .text_color(lane_text)
+                    .text_color(paint.lane)
                     .debug_selector(move || format!("pricer-menu-lane-{i}"))
                     .child(lane),
             );
@@ -346,6 +378,22 @@ mod tests {
         assert_eq!(step(&m, 5, -2), 0);
         assert_eq!(step(&m, 0, -1), 0, "clamped at the start");
         assert_eq!(step(&m, 0, 7), 5);
+    }
+
+    #[gpui::test]
+    fn only_a_highlighted_enabled_row_takes_the_fill(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            let theme = cx.theme();
+            let p = Paints::derive(theme);
+            let paint = |h, e| menu_row_paint(h, e, &p, theme.accent);
+            assert_eq!(paint(true, true).fill, Some(theme.accent));
+            assert_eq!(paint(true, true).text, p.menu_active_text);
+            assert_eq!(paint(false, true).fill, None);
+            assert_eq!(paint(true, false).fill, None);
+            assert_eq!(paint(true, false).text, p.menu_muted);
+            assert_eq!(paint(false, false), paint(true, false));
+        });
     }
 
     #[test]

@@ -55,7 +55,8 @@ pub(crate) struct HeaderInputs<'a> {
 pub(crate) struct HeaderModel {
     pub name: SharedString,
     pub view: SharedString,
-    /// `spot +2%`, `vol −1`: the sheet-wide shifts, only those set.
+    /// `spot +2.0%`, `vol -1.0`: the sheet-wide shifts, only those set,
+    /// spelled as their cells spell them (`columns::signed`, one place).
     pub shifts: Vec<SharedString>,
     pub pricer: SharedString,
     /// `N pricing…` while any line is stale.
@@ -267,6 +268,13 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
         // Capturing first lets this toggle decide; the shell's bubble
         // phase (click-to-focus) still runs, so a click on an unfocused
         // tile focuses it and `mode == menu` reaches the right tile.
+        //
+        // It enters through `dispatch`, exactly as `.` does, so with an
+        // entry field or cell editor open it first closes them (blurring
+        // before the drop, without committing) and the closers may re-sync
+        // the cursor. That is benign and intended: the menu acts on the
+        // cursor row, and a click here must not leave a live field under
+        // an open menu any more than the key would.
         .child(
             div()
                 .id(ElementId::NamedInteger(
