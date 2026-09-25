@@ -1247,9 +1247,27 @@ history; the open set is no longer pruned by edits, so `d d`/`g u` then
 `u` restores a package open, with the cursor on the first restored row.
 Of the deferred minors above this closes three: `escape` clearing
 `loading…`/`REFUSED`, the unbounded 1 s retry, and `dd`/`g u` then `u`
-restoring a package collapsed. The config-counter re-read/re-warn, the
-editor's stale column after a view reload, the unrefreshed menu enabled
-states and the untested `redo` clear-on-error arm remain open.
+restoring a package collapsed.
+
+Leftovers (2026-09-24, `worktree-pricer-leftovers`) close the remaining
+four:
+
+- *Config re-read.* The bridge's observer compares
+  `bridge::pricer_config_key` (merged `pricer_views` value, raw
+  `[pricing] refresh`, resolved `stale_after`) with the last one it
+  applied and does nothing when it is equal: no reload, timer restart,
+  warning or diagnostics note. The first reload after `attach` always
+  applies (the factory may have been built from another config).
+- *Editor column.* Every rebuild re-points an open editor at its column
+  kind's new plan index; when the kind left the plan or the line left
+  the grid it closes with `MOVED`, blurred through the window it opened
+  in at the end of the effect cycle (a rebuild has no `Window`).
+- *Menu states.* `rebuild_chrome` recomputes an open menu's rows,
+  keeping the highlight clamped. A grid click closes the menu, and
+  every verb does, so the reachable stale routes were a load answer
+  (menu opened while loading) and a config reload.
+- *Redo clear-on-error.* Pinned by
+  `a_refused_redo_drops_the_rest_of_both_sides` and a harness entry.
 
 Unverified on a real window: the header row, the tree column's indent
 and package ground, stale versus fresh contrast, the entry field over
