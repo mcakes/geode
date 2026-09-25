@@ -2,7 +2,7 @@
 //! installed into a `DataTable`, a header and a footer.
 //!
 //! **One door per kind of change.** A request-changing edit goes through
-//! `apply_edit` (Task 8), which records its undo; a delivery through
+//! `apply_edit` (or `apply_edits`), which records its undo; a delivery through
 //! `deliver`; a tick through `tick`. Each ends at `rebuild`, which builds
 //! the grid model (never in `render`), installs it, re-prepares the
 //! header and notifies.
@@ -181,7 +181,8 @@ impl Editor {
 
 pub struct PricerTile {
     pub(crate) id: TileId,
-    // Read from Task 8 on (the request door and the frame's as-of).
+    // Nothing reads it yet: the flip-barrier observer in `new` holds its
+    // own handle.
     #[allow(dead_code)]
     frame: Entity<Frame>,
     pub(crate) data: DataHandle,
@@ -230,7 +231,7 @@ pub struct PricerTile {
     title: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
-    /// What `p`/`shift+p` put (Task 11): the last `y y` or `d d`.
+    /// What `p`/`shift+p` put: the last `y y` or `d d`.
     pub(crate) register: Option<crate::core::RowSpec>,
     find: Option<FindState>,
     /// The latest submission's tag: an outcome with any other is dropped
@@ -240,8 +241,10 @@ pub struct PricerTile {
     /// WHETHER to submit, never what — a batch always carries every stale
     /// line.
     in_flight: HashMap<LineId, u64>,
-    /// Read only through `apply_edit`/`apply_edits` (Task 9's entry field
-    /// and cell editor, Task 11's `:spot clear` and `u`/`ctrl+r` dispatch).
+    /// Every inverse is recorded against the rows its edit left, so an
+    /// edit reaches the sheet only through `apply_edit`/`apply_edits`
+    /// (which record) and `history_step` (which replays); any other edit
+    /// would leave an entry pointing at rows that moved.
     pub(crate) undo: UndoStack,
     refresh_task: Option<Task<()>>,
     retry_task: Option<Task<()>>,
@@ -256,7 +259,7 @@ pub struct PricerTile {
     /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
     /// drops it. `None` outside insert mode.
     pub(crate) editor: Option<Editor>,
-    /// The `.` action menu (Task 11): `None` outside menu mode.
+    /// The `.` action menu: `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
     /// The line a cell press that closed the entry field resolved, with
     /// the grid row it was painted at (see `on_table_event`).
@@ -414,8 +417,8 @@ impl PricerTile {
             this.rebuild(cx);
         })
         .detach();
-        // A closed tile gives its name back (spec §7.4's open set). Tasks
-        // 8 and 12 add the cancel and the final save here.
+        // A closed tile flushes its sheet, cancels its pricing and gives
+        // its name back (spec §7.4's open set).
         cx.on_release(|this: &mut PricerTile, _cx| {
             // Spec §7.3: the sheet is not lost until the tile is — a save
             // still waiting on its idle timer, or one the store refused,
@@ -616,8 +619,7 @@ impl PricerTile {
     }
 
     /// The one edit door (global constraints): apply, record the undo,
-    /// then everything an edit implies. The entry field's `commit_entry` is
-    /// its first production caller; Task 10's cell editor is the next.
+    /// then everything an edit implies.
     pub(crate) fn apply_edit(
         &mut self,
         edit: Edit,
@@ -629,7 +631,7 @@ impl PricerTile {
         Ok(())
     }
 
-    /// Several edits as ONE undo entry (`:spot clear`, Task 11). On a
+    /// Several edits as ONE undo entry (`:spot clear`). On a
     /// refusal the ones already applied are taken back and nothing is
     /// recorded.
     pub(crate) fn apply_edits(
@@ -1062,17 +1064,14 @@ impl PricerTile {
         });
     }
 
-    /// What every edit, undo and redo implies (the open set keeps a
-    /// removed package's id, so an undo reinstates it open): rebuild,
-    /// reprice what changed, and make sure the timer runs once
-    /// the sheet has a line. Task 12 adds the write-behind save. Reached
-    /// only through `apply_edit`/`apply_edits`.
+    /// What every edit, undo and redo implies: rebuild, reprice what
+    /// changed, arm the write-behind save. The open set is left whole (a
+    /// removed package's id stays, so an undo reinstates it open). The
+    /// refresh timer is not touched: it runs whenever the tile is visible
+    /// with an interval set, and `tick` skips an empty sheet.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.rebuild(cx);
         self.submit(cx);
-        if self.refresh_task.is_none() {
-            self.restart_timer(cx);
-        }
         self.arm_save(cx);
     }
 
@@ -1279,11 +1278,11 @@ impl PricerTile {
         if self.sheet.is_empty() || self.loading {
             return;
         }
-        self.sheet.mark_all_stale();
-        self.rebuild(cx);
-        self.submit(cx);
+        self.reprice_all(cx);
     }
 
+    /// Every line stale, then one batch (`:price`, the `price` verb, a
+    /// tick).
     fn reprice_all(&mut self, cx: &mut Context<Self>) {
         self.sheet.mark_all_stale();
         self.rebuild(cx);
@@ -1343,7 +1342,7 @@ impl PricerTile {
 
     // ---- verbs ----------------------------------------------------------
 
-    /// Every normal-mode verb (Tasks 7–11 add arms). A verb this tile
+    /// Every normal-mode verb (`pricer::*`). A verb this tile
     /// handles clears the footer first, so a stale refusal never outlives
     /// the next keystroke.
     pub fn dispatch(
@@ -2309,8 +2308,7 @@ pub(crate) mod tests {
         diagnostics: Entity<Diagnostics>,
     }
 
-    // The harness serves Tasks 7–12's tests too; not every field and
-    // method has a reader yet.
+    // Not every field and method has a reader in every build.
     #[allow(dead_code)]
     pub(crate) struct Harness {
         pub tile: Entity<PricerTile>,
@@ -2400,7 +2398,7 @@ pub(crate) mod tests {
                         diagnostics,
                     });
                     // `Root` is load-bearing: gpui-component registers the
-                    // focused `InputState` on it (Tasks 9–10's fields).
+                    // focused `InputState` on it (the entry field and editor).
                     cx.new(|cx| gpui_component::Root::new(tile, window, cx))
                 })
             })
@@ -2571,7 +2569,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Task 6 ----
+    // ---- the factory, restore and session ----
 
     #[gpui::test]
     fn the_factory_is_kind_pricer_and_a_fresh_tile_opens_untitled_1(cx: &mut gpui::TestAppContext) {
@@ -2855,7 +2853,7 @@ pub(crate) mod tests {
         "SPX Z26 4000 P",
     ];
 
-    // ---- Task 7 ----
+    // ---- motions, tree verbs, yank and find ----
 
     #[gpui::test]
     fn motions_move_the_cursor_and_never_into_the_tree_column(cx: &mut gpui::TestAppContext) {
@@ -3019,7 +3017,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- Task 8 ----
+    // ---- repricing ----
 
     fn edit(h: &Harness, vcx: &mut VisualTestContext, e: Edit) {
         h.tile.update(vcx, |t, cx| t.apply_edit(e, cx)).unwrap();
@@ -3331,7 +3329,7 @@ pub(crate) mod tests {
         assert_ne!(utc, tokyo, "a zone change re-prepares the header");
     }
 
-    // ---- Task 9 ----
+    // ---- the entry field ----
 
     fn typed(h: &Harness, vcx: &mut VisualTestContext, text: &str) {
         vcx.simulate_input(text);
@@ -3468,7 +3466,7 @@ pub(crate) mod tests {
         assert!(!focused(&mut vcx));
     }
 
-    // ---- Task 10 ----
+    // ---- the cell editor ----
 
     fn editor_text(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
         h.tile.read_with(vcx, |t, cx| match &t.editor {
@@ -3700,7 +3698,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- Task 11 ----
+    // ---- undo, put, move, group and the menu ----
 
     fn answer_all(h: &Harness, vcx: &mut VisualTestContext, price: f64) {
         for b in h.prices() {
@@ -3951,7 +3949,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Task 11 fix round 1 ----
+    // ---- loading guards, put into a closed package, menu clicks ----
 
     /// Review finding: `:shift`/`:spot`/`:group`/`:ungroup` must not edit
     /// the empty fallback sheet while a load is pending — the edit would
@@ -4060,7 +4058,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- Task 12 ----
+    // ---- the write-behind save ----
 
     fn settle(vcx: &mut VisualTestContext, d: std::time::Duration) {
         vcx.executor().advance_clock(d);

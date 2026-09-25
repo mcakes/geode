@@ -36,9 +36,10 @@ background data work. It does not depend on the shell or feature modules.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
-shell's module contract and may ask the data service through `DataHandle`. They do not depend
-on sibling features. `geode-app` constructs shared services, registers module
-factories, adapters, document kinds, and pricers, and opens the window.
+shell's module contract and may ask the data service through `DataHandle`.
+They do not depend on sibling features. `geode-app` constructs shared
+services, registers module factories, adapters, document kinds, and pricers,
+and opens the window.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. Wire

@@ -143,7 +143,7 @@ required reading.
 The shell, data service, blotter, diagnostics, configuration dialogs,
 market-data editor, timeseries viewer, chart, shared date-time field, and
 line-pricer tile are built. Market-data egress and the line pricer's durable
-sheet store are not built; pricer sheets live in memory for one run. There are no production vendor adapters; demo
-sources exercise each supported source shape. Some recent UI paths still need
-real-window display checks. The current subsystem guides record their specific
-limitations.
+sheet store are not built; pricer sheets live in memory for one run. There are
+no production vendor adapters; demo sources exercise each supported source
+shape. Some recent UI paths still need real-window display checks. The current
+subsystem guides record their specific limitations.

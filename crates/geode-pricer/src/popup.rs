@@ -1,5 +1,5 @@
 //! The tile's popups (spec §8.4–§8.5): the choice typeahead under an
-//! editing cell, and (Task 11) the action menu. Rows are prepared when
+//! editing cell, and the action menu. Rows are prepared when
 //! the list changes, never formatted in render.
 
 use crate::tile::PricerTile;

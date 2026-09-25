@@ -7,7 +7,13 @@ use crate::content::PricerSettings;
 use crate::core::sheet::Sheet;
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
-use gpui::SharedString;
+use geode_shell::module::StackHandle;
+use geode_shell::shell::chip::{Tone, chip_paint};
+use geode_shell::shell::scale;
+use geode_shell::tiling::TileId;
+use gpui::prelude::*;
+use gpui::{FontWeight, IntoElement, SharedString, div};
+use gpui_component::{Theme, h_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
@@ -106,14 +112,6 @@ impl HeaderModel {
         out
     }
 }
-
-use geode_shell::module::StackHandle;
-use geode_shell::shell::chip::{Tone, chip_paint};
-use geode_shell::shell::scale;
-use geode_shell::tiling::TileId;
-use gpui::prelude::*;
-use gpui::{FontWeight, IntoElement, div};
-use gpui_component::{Theme, h_flex};
 
 /// `stale`: whether the last priced time is older than `stale_after` —
 /// computed by the caller per frame and passed in, so rendering never

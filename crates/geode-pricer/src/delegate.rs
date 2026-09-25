@@ -1,6 +1,6 @@
 //! The tile's `TableDelegate` (line-pricer spec §8.2): a prepared
 //! `Rc<GridModel>` swapped wholesale by `PricerTile::install_model`, a
-//! mirror of the tile's cursor, and (Tasks 9–10) mirrors of the open entry
+//! mirror of the tile's cursor, and mirrors of the open entry
 //! field and cell editor. The tile's own state is the truth; nothing here
 //! decides anything. Column 0 is the tree column (indent, chevron,
 //! shorthand), pinned left; the cursor never enters it.
@@ -53,10 +53,10 @@ pub struct SheetDelegate {
     pub(crate) paints: Paints,
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
     /// The tile's open entry field, mirrored here so `render_td` can paint
-    /// it (Task 9's `Entry` row); the tile's `entry` is the source of
+    /// it (the `Entry` row); the tile's `entry` is the source of
     /// truth, this is a read-only mirror.
     pub(crate) entry: Option<Entity<InputState>>,
-    /// The tile's open cell editor, mirrored the same way (Task 10).
+    /// The tile's open cell editor, mirrored the same way.
     pub(crate) editor: Option<EditorPaint>,
     /// The typeahead's rows call back into the tile; a dropped tile
     /// paints no popup.

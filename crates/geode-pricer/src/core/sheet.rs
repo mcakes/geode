@@ -4,11 +4,12 @@
 //! `parent`, and `parent` itself is rebuilt by one walk after every
 //! structural edit.
 //!
-//! Mutation goes through [`Sheet::apply`] (`edit.rs`); the other `pub`
-//! mutators are [`Sheet::deliver`] and [`Sheet::deliver_all`] (a result
-//! landing, one or a batch), [`Sheet::mark_all_stale`] (a tick) and
-//! [`Sheet::fold_packages`] (a recompute), and both are called by `apply`
-//! where they matter.
+//! Mutation goes through [`Sheet::apply`] (`edit.rs`). The other `pub`
+//! mutators change no row's identity or request: [`Sheet::deliver`] and
+//! [`Sheet::deliver_all`] (a result landing, one or a batch),
+//! [`Sheet::mark_all_stale`] (a tick, a load, `:price`; never called by
+//! `apply`) and [`Sheet::fold_packages`] (a recompute, which `apply` runs
+//! after every edit).
 
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::Template;
@@ -576,7 +577,7 @@ impl Sheet {
 
     /// Rotate the flat range `a.start..b.end` so block `b` comes before
     /// block `a` (the two are adjacent: `a.end == b.start`).
-    // Task 6's `Move` arm is the only caller.
+    // `Edit::Move` is the only caller.
     pub(crate) fn swap_adjacent_blocks(&mut self, a: Range<usize>, b: Range<usize>) {
         debug_assert_eq!(a.end, b.start);
         let whole = a.start..b.end;
@@ -900,8 +901,8 @@ pub(crate) mod tests {
             vol_pts: Some(-1.0),
         }))
         .unwrap();
-        // A row's own shift is set through Task 5's SetShift; here use the
-        // record/restore door to build one with an own vol shift.
+        // Build a row with an own vol shift through the record/restore
+        // door rather than `SetShift`.
         let mut rec = own.record(0);
         rec.shift = OwnShifts {
             spot_pct: None,
@@ -927,7 +928,7 @@ pub(crate) mod tests {
         let mut s = Sheet::new("t");
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
         let id = s.id(0);
-        // Pretend an edit bumped the revision (Task 5 does this through apply).
+        // Pretend an edit bumped the revision (`apply` does this for real).
         let mut rec = s.record(0);
         rec.revision = 2;
         s.apply(Edit::Remove { at: 0 }).unwrap();
