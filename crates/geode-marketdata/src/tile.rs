@@ -318,6 +318,16 @@ enum EchoStep {
 /// "newer" document to move onto or fall back to.
 const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
 
+/// What `:rebase` answers on a `Sent` draft with no differing echo held
+/// (controller ruling, egress spec §7 follow-up): the upload is still
+/// awaiting its echo upstream, so there is nothing newer to rebase onto.
+/// Running the ordinary rebase here would carry the draft back to
+/// `Editing` on the SAME generation and re-arm `:upload` of edits already
+/// in flight, a possible duplicate upload. `:revert` is the door named,
+/// since it drops the awaited echo along with the draft.
+const REBASE_AWAITING_ECHO: &str =
+    "nothing newer to rebase onto — the upload is awaiting its echo; :revert to drop it";
+
 /// What the row verbs (`o`, `shift+o`, `d d`; dividend spec §5.3) answer
 /// with the cursor in the attribute strip: an attribute is not a row, so
 /// there is nothing to insert beside or delete.
@@ -4232,6 +4242,13 @@ impl MarketDataTile {
         if !self.draft.is_behind() && !self.draft.is_sent() {
             return Err(NOT_BEHIND.to_string());
         }
+        // A `Sent` draft only has somewhere to rebase onto once a
+        // differing echo is held — otherwise the upload is still in
+        // flight upstream and this would be a rebase onto the very
+        // generation already submitted (controller ruling).
+        if self.draft.is_sent() && !matches!(self.echo, Some(Echo::Differs { .. })) {
+            return Err(REBASE_AWAITING_ECHO.to_string());
+        }
         // The rebase guard (spec §2, amendment 4) needs the group sizes
         // of the document currently on screen — `painted_snapshot` while
         // `Behind` — before `rebase` below moves the draft onto the newer
@@ -4720,8 +4737,11 @@ impl MarketDataTile {
             line,
             cursor,
             &self.catalog_keys(cx),
-            // `:rebase` is a verb of a `Sent` draft too (egress spec §7).
-            self.draft.is_behind() || self.draft.is_sent(),
+            // `:rebase` is a verb of a `Sent` draft too (egress spec §7),
+            // but only once a differing echo is held — otherwise there is
+            // nothing newer to offer it for (controller ruling).
+            self.draft.is_behind()
+                || (self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. }))),
             &attrs,
             &targets,
         )
@@ -13768,6 +13788,48 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
     }
 
+    /// A routine same-generation requery (any publish anywhere bumps the
+    /// frame, and the demo bus redelivers every few seconds) must not be
+    /// read as the echo: `echo_of`'s own guard compares the delivered
+    /// source time with `draft.base`, not with `sent`, before it ever
+    /// looks at `self.sent`. Content that plainly differs from what was
+    /// sent proves the short-circuit rather than a coincidental match —
+    /// mutated away, this delivery would build and compare against
+    /// `sent` and read as a difference within seconds of every upload.
+    #[gpui::test]
+    fn a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let sent = h.upload_ok(&mut vcx);
+
+        // Same generation as `draft.base`, with content that would read as
+        // differing if it were ever compared.
+        h.echo(
+            &mut vcx,
+            test_fixtures::snapshot_of_at(&CVI, &one_param_moved(&sent), BASE),
+        );
+
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.draft().is_sent()),
+            "still Sent"
+        );
+        assert!(
+            !h.header_texts(&vcx)
+                .iter()
+                .any(|t| t.starts_with("echo differs") || t.starts_with("echo not comparable")),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+        assert_eq!(
+            h.painted_as_of(&vcx).as_deref(),
+            Some(BASE),
+            "still painting the base"
+        );
+        assert!(h.cell(&vcx, 0, 0).1, "the edit is still painted");
+        assert!(h.sent_rows(&vcx).is_some(), "kept for the real echo later");
+    }
+
     /// Spec §7: a `Sent` draft is not a `Behind` one, and the update
     /// policy governs `Behind` alone — `replace` must not drop a sent
     /// draft whose echo differs, nor `rebase` move it.
@@ -13791,6 +13853,10 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         }
     }
 
+    /// `:rebase` from `Sent` only has somewhere to go once a differing
+    /// echo is held — this holds one first (`one_param_moved`), which is
+    /// also the premise `rebase_from_sent_without_a_held_echo_is_refused`
+    /// tests the absence of.
     #[gpui::test]
     fn rebase_from_sent_yields_editing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);
@@ -13822,6 +13888,38 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             Ok(()),
             "an Editing draft may be sent again"
         );
+    }
+
+    /// Controller ruling: `:rebase` from `Sent` with no differing echo
+    /// held has nothing newer to rebase onto — the upload is still
+    /// awaiting its echo upstream. Refused rather than rebasing onto the
+    /// same generation, which would re-arm `:upload` of edits already in
+    /// flight (a possible duplicate upload). Completions agree: `rebase`
+    /// is not offered here.
+    #[gpui::test]
+    fn rebase_from_sent_without_a_held_echo_is_refused(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.upload_ok(&mut vcx);
+
+        assert!(
+            !h.tile
+                .read_with(&vcx, |t, cx| t.completions("", 0, cx))
+                .contains(&"rebase".to_string()),
+            "no echo held: rebase is not offered"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "rebase"),
+            Err(
+                "nothing newer to rebase onto — the upload is awaiting its echo; :revert to drop it"
+                    .to_string()
+            )
+        );
+        let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(draft.is_sent(), "{:?}", draft.state);
+        assert_eq!(draft.base.as_deref(), Some(BASE), "unchanged");
+        assert_eq!(draft.len(), 1, "the edit is unchanged");
     }
 
     #[gpui::test]

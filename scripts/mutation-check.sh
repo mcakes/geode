@@ -17581,6 +17581,29 @@ run_mutation "panel: the tile answers keys after the upload confirm ends" \
   geode-marketdata \
   the_tile_answers_keys_after_the_upload_confirm_ends
 
+# The echo guard (egress spec §7): a delivered generation equal to
+# `draft.base` is a routine same-generation requery, never the echo, and
+# is skipped before `self.sent` is even read. Mutated away, every such
+# redelivery would build and compare against `sent` and read as a
+# difference within seconds of every upload on the demo bus.
+run_mutation "panel: a redelivery of the base is not read as the echo" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if draft.base.as_deref() == Some(t) {' \
+  '        if false {' \
+  geode-marketdata \
+  a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo
+
+# Controller ruling: `:rebase` from `Sent` with no differing echo held has
+# nothing newer to rebase onto — the upload is awaiting its echo. Mutated
+# away, `:rebase` would run anyway and re-arm `:upload` of edits already
+# in flight upstream, a possible duplicate upload.
+run_mutation "panel: rebase from Sent without a held echo is refused" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_sent() && !matches!(self.echo, Some(Echo::Differs { .. })) {' \
+  '        if false {' \
+  geode-marketdata \
+  rebase_from_sent_without_a_held_echo_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
