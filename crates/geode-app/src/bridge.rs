@@ -2176,6 +2176,7 @@ role = "key"
                 NamedColours::default(),
             )),
             pricer: test_pricer(&handle),
+            pricer_key: None,
             handle,
             factory,
             events: rx,
