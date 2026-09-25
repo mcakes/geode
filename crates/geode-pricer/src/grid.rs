@@ -18,6 +18,9 @@ use gpui::SharedString;
 
 #[derive(Debug, Clone)]
 pub struct GridColumn {
+    /// The vocabulary's name: the table's column key, stable whatever a
+    /// view labels it.
+    pub name: &'static str,
     pub label: SharedString,
     /// Pixels (the vocabulary's widths; see `ColumnDef::default_width`).
     pub width: f32,
@@ -135,6 +138,7 @@ impl GridModel {
             .columns
             .iter()
             .map(|c| GridColumn {
+                name: c.def.name,
                 label: c.label.clone().into(),
                 width: c.width,
                 right: right_aligned(c.def.kind),

@@ -13,14 +13,17 @@ use std::cell::RefCell;
 pub const PRICER_VIEWS_DOC: &str = "pricer_views";
 
 /// The two bundled views (spec §6.5). Part 3 pushes this into the
-/// builtin config layer with the factory (planning decision 12).
+/// builtin config layer with the factory (planning decision 12). Both end
+/// in `status`: a stale line's old numbers differ from fresh ones only by
+/// muted text, so the words `pricing…` (or a failure's reason) say it
+/// without colour.
 pub const BUILTIN_VIEWS: &str = r#"[vanilla]
 columns = ["qty", "underlying", "expiry", "strike", "type", "spot_shift", "vol_shift",
-           "price", "delta", "gamma", "vega", "theta", "rho"]
+           "price", "delta", "gamma", "vega", "theta", "rho", "status"]
 
 [barrier]
 columns = ["qty", "underlying", "expiry", "strike", "type", "barrier", "barrier_type", "spot_shift", "vol_shift",
-           "price", "delta", "gamma", "vega", "theta", "rho"]
+           "price", "delta", "gamma", "vega", "theta", "rho", "status"]
 "#;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,7 +215,7 @@ impl ColumnPlan {
                         .presentation
                         .label
                         .clone()
-                        .unwrap_or_else(|| c.def.name.to_string()),
+                        .unwrap_or_else(|| c.def.label.to_string()),
                     width: c.presentation.width.unwrap_or(c.def.default_width),
                     format: c.def.default_format.clone().with(&c.presentation),
                 })
@@ -261,7 +264,8 @@ mod tests {
                 "gamma",
                 "vega",
                 "theta",
-                "rho"
+                "rho",
+                "status"
             ]
         );
         let barrier = views.get("barrier").unwrap();
@@ -282,7 +286,8 @@ mod tests {
                 "gamma",
                 "vega",
                 "theta",
-                "rho"
+                "rho",
+                "status"
             ]
         );
         assert_eq!(Views::builtin(), views);
@@ -389,7 +394,7 @@ mod tests {
         assert_eq!(plan.columns.len(), 3);
         let qty = &plan.columns[0];
         assert_eq!(qty.def.name, "qty");
-        assert_eq!(qty.label, "qty", "the name when no label");
+        assert_eq!(qty.label, "qty", "the default label when none is set");
         assert_eq!(qty.width, column("qty").unwrap().default_width);
         assert_eq!(qty.format, column("qty").unwrap().default_format);
         let price = &plan.columns[1];
@@ -399,6 +404,18 @@ mod tests {
         assert!(
             price.format.thousands,
             "the default fills what the presentation left"
+        );
+        let (views, _) =
+            Views::from_doc(&doc("[v]\ncolumns = [\"spot_shift\", \"barrier_type\"]\n"));
+        let labels: Vec<String> = ColumnPlan::build(views.get("v").unwrap())
+            .columns
+            .into_iter()
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(
+            labels,
+            vec!["spot %", "barrier type"],
+            "readable words, never the snake_case name"
         );
         assert_eq!(
             plan.columns[2].def.name, "barrier",
