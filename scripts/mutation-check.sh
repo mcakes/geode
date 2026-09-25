@@ -13316,13 +13316,14 @@ run_mutation "mdpicker: a re-sorted catalog keeps the highlighted KEY, not its o
 # with `mode == insert` still claimed. Re-anchored 2026-09-19: the close
 # now sits ahead of the park (per-underlying drafts) rather than of the
 # key assignment; the comment line is what makes the anchor unique.
+# Re-anchored 2026-09-24: the upload confirm's disarm now follows the close.
 run_mutation "mdattr: a key change cancels an open editor" \
   crates/geode-marketdata/src/tile.rs \
   '        if self.editor.is_some() {
             self.close_editor(window, cx);
         }
-        // Park the outgoing draft under its own underlying.' \
-  '        // Park the outgoing draft under its own underlying.' \
+        // A question about the outgoing document must not stand over the' \
+  '        // A question about the outgoing document must not stand over the' \
   geode-marketdata a_key_change_cancels_an_open_editor
 
 # B4: the attribute value's click was the one mouse door that left a
