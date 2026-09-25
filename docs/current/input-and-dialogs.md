@@ -73,6 +73,12 @@ completed. See [configuration writes](configuration.md#runtime-edits) and
 [keybinding editing](keymaps.md#editing-unbinding-and-reset) for failure and
 layering details.
 
+The default-source row derives its options from the same
+`SeriesSettings` global read by timeseries tiles: `(none)` followed by the
+configured fetch sources in document order. An absent global supplies no
+sources; the row still offers `(none)`. These are configuration entries, not a
+check that each adapter started successfully.
+
 ## Filtering, choice, and movement
 
 [`listfilter`](../../crates/geode-shell/src/listfilter.rs) ranks labels without

@@ -672,14 +672,8 @@ fn the_factory_is_kind_timeseries_with_its_fragment_and_actions(cx: &mut gpui::T
         "{bound} keys for {} actions",
         ACTIONS.len()
     );
-    // And every key SPELLS. `check_fragment` only reads predicates,
-    // and the two checks above only read action ids, so an
-    // unparseable keystroke used to reach the running app and be
-    // dropped there with an error diagnostic in the trader's
-    // diagnostics tile — which is where `"+"` was found, on the
-    // first `--demo` boot after the module was registered.
-    // `build_keymap` over the real spliced docs is the production
-    // path and the one that reports it.
+    // Compile the real spliced keymap to validate key spellings as well as
+    // predicates and registered action ids.
     let docs = geode_shell::keymap::fragments::splice(
         &[geode_core::config::LayerDoc::builtin("keymap", "").unwrap()],
         &docs,
@@ -750,9 +744,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
         h.chart(&vcx).version > v0,
         "a chrome change rebuilds the chart model (§8.5's version contract)"
     );
-    // A count steps the cycle that many times: from `Right`, two
-    // steps is `BottomLeft` then `BottomRight` (the brief's `Left`
-    // predates the four-axis cycle the model builds).
+    // Two axis steps from Right pass through BottomLeft to BottomRight.
     h.dispatch(&mut vcx, "axis_next", Some(2));
     assert_eq!(h.model(&vcx).slots()[1].axis, Axis::BottomRight);
     h.dispatch(&mut vcx, "prev", None);
@@ -832,12 +824,7 @@ fn the_edit_verb_on_a_source_slot_says_so(cx: &mut gpui::TestAppContext) {
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
-    // A verb this tile does not handle leaves the notice on screen:
-    // clearing it in state while the old text is still painted is a
-    // lie (review round 1, MIN-3).
-    // (Every popup verb is handled somewhere, so the unhandled one
-    // here is a list key with no list open — `popup_verb`'s guards
-    // fall through to `false` exactly as an unrecognised verb does.)
+    // An unhandled list action with no list open preserves the standing notice.
     h.dispatch(&mut vcx, "list_down", None);
     assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
     // A handled one takes it away and speaks for itself.
@@ -851,11 +838,8 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
     let v = h.chart(&vcx).version;
-    // A cursor move, a chip click, a visibility change and a
-    // finished fetch all touch the HEADER and nothing the chart
-    // model carries — rebuilding one would clone every slot's
-    // points and flush `geode-chart`'s path cache for an identical
-    // model (review round 1, I-2).
+    // Header-only changes retain the chart model and its cached paths;
+    // rebuilding would copy identical point arrays.
     h.dispatch(&mut vcx, "next", None);
     h.dispatch(&mut vcx, "prev", None);
     assert_eq!(h.chart(&vcx).version, v, "a cursor move");
@@ -1018,7 +1002,7 @@ fn a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed(
     let (h, mut vcx) = open(cx);
     h.visible(&mut vcx, true);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "add SPX.close").unwrap(); // a second slot of the same pair (§9.6)
+    h.command(&mut vcx, "add SPX.close").unwrap(); // a second slot of the same pair
     h.requests(); // drain the fetch
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(0));
     let m = h.model(&vcx);
@@ -1053,13 +1037,8 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     h.visible(&mut vcx, true);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let first = h.fetch_request().expect("the add's own fetch");
-    // A frame notify carrying nothing this tile follows, while that
-    // first fetch is still unanswered, must not re-ask for the same
-    // span: `acted` is `None` — this
-    // tile has never asked a QUERY — so `follows_changed` says true,
-    // and the refetch trio hanging off it alone fired a duplicate
-    // `Fetch` per pair on the first scope keystroke after a show.
-    // The trio is gated on a REAL as-of move instead.
+    // An unrelated frame notification before the first fetch returns must not
+    // resubmit that span. With no acted query yet, requery can still be needed.
     h.frame.update(&mut vcx, |f, cx| {
         f.set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
@@ -1082,14 +1061,8 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     assert!(second.from > first.from, "a narrower span");
 }
 
-/// The as-of observer's own `in_flight.clear()`. `fetch_pending`
-/// drops the in-flight set only when the RANGE moved, and an as-of
-/// change leaves `Range` identical — so without the explicit clear a
-/// pair whose FIRST fetch is still unanswered as the as-of moves
-/// keeps its entry, and the new span (`AsOf::At(t)` resolves to
-/// `t − preset .. t`, a different left edge) is never asked for at
-/// all: the chart paints a truncated left edge with nothing on
-/// screen to say so.
+/// An as-of move invalidates fetch tracking even when Range is unchanged.
+/// The resolved span can have an earlier left edge requiring new coverage.
 #[gpui::test]
 fn an_as_of_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1134,8 +1107,7 @@ fn a_removed_pair_leaves_no_ghost_and_a_re_add_fetches_again(cx: &mut gpui::Test
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.requests();
     h.command(&mut vcx, "remove s1").unwrap();
-    // The answer lands for a pair this tile no longer holds — the
-    // one path that used to leave an entry behind for ever.
+    // Completion clears tracking even for a pair no longer held.
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     h.command(&mut vcx, "add SPX.close").unwrap();
     let f = h
@@ -1172,11 +1144,8 @@ fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(cx: &mut gpui::
     );
     h.deliver_series(&mut vcx, tag - 1, result_with(&[1], 50));
     assert_eq!(h.chart(&vcx).buckets.len(), 5, "stale");
-    // A stale tag is dropped AND does not arrive (review round 1,
-    // MIN-2): the barrier is waiting for the NEWER request's own
-    // answer, and an early arrival would release it — the second key
-    // keeps it open so a real arrival is visibly different from
-    // this.
+    // A stale delivery cannot count as an arrival for the newer request.
+    // A second awaited key keeps the arrival state observable.
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), QueryKey(99)], at);
     let fresh = h.series_request().expect("the as-of change requeried").tag;
@@ -1327,9 +1296,7 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
     let reqs = h.requests();
-    // The as-of moves the span's LEFT edge too, and live fetching
-    // never covered anything before `now − preset` (review round 1,
-    // I-1): the gaps are asked for before the points are.
+    // An as-of move can require earlier coverage; fetch gaps before querying.
     let Request::Fetch(f) = &reqs[0] else {
         panic!("an as-of change refetches first: {reqs:?}");
     };
@@ -1550,7 +1517,7 @@ fn chip_tones_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext)
     }
 }
 
-// ---- the picker and the expression field (spec §9.6, §9.7) --------
+// Picker and expression-field tests.
 
 #[gpui::test]
 fn a_opens_the_picker_over_the_catalogue_and_enter_adds_the_highlighted_pair(
@@ -1731,8 +1698,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
         before,
         "and the verb itself ran"
     );
-    // The series list, which holds no field, is unchanged: it stays
-    // open through exactly the verbs it always did (spec §9.5).
+    // The fieldless list remains open while changing slot colours.
     h.dispatch(&mut vcx, "list", None);
     h.dispatch(&mut vcx, "colour", None);
     assert!(h.popup_is_series(&vcx));
@@ -1810,7 +1776,7 @@ fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::Test
     );
 }
 
-// ---- the range popup (spec §9.8) ---------------------------------
+// Range-popup tests.
 
 #[gpui::test]
 fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(cx: &mut gpui::TestAppContext) {
@@ -1908,10 +1874,7 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     // A keystroke answers a refusal about a date that has moved on.
     vcx.simulate_keystrokes("backspace");
     assert_eq!(h.range_error(&vcx), None);
-    // `r` over the open popup REOPENS it on a fresh seed rather than
-    // toggling it shut: it is an insert popup, so `dispatch`'s gate
-    // closes it before the arm runs (spec §9.8 gives `r` no toggle;
-    // `escape` is the close).
+    // Repeating range dispatch reopens a fresh draft; Escape closes it.
     vcx.simulate_keystrokes("left");
     assert_eq!(h.range_active_segment(&vcx).1, Segment::Month);
     h.dispatch(&mut vcx, "range", None);
@@ -1922,17 +1885,8 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     );
 }
 
-/// `edited` is what turns the preset digits off, so
-/// only a keystroke that actually MOVED something may set it — a key
-/// that did nothing must leave the presets reachable. Two such keys,
-/// both of which used to disable them:
-///
-/// - `right` on `from`'s day, already the last segment under
-///   `Precision::Date` (`DateTimeField::apply` answers `false`), and
-/// - `tab`, which `RangePopup::switch` has always documented as "a
-///   trader who tabbed over to read the other date has typed nothing"
-///   — pinned here, since nothing else would notice it starting to
-///   count.
+/// Preset digits remain enabled after ineffective movement and field
+/// switching. Neither Right at the last segment nor Tab edits a date.
 #[gpui::test]
 fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1972,12 +1926,8 @@ fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.range_error(&vcx), None);
 }
 
-/// Ruling: an `Absolute` range seeds the popup from
-/// its STORED dates, as typed, and only a `Relative` one resolves
-/// against now/as-of — so reopening `r` under a historical as-of, or
-/// after the clock has rolled over midnight, is lossless. Seeding
-/// both through `resolve` used to round-trip an absolute range
-/// through a half-open end and back.
+/// Absolute ranges seed from stored dates; relative ranges resolve against
+/// now/as-of. Reopening an absolute draft must preserve its original span.
 #[gpui::test]
 fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1990,12 +1940,8 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
     );
     h.dispatch(&mut vcx, "cancel", None);
 
-    // The case the ruling is actually about: an as-of INSIDE the
-    // stored span. `Range::resolve` clips its end to the as-of by
-    // design (ruling 4) — which is right for what is fetched and
-    // queried, and wrong for what the popup seeds: a trader who
-    // opened `r` here and pressed `enter` would silently have their
-    // `to` rewritten to the as-of's own day.
+    // An as-of inside the stored span clips queries, but must not rewrite the
+    // To date merely because the editor opens and commits.
     h.frame.update(&mut vcx, |f, cx| {
         f.set_as_of(AsOf::At(
             "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
@@ -2074,10 +2020,8 @@ fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppC
     );
 }
 
-/// The chart's `offset_secs` is the APP clock's (`[time] zone`), never
-/// the machine's: installing a Tokyo clock as `AppClock` moves the
-/// offset to +9h and rebuilds the model (the offset is a `ChartKey`
-/// input), so a zone reload repaints the axis labels.
+/// Installing a Tokyo AppClock rebuilds chart input with a +9h offset.
+/// The offset is part of ChartKey, so clock reloads update displayed times.
 #[gpui::test]
 fn the_chart_offset_follows_the_app_clock(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);

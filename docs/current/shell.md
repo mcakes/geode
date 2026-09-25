@@ -114,9 +114,10 @@ choice, or starting a Keybindings capture.
 `enter_filter`, `filter_exit`, and `exit_filter` own the snapshot and key rules;
 `sync_dialog_text` reconciles the resulting query and focus. Escape accepts
 modifiers, while the keep-query Enter must be unmodified. Restoring a different
-query resets selection and scroll to the first match; leaving unchanged text
-keeps selection. In Normal mode, subsequent Escape presses clear a query,
-return from a nested stage, then close the dialog.
+query resets the list toward the first match; object edit stages then settle
+on an eligible row under their [cursor rules](configuration-dialogs.md#stages-and-ownership).
+Leaving unchanged text keeps selection. In Normal mode, subsequent Escape
+presses clear a query, return from a nested stage, then close the dialog.
 
 Naming, open object value fields, Settings typeahead, and keybinding capture
 have their own commit/cancel handling before filter routing. They can focus

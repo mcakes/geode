@@ -68,16 +68,41 @@ limitation rather than pretending to persist a draft upstream.
 
 `geode-timeseries` owns a chart tile composed from source series and arithmetic
 expressions. Its pure model tracks slots, range, frequency, axis mode,
-statistics, cursor, popups, and session state. Each mutation returns a
-`Changed` bitset so the tile can distinguish fetch, query, chart, chrome, and
-session work.
+statistics settings, cursor, and viewport. Mutations return a `Changed` bitset
+so the retained tile can distinguish fetch, query, chart, chrome, and session
+work. Popup state belongs to the retained tile, separately from the model.
 
-Source identities resolve through the configured fetch sources. Fetch requests
-ask only for uncovered spans; completion is broadcast by `(identity, source)`
-so every interested tile requeries, including when zero new rows were needed.
-Series queries return aligned struct-of-arrays values, percentiles, bins, and
-coverage. Expression slots may narrow the result to buckets shared by their
-operands.
+Runtime responsibilities are split by module:
+
+| Module | Responsibility |
+|---|---|
+| [`tile`](../../crates/geode-timeseries/src/tile/mod.rs) | Entity state, frame observation, actions and local commands, header preparation, chart cache, and rendering |
+| [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
+| [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+
+Settings and tiles obtain configured fetch sources from the shell-published
+`SeriesSettings` global. A configured source is not proof that its adapter
+started successfully. Fetch requests ask for the selected range; the data tier
+subtracts covered spans. Completion is broadcast by `(identity, source)` and
+updates affected slots. Visible affected tiles requery on every successful
+completion, including zero new rows. Failed requests retain the last good
+chart and report a notice or failed slot.
+
+Series queries return aligned points, percentiles, bins, and coverage.
+Expression slots may narrow results to buckets shared by their operands.
+Delivery tags reject superseded queries. Results requested under a pending
+frame flip are staged until promotion is allowed. This coordinates ready
+results, but the barrier timeout can release them while lagging tiles still
+show older data.
+
+The series list, add picker, expression editor, and range editor share one
+`Popup` owner. The list has no text field; insert popups own their input and
+key routing. Closing uses one cleanup path and blurs a focused input before
+releasing it. Series and add-picker rows share geometry, theme treatment,
+identity, and pointer handling, while supplying their own labels, controls,
+and activation behavior. The range editor uses separate date-field rows;
+the expression editor renders inline below the header in the tile body.
 
 `geode-chart` is independent of series and shell concepts. Its pure core owns
 scales, axes, layout, viewport, crosshair, decimation, and palette derivation.
