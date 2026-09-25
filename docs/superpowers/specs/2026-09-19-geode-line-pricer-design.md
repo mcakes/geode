@@ -1230,6 +1230,17 @@ change leaves an open editor painted at its old column index (a commit
 still refuses); menu enabled states are not refreshed after a `:`
 command; `redo`'s clear-on-error arm is untested.
 
+Post-merge cleanup (2026-09-24, `worktree-pricer-cleanup`): clicks below
+an open entry resolve their row to a `LineId` before the entry closes
+(a double-click's first press hands its line to the second); `escape`
+leaves `loading…`; `REFUSED` is its own state over the notice, cleared
+when nothing is left to submit, backing off 1 s → 30 s and logging once
+per streak; a refused `apply_edits` rollback logs and clears the undo
+history; the open set is no longer pruned by edits, so `d d`/`g u` then
+`u` restores a package open, with the cursor on the first restored row.
+This closes the first three of the deferred minors above and the
+`dd`/`g u` one.
+
 Unverified on a real window: the header row, the tree column's indent
 and package ground, stale versus fresh contrast, the entry field over
 the active row, the cell editor and its typeahead at the bottom edge,

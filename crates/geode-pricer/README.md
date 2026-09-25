@@ -59,7 +59,16 @@ cargo bench -p geode-pricer
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - A submission carries every stale line; an outcome tagged older than the
-  latest submission is dropped whole.
+  latest submission is dropped whole. A refusal streak is its own state over
+  the header notice (never written into it), backs off from one second to a
+  thirty-second cap, logs once, and ends on an admitted submission or when
+  nothing is left to submit.
+- A click resolves its grid row to a `LineId` before closing any field: the
+  entry placeholder is a grid row, so reading the row after the close names
+  the line below.
+- The open-package set is never pruned by an edit (ids are never reused, so an
+  undo reinstates a package open); it is pruned on load and filtered when the
+  session record is written.
 - The grid model is built on change and installed through `install_model`
   only, never in render.
 - Both text inputs blur before they drop, and a click in the grid (a chevron

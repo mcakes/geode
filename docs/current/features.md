@@ -165,7 +165,7 @@ Normal-mode keys:
 | `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries |
 | `d d` | Delete the row (a package with its legs) |
-| `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out |
+| `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
@@ -188,7 +188,10 @@ cell's value. Type and barrier type accept only their vocabulary, and `enter`
 commits the highlighted option. A commit whose line was deleted, or whose
 column moved under a view change, is refused with a footer message. A click in
 the grid, including a package chevron, cancels an open editor or entry field
-and never commits it. A `:` command or a `/` search closes the menu and any
+and never commits it, and acts on the row it was painted on: the entry
+placeholder is a row, so closing it moves the rows below up, but a click below
+it still lands on (or toggles, or double-click edits) the row the trader
+aimed at. A click on the placeholder itself only closes it. A `:` command or a `/` search closes the menu and any
 open field first. A click outside the grid leaves a text editor open until the next
 grid click or verb, as in the market-data panel; the typeahead popup closes on
 an outside click. Both the entry field and the cell editor blur before they
@@ -210,9 +213,18 @@ Every edit that changes a line's request bumps that line's revision and marks
 it stale. The tile submits when some stale line is not already in flight at its
 current revision, and each submission carries every stale line in one batch.
 An outcome tagged older than the latest submission is dropped whole. A result
-for an older revision is ignored, and the line, still stale, is resubmitted. A hidden tile cancels its in-flight work by key and submits nothing until
-shown, keeping its stale marks. A refused submission paints a header notice
-and retries after one second.
+for an older revision is ignored, and the line, still stale, is resubmitted. A
+hidden tile cancels its in-flight work by key and submits nothing until shown,
+keeping its stale marks.
+
+A refused submission (a full request queue, or a data service that is gone)
+paints `pricing request refused: …; retrying` over the header notice without
+replacing it, and retries: after one second, then doubling per consecutive
+refusal up to thirty seconds. The first refusal of a streak logs a warning on
+`geode::pricing` with the tile id; the rest of the streak logs nothing. The
+streak ends when a submission is admitted or when nothing is left to ask for
+(its lines were answered or deleted); the notice it covered then shows again,
+and the next refusal starts over at one second. `escape` does not clear it.
 
 The refresh timer marks every line stale and resubmits while the tile is
 visible and the sheet has a line. `[pricing] refresh` sets the default
@@ -235,9 +247,14 @@ answers with an error), the tile shows an empty fallback and the save slot
 reads `sheet 'NAME' did not load (…); edits are not saved`. Nothing is
 published from that tile, so the fallback cannot become the document's latest
 generation. A name with no document is not a failure: it opens empty and saves
-normally. The
-session record keeps the sheet name, view, refresh setting, cursor line, and
-open packages. A new tile takes the next free `untitled-N` name, and names
+normally.
+
+While a load is pending the header reads `loading…`; `escape` does not clear
+it (it is the only sign the load has not answered), and the answer does.
+
+The session record keeps the sheet name, view, refresh setting, cursor line,
+and open packages (only those still on the sheet: a deleted package's id is
+kept in the tile while an undo could bring it back, but never saved). A new tile takes the next free `untitled-N` name, and names
 open in another tile are skipped.
 
 **Known limitation:** the sheet store is in memory until the DuckDB store
