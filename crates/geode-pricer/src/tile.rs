@@ -529,7 +529,7 @@ impl PricerTile {
             cursor: self.cursor.line,
             expanded: match &self.held_expanded {
                 Some(held) => held.clone(),
-                None => self.expansion.ids().collect(),
+                None => self.expansion.live_ids(&self.sheet).collect(),
             },
         }
         .to_table()
@@ -1062,12 +1062,12 @@ impl PricerTile {
         });
     }
 
-    /// What every edit, undo and redo implies: forget dead package ids,
-    /// rebuild, reprice what changed, and make sure the timer runs once
+    /// What every edit, undo and redo implies (the open set keeps a
+    /// removed package's id, so an undo reinstates it open): rebuild,
+    /// reprice what changed, and make sure the timer runs once
     /// the sheet has a line. Task 12 adds the write-behind save. Reached
     /// only through `apply_edit`/`apply_edits`.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
-        self.expansion.retain_packages(&self.sheet);
         self.rebuild(cx);
         self.submit(cx);
         if self.refresh_task.is_none() {
@@ -1557,6 +1557,15 @@ impl PricerTile {
     /// `u` / `ctrl+r`. A refused inverse clears the whole history
     /// (`UndoStack`'s rule) and says so.
     fn history_step(&mut self, redo: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        // A step that reinstates rows (a `Restore`: `d d` undone) puts the
+        // cursor on the first of them; otherwise the cursor, keyed by id,
+        // stayed on the row that had followed them.
+        let restored = self.undo.peek(redo).and_then(|u| {
+            u.inverse.iter().find_map(|e| match e {
+                Edit::Restore { rows, .. } => rows.first().map(|r| r.id),
+                _ => None,
+            })
+        });
         let stepped = if redo {
             self.undo.redo(&mut self.sheet)
         } else {
@@ -1564,6 +1573,14 @@ impl PricerTile {
         };
         match stepped {
             Ok(true) => {
+                if let Some(id) = restored {
+                    // A leg restored under a closed package opens it, or
+                    // the cursor would sit on a hidden row.
+                    if let Some(p) = self.sheet.index_of(id).and_then(|r| self.sheet.parent(r)) {
+                        self.expansion.set(self.sheet.id(p), true);
+                    }
+                    self.cursor.line = Some(id);
+                }
                 self.after_edit(cx);
                 Ok(())
             }
@@ -4374,6 +4391,58 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
         assert_eq!(h.tree(&vcx).len(), 5, "and the package toggled");
+    }
+
+    // ---- undo keeps what the trader had open ----
+
+    /// Deleting an open package and undoing brings it back open, with the
+    /// cursor on it — not closed, with the cursor on the row after it.
+    #[gpui::test]
+    fn dd_then_u_on_an_open_package_restores_it_open_under_the_cursor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None); // P
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "delete", None);
+        assert_eq!(h.tree(&vcx).len(), 2);
+        let r = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert!(r.expanded.is_empty(), "the session never carries a dead id");
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.tree(&vcx).len(), 5, "P came back open");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on P");
+        let r = crate::session::Record::from_table(&h.serialize(&mut vcx));
+        assert_eq!(r.expanded, vec![crate::core::LineId(2)]);
+        h.dispatch(&mut vcx, "redo", None);
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.tree(&vcx).len(), 5, "and again after a redo");
+    }
+
+    /// A leg restored under a package closed since opens it, so the
+    /// cursor it lands on is a painted row.
+    #[gpui::test]
+    fn undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None); // P
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "down", None); // its first leg
+        h.dispatch(&mut vcx, "delete", None);
+        h.dispatch(&mut vcx, "collapse_all", None);
+        assert_eq!(h.tree(&vcx).len(), 3);
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.tree(&vcx).len(), 5, "P opened");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the restored leg");
+    }
+
+    #[gpui::test]
+    fn g_u_then_u_on_an_open_package_regroups_it_open(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None); // P
+        h.dispatch(&mut vcx, "expand", None);
+        h.dispatch(&mut vcx, "ungroup", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 4);
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(h.tree(&vcx).len(), 5, "P came back open");
     }
 
     // ---- notices ----

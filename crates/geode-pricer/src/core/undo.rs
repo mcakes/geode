@@ -63,6 +63,16 @@ impl UndoStack {
         }
     }
 
+    /// The entry the next `undo` (or, with `redo`, the next `redo`)
+    /// replays, without replaying it.
+    pub fn peek(&self, redo: bool) -> Option<&Undo> {
+        if redo {
+            self.undone.last()
+        } else {
+            self.done.back()
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.done.is_empty()
     }
