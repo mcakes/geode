@@ -81,9 +81,14 @@ XSD may supply.
 
 `:upload [target]` (also the action list's `Upload` row) sends the draft to
 an egress target that accepts the panel's document. It is refused, naming
-why, for a clean, `Behind`, already-sent or incomplete draft, and for a
-missing or ineligible target. Otherwise it assembles the document and asks
-`upload N cells, A rows added, D removed of <key> to <target>? (y/n)` in the
+why, for a clean, `Behind`, already-sent or incomplete draft, for a missing
+or ineligible target, while another upload from the panel is in flight (`an
+upload is in flight`), and while the frame's as-of is historical (`upload:
+the panel shows <time>, not live`): an upload is a whole document, and one
+assembled over an old generation would revert every untouched row upstream.
+Otherwise it assembles the document and asks
+`upload N cells, [K attributes, ]A rows added, D removed of <key> to
+<target>? (y/n)` in the
 header, where the question holds the keyboard: bare `y` submits, and any
 other key (consumed, chords included), a pointer press on the tile, or focus
 leaving the question cancels with `upload cancelled`. A delivery that
@@ -93,6 +98,14 @@ a new document arrived`, since the assembled rows belong to the superseded
 document. An `Ok` outcome marks the draft `sent HH:MM` only if the draft,
 base included, is still what was submitted; an `Err` keeps it editing and shows
 `upload failed: <e>` until the next edit or upload.
+
+Upload state belongs to the underlying that submitted it. Switching
+underlying while a draft is sent or its upload is in flight gives up that
+draft's echo check: it parks, and restores, as an unsent `Editing` draft,
+exactly as a session restore does, and the trader confirms upstream by eye or
+uploads again. An outcome that arrives for an underlying no longer shown is a
+notice naming it (`upload of <key> to <target> sent` or `... failed: <e>`) and
+never touches the draft on screen.
 
 While a draft is `sent`, the next generation delivered for its key with a
 different source time is compared with the rows that went out as a multiset
@@ -105,7 +118,17 @@ refuses edits until `:rebase` (which yields an unsent draft on the new
 generation) or `:revert`. The update policy does not apply to a sent draft. An
 upstream that only reorders rows reads as confirmed. A delivered document that
 cannot be assembled reads `echo not comparable: <why>` and is held the same
-way. `sent` is not persisted: a sent draft restores with its edits, unsent.
+way. `:rebase` is refused while a sent draft awaits its echo with no
+difference held (it would re-arm an upload of edits already in flight). `sent`
+is not persisted: a sent draft restores with its edits, unsent.
+
+**Known limitations.** An upload is a whole document with no concurrency
+check: the last writer wins, so an upstream generation that lands between the
+panel's last delivery and the trader's `y` is overwritten. An echo that
+arrives before the transport's `Ok` is handled as an ordinary delivery of a
+draft still `Editing` (the update policy applies, as to any newer generation),
+and the late `Ok` then does not enter `Sent`; the demo bus answers `Ok` first,
+but a real transport may not.
 
 ## Timeseries
 

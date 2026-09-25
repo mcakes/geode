@@ -6,8 +6,12 @@ per document row with the value columns laid flat) with a draft of unsent
 edits over the top. CVI and DIVIDEND are the panel specs built; each
 panel's roster kind is its own (`cvi`, `dividend`) while every panel
 shares the `marketdata` key context. `:upload [target]` sends the draft
-to an egress target after a y/n confirm (see `tile.rs`'s `arm_upload`);
-the echo of a sent draft confirms or holds it (`echo_of`).
+to an egress target after a y/n confirm (see `tile.rs`'s `arm_upload`),
+only while the frame is live and no other upload from the tile is in
+flight; the echo of a sent draft confirms or holds it (`echo_of`). Upload
+state is tied to the submitting underlying: an outcome for a key no longer
+shown is a notice, and a key switch gives up the outgoing draft's echo
+check.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#market-data-documents).

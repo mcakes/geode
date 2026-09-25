@@ -283,6 +283,15 @@ struct PendingUpload {
     _blur: gpui::Subscription,
 }
 
+/// The upload submitted and not yet answered: which underlying it sent
+/// and where. Kept across a key switch — the outcome still has to be
+/// reported, and naming the key it sent is what stops an answer for SPX
+/// from being read as NDX's.
+struct InFlightUpload {
+    key: Vec<String>,
+    target: String,
+}
+
 /// What the last echo of an upload said (egress spec §7), painted as its
 /// own header run rather than as the error-toned `notice`, which the next
 /// painting delivery clears: a confirmation is good news that stays up
@@ -681,8 +690,14 @@ pub struct MarketDataTile {
     /// outcome enters `Sent` only while the draft still matches it: an
     /// edit made while the upload was in flight is unsent work, and
     /// painting it as sent would claim a value went upstream that did
-    /// not.
+    /// not. Dropped on a key switch: the draft it describes is parked
+    /// and gives up its echo check.
     submitted: Option<Draft>,
+    /// The upload awaiting its outcome, if any. `:upload` is refused while
+    /// one is (a second submission would race the first's echo), and an
+    /// outcome for a key no longer shown is a notice that never touches
+    /// the current draft.
+    in_flight: Option<InFlightUpload>,
     /// This tile's upload counter, echoed in the outcome; an outcome whose
     /// tag is not the latest is ignored.
     upload_tag: u64,
@@ -988,6 +1003,7 @@ impl MarketDataTile {
             sent: None,
             echo: None,
             submitted: None,
+            in_flight: None,
             upload_tag: 0,
             upload_error: None,
         };
@@ -1272,8 +1288,34 @@ impl MarketDataTile {
     /// rebase applied, while the upload was in flight is unsent, so the
     /// draft stays `Editing`. `Err` leaves the draft `Editing` and paints `upload
     /// failed: <e>` until the next edit or upload.
+    ///
+    /// An outcome for an underlying no longer shown (the trader switched
+    /// away while it was in flight) is a notice naming key and target and
+    /// nothing else: the draft on screen, its error line and `sent` belong
+    /// to another document.
     pub fn deliver_upload(&mut self, u: UploadDelivery, cx: &mut Context<Self>) {
         if u.tag != self.upload_tag {
+            return;
+        }
+        let flight = self.in_flight.take();
+        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {
+            let key = display_key(&flight.key);
+            let target = flight.target;
+            let notice = match &u.result {
+                Ok(()) => format!("upload of {key} to {target} sent"),
+                Err(e) => format!("upload of {key} to {target} failed: {e}"),
+            };
+            tracing::info!(
+                target: "geode::ingest",
+                tile = self.id.0,
+                key = %key,
+                target = %target,
+                tag = u.tag,
+                ok = u.result.is_ok(),
+                "upload outcome for an underlying no longer shown"
+            );
+            self.notice = Some(notice.into());
+            self.changed(cx);
             return;
         }
         let submitted = self.submitted.take();
@@ -1342,8 +1384,17 @@ impl MarketDataTile {
                 }
             },
         };
+        if self.in_flight.is_some() {
+            return Err("an upload is in flight".into());
+        }
         if self.draft.is_empty() {
             return Err("nothing to upload".into());
+        }
+        // An upload is a whole document: one assembled over a historical
+        // generation would revert every untouched row upstream.
+        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {
+            let when = as_of_text(*at, chrono::Utc::now(), self.clock);
+            return Err(format!("upload: the panel shows {when}, not live"));
         }
         if self.draft.is_behind() {
             return Err(UPLOAD_BEHIND.into());
@@ -1375,9 +1426,14 @@ impl MarketDataTile {
             1 => "1 row added".to_string(),
             n => format!("{n} rows added"),
         };
+        let attrs = match self.draft.attr_count() {
+            0 => String::new(),
+            1 => "1 attribute, ".to_string(),
+            n => format!("{n} attributes, "),
+        };
         let key = self.key.as_deref().map(display_key).unwrap_or_default();
         let prompt = format!(
-            "upload {cells}, {added}, {} removed of {key} to {target}? (y/n)",
+            "upload {cells}, {attrs}{added}, {} removed of {key} to {target}? (y/n)",
             self.draft.rows_removed()
         );
         let focus = cx.focus_handle();
@@ -1480,6 +1536,10 @@ impl MarketDataTile {
         );
         self.sent = Some(pending.rows.clone());
         self.submitted = Some(self.draft.clone());
+        self.in_flight = Some(InFlightUpload {
+            key: self.key.clone().unwrap_or_default(),
+            target: pending.target.clone(),
+        });
         let queued = self.data.upload(geode_data::UploadParams {
             key: QueryKey(self.id.0),
             tag: self.upload_tag,
@@ -1491,6 +1551,7 @@ impl MarketDataTile {
             self.notice = Some("upload refused: the data service is busy or gone".into());
             self.sent = None;
             self.submitted = None;
+            self.in_flight = None;
         }
         self.changed(cx);
     }
@@ -4653,6 +4714,17 @@ impl MarketDataTile {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
+        // A question about the outgoing document must not stand over the
+        // incoming one.
+        let _ = self.disarm_upload(window, cx);
+        // The outgoing draft gives up its echo check (final-review
+        // ruling): it parks, and restores, as `Editing`, like a session
+        // restore — `sent` rows, the `submitted` snapshot and the error
+        // line all describe it, not the incoming draft. An upload still
+        // in flight keeps `in_flight`, so its outcome is reported by key.
+        self.sent = None;
+        self.submitted = None;
+        self.upload_error = None;
         // Park the outgoing draft under its own underlying. A non-empty
         // draft with NO key (a hand-edited session's `draft` with no
         // `underlying`) has nothing to park under and stays put — the
@@ -5130,6 +5202,21 @@ fn same_edits(a: &Draft, b: &Draft) -> bool {
 /// A delivered document's own source time — the identity a [`Draft`]
 /// compares its `base` against (§8.4: per-document `as_of`, never the
 /// dataset-wide `gen_id` a live query's provenance carries).
+/// A historical as-of in the trader's clock, the way the as-of chip
+/// spells one: `HH:MM` today, `YYYY-MM-DD HH:MM` on any other day.
+fn as_of_text(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    clock: geode_core::clock::Clock,
+) -> String {
+    let local = clock.local(at);
+    if local.date_naive() == clock.local(now).date_naive() {
+        clock.hm(at)
+    } else {
+        local.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
 fn source_time_of(snapshot: &Snapshot) -> Option<String> {
     snapshot
         .provenance()
@@ -13448,6 +13535,166 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             !h.header_texts(&vcx)
                 .iter()
                 .any(|t| t.starts_with("upload failed"))
+        );
+    }
+
+    /// An upload is a whole document: one assembled over a historical
+    /// generation would revert every untouched row upstream, so `:upload`
+    /// is refused unless the panel follows live — naming the as-of as the
+    /// as-of chip would, the time alone today, the date and time otherwise.
+    #[gpui::test]
+    fn upload_is_refused_under_a_historical_as_of(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let now = chrono::Utc::now();
+        for at in [
+            now - chrono::Duration::seconds(60),
+            now - chrono::Duration::days(3),
+        ] {
+            h.frame.update(&mut vcx, |f, cx| {
+                f.set_as_of(geode_core::query::AsOf::At(at));
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let when = as_of_text(at, chrono::Utc::now(), clock);
+            assert_eq!(
+                h.command(&mut vcx, "upload"),
+                Err(format!("upload: the panel shows {when}, not live"))
+            );
+            assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+            assert!(h.upload_request().is_none());
+        }
+        let today = as_of_text(now - chrono::Duration::seconds(60), now, clock);
+        assert_eq!(today.len(), "HH:MM".len(), "{today}");
+        let older = as_of_text(now - chrono::Duration::days(3), now, clock);
+        assert_eq!(older.len(), "YYYY-MM-DD HH:MM".len(), "{older}");
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::Live);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live again: armed");
+    }
+
+    /// A second `:upload` while the first awaits its outcome is refused:
+    /// it would race the first's echo.
+    #[gpui::test]
+    fn upload_is_refused_while_an_upload_is_in_flight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().expect("submitted").tag;
+        h.dispatch(&mut vcx, "down", None);
+        h.edit_one_cell(&mut vcx);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err("an upload is in flight".into())
+        );
+        assert_eq!(h.upload_prompt(&vcx), None);
+        assert!(h.upload_request().is_none());
+        h.deliver_upload(&mut vcx, tag, Ok(()));
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Ok(()),
+            "answered: the next upload arms"
+        );
+    }
+
+    /// Upload SPX, switch to NDX with an edit of its own, then deliver
+    /// SPX's outcome: a notice naming SPX and the target, and nothing else
+    /// on NDX. Switching back, SPX's draft has given up its echo check —
+    /// it restores `Editing`, never `Sent`.
+    fn outcome_after_a_key_switch(
+        cx: &mut gpui::TestAppContext,
+        result: Result<(), String>,
+        notice: &str,
+    ) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        let tag = h.upload_request().expect("submitted").tag;
+
+        h.command(&mut vcx, "key NDX.Z").expect("a valid key");
+        let request = h.document_request().expect("NDX requested").tag;
+        h.deliver(&mut vcx, request, Arc::new(cvi(BASE)));
+        h.edit_one_cell(&mut vcx);
+        let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.sent.is_none()),
+            "switch drops sent"
+        );
+
+        h.deliver_upload(&mut vcx, tag, result);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some(notice.to_string())
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().clone()),
+            before,
+            "NDX's draft is untouched"
+        );
+        let texts = h.header_texts(&vcx);
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.starts_with("upload failed") || t.starts_with("sent ")),
+            "{texts:?}"
+        );
+        assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+
+        h.command(&mut vcx, "key SPX.Z").expect("back to SPX");
+        let request = h.document_request().expect("SPX requested").tag;
+        h.deliver(&mut vcx, request, Arc::new(cvi(BASE)));
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.draft().state.clone()),
+            DraftState::Editing,
+            "a switched-away draft restores unsent"
+        );
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Ok(()),
+            "and may be sent again"
+        );
+    }
+
+    #[gpui::test]
+    fn an_err_outcome_after_a_key_switch_is_a_notice_naming_the_key(cx: &mut gpui::TestAppContext) {
+        outcome_after_a_key_switch(
+            cx,
+            Err("sophis is down".into()),
+            "upload of SPX.Z to sophis failed: sophis is down",
+        );
+    }
+
+    #[gpui::test]
+    fn an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key(cx: &mut gpui::TestAppContext) {
+        outcome_after_a_key_switch(cx, Ok(()), "upload of SPX.Z to sophis sent");
+    }
+
+    /// The confirm counts every kind of edit it is about to send, an
+    /// attribute included.
+    #[gpui::test]
+    fn the_confirm_counts_attribute_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.command(&mut vcx, "set spot_ref 4520").unwrap();
+        h.command(&mut vcx, "upload").unwrap();
+        assert_eq!(
+            h.upload_prompt(&vcx).as_deref(),
+            Some("upload 0 cells, 1 attribute, 0 rows added, 0 removed of SPX.Z to sophis? (y/n)")
         );
     }
 

@@ -17636,6 +17636,210 @@ run_mutation "panel: rebase from Sent without a held echo is refused" \
   geode-marketdata \
   rebase_from_sent_without_a_held_echo_is_refused
 
+# ---- upload: the final whole-branch review's contracts (egress spec §6-§8)
+
+# An upload is a whole document: one assembled over a historical generation
+# reverts every untouched row upstream. Mutated to ignore the as-of, a
+# historical panel arms the confirm.
+run_mutation "panel: upload is refused under a historical as-of" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {' \
+  '        if let Some(at) = None::<&chrono::DateTime<chrono::Utc>> {' \
+  geode-marketdata \
+  upload_is_refused_under_a_historical_as_of
+
+# A second upload while the first awaits its outcome would race the first's
+# echo. Mutated away, a second :upload arms.
+run_mutation "panel: upload is refused while an upload is in flight" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.in_flight.is_some() {
+            return Err("an upload is in flight".into());' \
+  '        if false {
+            return Err("an upload is in flight".into());' \
+  geode-marketdata \
+  upload_is_refused_while_an_upload_is_in_flight
+
+# An outcome for an underlying no longer shown names that key and target
+# and never touches the draft on screen. Mutated to treat every outcome as
+# the current key's, SPX's failure paints on NDX's header (and SPX's Ok
+# marks NDX's draft sent).
+run_mutation "panel: an outcome for a key no longer shown is a notice" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {' \
+  '        if let Some(flight) = flight.filter(|_| false) {' \
+  geode-marketdata \
+  outcome_after_a_key_switch_is_a_notice_naming_the_key
+
+# Switching away gives up the outgoing draft's echo check. Mutated to keep
+# `sent` and `submitted`, the kept rows outlive the switch.
+run_mutation "panel: a key switch drops the upload's sent rows" \
+  crates/geode-marketdata/src/tile.rs \
+  '        self.sent = None;
+        self.submitted = None;
+        self.upload_error = None;
+        // Park the outgoing draft' \
+  '        self.upload_error = None;
+        // Park the outgoing draft' \
+  geode-marketdata \
+  outcome_after_a_key_switch_is_a_notice_naming_the_key
+
+# The confirm names every kind of edit it sends. Mutated to omit a single
+# attribute, an attribute-only upload reads "0 cells".
+run_mutation "panel: the confirm counts attribute edits" \
+  crates/geode-marketdata/src/tile.rs \
+  '            1 => "1 attribute, ".to_string(),' \
+  '            1 => String::new(),' \
+  geode-marketdata \
+  the_confirm_counts_attribute_edits
+
+# Focus leaving the tile cancels the confirm (spec §6). Mutated to ignore
+# the blur, the question stands behind whatever took the keyboard.
+run_mutation "panel: focus loss cancels the upload confirm" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if this.pending_upload.is_some() {' \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if false && this.pending_upload.is_some() {' \
+  geode-marketdata \
+  focus_leaving_the_tile_cancels_the_confirm
+
+# A Sent draft with no edit since is refused "already sent". Mutated away,
+# the same document arms a second time.
+run_mutation "panel: a sent draft is refused already sent" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.draft.is_sent() {
+            return Err("already sent".into());' \
+  '        if false {
+            return Err("already sent".into());' \
+  geode-marketdata \
+  an_ok_outcome_enters_sent_and_the_header_reads_sent_hhmm
+
+# An incomplete inserted row is refused naming the count before assembly.
+# Mutated to skip the count, the refusal becomes assembly's empty-cell
+# message instead.
+run_mutation "panel: incomplete rows refuse the upload" \
+  crates/geode-marketdata/src/tile.rs \
+  '        match self.draft.incomplete_rows(self.spec, &self.model.columns) {
+            0 => {}' \
+  '        match 0 {
+            0 => {}' \
+  geode-marketdata \
+  upload_is_refused_with_an_incomplete_row
+
+# An Err outcome paints `upload failed: <e>` until the next edit. Mutated
+# to drop it, a failed upload is silent.
+run_mutation "panel: an Err outcome shows the inline upload error" \
+  crates/geode-marketdata/src/tile.rs \
+  '                self.upload_error =
+                    Some((format!("upload failed: {e}").into(), self.draft.clone()));' \
+  '                let _ = &e;' \
+  geode-marketdata \
+  an_err_outcome_keeps_editing_and_shows_the_error
+
+# `:bump` on an I64 column takes whole-number deltas only. Mutated to take
+# any delta, 3 + 0.5 lands a truncated 3 the trader never asked for.
+run_mutation "draft: bump refuses a fractional delta on an I64 column" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if true => Ok(Value::I64((current + delta) as i64)),' \
+  geode-marketdata \
+  bump_refuses_a_fractional_delta_on_an_integer_column_before_writing
+
+# DIVIDEND's announced/pay dates are required (ruling 2026-09-23): the
+# kind refuses a document without them. Mutated optional, an inserted row
+# without an announced date passes the incomplete check and fails upstream.
+run_mutation "spec: DIVIDEND requires the announced date" \
+  crates/geode-marketdata/src/core/spec.rs \
+  '            column: "announced_date",
+            label: "announced",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: true,' \
+  '            column: "announced_date",
+            label: "announced",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,' \
+  geode-marketdata \
+  dividend_dates_are_required
+
+run_mutation "spec: DIVIDEND requires the pay date" \
+  crates/geode-marketdata/src/core/spec.rs \
+  '            column: "pay_date",
+            label: "pay",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: true,' \
+  '            column: "pay_date",
+            label: "pay",
+            ty: ColumnType::Date,
+            format: ColumnFormat::TEXT,
+            choices: None,
+            required: false,' \
+  geode-marketdata \
+  dividend_dates_are_required
+
+# An upload to a target nobody configured answers Err naming it. Mutated to
+# return silently, the panel waits for an outcome that never comes.
+run_mutation "egress: an unknown target answers Err" \
+  crates/geode-data/src/egress.rs \
+  '        let Some(target) = self.targets.get(&p.target) else {
+            return refuse("unknown target".into());
+        };' \
+  '        let Some(target) = self.targets.get(&p.target) else {
+            return;
+        };' \
+  geode-data \
+  a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+# One worker per target runs uploads in submission order: the later of two
+# uploads of one document must land last. Mutated to drain what is queued
+# and run each drained batch newest first, the order inverts.
+run_mutation "egress: uploads to one target run in submission order" \
+  crates/geode-data/src/egress.rs \
+  '    while let Ok(job) = jobs.recv() {
+        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        answer(
+            &sink,
+            &name,
+            &job.document,
+            &job.document_key,
+            job.key,
+            job.tag,
+            result,
+        );
+    }
+}' \
+  '    while let Ok(first) = jobs.recv() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let mut batch = vec![first];
+        while let Ok(more) = jobs.try_recv() {
+            batch.push(more);
+        }
+        for job in batch.into_iter().rev() {
+        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        answer(
+            &sink,
+            &name,
+            &job.document,
+            &job.document_key,
+            job.key,
+            job.tag,
+            result,
+        );
+        }
+    }
+}' \
+  geode-data \
+  uploads_to_one_target_run_in_submission_order
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
