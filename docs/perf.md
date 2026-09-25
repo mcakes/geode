@@ -1630,6 +1630,26 @@ and quadratic for a batch (one full reprice of a 1,200-row sheet
 measured 3.37 ms that way against 175 µs here). Part 3's
 `Delivery::Price` arm calls `deliver_all`; `deliver` stays the
 single-result form.
+
+## Line pricer tile (spec §12, Part 3)
+
+`cargo bench -p geode-pricer -- grid_build_1000`, criterion median,
+benchmark profile, an M-series Mac with other cargo builds having run
+earlier in the session (23 of 100 samples were outliers, all high). The
+fixture is the Part 2 sheet: 1,000 rows, every tenth a two-leg callspread,
+every line answered through one `deliver_all`, every package open, the
+bundled `vanilla` view, UTC clock, no entry placeholder.
+
+| Benchmark | What it is | Result |
+|---|---|---|
+| `grid_build_1000` | one whole `GridModel::build`: every visible row's shorthand label and every cell's text and state | 1.85 ms (1.8517 ms; interval 1.8355–1.8718 ms) |
+
+Budget: the 8 ms pure-UI budget. The tile rebuilds the model on every
+edit, delivery, expansion, view, clock and entry change (never in
+render), so this is added to the keystroke's own edit cost — the worst
+case, a sheet-wide `:shift` (1.52 ms above) plus the rebuild, stays
+under 3.5 ms. Paints are a per-theme memo and are not in this figure; a
+theme switch re-derives the memo and rebuilds nothing.
 ## Timeseries chart (spec §8, Part 3)
 
 What one **cache miss** costs the render thread in `geode-chart`: the

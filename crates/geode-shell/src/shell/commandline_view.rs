@@ -1,8 +1,7 @@
-//! Paints the per-tile command line (Phase 3 §3.4): a one-line strip
-//! along the bottom edge of the focused tile with the prompt glyph, the
-//! shared `Input`, and an inline error; above it, when there are
-//! candidates, a popup of ranked rows with match highlighting, reusing
-//! the palette's row look.
+//! Render a tile-bottom prompt with Input and inline error text.
+//! The command popup paints the first eight ranked candidates, without scrolling
+//! or click handlers. Selection cycles across the full candidate list, so a
+//! highlight beyond those eight is not visible in this popup.
 
 use crate::commandline::{CommandLine, Prompt};
 use crate::fonts;
@@ -47,10 +46,7 @@ pub fn render(
         .text_color(theme.popover_foreground)
         .border_t_1()
         .border_color(theme.border)
-        // `Root` binds bare `tab` to its own focus-cycling, unconditionally
-        // (`dialog::init_reclaimed_keybindings`'s doc comment, bullet 3) —
-        // this context is what lets `tab` reach `ShellView::
-        // handle_command_line_key` instead of jumping focus elsewhere.
+        // The command-line key context reclaims Tab from Root focus cycling for completion.
         .key_context("GeodeCommandLine")
         .debug_selector(|| "command-line".to_string())
         .child(

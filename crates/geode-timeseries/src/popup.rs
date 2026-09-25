@@ -42,7 +42,7 @@ use geode_widgets::datefield::{DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Entity, FocusHandle,
-    Focusable as _, Hsla, MouseButton, SharedString, anchored, deferred, div, px,
+    Focusable as _, Hsla, MouseButton, SharedString, Window, anchored, deferred, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
@@ -561,70 +561,90 @@ pub(crate) fn render_series_popup(
     if p.rows.is_empty() {
         // "Asked and answered" rather than a blank rectangle — and it
         // names the keys that end the state, per the empty-state rule.
-        return anchor_popup(
-            list.child(
-                div()
-                    .h(scale::design(ROW_HEIGHT))
-                    .px(scale::design(ROW_INSET))
-                    .flex()
-                    .items_center()
-                    .text_color(theme.muted_foreground)
-                    .child(crate::header::EMPTY_HINT),
-            ),
-        );
+        return anchor_popup(list.child(empty_row(theme, crate::header::EMPTY_HINT)));
     }
     for (i, row) in p.rows.iter().enumerate() {
         let highlighted = cursor == Some(i);
         list = list.child(
-            h_flex()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .gap_2()
-                .rounded(theme.radius)
-                .items_center()
-                // No hover state: the highlight follows the CURSOR, and
-                // a second fill under the pointer would read as a second
-                // selection (CLAUDE.md — the market-data popup's rows
-                // take none either).
-                .when(highlighted, |d| {
-                    d.bg(theme.accent).text_color(theme.accent_foreground)
-                })
-                .when(!highlighted, |d| d.text_color(theme.popover_foreground))
-                // A hidden series stays in the list, struck through, for
-                // the same reason its chip does: `v` is a toggle, and a
-                // row that vanished would leave nothing to press again.
-                .when(row.hidden, |d| d.opacity(0.5).line_through())
-                .debug_selector(move || format!("ts-list-row-{tile_id}-{i}"))
-                // The mouse form of `j`/`k`, and the chip click's own
-                // door: one cursor between the strip and the list.
-                .on_mouse_down(MouseButton::Left, {
+            row_shell(
+                theme,
+                highlighted,
+                move || format!("ts-list-row-{tile_id}-{i}"),
+                {
+                    // The mouse form of `j`/`k`, and the chip click's own
+                    // door: one cursor between the strip and the list.
                     let tile = tile.clone();
-                    move |_, _window, cx| {
-                        cx.stop_propagation();
-                        tile.update(cx, |t, cx| t.chip_clicked(i, cx));
-                    }
-                })
-                .child(
-                    div()
-                        .size(scale::design(SWATCH))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .bg(row.swatch),
-                )
-                .child(div().flex_1().child(row.label.clone()))
-                .child(
-                    div()
-                        .text_xs()
-                        .when(!highlighted, |d| d.text_color(theme.muted_foreground))
-                        .child(row.source_rule.clone()),
-                )
-                .child(div().text_xs().child(row.axis))
-                .when(!row.state.is_empty(), |d| {
-                    d.child(div().text_xs().child(row.state.clone()))
-                }),
+                    move |_window, cx| tile.update(cx, |t, cx| t.chip_clicked(i, cx))
+                },
+            )
+            // A hidden series stays in the list, struck through, for
+            // the same reason its chip does: `v` is a toggle, and a
+            // row that vanished would leave nothing to press again.
+            .when(row.hidden, |d| d.opacity(0.5).line_through())
+            .child(
+                div()
+                    .size(scale::design(SWATCH))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(row.swatch),
+            )
+            .child(div().flex_1().child(row.label.clone()))
+            .child(
+                div()
+                    .text_xs()
+                    .when(!highlighted, |d| d.text_color(theme.muted_foreground))
+                    .child(row.source_rule.clone()),
+            )
+            .child(div().text_xs().child(row.axis))
+            .when(!row.state.is_empty(), |d| {
+                d.child(div().text_xs().child(row.state.clone()))
+            }),
         );
     }
     anchor_popup(list)
+}
+
+/// The one row every popup list paints: fixed height and inset, the
+/// cursor's fill when `highlighted`, and a left press that stops
+/// propagation — the chart beneath must not also take it — before
+/// running `on_down`.
+///
+/// No hover state: the highlight follows the CURSOR, and a second fill
+/// under the pointer would read as a second selection (the market-data
+/// popup's rows take none either).
+fn row_shell(
+    theme: &Theme,
+    highlighted: bool,
+    selector: impl FnOnce() -> String,
+    on_down: impl Fn(&mut Window, &mut App) + 'static,
+) -> Div {
+    h_flex()
+        .h(scale::design(ROW_HEIGHT))
+        .px(scale::design(ROW_INSET))
+        .gap_2()
+        .rounded(theme.radius)
+        .items_center()
+        .when(highlighted, |d| {
+            d.bg(theme.accent).text_color(theme.accent_foreground)
+        })
+        .when(!highlighted, |d| d.text_color(theme.popover_foreground))
+        .debug_selector(selector)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_down(window, cx);
+        })
+}
+
+/// A popup list's "asked and answered" line: a muted row naming why it
+/// is empty, never a blank rectangle.
+fn empty_row(theme: &Theme, text: &'static str) -> Div {
+    div()
+        .h(scale::design(ROW_HEIGHT))
+        .px(scale::design(ROW_INSET))
+        .flex()
+        .items_center()
+        .text_color(theme.muted_foreground)
+        .child(text)
 }
 
 /// The anchored, deferred wrapper every one of this tile's popups
@@ -680,73 +700,47 @@ pub(crate) fn render_picker(
         let loaded = p.loaded[ranked.row];
         let highlighted = row == p.list.highlighted();
         list = list.child(
-            h_flex()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .gap_2()
-                .rounded(theme.radius)
-                .items_center()
-                .when(highlighted, |d| {
-                    d.bg(theme.accent).text_color(theme.accent_foreground)
-                })
-                .when(!highlighted, |d| d.text_color(theme.popover_foreground))
-                .debug_selector(move || format!("ts-picker-row-{tile_id}-{row}"))
-                .on_mouse_down(MouseButton::Left, {
+            row_shell(
+                theme,
+                highlighted,
+                move || format!("ts-picker-row-{tile_id}-{row}"),
+                {
                     let tile = tile.clone();
-                    move |_, window, cx| {
-                        cx.stop_propagation();
-                        tile.update(cx, |t, cx| t.picker_pick(row, window, cx));
-                    }
-                })
-                .child(div().flex_1().child(identity))
-                .child(
-                    div()
-                        .text_xs()
-                        .when(!highlighted, |d| d.text_color(theme.muted_foreground))
-                        .child(source),
-                )
-                // Already on this tile — still pickable, since a second
-                // slot over one pair with another rule is legitimate.
-                .child(
-                    div()
-                        .w(scale::design(SWATCH))
-                        .child(if loaded { "•" } else { "" }),
-                ),
+                    move |window, cx| tile.update(cx, |t, cx| t.picker_pick(row, window, cx))
+                },
+            )
+            .child(div().flex_1().child(identity))
+            .child(
+                div()
+                    .text_xs()
+                    .when(!highlighted, |d| d.text_color(theme.muted_foreground))
+                    .child(source),
+            )
+            // Already on this tile — still pickable, since a second
+            // slot over one pair with another rule is legitimate.
+            .child(
+                div()
+                    .w(scale::design(SWATCH))
+                    .child(if loaded { "•" } else { "" }),
+            ),
         );
     }
     if let Some(add) = &p.add_row {
         list = list.child(
-            h_flex()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .rounded(theme.radius)
-                .items_center()
-                // The only thing `enter` can take while it is up, so it
-                // paints lit.
-                .bg(theme.accent)
-                .text_color(theme.accent_foreground)
-                .debug_selector(move || format!("ts-picker-add-{tile_id}"))
-                .on_mouse_down(MouseButton::Left, {
-                    let tile = tile.clone();
-                    move |_, window, cx| {
-                        cx.stop_propagation();
-                        tile.update(cx, |t, cx| t.commit_picker(window, cx));
-                    }
-                })
-                .child(add.clone()),
+            // The only thing `enter` can take while it is up, so it
+            // paints lit.
+            row_shell(theme, true, move || format!("ts-picker-add-{tile_id}"), {
+                let tile = tile.clone();
+                move |window, cx| {
+                    tile.update(cx, |t, cx| t.commit_picker(window, cx));
+                }
+            })
+            .child(add.clone()),
         );
     } else if p.list.painted_len() == 0 {
         // "Asked and answered", never a blank rectangle — the series
         // list's own empty-state rule.
-        list = list.child(
-            div()
-                .h(scale::design(ROW_HEIGHT))
-                .px(scale::design(ROW_INSET))
-                .flex()
-                .items_center()
-                .text_color(theme.muted_foreground)
-                .child("no identities known"),
-        );
+        list = list.child(empty_row(theme, "no identities known"));
     }
     anchor_popup(list)
 }

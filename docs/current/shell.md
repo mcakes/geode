@@ -63,6 +63,9 @@ contexts and supports chords, sequences, and numeric counts. The focused
 surface contributes its context; module fragments extend the vocabulary
 without giving a feature access to `ShellView`.
 
+See [input and dialogs](input-and-dialogs.md) for routing before the matcher,
+focused text ownership, palette and completion behavior, and frame pickers.
+
 The [keymap contract](keymaps.md) defines precedence, immediate exact matches,
 sequence cancellation, count handling, and the limits of fragment filtering
 and binding-editor resolution.

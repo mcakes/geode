@@ -1073,3 +1073,185 @@ multi-edit redo are untested; `restore` does not validate that `at`
 is a root boundary.
 
 Unverified on a real window: nothing in Part 2 paints.
+
+## 18. As built (Part 3, 2026-09-24)
+
+The tile landed as `geode-pricer`'s non-core modules and is registered
+in the app's roster (plan `2026-09-23-line-pricer-part-3-tile.md`). The
+twenty-three planning decisions, one line each; **(flag)** marks the
+three that went to Matthew:
+
+1. `nudge_text` moved to `geode_core::nudge` (a module may not depend on
+   `geode-marketdata`); `geode_marketdata::core` re-exports it.
+2. A nudge steps by the text's own precision, not the painted one; a
+   trailing `%` is stripped and restored; an empty shift nudges from 0.
+3. `Sheet::mark_all_stale` joined `deliver`/`deliver_all` as the third
+   state mutator: a tick or `:price` stales without a revision bump.
+4. Every submission carries every stale line; the in-flight map only
+   decides whether to submit (amends §9.1, which lost lines against
+   §9.2's older-tag drop).
+5. A refused submission arms a one-shot retry after 1 s and paints a
+   header notice.
+6. The tile arrives at flip barriers itself (it submits no view query).
+7. `SheetStore` is synchronous with a pending answer: `load → Rows |
+   Missing | Pending`, `save → bool`, `contains`; `PricerTile::loaded` is
+   what a `Pending` waits on.
+8. Write-behind, restore-by-name and the open-name set moved into Part 3
+   against `MemorySheetStore`: a sheet survives closing a tile, not a
+   restart. **(flag)**
+9. `:e`, `:name`, `:new`, `:rm` parse and refuse as not built yet.
+10. The cursor is `(LineId, column)`; a removed line falls back to the
+    grid row at the old index.
+11. The entry placeholder is a grid row, never a sheet row.
+12. `o`/`shift+o` and `p`/`shift+p` placement is pure
+    (`core::entry::place_for`, `core::clip::put_place`); a package put
+    always lands at a root boundary.
+13. Packages created in the session open; the session record's
+    `expanded` is authoritative on restore.
+14. Paint is a per-theme memo (`Paints`) resolved at render, not stored
+    in the `GridModel`; every text colour is floored to `READABLE_RATIO`
+    against its ground.
+15. Result cells are not sign-coloured in this part. **(flag)**
+16. `y` alone is unbound (it would shadow `y y`/`y c`); the market-data
+    fragment's `y` binding is out of scope. **(flag)**
+17. The underlying typeahead offers the sheet's own underlyings and
+    accepts free text; catalogue underlyings are deferred.
+18. A package row is read-only in every column.
+19. Delivery log levels: `FutureRevision`/`NotALine` warn, `UnknownLine`
+    debug, `OldRevision` silent.
+20. Reload reaches the factory through the frame's config counter, not
+    `ShellEvent::ConfigReloaded`.
+21. `[pricing] refresh` is read by `bridge::pricing_refresh_from_config`:
+    absent 30 s, `"off"` none, a duration, else 30 s plus a warning at
+    `app.pricing.refresh`.
+22. Menu rows are the pricer's own over `shell::listrow`.
+23. Deleting a line whose request is in flight is safe (`UnknownLine`,
+    debug); undo of that delete restores its last result and state.
+
+Execution deviations and rulings, found in review:
+
+- **Paint floor (Task 5).** The plan floored `own` toward
+  `theme.foreground` itself, which leaves `readable_on` nothing to
+  bisect toward when the colour matches its ground. Every paint is
+  floored toward the black/white pole with more contrast against its
+  ground (market-data's `FlooredTones` idiom), so the floor always lands.
+  A `Leg` placeholder inside a closed package paints after the package
+  row at depth 1; the tile opens the package before arming one.
+- **Pending restore (Task 6).** A `Pending` load holds the record's
+  cursor and expansion until `loaded` applies them; `reconcile_cursor`
+  does nothing while loading, and `serialize` returns the held values,
+  so a session save mid-load does not overwrite the record.
+- **Chevron (Task 7).** A chevron click moves the tile's cursor to the
+  clicked row and ends in `sync_cursor`, so the table's selection and the
+  tile's cursor agree.
+- **Click cancels (Task 9).** "A click anywhere cancels" is scoped to
+  `TableEvent::SelectCell`: `sync_cursor`'s own programmatic selection
+  emits `SelectRow`/`SelectColumn` and would close a just-opened field.
+- **Typeahead and clicks (Task 10).** The typeahead is a
+  `deferred(anchored(..))` overlay snapped to the window, as
+  market-data's. A click inside an open field's cell cancels, as
+  market-data. A click outside the grid leaves a text editor open
+  (market-data parity; a display check). The underlying typeahead
+  first committed the highlighted option whenever the query ranked one;
+  the whole-branch review reversed that (below).
+- **Load refusals, put, menu (Task 11).** `:shift`/`:spot`/`:group`/
+  `:ungroup` refuse while a load is pending, and `loaded` clears the undo
+  stack (its inverses were recorded against the fallback sheet). A line
+  put onto a collapsed package's leg slot opens the package first. The
+  `.` menu is a `deferred(anchored(..))` overlay and its rows go through
+  `shell::listrow` (tokens, hover).
+- **Early harness entries (Task 4).** Seven entries for the undo stack
+  and the `:` vocabulary landed with the core modules rather than here.
+- **Whole-branch review (2026-09-24).**
+  - *Typeahead ruling reversed.* Ranking is a case-insensitive
+    subsequence match, so `HSI` ranked `HSCEI` first and `enter`
+    committed a different real underlying. In the free underlying list
+    `enter` now takes the highlighted option only when the query equals
+    it case-insensitively or the highlight was moved (`up`/`down`, a
+    row click) since the query last changed (`Editor::Choice::moved`);
+    otherwise it commits the typed text upper-cased, and an untouched
+    empty query keeps the cell. Closed vocabularies are unchanged.
+  - *Failed loads block saves.* A decode error or `loaded(Err(..))`
+    sets `save_blocked`: `save_now` publishes nothing for the life of
+    the tile, so the fallback never becomes the document's latest
+    generation, and the save slot reads "sheet 'X' did not load (…);
+    edits are not saved". `Missing`/`Ok(None)` is not a failure (§7.4).
+  - *Unsaved sheets flush on close; the save state has its own slot.*
+    `dirty` is set by every armed save and cleared only by an accepted
+    one; `on_release` saves whenever it is set, so a refused save is no
+    longer lost on close. `NOT_SAVED` and the blocked notice live in a
+    header slot of their own, painted before the pricing notice (both
+    may show): `REFUSED` cannot overwrite it, a good submit cannot clear
+    it, and `escape` leaves it.
+  - *Minors fixed.* `:` and `/` close the menu, the entry and the editor
+    first (they bypass `dispatch`); a chevron click cancels an open
+    field before it toggles; `render` computes the stale mark locally
+    and passes it to `header::render` rather than writing the model;
+    the `pricer::escape` palette title is "Clear find and notice";
+    `:view`, `:refresh` and the menu's view rows refuse while loading;
+    a barrier nudge no longer keeps a `%` that `commit` refuses (only a
+    strike's `%` is kept).
+- **Staleness clock.** The header's stale mark compares UTC instants
+  (`Utc::now`), not `AppClock`, which is a display zone; an idle tile
+  with the refresh timer off shows `stale` on its next notify.
+
+Thirty-three harness entries cover Part 3 (three added by the
+whole-branch review: the typeahead guard, `save_blocked`, the dirty
+flush on close); the first thirty: seven from Task 4 (`pricer undo:`
+×3, `pricer commands:` ×4) and twenty-three here (`pricer tile:` ×17,
+`pricer paint:` ×2, `pricer core:`, `pricer entry:`, `pricer cell:`,
+`pricer app:`), every one caught by its named test. The paint entries
+led to strengthening the floor test with a light and a dark ground: at
+mid grey both poles clear 3:1, so the pole choice went unpinned.
+
+`cargo bench -p geode-pricer -- grid_build_1000`: 1.8517 ms median at
+1,000 rows with every package open, against the 8 ms pure-UI budget
+(`docs/perf.md`, "Line pricer tile").
+
+Part 4 obligations:
+
+- The DuckDB `SheetStore`, answering `Loaded::Pending`, and the
+  `Delivery::Query` arm calling `PricerTile::loaded` with the decoded
+  rows.
+- `:e`, `:name`, `:new`, `:rm` (the open-name set exists: `:e` refuses a
+  name open in another tile).
+- The `pricer_sheets` declaration into the builtin layer (`builtin_layer`
+  in `geode-app/src/main.rs` is the place).
+- `keep_generations` for local datasets.
+- Catalogue underlyings for the typeahead, if a source for them exists
+  by then.
+- Decide the header precedence of a refusal streak over `loading…`. Once
+  `:e` makes loads happen mid-life, a streak standing when a load starts
+  paints `REFUSED` over `loading…`, and a retry that fires while loading
+  submits nothing and is not re-armed (`loaded` resubmits, which ends or
+  continues the streak, so it self-heals).
+
+Deferred minors, none blocking: `escape` clears `loading…` (or
+`REFUSED`) mid-flight; the 1 s retry is unbounded with no backoff; the
+config-counter observer re-reads and re-warns `[pricing] refresh` on
+every reload and restarts the timer even when the interval is unchanged;
+`dd`/`g u` then `u` restores a package collapsed; a config-reload view
+change leaves an open editor painted at its old column index (a commit
+still refuses); menu enabled states are not refreshed after a `:`
+command; `redo`'s clear-on-error arm is untested.
+
+Post-merge cleanup (2026-09-24, `worktree-pricer-cleanup`): clicks below
+an open entry resolve their row to a `LineId` before the entry closes
+(a double-click's first press hands its line, or the placeholder, to the
+second); the `pricer::escape` title is "Clear find and dismissible
+notice"; `escape`
+leaves `loading…`; `REFUSED` is its own state over the notice, cleared
+when nothing is left to submit, backing off 1 s → 30 s and logging once
+per streak; a refused `apply_edits` rollback logs and clears the undo
+history; the open set is no longer pruned by edits, so `d d`/`g u` then
+`u` restores a package open, with the cursor on the first restored row.
+Of the deferred minors above this closes three: `escape` clearing
+`loading…`/`REFUSED`, the unbounded 1 s retry, and `dd`/`g u` then `u`
+restoring a package collapsed. The config-counter re-read/re-warn, the
+editor's stale column after a view reload, the unrefreshed menu enabled
+states and the untested `redo` clear-on-error arm remain open.
+
+Unverified on a real window: the header row, the tree column's indent
+and package ground, stale versus fresh contrast, the entry field over
+the active row, the cell editor and its typeahead at the bottom edge,
+the `.` menu's anchoring, and the footer holding its height.

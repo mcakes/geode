@@ -1,50 +1,14 @@
-//! The command palette (Task 6, spec §3.2/§3.3): a universal, fuzzy-filtered
-//! list over every registered action and every bundled theme, driven by the
-//! keyboard (`ctrl+k` / `ctrl+shift+p` open, Esc closes; typing filters;
-//! up/down or ctrl+p/ctrl+n move the selection; Enter dispatches) and, since
-//! the palette-input-polish task, the mouse (click a row to select it, click
-//! outside the panel to dismiss — see `render`'s doc comment).
+//! Command-palette items, ranking, display labels, and rendering.
 //!
-//! Everything above the `render` section is the pure core: `PaletteItem`,
-//! `PaletteState`, `fuzzy_match`, and the keystroke-rendering/index-building
-//! helpers never import `gpui` and are fully unit-tested without a window
-//! (plan constraint: "the fuzzy filter and PaletteState are PURE and TDD'd
-//! — no deps, no gpui"). `render`, at the bottom, is the only part that
-//! touches `gpui`/`gpui_component`; `ShellView` (`shell::mod`) owns the
-//! `PaletteState` and drives it from real key events.
+//! The shell creates a fresh snapshot of actions, themes, saved scopes, binding
+//! badges, and usage bonuses when opening the palette. Its Input owns text editing;
+//! query changes update [`PaletteState`], which caches ranked matches. The renderer
+//! reads that cache and delegates row clicks to the shell's commit handler.
 //!
-//! **Query ownership** (palette-input-polish task): the query text itself is
-//! no longer part of the free-typing key handling this module used to do
-//! (`push_char`/`backspace`, both removed). `ShellView` now owns a real
-//! gpui-component `Entity<InputState>` for the query field (mirroring the
-//! toolbar's `filter_input`) and feeds `PaletteState::set_query` from an
-//! `InputEvent::Change` subscription — see that struct's and method's own
-//! doc comments, and `shell::mod`'s doc comment on `palette_input`, for the
-//! full routing story (why up/down/ctrl+p/ctrl+n/enter/escape still reach
-//! `ShellView::handle_palette_key` as bubbled `KeyDownEvent`s while
-//! printable/caret/ctrl+a/ctrl+v are consumed natively by the `Input`).
-//!
-//! **Ranking** (2026-09-12): a row's match text is `"{title} {category}"`
-//! — the same `searchable_text` shape the keybindings and settings dialogs
-//! filter over — with every score earned past the title's end divided by
-//! [`CATEGORY_DIVISOR`], so the category is searchable but the lower-
-//! preference field: the same letters in a title outrank them in a
-//! category, and the alignment (and so the highlight, split across the
-//! two labels by [`split_label_indices`]) lands on the title copy when
-//! both hold them. On top of the match score each row adds its usage
-//! bonus (`crate::palette_usage`, baked once per open by
-//! [`PaletteState::with_usage`]): an empty query lists the rows a trader
-//! has actually chosen first, most recent and most used first, and a typed
-//! query lets a habitual row edge past a marginally better textual match.
-//! The bonus is capped at two run bonuses (`palette_usage::MAX_BONUS`,
-//! 18), and the ruling on where that cap meets the category discount
-//! (review 2026-09-12) is: a bare scattered match never beats a
-//! contiguous run whatever its usage; a maxed-out row whose only hit is
-//! in its category leads an unused title prefix on a query of three
-//! characters or fewer, ties it at four (registry order holds) and loses
-//! to it from five on — pinned by
-//! `a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one`,
-//! the test to read before moving either constant.
+//! Matching uses lowercase `title + space + category`. Category contributions are
+//! discounted and each surviving row receives a bounded usage bonus. Usage cannot
+//! make a nonmatching item visible. Equal totals retain input order. The ranking
+//! snapshot is fixed while open; changing the query does not refresh usage or rows.
 
 use std::collections::BTreeMap;
 
@@ -53,26 +17,19 @@ use crate::keymap::{Keymap, Keystroke};
 use crate::shell::scale;
 use crate::theme::ThemeService;
 
-/// Palette-facing category for theme rows (brief: themes appear as
-/// `"Theme: {name}"` under category `"Appearance"`).
+/// Palette category for theme rows.
 const THEME_CATEGORY: &str = "Appearance";
 
-/// Palette-facing category for saved-scope rows (Phase 4a §3.9: `"Scope:
-/// {name}"`, listed after the theme rows).
+/// Palette category for saved-scope rows.
 const SCOPE_CATEGORY: &str = "Scope";
 
-/// One row the palette can show. `Action` carries the id (for dispatch),
-/// its registry title/category, and its rendered binding text if the
-/// keymap has one bound. `Theme`'s `String` is a fully qualified bundled
-/// theme name (e.g. `"Gruvbox Dark"`) — exactly what
-/// `ThemeService::apply`/`resolve` expect, so dispatch needs no further
-/// lookup.
+/// One dispatchable palette row: an action with title/category/binding
+/// badge, a fully qualified bundled theme name, or a live saved-scope name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteItem {
     Action(ActionId, String, String, Option<String>),
     Theme(String),
-    /// A saved scope's name (Phase 4a §3.9) — selecting it loads that
-    /// scope via `Frame::load_scope`.
+    /// Saved-scope name, loaded into the frame when selected.
     Scope(String),
 }
 
@@ -119,65 +76,23 @@ impl PaletteItem {
     }
 }
 
-/// Case-insensitive subsequence match: every character of `query`, in
-/// order, must occur somewhere in `candidate` (skipping characters as
-/// needed). `None` means `query` is not a subsequence of `candidate` at
-/// all; otherwise the result is `(score, indices)` where higher `score`
-/// means a better match and `indices` are the **char** (not byte) offsets
-/// into `candidate` that matched, one per query character, in increasing
-/// order — `render`'s highlighting turns them into styled spans over the
-/// row title (see [`highlight_runs`]).
+/// Case-insensitive subsequence match returning the best score and its
+/// alignment. Every query character must appear in order. Scores reward prefix
+/// starts, starts after space/colon/underscore/hyphen, and consecutive matches.
+/// Dynamic programming chooses the best alignment; backtracking favors the
+/// earliest equal-score endpoint and continuation of a run.
 ///
-/// Matching is an optimal alignment, not a greedy walk: every way of
-/// placing the query's characters, in order, over `candidate` is scored
-/// and the best-scoring placement is the one returned — so the indices
-/// ARE the alignment the score ranks by. The score rewards, per matched
-/// character: a match at position 0 (prefix start), a match right after a
-/// separator (`' '`, `':'`, `'_'`, `'-'` — a "word start"), and each pair
-/// of consecutive matched characters ([`RUN_BONUS`]), so one unbroken run
-/// scores more than the same letters split across runs or scattered.
-/// Between equally-scored placements the earliest wins, and a run is
-/// continued rather than restarted.
-///
-/// Why not greedy-leftmost (what this was until 2026-09-12): the settings
-/// dialog matches `ling` over the joined text "add tile tiling", and a
-/// greedy walk claimed the `l` of "tile" first, then scattered `i`, `n`,
-/// `g` across "tiling" — painting `Add ti[l]e` / `T[i]li[ng]` — while the
-/// whole query sat as one run in "tiling". Greedy also under-scored such
-/// rows, since the placement it scored was not the best one available.
-///
-/// The indices are positions in `candidate.to_lowercase().chars()`. For
-/// every candidate this palette ever renders (action titles — ASCII plus
-/// a trailing `…` on the ones that open a dialog, which lowercases to
-/// itself — and `"Theme: {name}"` rows) lowercasing never changes the char
-/// count, so
-/// those positions apply equally to the original-case `candidate` — a
-/// property `render` relies on rather than re-deriving.
-///
-/// An empty query matches everything with score 0 and no matched indices —
-/// see [`PaletteState::filtered`] for why that specific score value
-/// matters.
+/// Indices address characters in the lowercased candidate, not bytes or guaranteed
+/// positions in the original text. Lowercase expansion can shift highlights.
+/// An empty query matches with score zero and no indices; whitespace is literal.
 pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
     fuzzy_match_lowered(&query.to_lowercase(), &candidate.to_lowercase(), usize::MAX)
 }
 
-/// [`fuzzy_match`]'s core over ALREADY-lowercased inputs (post-merge
-/// review perf 11): [`PaletteState`] stores each item's lowered match
-/// text once at construction and lowercases the query once per edit, so
-/// the per-item work in a filter pass is just this subsequence walk —
-/// no per-item `title()` clone, no per-item `to_lowercase`. The public
-/// wrapper above keeps the original lowercase-both contract for callers
-/// (and tests) holding raw strings.
-///
-/// `title_len` is the char index where the candidate's title ends and its
-/// category begins (the palette matches `"{title} {category}"`, the same
-/// `searchable_text` shape the keybindings and settings dialogs use):
-/// every score a character at or past that boundary earns — its own base
-/// and the run bonus for continuing onto it — is divided by
-/// [`CATEGORY_DIVISOR`], so the same letters in a title outrank them in a
-/// category, and the alignment lands on the title copy when both hold
-/// them (the highlight has to agree with the ranking). `usize::MAX` means
-/// the whole candidate is title.
+/// Match already-lowercased text without rebuilding it per candidate.
+/// `title_len` is the lowered title's character length in `title + space + category`;
+/// contributions at or beyond it are divided by CATEGORY_DIVISOR and rounded up.
+/// Use usize::MAX when the whole candidate has title weighting.
 fn fuzzy_match_lowered(
     query: &str,
     candidate: &str,
@@ -196,13 +111,8 @@ fn fuzzy_match_lowered(
     let base_at = |j: usize| discounted(char_base(&c, j), j, title_len);
     let run_at = |j: usize| discounted(RUN_BONUS, j, title_len);
 
-    // Two row-major `n × m` tables (Smith–Waterman in the mould of fzf's
-    // v2 matcher, without its gap penalty):
-    //   ends_at[i][j]  best score with `q[..=i]` placed and `q[i]` AT `c[j]`
-    //   within [i][j]  best score with `q[..=i]` placed somewhere in `c[..=j]`
-    // `within` only advances on a strictly better cell, so among equal
-    // scores it remembers the earliest — which is what makes the
-    // backtrack below prefer the leftmost of two tied placements.
+    // Track best scores ending at each cell and within each prefix. Both
+    // n-by-m tables are retained for alignment backtracking.
     let mut ends_at: Vec<Option<u32>> = vec![None; n * m];
     let mut within: Vec<Option<u32>> = vec![None; n * m];
     for i in 0..n {
@@ -237,11 +147,8 @@ fn fuzzy_match_lowered(
 
     let score = within[(n - 1) * m + (m - 1)]?;
 
-    // Backtrack from the earliest cell holding the final score, at each
-    // step continuing a run when that reproduces the cell's score (so a
-    // tie between "continue" and "restart" paints one run, not two) and
-    // otherwise jumping to the earliest cell of the previous row that
-    // carries `within`'s remembered best.
+    // Backtrack through the same score rules, preferring a continuing run
+    // when it attains the cell's score, otherwise the earliest matching endpoint.
     let mut indices = vec![0usize; n];
     let mut j = (0..m).find(|&j| ends_at[(n - 1) * m + j] == Some(score))?;
     indices[n - 1] = j;
@@ -268,15 +175,8 @@ const PREFIX_BONUS: u32 = 10;
 /// The bonus for matching the first character after a separator.
 const WORD_START_BONUS: u32 = 8;
 
-/// The score every pair of consecutive matched characters adds — constant
-/// per pair, so a run of `k` matched characters earns `(k - 1) × RUN_BONUS`
-/// and one long run beats the same pairs split across shorter runs.
-///
-/// It must exceed [`WORD_START_BONUS`]: the alignment weighs "extend the
-/// run" against "restart at the next word start" cell by cell, and with
-/// the run bonus the smaller, `app` on "Apple Pie" would paint `Ap` + `P`
-/// rather than `App` — a contiguous region is the better match, and the
-/// highlight has to say so.
+/// Bonus per consecutive matched pair. It exceeds WORD_START_BONUS so
+/// continuing a run beats restarting at another word boundary in a score tie.
 pub(crate) const RUN_BONUS: u32 = 9;
 const _: () = assert!(RUN_BONUS > WORD_START_BONUS);
 
@@ -315,37 +215,11 @@ fn char_base(cand: &[char], idx: usize) -> u32 {
     score
 }
 
-/// Merge [`fuzzy_match`]'s matched char indices into contiguous runs and
-/// convert each run to a byte [`Range`](std::ops::Range) over `title`,
-/// suitable for `gpui::StyledText::with_highlights`. Adjacent indices
-/// (`i`, `i+1`, `i+2`, ...) collapse into one range rather than one per
-/// character, so a prefix match like `"app"` against `"Apple Pie"`
-/// highlights `"App"` as a single run instead of three abutting ones —
-/// cheaper to build and (for a bold weight) visually identical either way.
-///
-/// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
-/// runs at all.
-///
-/// `pub(crate)` since the filter-first dialog UX:
-/// `keybindings_view::highlighted_text` paints its rows' fuzzy matches
-/// through this same conversion rather than growing a second copy — and
-/// it leans on the out-of-range guard below deliberately, since it feeds
-/// one row's indices to two separate label lines (title, then category)
-/// and each pass must simply skip the other line's.
-///
-/// **Out-of-range guard** (fix-round nit): the indices are positions in
-/// the *lowered* match text while `boundaries` comes from the
-/// original-case `title`, and `str::to_lowercase` is not always
-/// char-count-preserving — 'İ' (U+0130, dotted capital I) lowercases to
-/// the two chars `"i\u{307}"`, so a title containing it produces match
-/// indices past its own last char. Every title this palette renders
-/// today is plain ASCII (action titles and `"Theme: {name}"` rows over
-/// the bundled theme names), so this is unreachable in practice — but
-/// this function runs on the render path, where an out-of-bounds
-/// `boundaries[..]` would be a panic mid-frame rather than a wrong
-/// highlight, and free-form theme names would be all it takes. Indices
-/// that fall outside the title are therefore skipped (the in-range
-/// characters still highlight normally) instead of indexing.
+/// Merge matched character indices into contiguous byte ranges in the
+/// original title. Skip indices outside its character count to avoid indexing
+/// past the boundary table after lowercase expansion. This guards bounds but
+/// does not map expanded lowercase characters back to their original positions;
+/// highlight placement can differ for such text.
 pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
     if indices.is_empty() {
         return Vec::new();
@@ -385,24 +259,10 @@ pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Ra
     runs
 }
 
-/// Fuzzy-filtered, keyboard-navigable palette state. Pure: no `gpui`, no
-/// I/O. `ShellView` builds one fresh (via [`build_items`]) each time the
-/// palette opens and drops it on close — nothing here is per-frame state.
-///
-/// **Filter caching** (post-merge review perf 11): the filter result is
-/// computed once per query edit (`recompute_filtered`, from `new` and
-/// `set_query`) and cached in `filtered`; [`PaletteState::filtered`] and
-/// every selection accessor read the cache without re-matching — before
-/// this, each call re-fuzzy-matched the whole list, so a single Enter
-/// press computed the same filter three times (`selected_item`, then the
-/// close, then the next render). `items` cannot change while a
-/// `PaletteState` lives, so the query is the ONLY invalidation key —
-/// verified, not assumed: the sole construction site is
-/// `ShellView::toggle_palette` (fresh from the post-init-fixed
-/// `ActionRegistry` and the fixed bundled-theme list), and the one
-/// reload path that could change palette inputs (`apply_reload`'s
-/// keymap-docs-changed branch) CLOSES the palette (`self.palette =
-/// None`) rather than mutating an open one.
+/// A fixed item/usage snapshot with cached fuzzy ranking and selection.
+/// Construction and every set_query call recompute matches. Selection and render
+/// accessors read the cache; item text and usage bonuses cannot change in place.
+/// The shell constructs fresh state for each palette session.
 pub struct PaletteState {
     items: Vec<PaletteItem>,
     /// Each item's lowercased match text — `"{title} {category}"`, the
@@ -427,10 +287,7 @@ pub struct PaletteState {
     /// is stable). Indices, not `&PaletteItem` borrows, so the cache can
     /// live beside the items it points into.
     filtered: Vec<(usize, Vec<usize>)>,
-    /// Test-only honesty counter for the no-re-match guarantee: bumped
-    /// at the real `fuzzy_match_lowered` call site in
-    /// `recompute_filtered`, per instance (a `Cell` field, not a global
-    /// static, so parallel tests can't race it).
+    /// Count actual matcher invocations so tests detect repeated matching on cache reads.
     #[cfg(test)]
     match_calls: std::cell::Cell<usize>,
 }
@@ -443,12 +300,8 @@ impl PaletteState {
         Self::with_bonus(items, bonus)
     }
 
-    /// A palette ranked by `usage` as of `now` (unix seconds): each row's
-    /// bonus is read once here and added to its match score on every
-    /// filter pass — an empty query lists the used rows first, best bonus
-    /// first, and the rest in registry order; a typed query lets a
-    /// well-used row edge past a marginally better textual match, within
-    /// the bound the module doc states (`palette_usage::MAX_BONUS`).
+    /// Snapshot each item's usage bonus at `now` (Unix seconds), then rank.
+    /// Bonus values stay fixed until a new PaletteState is constructed.
     pub fn with_usage(
         items: Vec<PaletteItem>,
         usage: &crate::palette_usage::PaletteUsage,
@@ -486,10 +339,7 @@ impl PaletteState {
         state
     }
 
-    /// Recompute the cached filter result for the current query — the
-    /// one place matching happens (called from `new` and `set_query`
-    /// only; see the struct doc for why those are the only two
-    /// invalidation points).
+    /// Recompute scores and alignments for the current query and frozen usage bonuses.
     fn recompute_filtered(&mut self) {
         let query = self.query.to_lowercase();
         let mut scored: Vec<(usize, u32, Vec<usize>)> = Vec::new();
@@ -525,33 +375,17 @@ impl PaletteState {
         self.selected
     }
 
-    /// Replace the whole query in one step and reset the selection to the
-    /// top match — the palette-input-polish task moved character-at-a-time
-    /// editing (the removed `push_char`/`backspace`) into a real
-    /// gpui-component `Input`; this is what feeds that `Entity<InputState>`'s
-    /// `InputEvent::Change` value back into the pure filter/selection core
-    /// (`ShellView`'s subscription, set up once in `new`, calls this on
-    /// every edit). Filtering can shrink or reorder the result list out from
-    /// under a selection further down it, so every query edit snaps the
-    /// selection back to a row that's guaranteed to still exist — same
-    /// reasoning `push_char`/`backspace` used to document, just triggered by
-    /// a whole-string replace instead of one character at a time.
+    /// Replace the query, reset selection to row zero, and recompute matches.
+    /// Even an identical supplied query reranks; the Input subscription owns edit
+    /// notifications. Empty results leave the index at zero with no selected item.
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.selected = 0;
         self.recompute_filtered();
     }
 
-    /// Set the selection to an absolute row index — a mouse click on a
-    /// result row (`render`'s per-row `on_mouse_down`), which names exactly
-    /// which row was hit, and the keyboard path too, which lands the row
-    /// `vimnav::apply` answered (`handle_palette_key`; spec §20.5: a bare
-    /// ±1 wraps, anything larger clamps). Defensively clamped: an empty
-    /// filtered list leaves `selected` at 0 untouched, and an
-    /// index past the end of the current filtered list (stale by the time a
-    /// click is actually processed — e.g. the query changed between the
-    /// frame that painted the row and the click landing) clamps to the last
-    /// row rather than panicking or silently going out of range.
+    /// Set a filtered-row index, clamped to the last result or zero when empty.
+    /// This handles stale click indices after filtering without indexing past the list.
     pub fn set_selected(&mut self, index: usize) {
         let len = self.filtered.len();
         if len == 0 {
@@ -561,16 +395,9 @@ impl PaletteState {
         self.selected = index.min(len - 1);
     }
 
-    /// Every item whose title or category fuzzy-matches the current
-    /// query, best score plus usage bonus first, paired with the matched
-    /// char indices over `"{title} {category}"`. Ties — including an empty
-    /// query, where every item scores its bonus alone — keep their
-    /// original `items` order (see `recompute_filtered`). A cache read
-    /// (perf 11 — see the struct doc): no matching happens here, only a
-    /// walk of the stored result. The signature still returns owned index
-    /// `Vec`s (a handful of small clones) rather than borrows purely to
-    /// keep the pre-cache API shape for tests; `render` walks
-    /// [`PaletteState::rows`] instead, which borrows.
+    /// Read ranked item references and cloned highlight indices from the cache.
+    /// Scores include usage; equal scores retain original item order. No fuzzy matching
+    /// runs here. [`Self::rows`] avoids index-vector clones for rendering.
     pub fn filtered(&self) -> Vec<(&PaletteItem, Vec<usize>)> {
         self.filtered
             .iter()
@@ -637,13 +464,9 @@ pub fn render_binding(keystrokes: &[Keystroke]) -> String {
         .join(" ")
 }
 
-/// Build the `ActionId -> rendered binding` reverse index the palette shows
-/// next to each action. Built once per `Keymap::bindings()` call at
-/// palette-open time (brief: "not per frame"), not recomputed per render.
-/// When an action has more than one binding (e.g. `palette::toggle`'s
-/// `ctrl+k` and `ctrl+shift+p`), the first one encountered in
-/// `Keymap::bindings()`'s own (layer-then-declaration) order wins — the
-/// earliest-declared binding is treated as the "primary" one for display.
+/// Build binding badges once at palette open. Keep the first compiled
+/// binding encountered for each action ID. This is a display index: it neither
+/// evaluates contexts nor checks whether a later binding shadows that key.
 pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
     let mut index = BTreeMap::new();
     for binding in keymap.bindings() {
@@ -654,12 +477,9 @@ pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
     index
 }
 
-/// Build the full palette item list: every registered action, in registry
-/// order (`ActionRegistry::iter`, sorted by id), each paired with its
-/// rendered binding from `bindings` if it has one; then every bundled theme
-/// (`ThemeService::names`' sorted order) as a `Theme` row; then every saved
-/// scope (`saved`'s own `BTreeMap` order — spelling, per Phase 4a's
-/// interface note) as a `Scope` row.
+/// Append actions in registry-ID order, themes in sorted name order, and
+/// live saved scopes in name order. Registered scope actions and live Scope rows
+/// are both retained, so the same scope can appear through two dispatch routes.
 pub fn build_items(
     registry: &ActionRegistry,
     theme: &ThemeService,
@@ -682,17 +502,9 @@ pub fn build_items(
     items
 }
 
-/// Split ranked `indices` (char offsets into a row's `searchable_text`,
-/// `"{title} {category}"` — see `searchable_text` in this module and in
-/// `settings_view`) back across the two label lines a row paints them on.
-/// `title_len` is the title's own char count; the offset at exactly
-/// `title_len` is the separating space and belongs to neither returned
-/// list. Shared by both list dialogs' `build` (`keybindings_view` and
-/// `settings_view`) rather than duplicated: the arithmetic is only
-/// correct as long as *both* modules' `searchable_text` stays
-/// `"{title} {category}"`, so one copy is what keeps a future separator
-/// change from silently mis-highlighting whichever module didn't get the
-/// memo.
+/// Split indices in `title + space + category` across its two labels.
+/// The separating space at `title_len` belongs to neither result. Callers must
+/// use a title length and indices measured in the same character space.
 pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<usize>, Vec<usize>) {
     let title_ix = indices.iter().copied().filter(|&i| i < title_len).collect();
     let cat_ix = indices
@@ -703,9 +515,7 @@ pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<u
     (title_ix, cat_ix)
 }
 
-// ---------------------------------------------------------------------
-// Rendering (gpui) — everything above this line is the pure core.
-// ---------------------------------------------------------------------
+// Rendering and shared highlight helpers.
 
 use gpui::prelude::*;
 use gpui::{
@@ -717,32 +527,15 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
 use crate::fonts;
 
-/// Target overlay width in pixels (brief: "~560px wide").
+/// Target panel width at the design rem size.
 const WIDTH: f32 = 560.0;
 
-/// Sizing hint only (no longer a selection clamp — every motion goes
-/// through `vimnav::apply`, spec §20.5): the number of rows the results viewport
-/// is tall enough to show before it needs to scroll. Item count today is
-/// 84 (`register_builtin_actions`' 40 actions + `theme::load_bundled`'s 44
-/// bundled theme entries — counted directly, not estimated, by
-/// `build_binding_index_and_items_cover_the_whole_registry_and_theme_set`),
-/// well within what a plain scrollable `div`
-/// handles without virtualization — see `ROW_HEIGHT` below for how this
-/// becomes a pixel height.
-///
-/// `pub(crate)` since the dimension pickers (Phase 4a §3.3): `shell::
-/// picker`'s values list is a `uniform_list`, sized to this same rhythm
-/// rather than growing its own rows-visible constant.
+/// Maximum viewport height in estimated rows. This does not truncate
+/// results or clamp selection; the full result list is scrollable.
 pub(crate) const VISIBLE_ROWS: usize = 12;
 
-/// Estimated row height in pixels (`px_2`/`py_1` padding plus one line of
-/// default-size text) — used only to size the scrollable viewport to
-/// [`VISIBLE_ROWS`] rows; not load-bearing for correctness the way it would
-/// be for a hand-rolled offset calculation, because scroll-follow here goes
-/// through `gpui::ScrollHandle::scroll_to_item`, which measures real
-/// per-row layout bounds rather than trusting this estimate.
-///
-/// `pub(crate)` — see [`VISIBLE_ROWS`]'s own doc comment.
+/// Estimated row height at the design rem size, used to size the viewport.
+/// Scroll-follow uses measured item positions through ScrollHandle.
 pub(crate) const ROW_HEIGHT: f32 = 28.0;
 
 /// What [`render`] needs to know about the window it paints into: the
@@ -755,24 +548,9 @@ pub struct Viewport {
     pub rem_size: Pixels,
 }
 
-/// Render one row title with its [`fuzzy_match`]ed characters styled —
-/// `cx.theme().primary` plus a bold weight (plan constraint: no raw
-/// colors; bold is "cheap" per the brief).
-///
-/// **Mechanism, checked against the pinned gpui rev before building this**
-/// (`gpui::elements::text::StyledText`, re-exported at the crate root):
-/// `StyledText::with_highlights` takes `(byte Range, HighlightStyle)`
-/// pairs and — unlike `with_default_highlights` — needs no `TextStyle` of
-/// our own to seed the unhighlighted runs; it resolves them lazily from
-/// `Window::text_style()` at layout time, i.e. whatever ambient text style
-/// this element inherits from its ancestors (the row's `.text_color(...)`
-/// when selected). That is a better fit here than gpui-component's
-/// `highlighter` module (a full syntax-highlighter keyed to a language
-/// grammar — built for code panes, not fuzzy-match spans) or hand-rolled
-/// span children (would need to re-slice `title` into N+1 `div`s per row
-/// and fight `h_flex`'s gaps to keep them visually glued together).
-/// `highlight_runs` (pure core, above) does the char-index -> merged
-/// byte-range conversion this needs.
+/// Render merged match spans in the supplied accent colour and bold weight.
+/// Other spans inherit ambient text style. [`highlight_runs`] supplies UTF-8 byte
+/// ranges and handles indices outside the original label's character count.
 pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
     let runs = highlight_runs(title, indices);
     if runs.is_empty() {
@@ -786,75 +564,15 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
     StyledText::new(title.to_string()).with_highlights(runs.into_iter().map(|r| (r, style)))
 }
 
-/// The palette overlay: a horizontally centered ~560px-wide panel, top
-/// edge on the same line as every shell dialog
-/// (`dialog::MODAL_TOP_RATIO`), on
-/// `cx.theme().popover`, a real gpui-component `Input` for the query
-/// (`query_input` — native caret/selection/clipboard, see this module's own
-/// doc comment for the routing story), and every filtered result inside a
-/// fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the selected
-/// row highlighted (`shell::listrow::row_paint`: `list_active` under the
-/// foreground, `list_hover` under the pointer — plan constraint: no raw
-/// colors, `cx.theme()` roles only) and its
-/// binding right-aligned in `cx.theme().muted_foreground`.
+/// Render a centered palette panel with Input and a scrollable full result
+/// list. The viewport shows at most VISIBLE_ROWS estimated rows; rows are not
+/// virtualized. Selection scrolling is the controller's responsibility.
 ///
-/// **`Input` styling** (inventoried against `Input`'s own builder methods at
-/// the pinned release, `gpui-component-0.6.2/src/input/input.rs`):
-/// `.appearance(false)` strips `Input`'s own background/border/rounding
-/// (`self.appearance` gates all three there), which would otherwise paint
-/// a second, competing box inside this panel's own chrome; it does *not*
-/// touch `Input`'s internal horizontal/vertical padding
-/// (`input_px`/`input_py`, applied
-/// unconditionally for a single-line input regardless of `appearance`), so
-/// `input_row` below needs no padding of its own beyond the bottom border
-/// that visually separates it from `list` — the same convention the
-/// toolbar's bare `Input::new(filter_input)` already uses (`shell::
-/// toolbar::toolbar`, no wrapping padding there either).
-///
-/// **Mouse** (palette-input-polish task; dispatch added 2026-09-12): each
-/// row's `on_mouse_down` hands its index to `on_row_click` (a
-/// caller-supplied, cheaply `Clone`-able closure — see
-/// [`ShellView::render`](../shell/struct.ShellView.html)'s call site for
-/// how it's built from a `WeakEntity<ShellView>`, sidestepping per-row heap
-/// allocation), which SELECTS the row and then COMMITS it — the mouse form
-/// of Enter, through the same `ShellView::commit_selected` door the key
-/// takes (the interaction model's §17.1 rule 2, adopted here by user
-/// request: a click that only moved the highlight left a mouse user one
-/// keystroke short of everything). The panel's
-/// own `on_mouse_down` calls `cx.stop_propagation()` (precedent:
-/// `dialog::render_modal`'s panel does the same over its backdrop) so a
-/// click anywhere inside the panel — a row, the input, empty space — never
-/// also reaches the full-window click-catcher `ShellView::render` wraps
-/// this element in, which would otherwise dismiss the palette out from
-/// under the very click that's interacting with it. That catcher (and its
-/// dismiss-on-click-outside handling) lives in `shell::mod`, not here — see
-/// that module's doc comment on why the backdrop-vs-panel split stays there.
-///
-/// **Scroll mechanism, checked against the pinned gpui rev before building
-/// this** (`gpui::elements::div::{ScrollHandle, StatefulInteractiveElement}`,
-/// re-exported at the crate root): `scroll_handle` is a `Clone`-cheap
-/// (`Rc<RefCell<..>>`) handle the caller owns across frames (`ShellView`
-/// keeps one alongside `PaletteState`, both rebuilt together on palette
-/// open); `.id(..).overflow_y_scroll().track_scroll(scroll_handle)` on the
-/// list container turns it into a real scrollable viewport with mouse-wheel
-/// support built in (gpui-component's own `Scrollable`/list machinery — see
-/// `gpui-component-0.6.2/src/scroll/`, `gpui-component-0.6.2/src/list/
-/// list.rs` — layers a custom scrollbar and virtualization
-/// on top of exactly this primitive; at 66 items neither is needed here,
-/// so this uses the primitive directly rather than pulling in `List`'s
-/// virtualized-row bookkeeping for a list this small). `ShellView`'s
-/// selection-change path (`set_selected` after `vimnav::apply`, the
-/// selection reset in `set_query`, and row clicks via `set_selected`) calls `scroll_handle.
-/// scroll_to_item(new_selected)` — a real per-frame layout measurement, not
-/// a pixel-math guess — so the newly selected row always ends up visible;
-/// this function only wires the handle into the container, it never calls
-/// `scroll_to_item` itself.
-///
-/// `viewport` is the window's own drawable size and rem
-/// (`Window::viewport_size`/`rem_size`, the same source `ShellView::render`
-/// already reads for the tile surface) — passed in rather than read from
-/// `cx` so this stays a pure function of its arguments, the same shape as
-/// `shell::status::status_bar`.
+/// Row clicks call the supplied handler with a filtered-row index; the shell
+/// selects and commits through its ordinary palette dispatch path. The panel
+/// stops mouse-down propagation so its enclosing outside-click handler cannot
+/// dismiss it during an inside interaction. This function attaches the retained
+/// scroll handle but does not mutate selection, focus, query, or scroll position.
 pub fn render(
     state: &PaletteState,
     scroll_handle: &ScrollHandle,
@@ -875,21 +593,13 @@ pub fn render(
     let width = scale::design_px(WIDTH, rem_size).min((viewport_width - 32.0).max(160.0));
     let row_height = scale::design_px(ROW_HEIGHT, rem_size);
     let left = ((viewport_width - width) / 2.0).max(0.0);
-    // Same top edge as every shell dialog (`dialog::MODAL_TOP_RATIO`, user
-    // direction — the palette is dialog-like, and one shared line beats a
-    // separate top-third anchor for spatial memory).
+    // Use the same proportional top position as shell modal dialogs.
     let top = (viewport_height * crate::shell::dialog::MODAL_TOP_RATIO).max(0.0);
 
     let row_count = state.filtered.len();
 
-    // Fixed-height, scrollable viewport over the FULL filtered list (no
-    // truncation) — `.id(..)` makes this a `Stateful<Div>`, required for
-    // `overflow_y_scroll`/`track_scroll` (gpui::elements::div::
-    // StatefulInteractiveElement); mouse-wheel scrolling comes for free
-    // from `overflow_y_scroll` once the container is tracked. Sized to
-    // `VISIBLE_ROWS` * `ROW_HEIGHT` when there's more than one screenful,
-    // or exactly the content height otherwise, so a short result list
-    // doesn't leave dead scrollable space below it.
+    // Scroll the full list in a viewport capped at VISIBLE_ROWS estimates.
+    // Short results shrink the viewport; empty results retain one message row.
     let mut list = v_flex()
         .id("palette-results")
         .w_full()
@@ -898,11 +608,7 @@ pub fn render(
         ))
         .overflow_y_scroll()
         .track_scroll(scroll_handle)
-        // Test-only (no-op outside `cfg(test)`/`test-support`, see gpui's
-        // `debug_selector` doc comment): lets a `#[gpui::test]` recover
-        // this container's painted bounds via `VisualTestContext::
-        // debug_bounds` and check a row's bounds actually fall inside it
-        // — i.e. that scroll-follow, not just selection, moved.
+        // Expose the list bounds to UI tests without changing production behavior.
         .debug_selector(|| "palette-list".to_string());
     if row_count == 0 {
         list = list.child(
@@ -933,10 +639,8 @@ pub fn render(
             }
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
-            // A click selects this row (moves the highlight, no dispatch —
-            // see this function's own doc comment); `on_row_click` is
-            // cloned per row rather than shared some other way because each
-            // row's closure needs to close over its own `i`.
+            // The shell callback selects and commits this filtered row. Clone the
+            // callback so each closure retains its own row index.
             let click = on_row_click.clone();
             let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 click(i, window, cx);
@@ -976,24 +680,8 @@ pub fn render(
         }
     }
 
-    // A muted search icon in the `prefix` slot, and still no placeholder
-    // helper text: an empty query shows the icon and a caret, never hint
-    // text. This is gpui-component's own idiom for this exact surface —
-    // its command palette builds the identical `prefix` +
-    // `appearance(false)` pair (pinned release,
-    // `gpui-component-0.6.2/src/command/state.rs`, `Command`'s
-    // searchable-header render), which is why the icon keeps its default
-    // size — and the same one `shell::dialog::filter_row` wears, so all
-    // three filtering surfaces read alike.
-    //
-    // `.appearance(false)` strips `Input`'s own border/background (see
-    // this function's doc comment) but not its prefix, which that flag
-    // never guards (`gpui-component-0.6.2/src/input/input.rs`, `Input`'s
-    // render); the bottom border below is `input_row`'s own, standing in
-    // for the chrome
-    // `appearance(true)` would otherwise have drawn, just scoped to
-    // separating the query row from `list` rather than boxing the input
-    // itself.
+    // Input supplies its own padding and search prefix. The outer row draws
+    // only the separator so the query is not boxed inside another panel.
     let input_row = div()
         .w_full()
         .border_b_1()
@@ -1010,28 +698,14 @@ pub fn render(
         .left(px(left))
         .top(px(top))
         .w(px(width))
-        // Spec §20.5: reclaims `tab`/`shift-tab` from gpui-component's
-        // `Root` (`dialog::init_reclaimed_keybindings`'s `"GeodePalette"`
-        // entries) so they cannot cycle focus off `query_input`.
+        // Reclaim Tab focus cycling through the GeodePalette key context.
         .key_context("GeodePalette")
         .flex()
         .flex_col()
         .gap_2()
         .p_2()
-        // The same panel frame `dialog::render_modal` wears — background,
-        // text, border, radius token and drop shadow — so the palette and
-        // the dialogs read as siblings (user direction: "unify the
-        // appearance"). The radius was a hardcoded `px(8.)` before this;
-        // `theme.radius_lg` is the same idea but follows the theme, which
-        // is what every other rounded surface in this crate already does.
-        //
-        // What deliberately still differs: the interior rhythm (this is a
-        // denser surface — `ROW_HEIGHT` 28px against the dialogs' 44px, so
-        // matching their `px_4`/`gap_3` would loosen it into looking like a
-        // different component), the absent title row (a palette has no
-        // title to show), and the undimmed backdrop — see the click-catcher
-        // in `ShellView::render` for why that one is a decision, not an
-        // omission.
+        // Use the shared dialog frame tokens and shadow. Interior spacing stays
+        // compact for the palette's denser result rows.
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
         .border_1()
@@ -1042,10 +716,7 @@ pub fn render(
         // `on_mouse_down` below already stops — `render_modal`'s panel has
         // had this from the start; the palette simply never grew it.
         .occlude()
-        // Test-only, see `list`'s `debug_selector` comment above — lets a
-        // `#[gpui::test]` recover the panel's own painted bounds to click
-        // inside it (precedent: `dialog::render_modal`'s
-        // `"shell-modal-panel"`).
+        // Expose panel bounds so tests distinguish inside clicks from backdrop clicks.
         .debug_selector(|| "palette-panel".to_string())
         // See this function's doc comment: stops a click anywhere in the
         // panel from also reaching the click-catcher `ShellView::render`
@@ -1070,10 +741,7 @@ mod tests {
         )
     }
 
-    /// A keyboard step exactly as `handle_palette_key`'s fallback arm
-    /// spells it (spec §20.5): `vimnav::apply` decides the row — a bare
-    /// ±1 wraps, anything larger clamps — and `set_selected` lands it.
-    /// `PaletteState` has no motion method of its own any more.
+    /// Apply the same resolved navigation and selection clamp as the palette controller.
     fn step(state: &mut PaletteState, delta: i64) {
         let next = crate::vimnav::apply(
             state.selected(),
@@ -1245,14 +913,8 @@ mod tests {
         assert!(highlight_runs("anything", &[]).is_empty());
     }
 
-    /// Fix-round nit guard: 'İ' (U+0130) lowercases to "i\u{307}" — TWO
-    /// chars — so match indices (positions in the LOWERED text, per
-    /// `fuzzy_match`'s contract) can exceed the original title's char
-    /// count. Unreachable with today's all-ASCII titles, but it was a
-    /// panic-on-the-render-path landmine (`boundaries[run_end + 1]` out
-    /// of bounds) if theme names ever go free-form. The guard skips the
-    /// expansion-only indices instead of panicking; the in-range chars
-    /// still highlight.
+    /// Lowercasing İ expands to two characters. Highlight conversion skips
+    /// indices beyond the original label rather than indexing past its boundaries.
     #[test]
     fn highlight_runs_survives_lowercase_char_expansion() {
         let title = "İstanbul"; // 8 chars; lowered "i\u{307}stanbul" is 9
@@ -1516,13 +1178,8 @@ mod tests {
         assert_eq!(state.selected_item(), None);
     }
 
-    /// Post-merge review perf 11: the filter runs once per query edit,
-    /// never per `filtered()` call — before the cache, every call
-    /// re-fuzzy-matched the whole item list (an Enter press computed it
-    /// three times: `selected_item`, the close-path bookkeeping, and the
-    /// next render). Observed honestly through the test-only per-instance
-    /// match-call counter incremented at the real `fuzzy_match_lowered`
-    /// invocation site — not a stand-in assertion.
+    /// Construction and query changes match each item once; repeated result
+    /// reads must use the cache. The counter records actual matcher calls.
     #[test]
     fn filtered_matches_once_per_query_edit_not_per_call() {
         let mut state = PaletteState::new(vec![
@@ -1549,8 +1206,7 @@ mod tests {
             "the cached result carries the matched char indices"
         );
 
-        // Repeat reads — the per-Enter triple-compute shape and more —
-        // must do no matching at all.
+        // Repeated reads must not recompute fuzzy matches.
         let _ = state.filtered();
         let _ = state.filtered();
         let _ = state.selected_item();
@@ -1633,12 +1289,8 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let bindings = build_binding_index(&keymap);
-        // palette::toggle is bound to both "ctrl+k" and "ctrl+shift+p" in
-        // BUILTIN_KEYMAP's [bindings.keys] table; TOML tables here iterate
-        // by sorted key spelling (see keymap::build's own doc comment), so
-        // "ctrl+k" (alphabetically first: 'k' < 's') is the one that wins as
-        // build_keymap's first-encountered binding, and so the one
-        // build_binding_index's first-wins rule keeps for display.
+        // The compiler sorts key spellings within the builtin keys table.
+        // Control-K precedes Control-Shift-P, so the first-binding badge uses it.
         assert_eq!(
             bindings
                 .get(&ActionId("palette::toggle".to_string()))
@@ -1826,9 +1478,8 @@ mod tests {
         assert_eq!(titles, vec!["Toggle", "Tiles"]);
     }
 
-    /// The bonus is bounded at two run bonuses: even at the cap it cannot
-    /// drag a bare scattered match (`tog` mid-word across "Batch log",
-    /// three points) past a never-used row's contiguous prefix run.
+    /// The capped bonus cannot lift this three-character scattered match
+    /// above the fixture's contiguous prefix match.
     #[test]
     fn the_capped_bonus_cannot_lift_a_scattered_match_over_a_contiguous_run() {
         let items = vec![
@@ -1859,13 +1510,8 @@ mod tests {
         assert_eq!(used.filtered()[0].0.title(), "Beta");
     }
 
-    /// The bound where the usage cap and the category discount meet,
-    /// pinned as the ruling it is (review 2026-09-12): a maxed-out row
-    /// whose only hit is in its category leads an unused title prefix on a
-    /// SHORT query (`wor`: 17 + 18 against 31) — that is the brain-reading
-    /// point — and loses to it once the prefix run reaches five characters
-    /// (`works`: 29 + 18 against 51). At four they tie and registry order
-    /// holds. Move either constant and this is the test that says so.
+    /// A maximum-usage category match beats an unused three-character title
+    /// prefix, ties at four, and loses at five with the configured scoring constants.
     #[test]
     fn a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one() {
         let items = vec![
@@ -1885,11 +1531,8 @@ mod tests {
         assert_eq!(titles, vec!["Workspace: next", "Focus left"]);
     }
 
-    /// The backtrack must use the same discounted constants as the
-    /// forward pass: with the plain `RUN_BONUS` there, `ic` on
-    /// "Perf overlay" / "Diagnostics" keeps its score but paints the
-    /// title's `i` plus the category's `c` — a scattered highlight for a
-    /// contiguous category match (review 2026-09-12).
+    /// Backtracking must use category discounts too, or its highlighted
+    /// alignment can disagree with the score computed by the forward pass.
     #[test]
     fn a_contiguous_category_match_backtracks_to_one_run() {
         let mut state =

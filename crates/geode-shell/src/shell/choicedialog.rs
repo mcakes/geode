@@ -1,46 +1,15 @@
-//! The choice dialog (2026-09-19): one filter-first modal in
-//! [`asof_view`](super::asof_view)'s mould for "pick one of these and
-//! act", with a [`Target`] saying what the rows are and what a pick
-//! does. Three targets so far:
+//! A filter-only choice modal for grouping slots, tile kinds, and log levels.
+//! [`ChoiceList`] owns ranking, highlight, Tab completion, and navigation.
+//! Enter or a row click commits the selected option.
 //!
-//! - [`Target::Grouping`] — the frame's grouping slots: the mouse and
-//!   typeahead form of `ctrl+1..9`/`ctrl+0`, opened by `frame::grouping`
-//!   (`mod+g`, the palette's "Pick a grouping…") and by a click on the
-//!   toolbar's grouping readout (the `"1 · book / lhu"` / `"view
-//!   default"` text, `toolbar::toolbar`'s `on_grouping`).
-//! - [`Target::TileKind`] — the roster's module kinds: the choosing form
-//!   of the palette's `<Kind>: Split` rows, opened by `tile::add`
-//!   (`mod+n`, "Add a tile…") and by a bare double-click on a placeholder
-//!   tile (`ShellView::try_pick_tile_on_double_click`), where the pick
-//!   fills that placeholder in place through `add_tile`.
-//! - [`Target::LogLevel`] — `Set log level…` (command-line locality spec
-//!   §4.2), two steps over the one dialog: step 1's rows are the seven
-//!   `geode::` targets with their effective level, a pick replaces the
-//!   rows in place with step 2's five levels, and a pick there lands on
-//!   `Diagnostics::request_level` — the path `:level` used to take.
-//!   `escape` on step 2 returns to step 1 rather than closing.
+//! Grouping lists the view default followed by configured slots 1–9. With
+//! an empty query, digits activate a configured slot and 0 restores the view
+//! default. Tile choices follow roster order and omit the placeholder; a
+//! commit fills the focused placeholder or splits the focused real tile.
 //!
-//! ## Architecture
-//!
-//! [`ChoiceDialogState`] is pure (no `gpui`), stored on `ShellView` as
-//! `choice_dialog: Option<ChoiceDialogState>`, exactly like
-//! `picker`/`as_of_dialog`: a [`ChoiceList`] over the option rows plus
-//! the target. Ranking, the highlight, `tab` completion and `enter` all
-//! go through the one choice core (`choice::route` is the key table);
-//! the grouping target adds the digit jump — `1`–`9` on an EMPTY field
-//! activate that slot outright, `0` the view default, mirroring the
-//! chords — and each target its own commit.
-//!
-//! Only FILLED slots are grouping rows, plus "view default" first:
-//! `Frame::set_active_slot` ignores an empty slot, and a row that
-//! visibly does nothing is the defect the scope bar's `save` chip was
-//! withdrawn for (`ScopeBarModel::savable`). A trader who wants a slot
-//! that is not configured edits groupings (`config::edit_groupings`),
-//! deliberately not offered here (user ruling 2026-09-19).
-//!
-//! [`open`] is the only entry point and the only place a
-//! `ChoiceDialogState` is constructed — nothing survives a close/reopen,
-//! the same contract every other modal here keeps.
+//! Log level uses two steps in the same modal: select a target, then a level.
+//! Escape from the level step returns to targets. Escape elsewhere closes.
+//! Each open starts fresh; stage transitions clear and refocus the Input.
 
 use std::rc::Rc;
 
@@ -78,9 +47,7 @@ pub enum Target {
     Grouping { slots: Vec<Option<u8>> },
     /// The module kind each declared option adds (`add_tile`).
     TileKind { kinds: Vec<String> },
-    /// `Set log level…` (command-line locality spec §4.2), two steps over
-    /// one dialog: `chosen` is `None` while the rows are targets and
-    /// `Some(target)` while they are levels.
+    /// Log-level stage: `None` shows targets; `Some(target)` shows levels.
     LogLevel {
         targets: Vec<String>,
         chosen: Option<String>,
@@ -178,8 +145,7 @@ impl ChoiceDialogState {
         }
     }
 
-    /// Step 2: the five levels, the highlight placed on `current` so a
-    /// bare `enter` changes nothing.
+    /// Step 2: the five levels, with the current effective level highlighted.
     pub fn log_levels(target: String, current: Level) -> Self {
         let options: Vec<String> = LEVEL_WORDS.iter().map(|(w, _)| (*w).to_string()).collect();
         let mut list = ChoiceList::new(options, choice::DEFAULT_CAP);
@@ -216,10 +182,9 @@ impl ChoiceDialogState {
         }
     }
 
-    /// A digit typed into an EMPTY field on the grouping target — `1`–`9`
-    /// the slot of that number if it is filled, `0` the view default —
-    /// mirroring `ctrl+N`. `None` for an unfilled slot (the chord ignores
-    /// it too), a non-digit, or any other target.
+    /// Map a grouping digit to its configured slot, or 0 to the view default.
+    /// The key handler gates this on an empty query. Return `None` for an empty
+    /// slot, a non-digit, or another target.
     pub fn jump(&self, key: &str) -> Option<Option<u8>> {
         let Target::Grouping { slots } = &self.target else {
             return None;
@@ -375,20 +340,13 @@ fn open(
     );
 }
 
-/// The status-bar notice when a picked slot was emptied under the open
-/// picker (a `groupings.toml` reload — `Frame::replace_slots` — while
-/// the rows still listed it): the chord ignores the same case silently,
-/// but the chord never showed a list claiming the slot existed.
+/// Notice for a slot removed after the dialog captured its rows.
 pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
 
-/// Act on `pick` and close — the enter arm's, the digit jump's and a row
-/// click's one commit path. A slot goes through `Frame::set_active_slot`,
-/// the same door `frame::slot_N`/`frame::slot_clear` take; a kind through
-/// `ShellView::add_tile` with the setting-resolved split, the palette's
-/// `<Kind>: Split` row's own placement — which fills a focused
-/// placeholder in place. The modal closes FIRST for a kind: `add_tile`
-/// records the request for `ensure_occupants` on the next render, and
-/// the close's own focus return must not land after that.
+/// Commit through the target's operation. Grouping revalidates the slot
+/// against the frame. Tile kind closes the modal before calling `add_tile`,
+/// so modal focus return precedes occupant creation. A log target replaces
+/// the rows without closing; a log level requests the change and closes.
 fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Context<ShellView>) {
     match pick {
         Pick::Slot(slot) => {
@@ -433,13 +391,9 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
     }
 }
 
-/// The [`dialog::ModalKeyHandler`] for this modal: [`choice::route`]'s
-/// table, plus the grouping target's digit jump on an empty field.
-/// `escape` claims nothing on every target and step EXCEPT
-/// `Target::LogLevel`'s level step, which claims it to step back to the
-/// target step instead of closing the dialog (locality spec §4.2);
-/// everywhere else it falls through to `handle_key_down`'s
-/// modal-closes-on-escape branch.
+/// Route choice keys and grouping digits. Escape from log levels rebuilds
+/// the target list and clears its query; other Escape presses reach the
+/// shell's modal-close handler.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -488,12 +442,8 @@ fn handle_key(
             return true;
         }
         Some(ChoiceKey::Complete) => {
-            // A filter-only dialog keeps its own field (spec §16.4 —
-            // `sync_dialog_text` serves the mode-carrying dialogs), so
-            // the completed text is written here, the way the as-of
-            // dialog's own `sync_dialog_text` arm writes its query back
-            // to the shared field: `set_value` emits no `Change`, and
-            // the list already holds the new query.
+            // Completion updates the list's query directly. Copy it to the shared
+            // Input because programmatic `set_value` does not emit Change.
             let text = shell.choice_dialog.as_mut().and_then(|state| {
                 state
                     .list
@@ -525,14 +475,9 @@ fn handle_key(
         }
         None => {}
     }
-    // The digit jump (grouping target only — `jump` answers `None` for
-    // the rest, whose digits then type): only on an empty field, so a
-    // digit typed as part of a filter (`"1 · book"`) still reaches the
-    // input. `text()` is the borrowed rope (its `len` is bytes), not
-    // `value()`'s fresh copy — this runs per keystroke. An unfilled
-    // slot's digit is claimed and dropped, as its chord is ignored:
-    // letting it type would put a lone `2` in the field that matches no
-    // row, a worse answer than nothing.
+    // Grouping digits jump only on an empty Input. A digit for an unfilled
+    // slot is claimed without editing the query; other targets accept digits
+    // as filter text.
     if ks.mods == Modifiers::NONE
         && is_digit(&ks.key)
         && shell.dialog_input.read(cx).text().len() == 0
@@ -557,10 +502,7 @@ fn is_digit(key: &str) -> bool {
     key.len() == 1 && key.as_bytes()[0].is_ascii_digit()
 }
 
-/// The body: the shared filter field, the ranked rows through
-/// `dialog::choice_rows` (a row click commits — a pick, as in the
-/// market-data underlying picker, not the dialogs' `tab`), and the hint
-/// line.
+/// Render the filter, ranked clickable choices, and footer. Row clicks commit.
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,

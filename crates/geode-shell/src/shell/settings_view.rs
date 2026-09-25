@@ -1,8 +1,8 @@
 //! The settings modal: a keyboard-driven flat list of typed settings.
 //!
-//! Rows derive from current shell state on every render and key event. Stepping applies
-//! immediately through each setting's mutation and background persistence path. In
-//! Normal mode, `i` or Enter opens the selected row's choice typeahead.
+//! Rows derive from current shell state on every render and key event. Stepping updates
+//! the shell immediately and submits background persistence through each setting's
+//! setter. In Normal mode, `i` or Enter opens the selected row's choice typeahead.
 //!
 //! `/` enters list filtering and captures its entry query. Escape restores that query;
 //! bare Enter keeps the edited query. Both return to Normal without opening a choice or
@@ -15,8 +15,8 @@
 //! so bare letters act as commands.
 //!
 //! Visible settings are Theme, Font size, Line numbers, Find style, Add tile direction,
-//! and timeseries default source when available. Theme names include light or dark
-//! appearance, so there is no separate appearance-mode row.
+//! and timeseries default source. With no configured sources, its only option is
+//! `(none)`. Theme names include appearance, so there is no separate mode row.
 
 use std::rc::Rc;
 
@@ -72,29 +72,13 @@ pub struct SettingRow {
     pub current: usize,
 }
 
-/// Build the dialog's rows from plain inputs (no gpui, no `ShellView` —
-/// [`rows_for`] is the thin shell-reading wrapper), in the dialog's
-/// fixed display order: the Appearance rows first (Theme, Font size),
-/// then Keyboard (Find style), then Line numbers, Add tile and the
-/// timeseries default source in the order they were added. A two-value
-/// setting (Find style) needs no special case — wrapping a two-element
-/// list IS a toggle.
+/// Build rows from plain inputs in fixed order: Theme, Font size, Find style, Line
+/// numbers, Add tile direction, and Default series source. The source row always
+/// includes `(none)`, even with no configured sources. [`rows_for`] supplies the live
+/// shell values.
 ///
-/// An `active_theme` not present in `theme_names` (impossible via the UI —
-/// `ThemeService::apply` only ever activates a bundled name — but cheap to
-/// be deterministic about) marks the first theme as current rather than
-/// panicking or carrying an out-of-range index into [`step`].
-///
-/// `default_source` naming nothing in `fetch_sources` (a stale
-/// `[timeseries] default_source`, which the startup/reload diagnostic
-/// already warns about) shows as `(none)` — the same deterministic
-/// fallback rather than an out-of-range index.
-///
-/// Eight plain inputs rather than a bundling struct (clippy's
-/// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
-/// reasoning: [`rows_for`], the one production call site, already holds
-/// each of these as its own field on `ShellView`, and this body treats
-/// every one independently.
+/// An unknown active theme falls back to index zero. An unavailable default source
+/// selects `(none)`.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_rows(
     theme_names: &[String],
@@ -183,39 +167,23 @@ pub fn derive_rows(
     ]
 }
 
-/// The first value of the Default series source row: no default at all,
-/// which is the `[timeseries] default_source` key ABSENT (what
-/// `series::persist_to_user_config(.., None)` writes). It is identified
-/// by INDEX (`value_ix == 0`), never by comparing the label, so a source
-/// somehow named `(none)` would still step to itself rather than to no
-/// default.
+/// First source option, identified by index zero rather than its label. Choosing it
+/// removes `[timeseries] default_source`; a source named `(none)` still has its own
+/// nonzero index.
 const NO_DEFAULT_SOURCE: &str = "(none)";
 
-/// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
-/// (back, `Left`), and the value chip's click (forward, mirroring `tab`)
-/// vs. its shift+click (back, mirroring `shift+tab`) — spec §20.3's mouse
-/// form of the same two directions; a plain click on the row's own label
-/// only selects it, never a step (the old already-selected-row-cycles
-/// rule is gone). The old dialog's `h`/`left`/`l`/`right` motions and
-/// its `enter`/`space` cycle-forward keys are retired along with the vim
-/// vocabulary this dialog no longer speaks (see the module doc); `enter`
-/// is deliberately inert now rather than aliased onto `Right` — see
-/// [`handle_key`]'s own doc comment.
+/// Direction of a cyclic value step. Tab/Shift-Tab work in either list mode; Normal
+/// also accepts the shared forward/backward commands. A value-chip click steps forward
+/// and Shift-click steps backward. Row clicks select, and Normal Enter opens a choice
+/// instead of stepping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDirection {
     Left,
     Right,
 }
 
-/// The value index one step from `current` in a `len`-value list,
-/// WRAPPING at both ends unconditionally — unlike `vimnav::apply`, which
-/// wraps only a bare ±1 and clamps a larger or counted step (spec
-/// §20.5): a settings value is a cycle (fzf → vim → fzf), not a list
-/// with ends, and this always moves by exactly one, so wrap is what lets
-/// a run of `tab` presses (or repeated clicks on the value chip) reach
-/// every value without ever hitting a dead end. `len == 0` yields 0
-/// (unreachable for real rows — every setting has at least two values —
-/// but deterministic).
+/// Wrap a single step within the value list in either direction. An empty list yields
+/// zero; callers normally supply the selected row's available values.
 pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     if len == 0 {
         return 0;
@@ -257,11 +225,7 @@ pub struct SettingsState {
     pub choice: Option<ChoiceEntry>,
 }
 
-/// Hand-written rather than derived so the opening mode is one explicit,
-/// greppable line — the same reasoning `KeybindingsState`'s own `Default`
-/// gives: `DialogMode` has no `Default` of its own on purpose, and
-/// deriving one there would quietly make "normal" every surface's answer
-/// instead of this dialog's own stated choice.
+/// The dialog explicitly opens in Normal; `DialogMode` has no global default.
 impl Default for SettingsState {
     fn default() -> Self {
         Self {
@@ -309,14 +273,8 @@ impl SettingsState {
     }
 }
 
-/// The text one row exposes to the filter: title and category — exactly
-/// what the row displays as its identity, and nothing more. The value
-/// labels deliberately do NOT participate (same philosophy as
-/// keybindings' `searchable_text` excluding the invisible action id, one
-/// step further: values ARE visible, but `gruvbox` matching the Theme
-/// row only when Gruvbox happens to be active — and `large` matching Font
-/// size only sometimes — would make matching depend on current state
-/// rather than on what the row *is*).
+/// Search title and category only. Excluding current values keeps a setting's search
+/// identity stable when its value changes.
 pub fn searchable_text(row: &SettingRow) -> String {
     format!("{} {}", row.title, row.category)
 }
@@ -374,11 +332,9 @@ pub enum KeyAction {
     PassThrough,
 }
 
-/// `tab` (forward) / `shift+tab` (back) — the stepping keys this dialog
-/// has always had, live in both modes: a focused single-line `Input`
-/// leaves them free (with `dialog::init_reclaimed_keybindings`'s help),
-/// and normal mode adds `space`/`shift+space` beside them rather than
-/// retiring them.
+/// Tab/Shift-Tab step values in both list modes. Reclaimed bindings allow these keys to
+/// reach the dialog even while Input owns text. Normal also accepts space/Shift-space
+/// and the shared left/right stepping commands.
 fn tab_step(ks: &Keystroke) -> Option<StepDirection> {
     const SHIFT: Modifiers = Modifiers {
         shift: true,
@@ -451,17 +407,12 @@ pub fn route(mode: DialogMode, query_is_empty: bool, choosing: bool, ks: &Keystr
     }
 }
 
-// ---------------------------------------------------------------------
-// Applying a value — the same seams the old dialog's controls drove.
-// ---------------------------------------------------------------------
+// Applying values to live shell state and submitting persistence.
 
-/// Apply value `value_ix` of the setting `id` names to the live shell —
-/// the one place [`handle_key`]'s stepping and [`on_value_chip_clicked`]'s
-/// step both land. Dispatches to the `*_on` core of the matching
-/// setter helper, so a keyboard step is byte-for-byte the same apply +
-/// persist path a direct [`set_theme`]/[`set_font_size`]/... call takes.
-/// An out-of-range `value_ix` (unreachable — [`step`] wraps within the
-/// row's own `values`) is a no-op rather than a panic.
+/// Apply a row's selected value through the same setter used by keyboard steps, choice
+/// picks, and value-chip clicks. Mutate live shell state before submitting background
+/// persistence; invalid indices are ignored. Persistence failure does not roll the live
+/// value back.
 fn apply_setting(
     shell: &mut ShellView,
     id: SettingId,
@@ -503,88 +454,64 @@ fn apply_setting(
             // it.
             if value_ix == 0 {
                 shell.set_default_source(None, cx);
-            } else if let Some(name) = shell.fetch_sources.get(value_ix - 1).cloned() {
+            } else if let Some(name) = fetch_source_names(cx).get(value_ix - 1).cloned() {
                 shell.set_default_source(Some(name), cx);
             }
         }
     }
 }
 
-/// Apply `name` via `ThemeService::apply`, then persist it
-/// (`ShellView::persist_theme`) —
-/// the core both [`set_theme`] (the `Entity`-taking seam `shell::mod`'s
-/// tests drive) and [`apply_setting`] (this dialog's own stepping, which
-/// already holds `&mut ShellView` mid-key-dispatch and must not reenter
-/// the entity) share.
+/// Apply the theme, request persistence, and notify. Keyboard and pointer paths use the
+/// existing shell borrow; the entity wrapper delegates to this same core.
 fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
     shell.services.theme.apply(name, cx);
     shell.persist_theme(cx);
     cx.notify();
 }
 
-/// [`set_theme_on`]'s sibling for font size. The `notify` triggers a
-/// re-render, and `ShellView::render` applies the new rem size there
-/// (this core has no `Window` to apply it here — see the `fontsize`
-/// module doc).
+/// Store and persist font size, then notify. The next shell render applies its rem size
+/// to the window.
 fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<ShellView>) {
     shell.font_size = size;
     shell.persist_font_size(cx);
     cx.notify();
 }
 
-/// [`set_theme_on`]'s sibling for find style. Nothing to apply beyond the
-/// state itself, and honestly nothing downstream either: neither dialog
-/// reads `ShellView::find_style` for behaviour any more (the filter-first
-/// rewrite retired both `/` sessions it used to choose between — spec
-/// `2026-09-01-dialog-filter-input-design.md` §8). Stepping this row only
-/// re-labels its own value and persists the setting; it steers nothing
-/// until Phase 3's blotter reads it (§9).
+/// Store and persist find style, then notify. This setter updates the shell's
+/// preference; feature-specific consumers receive configuration separately.
 fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<ShellView>) {
     shell.find_style = style;
     shell.persist_find_style(cx);
     cx.notify();
 }
 
-/// [`set_theme_on`]'s sibling for the add direction (spec 2026-09-08
-/// add-tile §5). Read by `ShellView::add_tile` on the next add.
+/// Store and persist the add direction, used by the next `ShellView::add_tile`.
 fn set_add_direction_on(shell: &mut ShellView, d: AddDirection, cx: &mut Context<ShellView>) {
     shell.add_direction = d;
     shell.persist_add_direction(cx);
     cx.notify();
 }
 
-/// Apply a theme by name — the `Entity<ShellView>`-taking seam kept from
-/// the pre-rewrite dialog (its doc'd purpose — a directly drivable
-/// handler for tests, since the old dropdown's popup overlay couldn't be
-/// clicked from a `#[gpui::test]` — still holds, and `shell::mod`'s tests
-/// still call it). Now a thin `Entity::update` wrapper over
-/// [`set_theme_on`], the same core this dialog's `tab`/`shift+tab`
-/// stepping applies through. Only test code calls these four wrappers
-/// since the rewrite (the dialog itself already holds `&mut ShellView`
-/// mid-key-dispatch and must use the cores directly), hence the not-test
-/// `dead_code` allowance rather than `#[cfg(test)]`: they stay compiled,
-/// documented, and reachable for any future non-modal caller.
+/// Entity wrapper for the theme setter, also used by tests. Modal handlers use
+/// [`set_theme_on`] directly because they already hold the shell's mutable borrow.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
     view.update(cx, |shell, cx| set_theme_on(shell, name, cx));
 }
 
-/// Set the UI font size and persist it (`[ui] font_size`) — same survival
-/// story as [`set_theme`].
+/// Entity wrapper for setting and persisting `[ui] font_size`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_font_size(view: &Entity<ShellView>, size: FontSize, cx: &mut App) {
     view.update(cx, |shell, cx| set_font_size_on(shell, size, cx));
 }
 
-/// Set the find style and persist it (`[ui] find_style`) — same survival
-/// story as [`set_theme`].
+/// Entity wrapper for setting and persisting `[ui] find_style`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_find_style(view: &Entity<ShellView>, style: FindStyle, cx: &mut App) {
     view.update(cx, |shell, cx| set_find_style_on(shell, style, cx));
 }
 
-/// Set the add direction and persist it (`[tiles] add`) — same survival
-/// story as [`set_theme`].
+/// Entity wrapper for setting and persisting `[tiles] add`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_add_direction(view: &Entity<ShellView>, d: AddDirection, cx: &mut App) {
     view.update(cx, |shell, cx| set_add_direction_on(shell, d, cx));
@@ -604,18 +531,12 @@ fn mod_alias_label(mods: Modifiers) -> &'static str {
     }
 }
 
-// ---------------------------------------------------------------------
-// gpui wiring — everything above this line is the pure core (plus the
-// apply seams, which touch ShellView but no rendering).
-// ---------------------------------------------------------------------
+// GPUI wiring and rendering.
 
-/// Row height estimate for sizing the viewport (two lines: title plus
-/// muted category) — same non-load-bearing caveat as
-/// `keybindings_view::ROW_HEIGHT`.
+/// Estimated two-line row height for viewport sizing. Scroll-follow uses actual layout
+/// through the scroll handle.
 const ROW_HEIGHT: f32 = 44.0;
-/// Rows visible before the list scrolls. Six rows today, so nothing
-/// scrolls — kept anyway so the list's sizing arithmetic stays identical
-/// to keybindings' and a seventh setting never needs layout thought.
+/// Maximum visible settings rows before the list scrolls.
 const VISIBLE_ROWS: usize = 10;
 /// Target dialog content width in pixels — same as the keybinding
 /// dialog's, so the two sibling dialogs read as one family.
@@ -625,7 +546,11 @@ const WIDTH: f32 = 640.0;
 /// model meets `ShellView`. Called fresh on every render ([`build`]) and
 /// every keystroke ([`handle_key`]); rows are never cached, so a step's
 /// effect (or a config hot reload's) is visible on the very next derive.
-fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
+///
+/// The fetch sources come from the `SeriesSettings` global, the same
+/// value an open timeseries tile reads, so the row and the tiles cannot
+/// disagree about which sources exist.
+fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
     derive_rows(
         &shell.services.theme.names(),
         shell.services.theme.active_name(),
@@ -634,26 +559,28 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
         shell.line_numbers,
         shell.add_direction,
         shell.default_source.as_deref(),
-        &shell.fetch_sources,
+        &fetch_source_names(cx),
     )
 }
 
-/// Open the settings modal (`settings::open`: `ctrl+,`, the palette
-/// entry, and the sidebar profile icon all reach this). A no-op if a
-/// modal is already open — re-triggering the action must not clobber
-/// whatever's up. Fresh [`SettingsState`] every open, nothing survives a
-/// close/reopen — the same contract as the palette and the keybinding
-/// dialog. Goes through [`dialog::open_shell_dialog_with_key`] (the one
-/// standard door, with the Part B key seam): this dialog needs first
-/// refusal on every keystroke for the whole vocabulary [`route`] names.
+/// The configured fetch source names in doc order — the default-source
+/// row's values after `(none)`. The shell publishes the global before
+/// its first render; an absent one reads as no sources rather than a
+/// panic in `render`.
+fn fetch_source_names(cx: &App) -> Vec<String> {
+    cx.try_global::<crate::series::SeriesSettings>()
+        .map(crate::series::SeriesSettings::names)
+        .unwrap_or_default()
+}
+
+/// Open fresh settings state through the shared modal lifecycle, preserving any
+/// already-open modal. The custom key handler routes the settings vocabulary.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
     }
-    // Set *before* the door runs: its `dialog::sync_dialog_text` call
-    // reads the `DialogMode::Normal` this dialog opens in and parks the
-    // keys on the shell root, so a bare letter reaches [`handle_key`] as
-    // a verb rather than being eaten as text by a focused `Input`.
+    // Install state before opening so synchronization parks Normal focus on the shell,
+    // allowing bare-letter commands.
     view.settings = Some(SettingsState::new());
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
@@ -663,15 +590,10 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        // `false`: `focus_filter` is for a dialog with no mode, and this
-        // one has one now — its initial focus comes from the door's own
-        // sync (spec §16.1), exactly as the keybinding dialog's does.
+        // Mode-aware synchronization chooses initial focus; no filter-first override.
         false,
     );
-    // §18.1: the mode pill lives in the modal's own title row
-    // (`dialog::render_modal`'s `title_extra` slot). A row's typeahead
-    // paints `choose` in its place (spec 2026-09-19 §3.3) — `filter`
-    // would misdescribe what `enter` does over an open choice field.
+    // The title-extra slot shows the mode pill, or `choose` for an open choice.
     dialog::set_title_extra(view, |shell, cx| {
         shell
             .settings
@@ -701,7 +623,7 @@ fn handle_key(
     _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return false;
     };
@@ -827,7 +749,7 @@ fn on_row_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
@@ -849,9 +771,8 @@ fn on_row_clicked(
     cx.notify();
 }
 
-/// The value chip's click (spec §20.3): select the row and step it
-/// through the ONE step path a key takes, [`apply_setting`] via
-/// [`step`]. `forward` is `!shift`.
+/// Select the value chip's row and step through [`step`] and [`apply_setting`], the
+/// same path as keyboard stepping. `forward` is `!shift`.
 fn on_value_chip_clicked(
     shell: &mut ShellView,
     clicked: SettingId,
@@ -859,13 +780,11 @@ fn on_value_chip_clicked(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let Some(state) = shell.settings.as_mut() else {
         return;
     };
-    // Spec 2026-09-19 §3.3: the value chip isn't even painted while a
-    // choice field is open (the filter row takes its place), but the
-    // guard stands beside `on_row_clicked`'s regardless.
+    // Ignore stale value-chip callbacks while a choice field owns the surface.
     if state.choosing() {
         return;
     }
@@ -888,14 +807,9 @@ fn on_value_chip_clicked(
     cx.notify();
 }
 
-/// The [`dialog::ShellModal::build`] closure body: the shared filter row
-/// (`dialog::filter_row`, frozen throughout normal mode — see the
-/// `frozen_query` note at the end of this function) over a scrollable row list (title + muted
-/// category on the left, with fuzzy-match highlighting; the current value
-/// label on the right in the mono data face) plus a footer hint. `entity`
-/// is the `Entity<ShellView>` every row's click handler captures to reach
-/// [`on_row_clicked`] at click time; `shell` is this call's own
-/// plain-borrow read (see `ShellModal::build`'s doc comment for why both).
+/// Build either the filtered settings list or an open choice list, with its input and
+/// active hints. Borrow the shell for current render state; capture `entity` for
+/// pointer handlers that run later.
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,
@@ -905,7 +819,7 @@ fn build(
     let Some(state) = shell.settings.as_ref() else {
         return div().into_any_element();
     };
-    let rows = rows_for(shell);
+    let rows = rows_for(shell, cx);
     let theme = cx.theme();
     let row_paint = super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
@@ -919,10 +833,7 @@ fn build(
     );
     let chip_radius = theme.radius;
 
-    // Row list vs. the open choice field's ranked options (spec
-    // 2026-09-19 §3.3): while a row's typeahead is open it takes over
-    // the row list's place entirely — the field loop below never runs
-    // at all, exactly the object dialog's own rule for a `Choice` row.
+    // An open choice list replaces the settings rows entirely.
     let list: AnyElement = if let Some(entry) = state.choice.as_ref() {
         let entity_for_click = entity.clone();
         dialog::choice_rows(
@@ -957,10 +868,7 @@ fn build(
             let row = &rows[row_ix];
             let is_selected = position == state.selected;
 
-            // `split_label_indices` (shared with `keybindings_view::build` —
-            // see its own doc comment for why this is one function, not two
-            // copies) splits the ranked char offsets back across the title
-            // and category lines they're painted on.
+            // Split ranked character offsets between their title and category lines.
             let title_len = row.title.chars().count();
             let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
@@ -988,11 +896,8 @@ fn build(
                         .child(highlighted_text(row.category, &cat_ix, row_paint.accent)),
                 );
 
-            // The current value, in the data face — a value readout, not
-            // prose, same register as the binding chips across the hall.
-            // Painted as a `dialog::value_chip` (spec §20.3): click steps
-            // forward, shift+click steps back, the mouse form of
-            // `space`/`shift+space` — a plain row click only selects.
+            // A value-chip click steps forward; Shift-click steps backward. Its handler
+            // stops propagation so the row's selection handler does not also run.
             let entity_for_chip = entity.clone();
             let chip_id = row.id;
             let on_step: dialog::StepHandler = Rc::new(move |forward, window, cx| {
@@ -1041,29 +946,12 @@ fn build(
         list.into_any_element()
     };
 
-    // Footer hint chips — `keybindings_view::key_chip`, reused so key
-    // names in helper text look identical across the two sibling dialogs.
-    // The hint rows state the CURRENT mode's vocabulary, not the union of
-    // both (the keybinding dialog's rule): a footer listing keys that
-    // are inert right now is exactly the lie the mode pill exists to
-    // prevent. Normal mode names all five stepping spellings in the
-    // object dialog's own order and word — `space shift+space tab h l ·
-    // change` — since the 2026-09-13 ruling made them one vocabulary and
-    // the 2026-09-14 one made every footer read the same way; filter
-    // mode shows `tab`/`shift+tab` alone, because there `space`, `l` and
-    // `h` are characters on their way to the `Input`. WHERE each hint
-    // paints is not decided here: `crate::footer` files it by category
-    // (move / edit / go, spec §19) and `dialog::hint_rows` lays the rows
-    // out.
-    //
-    // Both modes' stepping groups carry the `settings-hint-change`
-    // selector on their first chip, so a test can read that the group is
-    // taught in both.
+    // Teach only keys active in the current mode. Normal includes bare-letter and space
+    // stepping; Filter reserves them for query text and teaches Tab stepping. Hints
+    // carry their footer category. Both stepping groups expose the
+    // `settings-hint-change` selector on their first chip.
     let hints: Vec<Hint> = if state.choosing() {
-        // Spec 2026-09-19 §3.3: a row's typeahead has its own small
-        // vocabulary — narrow, move, complete, choose, cancel — ahead of
-        // the mode match below, since it owns the keys outright while
-        // open (see [`route`]'s rung 0).
+        // Choice entry owns its own narrow/move/complete/pick/cancel vocabulary.
         vec![
             Hint::prose(HintRow::Move, "type to narrow"),
             Hint::new(HintRow::Move, &["up", "down"], "move"),
@@ -1127,9 +1015,7 @@ fn build(
                 .text_color(theme.muted_foreground)
                 .child(hint_line),
         )
-        // The old dialog's read-only content, now two muted inert lines
-        // (module doc): the mod key is set in config, not here; and every
-        // row above saves through the same file.
+        // Read-only information: modifier alias and configuration file location.
         .child(
             div()
                 .text_xs()
@@ -1146,18 +1032,10 @@ fn build(
                 .child("saved to your app.toml"),
         );
 
-    // The filter row is frozen throughout normal mode — a caret in a
-    // field that is not receiving the keys is the most misleading thing
-    // a modal surface can show. `slash_filters` is always true here:
-    // unlike the keybinding dialog, this one has no capture state in
-    // which `/` means something else, so the `press / to filter`
-    // placeholder is never a lie. The frozen row is also the mouse form
-    // of `/` (§17.1 rule 1), which is what `entity` is for.
-    //
-    // Spec 2026-09-19 §3.3: while a row's typeahead is open, this slot
-    // is [`dialog::name_row`] instead — the same shared `Input`, but
-    // naming the setting being chosen rather than a query over the row
-    // list (which the choice field has already withdrawn, above).
+    // Freeze the query while Normal owns commands; clicking it enters filtering. There
+    // is no capture state here, so the empty frozen row can always teach `/`. An open
+    // choice instead labels the same shared Input with the setting name and supplies
+    // its own query.
     let top_row = if let Some(entry) = state.choice.as_ref() {
         let title = rows
             .iter()
@@ -1182,8 +1060,8 @@ fn build(
         .into_any_element()
 }
 
-/// A click on a choice-field row is `tab` on it (spec 2026-09-19 §3.3).
-/// Ends in [`dialog::sync_dialog_text`], the row-click seam.
+/// Complete the clicked ranked choice as Tab would, then synchronize the input.
+/// Completion leaves the choice open; Enter picks its value.
 fn on_choice_row_clicked(
     shell: &mut ShellView,
     row: usize,
@@ -1311,7 +1189,7 @@ mod tests {
 
     #[test]
     fn there_is_no_dark_mode_row() {
-        // Retired 2026-09-12: every theme name already carries its mode.
+        // Theme names already include their appearance mode.
         let rows = rows();
         assert!(rows.iter().all(|r| r.title != "Dark mode"));
         let mut state = SettingsState::new();
@@ -1437,10 +1315,7 @@ mod tests {
 
     #[test]
     fn a_click_resolves_a_setting_id_to_its_filtered_position() {
-        // The list the user clicks is the filtered one, so a row's click
-        // handler (keyed by SettingId, as it always was) must resolve to a
-        // position in THAT list, not in the full one — the settings twin
-        // of keybindings' `a_click_resolves_an_action_id_to_its_filtered_position`.
+        // Resolve clicked SettingId against the filtered list, not the full row order.
         let rows = rows();
         let mut state = SettingsState::new();
         state.set_query(rows[2].title.to_string());
@@ -1466,7 +1341,7 @@ mod tests {
         assert_eq!(filtered_position(&visible, &rows, hidden.id), None);
     }
 
-    // -- the mode and the key table (crate::dialogmode, spec §18) --------
+    // Mode and key routing (`crate::dialogmode`).
 
     fn ks(key: &str, mods: Modifiers) -> Keystroke {
         Keystroke {
@@ -1482,8 +1357,7 @@ mod tests {
         ..Modifiers::NONE
     };
 
-    /// The one line the whole model turns on: a fresh session is in
-    /// normal mode, so the door's sync parks the keys on the shell root.
+    /// A fresh session is Normal, so opening synchronization focuses the shell.
     #[test]
     fn a_fresh_session_opens_in_normal_mode() {
         assert_eq!(SettingsState::new().mode, DialogMode::Normal);
@@ -1583,10 +1457,8 @@ mod tests {
         );
     }
 
-    /// Filter mode: printable keys — `space` and `/` included — are text
-    /// on their way to the focused `Input`, so they pass through. This
-    /// is the spec's own risk 3: a `space` that stepped regardless of
-    /// mode would change a setting under a trader typing a query.
+    /// Filter treats printable keys, including space and `/`, as input text. Typing a
+    /// query must not step a setting.
     #[test]
     fn filter_mode_passes_printable_keys_to_the_input() {
         use KeyAction::*;

@@ -142,6 +142,10 @@ module roster from loading. Retained fragment-filter diagnostics are shown on
 reload but do not themselves reject a user edit; errors from the ordinary
 compiler still participate in the reload gate.
 
+See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
+that bypass sequences and counts while handling text, and for the limits of
+palette binding badges and which-key hints.
+
 ## Editing, unbinding, and reset
 
 The editor opens in Normal mode. `/` or clicking its frozen filter row enters

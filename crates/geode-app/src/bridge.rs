@@ -10,7 +10,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::egress_config;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
-use geode_core::source_config::SourceShape;
+use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::documents::DocumentRegistry;
@@ -20,6 +20,9 @@ use geode_data::{
 };
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
+use geode_pricer::content::{PricerFactory, PricerSettings};
+use geode_pricer::core::{PRICER_VIEWS_DOC, Views};
+use geode_pricer::store::MemorySheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -46,6 +49,9 @@ pub struct DataSetup {
     /// Datasets declared local. Their publications update diagnostics but skip
     /// frame publication history and revisions, preventing autosave invalidation.
     pub local_datasets: HashSet<String>,
+    /// The pricer's views and settings; `stale_after` is filled by `start`.
+    pub pricer_views: Views,
+    pub pricer_settings: PricerSettings,
 }
 
 /// Build setup when both datasets and views documents are present. Empty
@@ -120,6 +126,16 @@ pub fn data_setup(
             PricerConfig::missing(&pricer_name)
         }
     };
+    let (pricer_views, view_diags) = pricer_views_from_config(config);
+    diagnostics.extend(view_diags);
+    let (refresh, refresh_diag) = pricing_refresh_from_config(config);
+    diagnostics.extend(refresh_diag);
+    let pricer_settings = PricerSettings {
+        pricer: pricer_name.clone(),
+        pricer_missing: pricer.pricer.is_none(),
+        refresh,
+        stale_after: Duration::default(),
+    };
     let local_datasets: HashSet<String> = schema
         .datasets
         .iter()
@@ -150,6 +166,8 @@ pub fn data_setup(
         colours,
         diagnostics,
         local_datasets,
+        pricer_views,
+        pricer_settings,
     })
 }
 
@@ -188,6 +206,46 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
         .unwrap_or(geode_blotter::tile::DEFAULT_STALE_AFTER)
 }
 
+/// `[pricing] refresh` (spec §5.5, §9.4): the app default periodic
+/// reprice. Absent is 30 s, `"off"` disables it, a duration is that; an
+/// unreadable value keeps 30 s and says so (planning decision 21).
+pub const DEFAULT_PRICING_REFRESH: Duration = Duration::from_secs(30);
+
+pub fn pricing_refresh_from_config(config: &Config) -> (Option<Duration>, Option<Diagnostic>) {
+    let Some(value) = config.get("app", "pricing.refresh") else {
+        return (Some(DEFAULT_PRICING_REFRESH), None);
+    };
+    if value.as_str() == Some("off") {
+        return (None, None);
+    }
+    if let Some(d) = value
+        .as_str()
+        .and_then(parse_duration)
+        .filter(|d| !d.is_zero())
+    {
+        return (Some(d), None);
+    }
+    (
+        Some(DEFAULT_PRICING_REFRESH),
+        Some(Diagnostic {
+            severity: Severity::Warning,
+            layer: config.explain("app", "pricing.refresh"),
+            file: None,
+            message: format!("[pricing] refresh = {value} is not a duration or \"off\"; using 30s"),
+            path: Some("app.pricing.refresh".to_string()),
+        }),
+    )
+}
+
+/// The `pricer_views` doc, or the bundled two when no layer has one (the
+/// builtin layer always does in the app; a test config may not).
+pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
+    match config.doc(PRICER_VIEWS_DOC) {
+        Some(doc) => Views::from_doc(doc),
+        None => (Views::builtin(), Vec::new()),
+    }
+}
+
 /// Workers offer state without waiting for the UI. Bursts coalesce in the
 /// mailbox; only a closed receiver refuses delivery. Count each refusal and
 /// log closure once, while allowing producers to continue their work.
@@ -220,6 +278,9 @@ pub struct Bridge {
     /// Timeseries factory sharing the data handle and named colours. Retained
     /// so reload can update the chart palette.
     pub timeseries: Rc<geode_timeseries::content::TimeseriesFactory>,
+    /// The line pricer's factory, sharing the handle. Retained so a reload
+    /// reaches its views and settings.
+    pub pricer: Rc<PricerFactory>,
     events: crate::events::Receiver,
     dropped: Arc<AtomicU64>,
     /// Startup source descriptions paired with their schema-derived pipeline.
@@ -290,6 +351,16 @@ pub fn start(
         find_style,
         stale_after,
     ));
+    let mut pricer_settings = setup.pricer_settings.clone();
+    pricer_settings.stale_after = stale_after;
+    // Part 3's store is in-memory (line-pricer Part 3, planning decision
+    // 8): a sheet survives closing and reopening a tile, not a restart.
+    let pricer = Rc::new(PricerFactory::new(
+        handle.clone(),
+        Rc::new(MemorySheetStore::default()),
+        setup.pricer_views.clone(),
+        pricer_settings,
+    ));
     Bridge {
         marketdata: Rc::new(
             MarketDataFactory::new(
@@ -314,6 +385,7 @@ pub fn start(
                 .with_egress(egress_targets),
         ),
         timeseries,
+        pricer,
         handle,
         factory,
         events: rx,
@@ -540,6 +612,50 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         }
     })
     .detach();
+
+    // The pricer refreshes on EVERY applied reload (planning decision 20):
+    // `ShellEvent::ConfigReloaded` fires only for five named docs, and a
+    // `pricer_views` or `[pricing] refresh` edit is neither. The frame's
+    // `config` counter is the ungated signal (`main.rs`'s diagnostics
+    // factory observes it the same way).
+    {
+        let pricer = bridge.pricer.clone();
+        let diagnostics = diagnostics.clone();
+        let shell = shell.clone();
+        let frame = shell.read(cx).frame().clone();
+        let last = Rc::new(Cell::new(frame.read(cx).versions().config));
+        cx.observe(&frame, move |frame, cx| {
+            let now = frame.read(cx).versions().config;
+            if now == last.get() {
+                return;
+            }
+            last.set(now);
+            // Read everything out of the config before the factory takes
+            // `cx` mutably.
+            let (views, mut diags, refresh, stale_after) = {
+                let config = shell.read(cx).config();
+                let (views, diags) = pricer_views_from_config(config);
+                let (refresh, refresh_diag) = pricing_refresh_from_config(config);
+                let mut diags = diags;
+                diags.extend(refresh_diag);
+                (views, diags, refresh, stale_after_from_config(config))
+            };
+            pricer.reload(views, refresh, stale_after, cx);
+            for d in &diags {
+                tracing::warn!(target: "geode::pricing", "{d}");
+            }
+            if !diags.is_empty() {
+                diagnostics.update(cx, |dg, cx| {
+                    let before = dg.version();
+                    dg.note_data_diagnostics(std::mem::take(&mut diags), SystemTime::now());
+                    if dg.version() != before {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
 
     let diagnostics_for_drain = diagnostics.clone();
     let catalog_refresh_for_drain = catalog_refresh.clone();
@@ -1068,6 +1184,219 @@ role = "key"
         .unwrap()
     }
 
+    fn test_pricer(handle: &DataHandle) -> Rc<PricerFactory> {
+        Rc::new(PricerFactory::new(
+            handle.clone(),
+            Rc::new(MemorySheetStore::default()),
+            Views::builtin(),
+            PricerSettings::default(),
+        ))
+    }
+
+    /// A bridge whose every factory is a default; for tests that exercise
+    /// one factory's reload path.
+    fn test_bridge(handle: DataHandle) -> Bridge {
+        let (_tx, rx) = crate::events::channel();
+        Bridge {
+            factory: Rc::new(BlotterFactory::new(
+                handle.clone(),
+                Vec::new(),
+                NamedColours::default(),
+                SchemaSpec::default(),
+                DerivedDimensions::default(),
+                FindStyle::default(),
+                Duration::from_secs(900),
+            )),
+            marketdata: Rc::new(MarketDataFactory::new(
+                handle.clone(),
+                &CVI,
+                Duration::from_secs(900),
+            )),
+            dividend: Rc::new(
+                MarketDataFactory::new(handle.clone(), &DIVIDEND, Duration::from_secs(900))
+                    .without_keymap(),
+            ),
+            timeseries: Rc::new(geode_timeseries::content::TimeseriesFactory::new(
+                handle.clone(),
+                NamedColours::default(),
+            )),
+            pricer: test_pricer(&handle),
+            handle,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+            local_datasets: Default::default(),
+        }
+    }
+
+    #[test]
+    fn pricing_refresh_reads_off_a_duration_and_defaults_to_thirty_seconds() {
+        let config = |text: &str| {
+            Config::load(&ConfigSources {
+                builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+                desk: None,
+                user: None,
+            })
+        };
+        assert_eq!(
+            pricing_refresh_from_config(&config("")),
+            (Some(DEFAULT_PRICING_REFRESH), None)
+        );
+        assert_eq!(
+            pricing_refresh_from_config(&config("[pricing]\nrefresh = \"off\"\n")),
+            (None, None)
+        );
+        assert_eq!(
+            pricing_refresh_from_config(&config("[pricing]\nrefresh = \"10s\"\n")),
+            (Some(Duration::from_secs(10)), None)
+        );
+        let (refresh, diag) =
+            pricing_refresh_from_config(&config("[pricing]\nrefresh = \"soon\"\n"));
+        assert_eq!(refresh, Some(DEFAULT_PRICING_REFRESH));
+        let diag = diag.expect("a bad value warns");
+        assert_eq!(diag.path.as_deref(), Some("app.pricing.refresh"));
+    }
+
+    #[test]
+    fn pricer_views_fall_back_to_the_bundled_two_with_no_doc() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![],
+            desk: None,
+            user: None,
+        });
+        let (views, diags) = pricer_views_from_config(&config);
+        assert!(diags.is_empty());
+        assert_eq!(
+            views.names().collect::<Vec<_>>(),
+            vec!["vanilla", "barrier"]
+        );
+    }
+
+    /// Planning decision 20: a reload reaches the pricer through the
+    /// frame's `config` counter — `ShellEvent::ConfigReloaded` never fires
+    /// for a `pricer_views`-only edit.
+    #[gpui::test]
+    fn a_config_reload_hands_the_pricer_factory_its_views(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("pricer_views", "[slim]\ncolumns = [\"qty\", \"price\"]\n")
+                    .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert_eq!(
+            bridge.pricer.view_names(),
+            vec!["vanilla", "barrier"],
+            "fixture: built with the bundled views"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// A shell holding one restored pricer tile, its roster, actions and
+    /// keymap fragment wired exactly as `main` wires them — so a typed
+    /// key travels the shell's real matcher and insert-focus predicate.
+    fn test_shell_services_with_a_pricer_tile() -> ShellServices {
+        let mut services = test_shell_services();
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(PricerFactory::new(
+            handle,
+            Rc::new(MemorySheetStore::default()),
+            Views::builtin(),
+            PricerSettings::default(),
+        )));
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "pricer"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        services
+    }
+
+    /// The pricer's entry field must count as insert focus for the shell:
+    /// a shifted letter typed after `o` is text, never a shell binding
+    /// (`shift+d` is `workspace::duplicate_horizontal`). The shell treats
+    /// keys as typing only while the focused tile's context reads
+    /// `mode == insert` AND the tile holds focus
+    /// (`ShellView::occupant_insert_stack`).
+    #[gpui::test]
+    fn typing_into_the_pricer_entry_field_fires_no_shell_binding(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        let services = test_shell_services_with_a_pricer_tile();
+        let tail = services.action_tail.clone();
+        cx.update(geode_pricer::init);
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let dispatched = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().any(|x| x == h)
+        };
+        vcx.simulate_keystrokes("o");
+        assert!(
+            dispatched("pricer::add_below"),
+            "fixture: `o` reached the pricer"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ec26");
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the entry field ran a shell binding"
+        );
+    }
+
     /// Resolve pricing.adapter through the supplied registry. Unknown names must
     /// warn with the requested and available pricers without preventing setup.
     /// Use both required documents so this reaches registry resolution.
@@ -1220,6 +1549,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1331,6 +1661,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1389,6 +1720,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1513,6 +1845,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1576,6 +1909,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1645,6 +1979,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1707,6 +2042,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1781,6 +2117,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1862,6 +2199,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -1931,6 +2269,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory: factory.clone(),
             events: rx,
@@ -1991,6 +2330,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -2089,6 +2429,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -2154,6 +2495,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -2296,6 +2638,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,
@@ -2647,6 +2990,7 @@ role = "key"
                 handle.clone(),
                 NamedColours::default(),
             )),
+            pricer: test_pricer(&handle),
             handle,
             factory,
             events: rx,

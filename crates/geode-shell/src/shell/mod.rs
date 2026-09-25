@@ -799,11 +799,6 @@ pub struct ShellView {
     /// `series::SeriesSettings` global so a timeseries tile can read the
     /// source `:add` means without a path to `ShellView`.
     pub(super) default_source: Option<String>,
-    /// The configured fetch source names, re-derived beside
-    /// `default_source` (startup and hot reload) — the settings row's
-    /// value list, kept on the view because `settings_view::rows_for`
-    /// reads `&ShellView` alone and has no `App` to ask the global.
-    pub(super) fetch_sources: Vec<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -1455,7 +1450,6 @@ impl ShellView {
         // through `set_default_source`.
         let series = crate::series::SeriesSettings::from_config(&services.config);
         let default_source = series.default_source.clone();
-        let fetch_sources = series.names();
         cx.set_global(series);
         // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
         // four globals — see its own doc comment).
@@ -1649,7 +1643,6 @@ impl ShellView {
             add_direction,
             line_numbers,
             default_source,
-            fetch_sources,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),

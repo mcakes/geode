@@ -1,14 +1,20 @@
 //! The sheet core's costs at spec §8.2's shape — a sheet of 1,000 lines —
 //! against §7's 8 ms pure-UI budget. `parse` is per line typed; `apply`
 //! and undo is per keystroke; `to_rows`/`from_rows` is per autosave and
-//! per restore. Medians go to docs/perf.md under "Line pricer core".
+//! per restore; `grid_build_1000` is the prepared `GridModel` rebuild —
+//! the per-keystroke cost the table pays on every edit, delivery and
+//! expansion change. Medians go to docs/perf.md under "Line pricer core"
+//! (`grid_build_1000`: "Line pricer tile").
 
 use chrono::Utc;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use geode_core::clock::Clock;
 use geode_core::pricing::PriceResult;
 use geode_pricer::core::{
-    Edit, LineId, OwnShifts, Place, RowSpec, Sheet, from_rows, parse, to_rows,
+    ColumnPlan, Edit, Expansion, LineId, OwnShifts, Place, RowSpec, Sheet, Views, from_rows, parse,
+    to_rows,
 };
+use geode_pricer::grid::GridModel;
 use std::hint::black_box;
 
 /// `n` distinct vanilla lines: alternating buy/sell, calls/puts, strikes
@@ -133,6 +139,37 @@ fn bench(c: &mut Criterion) {
             let rows = to_rows(&s).expect("rows");
             black_box(from_rows("bench", &rows).expect("loads"))
         })
+    });
+
+    // Spec §8.2 / §12: the grid model is rebuilt on every edit, delivery
+    // and expansion change, so a whole build at 1,000 lines — every
+    // package open, every line answered — is the per-keystroke cost the
+    // 8 ms budget constrains.
+    let mut s = sheet(1_000);
+    let answers: Vec<(LineId, u64, Result<PriceResult, String>)> = (0..s.len())
+        .filter(|r| s.is_line(*r))
+        .map(|r| {
+            (
+                s.id(r),
+                s.revision(r),
+                Ok(PriceResult {
+                    price: 12.5,
+                    delta: 0.5,
+                    gamma: 0.01,
+                    vega: 1.0,
+                    theta: -0.5,
+                    rho: 0.1,
+                }),
+            )
+        })
+        .collect();
+    s.deliver_all(answers, Utc::now());
+    let mut expansion = Expansion::default();
+    expansion.open_all(&s);
+    let views = Views::builtin();
+    let plan = ColumnPlan::build(views.get("vanilla").expect("bundled"));
+    g.bench_function("grid_build_1000", |b| {
+        b.iter(|| black_box(GridModel::build(&s, &expansion, &plan, None, Clock::utc())))
     });
 
     g.finish();

@@ -1,5 +1,6 @@
 //! Shared vocabulary and pure logic for Geode: configuration, schema,
-//! scopes, query values, snapshots, health, documents, series, and pricing.
+//! scopes, query values, snapshots, health, documents, series, pricing, and
+//! editor nudging.
 
 pub mod attribution;
 pub mod clock;
@@ -12,6 +13,7 @@ pub mod format;
 pub mod groupings;
 pub mod health;
 pub mod log;
+pub mod nudge;
 pub mod panic;
 pub mod pricing;
 pub mod query;

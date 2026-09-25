@@ -32,6 +32,7 @@ use geode_core::config::{Config, Diagnostic, Layer, Severity};
 use geode_core::view::ColumnPresentation;
 
 use crate::dialogmode::{self, DialogMode};
+use crate::vimnav::{self, NavCommand};
 
 /// The one notice every mutating verb on a [`Domain::writable`] `false`
 /// domain shows — `render.rs`'s browse `n` gate, `handle_edit_key`'s
@@ -1175,6 +1176,146 @@ impl Draft {
                 | FieldKind::MultiChoice { .. }
                 | FieldKind::OrderedList { .. } => RowVocabulary::Inert,
             },
+        }
+    }
+
+    /// The column stage `enter` opens on `row`, if any: a Views member row names its
+    /// own column, and a Schema `columns.<name>` field row names that column. No target
+    /// while a column projection is already open — a column has no column of its own.
+    ///
+    /// Pure and row-addressed rather than reading the cursor, because two callers ask
+    /// it about different rows: `render`'s `enter` asks about the selected one, and
+    /// [`Self::is_cursor_stop`] asks about every row in the list. A row that opens a
+    /// stage is a row the cursor must be able to reach, so the two questions have to
+    /// share one answer.
+    pub fn column_stage_target(&self, domain: Domain, row: EditRow) -> Option<String> {
+        if self.column().is_some() {
+            return None;
+        }
+        match (domain, row) {
+            (Domain::Views, row @ EditRow::Item { .. }) => Some(self.row_label(row)),
+            (Domain::Schema, EditRow::Field(i)) => self
+                .fields
+                .get(i)?
+                .key
+                .strip_prefix("columns.")
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
+    /// The Values stage `enter` opens on `row` (scopes-editing spec §3): a Scopes
+    /// `dimensions` member or candidate, outside any projection. Row-addressed for the
+    /// reason [`Self::column_stage_target`] gives.
+    pub fn values_stage_target(&self, domain: Domain, row: EditRow) -> Option<String> {
+        if domain != Domain::Scopes || self.column().is_some() || self.values().is_some() {
+            return None;
+        }
+        match row {
+            row @ (EditRow::Item { field, .. } | EditRow::Available { field, .. })
+                if self
+                    .fields
+                    .get(field)
+                    .is_some_and(|f| f.key == "dimensions") =>
+            {
+                Some(self.row_label(row))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the cursor may rest on `row` (user ruling 2026-09-23). A row is a stop
+    /// when it answers to something: a [`RowVocabulary`] other than `Inert`, or a stage
+    /// `enter` opens on it (Schema's `columns.<name>` rows are inert to every value
+    /// verb and still open a column stage).
+    ///
+    /// Everything else — Groupings' display-only `slot`, an `OrderedList`'s own header
+    /// row, a `MultiChoice`, a one-option `Choice`, Schema's `derived.<name>` rows —
+    /// still PAINTS and is still where a diagnostic lands; it is only not a place the
+    /// cursor can be left, because a highlighted row whose every key does nothing is
+    /// the inert-keystroke defect the interaction model exists to remove.
+    ///
+    /// The object's own verbs do not enter into this: `d`, `r`, `n` — and Groupings'
+    /// `i`, which reaches past the selected row to the slot's whole chain
+    /// ([`Self::selected_vocabulary`]'s own note) — act on the OBJECT from whichever
+    /// row the cursor is on, so a row that answers only to those is not a stop.
+    pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
+        self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert
+            || self.column_stage_target(domain, row).is_some()
+            || self.values_stage_target(domain, row).is_some()
+    }
+
+    /// Move the cursor by `nav`, then settle it onto a stop in the direction of travel
+    /// — so `j` onto a header keeps going down and `k` keeps going up, rather than the
+    /// key appearing to do nothing for a press.
+    ///
+    /// The search follows `vimnav::apply`'s own edge behaviour for that command: a bare
+    /// ±1 wraps there, so the snap wraps too — `k` on the first stop reaches the last,
+    /// past the header rows above it. A counted step and `g`/`shift+g` CLAMP there, so
+    /// the snap does not wrap: `ctrl+d` into a list ending in headers settles back up
+    /// onto the last stop rather than teleporting to the top.
+    pub fn move_selection(&mut self, domain: Domain, nav: NavCommand) {
+        let len = self.visible_rows().len();
+        self.selected = vimnav::apply(self.selected, len, nav);
+        let (forward, wrap) = match nav {
+            NavCommand::Move(delta) => (delta > 0, delta.abs() == 1),
+            NavCommand::Top => (true, false),
+            NavCommand::Bottom => (false, false),
+        };
+        self.snap_selection(domain, forward, wrap);
+    }
+
+    /// Put the cursor on a stop without a direction of travel — the door for every
+    /// selection that was reset rather than moved (a stage opening, a query change, a
+    /// list that grew or shrank under it). Nearest stop at or after the cursor, else
+    /// the nearest before it.
+    pub fn settle_selection(&mut self, domain: Domain) {
+        self.snap_selection(domain, true, false);
+    }
+
+    /// The one search both doors use. `wrap` searches the whole list from the cursor in
+    /// the direction of travel; without it the search runs to the end of the list that
+    /// way and then back the other. Either way a list with no stop at all (a filter
+    /// narrowed to headers, a Schema dataset of nothing but derived dimensions) leaves
+    /// the cursor wherever it already is — the search moves it only ONTO a stop, so in
+    /// such a list `j` and `k` still walk the verbless rows `vimnav::apply` put the
+    /// cursor on. That is the honest fallback: the footer says the row is inert, and
+    /// refusing to move at all would make the motion keys look broken instead.
+    fn snap_selection(&mut self, domain: Domain, forward: bool, wrap: bool) {
+        // The row model is built ONCE for the whole search, not per probe: under a
+        // query `visible_rows` re-ranks every label (`listfilter::rank` fuzzy-matches
+        // and sorts), and a search that finds nothing probes the whole list — a
+        // per-probe rebuild would make an ordinary motion key quadratic in a long
+        // filtered list.
+        let rows = self.rows();
+        let visible = self.visible_rows();
+        let len = visible.len();
+        if len == 0 {
+            return;
+        }
+        let at = self.selected.min(len - 1);
+        let is_stop = |position: usize| {
+            visible
+                .get(position)
+                .and_then(|m| rows.get(m.row).copied())
+                .is_some_and(|row| self.is_cursor_stop(domain, row))
+        };
+        // Lazily, so a search that succeeds on its first probe allocates nothing.
+        let order: Box<dyn Iterator<Item = usize>> = if wrap {
+            Box::new((0..len).map(move |step| {
+                if forward {
+                    (at + step) % len
+                } else {
+                    (at + len - step) % len
+                }
+            }))
+        } else if forward {
+            Box::new((at..len).chain((0..at).rev()))
+        } else {
+            Box::new((0..=at).rev().chain(at + 1..len))
+        };
+        if let Some(position) = order.into_iter().find(|&p| is_stop(p)) {
+            self.selected = position;
         }
     }
 
@@ -2816,6 +2957,11 @@ impl ObjectDialogState {
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
+        // The stage opens with the cursor on the first row that answers to something,
+        // not on row 0 (user ruling 2026-09-23): a Groupings slot's first two rows are
+        // its number and the `Dimensions` header, and opening onto either is opening
+        // onto a row where every key does nothing.
+        draft.settle_selection(self.domain);
         // Every domain opens in normal mode with no field open — a Groupings slot lands
         // in the chooser and `i` opens its chain field. There is deliberately no domain
         // arm here: the one door every entry goes through has one answer.
@@ -2835,8 +2981,9 @@ impl ObjectDialogState {
     /// initial fields. Use the render stage-entry wrapper for scroll and repaint.
     pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, mut draft: Draft) {
         // Same defensive clear `enter_edit` gives its own freshly-derived
-        // draft — see that method's doc.
+        // draft — see that method's doc — and the same opening cursor rule.
         draft.query.clear();
+        draft.settle_selection(self.domain);
         self.stage = Stage::Edit {
             object: draft.name.clone(),
         };
@@ -2874,6 +3021,14 @@ impl ObjectDialogState {
         ) && let Some(draft) = self.draft.as_mut()
         {
             draft.set_query(query);
+            // A filter keystroke re-ranks the rows under the cursor, so the row it
+            // reset to may answer to nothing (user ruling 2026-09-23). Not while a
+            // field is open: `set_query` deliberately parks the cursor on the row being
+            // EDITED there, which on Groupings is the `Dimensions` header the chain
+            // field belongs to — a row the cursor could not otherwise rest on.
+            if draft.text_entry.is_none() {
+                draft.settle_selection(self.domain);
+            }
         } else {
             self.query = query;
             self.selected = 0;
@@ -5513,6 +5668,138 @@ mod tests {
     }
 
     /// Selected-row vocabulary controls both stepping hints and typed-entry hints.
+    #[test]
+    fn cursor_stops_are_the_rows_that_answer_to_something() {
+        // Views: the display-only `Dataset` row and the `Columns` header answer to
+        // nothing; the members and the catalogue row do.
+        let list = two_column_draft_with_one_available();
+        let stops: Vec<bool> = list
+            .rows()
+            .into_iter()
+            .map(|row| list.is_cursor_stop(Domain::Views, row))
+            .collect();
+        assert_eq!(
+            stops,
+            vec![false, false, true, true, true],
+            "dataset and the list header are not stops; the two members and the \
+             available candidate are"
+        );
+
+        // Groupings: the whole point of the ruling — `Slot` is a read-only `Text` and
+        // `Dimensions` is a list header, so a slot's stage has stops only from its
+        // chain down.
+        let slot = groupings_draft();
+        let stops: Vec<bool> = slot
+            .rows()
+            .into_iter()
+            .map(|row| slot.is_cursor_stop(Domain::Groupings, row))
+            .collect();
+        assert_eq!(
+            stops.first(),
+            Some(&false),
+            "the slot number answers to nothing"
+        );
+        assert_eq!(stops.get(1), Some(&false), "nor does the Dimensions header");
+        assert!(
+            stops[2..].iter().all(|stop| *stop),
+            "every dimension row does"
+        );
+    }
+
+    /// A row that opens a stage is a stop even though every value verb refuses it:
+    /// Schema's `columns.<name>` rows are read-only `Text` (`RowVocabulary::Inert`) and
+    /// `enter` opens each column's own stage, so the cursor has to be able to reach
+    /// them. Its `derived.<name>` rows open nothing and are not stops.
+    #[test]
+    fn a_row_that_opens_a_stage_is_a_stop_even_when_every_value_verb_refuses_it() {
+        let field = |key: &str| Field {
+            key: key.to_string(),
+            label: key.to_string(),
+            kind: FieldKind::Text("f64 · measure".to_string()),
+            dest: Destination::Doc,
+            layer: None,
+        };
+        let draft = Draft::new_object(
+            "risk_snapshot",
+            vec![field("columns.npv"), field("derived.desk")],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            draft.vocabulary_of(Some(EditRow::Field(0)), Domain::Schema),
+            RowVocabulary::Inert,
+            "sanity: a Schema column row has no value verb at all"
+        );
+        assert!(
+            draft.is_cursor_stop(Domain::Schema, EditRow::Field(0)),
+            "and is still a stop, because enter opens its column stage"
+        );
+        assert!(
+            !draft.is_cursor_stop(Domain::Schema, EditRow::Field(1)),
+            "a derived dimension opens nothing and answers to nothing"
+        );
+    }
+
+    /// Motion settles in the direction of travel, so a header never eats a keystroke:
+    /// `j` off the last stop wraps to the FIRST stop (not to the field rows above it),
+    /// and `k` off the first wraps to the last.
+    #[test]
+    fn motion_skips_the_rows_that_answer_to_nothing() {
+        let mut list = two_column_draft_with_one_available();
+        list.settle_selection(Domain::Views);
+        assert_eq!(list.selected, 2, "the stage settles onto the first member");
+
+        list.move_selection(Domain::Views, NavCommand::Move(-1));
+        assert_eq!(
+            list.selected, 4,
+            "k off the top wraps past the two field rows to the last stop"
+        );
+        list.move_selection(Domain::Views, NavCommand::Move(1));
+        assert_eq!(
+            list.selected, 2,
+            "and j off the bottom wraps back to the first stop, not to row 0"
+        );
+        list.move_selection(Domain::Views, NavCommand::Top);
+        assert_eq!(
+            list.selected, 2,
+            "`g` goes to the top of what the cursor can reach"
+        );
+        list.move_selection(Domain::Views, NavCommand::Bottom);
+        assert_eq!(list.selected, 4, "and `shift+g` to the bottom of it");
+        // A counted step CLAMPS rather than wrapping (`vimnav::apply`), so it must
+        // settle back UP the list rather than teleporting to the first stop.
+        list.selected = 2;
+        list.move_selection(Domain::Views, NavCommand::Move(10));
+        assert_eq!(list.selected, 4, "a clamped step lands on the last stop");
+        list.move_selection(Domain::Views, NavCommand::Move(-10));
+        assert_eq!(list.selected, 2, "and back on the first");
+    }
+
+    /// The fallback: with nothing to land on, the snap moves the cursor nowhere. A
+    /// filter can narrow a list to headers alone, and a Schema dataset can be all
+    /// derived dimensions. (Motion itself still applies `vimnav` first, so in a
+    /// MULTI-row list with no stop the cursor still walks — there is nothing better
+    /// for it to do; this one-row list is the case where that cannot hide the snap.)
+    #[test]
+    fn a_list_with_no_stop_at_all_moves_the_cursor_nowhere() {
+        let mut list = two_column_draft_with_one_available();
+        list.selected = 1;
+        // Only the `Columns` header survives this query, and it answers to nothing.
+        list.set_query("Columns".to_string());
+        assert_eq!(
+            list.visible_rows().len(),
+            1,
+            "sanity: the query left one row"
+        );
+        list.selected = 0;
+        list.settle_selection(Domain::Views);
+        assert_eq!(list.selected, 0);
+        list.move_selection(Domain::Views, NavCommand::Move(1));
+        assert_eq!(
+            list.selected, 0,
+            "a motion with nowhere to go leaves the cursor put"
+        );
+    }
+
     #[test]
     fn selected_vocabulary_answers_for_the_row_under_the_cursor() {
         let field = |key: &str, kind: FieldKind| Field {

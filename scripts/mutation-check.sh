@@ -2012,15 +2012,13 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
   '    if state.notice.take().is_some() {
         cx.notify();
     }
-    // Spec §20.1: a click is claimed and dropped while a question stands —
-    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
     let visible = visible_rows(state, &rows);
     let Some(ix)' \
-  '    // Spec §20.1: a click is claimed and dropped while a question stands —
-    // the object dialog'"'"'s tick-click rule (§18.9.2) on this surface.
+  '    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
@@ -4266,7 +4264,7 @@ run_mutation "publication routing: panel promotion uses its own dependencies" \
   geode-marketdata unrelated_documents_cannot_release_a_barrier_or_discard_a_valid_stage
 
 run_mutation "publication routing: a series query must really arrive" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   'if self.query_in_flight
             && self' \
   'if false
@@ -11521,10 +11519,10 @@ run_mutation "insert: a non-binding keystroke falls through to the matcher" \
   '            return;
         }
 
-        // Deliberately no analogous "if palette_input is focused, return' \
+        // The palette handles its own navigation and text below. Convert once for' \
   '        }
 
-        // Deliberately no analogous "if palette_input is focused, return' \
+        // The palette handles its own navigation and text below. Convert once for' \
   geode-shell a_count_prefix_typed_in_insert_mode_is_text_not_a_count
 
 # Controller ruling: a bare key resolves only against the contexts that
@@ -12215,11 +12213,9 @@ run_mutation "final: a restored draft's dropped edits are named" \
 # into the abandoned cell, count prefix and all.
 run_mutation "final: a keyboard focus move hands the keyboard back to the shell" \
   crates/geode-shell/src/shell/input.rs \
-  '            // own, which is exactly the kind of drift the mechanism rule
-            // is against.
+  '            // would have to track the workspace router exactly.
             self.note_keyboard_focus_move(window, cx);' \
-  '            // own, which is exactly the kind of drift the mechanism rule
-            // is against.' \
+  '            // would have to track the workspace router exactly.' \
   geode-shell \
   a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell
 
@@ -14151,13 +14147,11 @@ run_mutation "objectdialog: an edit-row click is dropped while a confirm is arme
   '    if armed_confirm(shell).is_some() {
         return;
     }
-    if let Some(draft) = draft_mut(shell) {
-        // `position` is the FILTERED index' \
+    let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
   '    if armed_confirm(shell).is_some() {
         let _ = 0;
     }
-    if let Some(draft) = draft_mut(shell) {
-        // `position` is the FILTERED index' \
+    let domain = shell.object_dialog.as_ref().map(|state| state.domain);' \
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
@@ -14187,9 +14181,10 @@ run_mutation "objectdialog: press_verb syncs the dialog text after a verb (spec 
   i_and_n_have_buttons_that_do_what_their_keys_do
 
 # Spec §20.3: `i` is a button only where the selected row is one it
-# opens. Mutated to always offer it, a read-only `Text` row (Scopes'
-# `Selects` summary, RowVocabulary::Inert) paints a button that can only
-# answer with a notice. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
+# opens. Mutated to always offer it, a LIST ITEM row (a Scopes dimension,
+# RowVocabulary::Item) paints a button that can only answer with a
+# notice. An inert row would be the sharper witness, but since the
+# 2026-09-23 ruling the cursor cannot rest on one. NOT a `Choice` row: spec 2026-09-19 §3.2 made a
 # multi-option `Choice` StepsAndTypes, so `i` legitimately paints there
 # now and that row can no longer tell this mutation apart from the real
 # code — `i_and_n_have_buttons_that_do_what_their_keys_do`'s own `Choice`
@@ -14199,7 +14194,7 @@ run_mutation "objectdialog: the i button is offered per row, not per domain (spe
   '    ) || state.domain == Domain::Groupings;' \
   '    ) || true;' \
   geode-shell \
-  the_i_button_is_withheld_on_a_read_only_text_row
+  the_i_button_is_withheld_on_a_list_item_row
 
 # Spec §20.3: the browse `n` button takes the key's own door. Mutated
 # away, the button syncs and notifies but opens nothing.
@@ -14256,12 +14251,12 @@ run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.
 run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
   '    if let Some(state) = shell.keybindings.as_mut() {
-        // Spec §20.1: not over an open question.
+        // Keep the confirmation'"'"'s exclusive input route until it is answered.
         if state.confirm.is_some() {
             return;
         }' \
   '    if let Some(state) = shell.keybindings.as_mut() {
-        // Spec §20.1: not over an open question.
+        // Keep the confirmation'"'"'s exclusive input route until it is answered.
         if false {
             return;
         }' \
@@ -15556,8 +15551,8 @@ run_mutation "grouping: the readout click opens the picker" \
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
-    // The open-door seam' \
-  '    // The open-door seam' \
+    // Dialog state is installed before this call so synchronization can choose its' \
+  '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
   the_pick_chip_is_always_present_and_opens_the_picker
 
@@ -16056,6 +16051,84 @@ run_mutation "pricer shorthand: a template quantity overflows silently" \
                     .ok_or_else(|| err(qty_offset, "quantity out of range"))?,' \
   '                qty: qty.wrapping_mul(l.weight),' \
   geode-pricer every_error_names_the_offending_offset
+
+# Line pricer Part 3 Task 4: the strictly-LIFO undo stack and the `:`
+# command vocabulary (spec §6.2/§8.5, §8.6).
+run_mutation "pricer undo: depth trims the oldest entry, not the newest" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_front();
+        }' \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_back();
+        }' \
+  geode-pricer the_stack_keeps_the_newest_hundred
+
+run_mutation "pricer undo: a fresh edit forks history by dropping the redo side" \
+  crates/geode-pricer/src/core/undo.rs \
+  '    pub fn record(&mut self, undo: Undo) {
+        self.undone.clear();' \
+  '    pub fn record(&mut self, undo: Undo) {' \
+  geode-pricer a_new_edit_clears_the_redo_side
+
+run_mutation "pricer undo: a refused inverse mid-undo clears the whole history" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                self.clear();
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  geode-pricer a_refused_inverse_mid_undo_drops_the_rest_of_both_sides
+
+run_mutation "pricer commands: group accepts a zero count" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)' \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: refresh accepts a zero duration" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["refresh", d] => parse_duration(d)
+            .filter(|d| !d.is_zero())' \
+  '        ["refresh", d] => parse_duration(d)' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: a Part 4 verb answers 'unknown command' instead of naming itself" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  '        [verb, ..] if false && NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: completions offer the word under the cursor as a choice" \
+  crates/geode-pricer/src/core/commands.rs \
+  '    words.pop(); // the word under the cursor' \
+  '    // words.pop(); // the word under the cursor' \
+  geode-pricer completions_offer_each_positions_vocabulary_unfiltered
 
 # The document family's numeric-only VALUE-column rule exempts a `local`
 # dataset (the pricer's sheets store enumerable text per row); this pins
@@ -16794,7 +16867,7 @@ run_mutation "timeseries: an add fetches before it queries" \
 # barrier waits for). Applied, it paints the old question's points under
 # the new question's header.
 run_mutation "timeseries: a stale tag is dropped" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if outcome.tag != self.tag {' \
   '        if false {' \
   geode-timeseries \
@@ -16805,7 +16878,7 @@ run_mutation "timeseries: a stale tag is dropped" \
 # shapes it. Following scope too makes every keystroke in the scope bar a
 # refetch and a requery on every open chart.
 run_mutation "timeseries: only as_of is followed" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        versions.as_of != now.as_of' \
   '        versions.as_of != now.as_of || versions.scope != now.scope' \
   geode-timeseries \
@@ -16816,7 +16889,7 @@ run_mutation "timeseries: only as_of is followed" \
 # appended. Gated on n > 0, a tile that already has its data never asks
 # for it and paints the empty hint for ever.
 run_mutation "timeseries: Ok(0) still requeries" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if result.is_ok() && self.visible {' \
   '        if matches!(result, Ok(n) if n > 0) && self.visible {' \
   geode-timeseries \
@@ -16828,7 +16901,7 @@ run_mutation "timeseries: Ok(0) still requeries" \
 # `set_pair_state` and must stop there; without the early return another
 # chart's fetch requeries this one.
 run_mutation "timeseries: a pair the tile does not hold is ignored" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if changed.is_none() {' \
   '        if false {' \
   geode-timeseries \
@@ -16838,7 +16911,7 @@ run_mutation "timeseries: a pair the tile does not hold is ignored" \
 # trip spent for nothing — and one the pool would rather spend on a
 # visible chart.
 run_mutation "timeseries: a hidden tile cancels in flight" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '            self.data.cancel(QueryKey(self.id.0));' \
   '            let _ = QueryKey(self.id.0);' \
   geode-timeseries \
@@ -16849,7 +16922,7 @@ run_mutation "timeseries: a hidden tile cancels in flight" \
 # option adds a different pair from the one under the highlight — here,
 # the default source instead of the one the trader arrowed down to.
 run_mutation "timeseries: enter picks the highlighted row not the text" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            PickerStage::Sources { identity } => match p.list.pick() {' \
   '            PickerStage::Sources { identity } => match Some(0usize) {' \
   geode-timeseries \
@@ -16860,7 +16933,7 @@ run_mutation "timeseries: enter picks the highlighted row not the text" \
 # dropped handle never reports `None`, and the shell's focus-return net
 # never fires — every chord dies for the rest of the session (CLAUDE.md).
 run_mutation "timeseries: the picker closer blurs before dropping" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            window.blur(cx);' \
   '            let _ = &window;' \
   geode-timeseries \
@@ -16871,7 +16944,7 @@ run_mutation "timeseries: the picker closer blurs before dropping" \
 # expression away and reports the error as a tile notice with nothing
 # left to fix.
 run_mutation "timeseries: an expression parse error keeps the field open" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '                if let Some(Popup::Expr(f)) = &mut self.popup {
                     f.error = Some(e.into());
                 }
@@ -16887,7 +16960,7 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
 # types itself into the day segment and the popup stays open — the
 # keyboard path to `3m` is gone.
 run_mutation "timeseries: a digit in the range popup commits a preset" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '                    && Preset::digit(d).is_some() =>' \
   '                    && false =>' \
   geode-timeseries \
@@ -16909,7 +16982,7 @@ run_mutation "timeseries: a no-op key is not an edit" \
 # trader who opens `r` under a historical as-of and presses `enter` has
 # their stored `to` silently rewritten to the as-of day.
 run_mutation "timeseries: an absolute range seeds from its stored dates" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/popups.rs \
   '            Range::Absolute { from, to } => (*from, *to),' \
   '' \
   geode-timeseries \
@@ -16920,7 +16993,7 @@ run_mutation "timeseries: an absolute range seeds from its stored dates" \
 # trader who pans with the list up meant the chart, and an overlay left
 # over the answer is the confusing half.
 run_mutation "timeseries: a popup closes before another verb" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                "list"
                     | "list_down"' \
   '                "pan_left"
@@ -16935,7 +17008,7 @@ run_mutation "timeseries: a popup closes before another verb" \
 # installed leaves `key_context` reporting `insert` with nothing focused
 # — a tile deaf to every bare key until `escape`.
 run_mutation "timeseries: an insert popup closes on any verb but its own four" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")' \
   '                true' \
   geode-timeseries \
@@ -16948,7 +17021,7 @@ run_mutation "timeseries: an insert popup closes on any verb but its own four" \
 # bump — flush every path `geode-chart` has cached, for a model identical
 # to the one it replaced.
 run_mutation "timeseries: the chart model is rebuilt only when its inputs change" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        if self.last_chart_key.as_ref() == Some(&key) {' \
   '        if false {' \
   geode-timeseries \
@@ -16966,7 +17039,7 @@ run_mutation "timeseries: the chart model is rebuilt only when its inputs change
 # counter monotonic and every built model still carries a fresh, larger
 # version. The two entries around it are the load-bearing pair.
 run_mutation "timeseries: a chrome change bumps the chart version" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        self.chart_version += 1;' \
   '        self.chart_version += 0;' \
   geode-timeseries \
@@ -16977,7 +17050,7 @@ run_mutation "timeseries: a chrome change bumps the chart version" \
 # `Arc` into the cell every tile shares, and nothing else would ever tell
 # a painted chart that a name it draws with was redefined.
 run_mutation "timeseries: a colours reload reaches an open tile" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '        theme,
         colours,
         offset_secs,
@@ -17001,7 +17074,7 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
 # A stale entry is indistinguishable from a live fetch, so the same pair,
 # re-added, would be skipped for the tile's whole life.
 run_mutation "timeseries: a removed pair leaves no in_flight ghost" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        self.in_flight
             .retain(|(source, identity)| model.holds_pair(source, identity));' \
   '        let _ = model;' \
@@ -17013,7 +17086,7 @@ run_mutation "timeseries: a removed pair leaves no in_flight ghost" \
 # span, and without this compare an unanswered pair keeps its entry and
 # the new span is never asked for at all.
 run_mutation "timeseries: a range change refetches an unanswered pair" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/data.rs \
   '        if self.in_flight_range.as_ref() != Some(self.model.range()) {' \
   '        if false {' \
   geode-timeseries \
@@ -17024,7 +17097,7 @@ run_mutation "timeseries: a range change refetches an unanswered pair" \
 # tile refetches as well as requeries, gaps first. Requery alone paints
 # a truncated left edge with no sign that anything is missing.
 run_mutation "timeseries: an as-of change refetches" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                    this.fetch_pending(cx);' \
   '                    ();' \
   geode-timeseries \
@@ -17036,7 +17109,7 @@ run_mutation "timeseries: an as-of change refetches" \
 # an as-of change leaves `Range` identical, so a stale entry would
 # suppress the new span's ask entirely.
 run_mutation "timeseries: an as-of change drops the in-flight set" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                    this.in_flight.clear();
                     this.model.mark_all_fetching();' \
   '                    this.model.mark_all_fetching();' \
@@ -17049,7 +17122,7 @@ run_mutation "timeseries: an as-of change drops the in-flight set" \
 # freshly shown tile whose first fetch is still out, ANY frame notify (a
 # scope keystroke, say) asked for every pair's span a second time.
 run_mutation "timeseries: the as-of refetch is gated on a real as-of move" \
-  crates/geode-timeseries/src/tile.rs \
+  crates/geode-timeseries/src/tile/mod.rs \
   '                if this
                     .acted
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
@@ -17069,6 +17142,16 @@ run_mutation "series settings: the default source diagnostic names the sources" 
   '    if true {' \
   geode-shell \
   the_default_source_is_read_and_diagnosed
+
+# The default-source row's value list comes from the `SeriesSettings`
+# global, `(none)` first; the pick indexes past it. Off by one, stepping
+# to a source writes its neighbour as the default.
+run_mutation "series settings: the settings row picks the source it shows" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            } else if let Some(name) = fetch_source_names(cx).get(value_ix - 1).cloned() {' \
+  '            } else if let Some(name) = fetch_source_names(cx).get(value_ix).cloned() {' \
+  geode-shell \
+  the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global
 
 # A tile may only name a FETCH-shaped source (a non-directory adapter
 # over a series dataset). Without the shape filter the picker offers the
@@ -17860,6 +17943,442 @@ run_mutation "egress: uploads to one target run in submission order" \
 }' \
   geode-data \
   uploads_to_one_target_run_in_submission_order
+
+# Line pricer Part 3 (tile): the repricing rules, the two inputs'
+# blur-then-drop, write-behind, the pending load, placement, the paint
+# floor and the reload. (The undo stack's fork and refused-inverse rules
+# are the Task 4 entries above.)
+run_mutation "pricer tile: an older submission's outcome is installed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.tag {' \
+  '        if outcome.key != QueryKey(self.id.0) {' \
+  geode-pricer an_older_submissions_outcome_is_dropped_whole
+
+run_mutation "pricer tile: a batch carries only the lines not in flight" \
+  crates/geode-pricer/src/tile.rs \
+  '        let lines: Vec<PriceLine> = stale
+            .iter()
+            .filter_map(|r| {' \
+  '        let lines: Vec<PriceLine> = stale
+            .iter()
+            .filter(|r| self.in_flight.get(&self.sheet.id(**r)) != Some(&self.sheet.revision(**r)))
+            .filter_map(|r| {' \
+  geode-pricer an_older_submissions_outcome_is_dropped_whole
+
+run_mutation "pricer tile: a hidden tile still submits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.visible || self.loading {' \
+  '        if self.loading {' \
+  geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
+
+run_mutation "pricer tile: a hide does not cancel by key" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.data.cancel(QueryKey(self.id.0));
+            self.in_flight.clear();
+            self.refresh_task = None;' \
+  '            self.in_flight.clear();
+            self.refresh_task = None;' \
+  geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
+
+run_mutation "pricer tile: a refused submission never retries" \
+  crates/geode-pricer/src/tile.rs \
+  '                t.retry_task = None;
+                t.submit(cx);' \
+  '                t.retry_task = None;' \
+  geode-pricer a_refused_submission_notices_and_retries_after_a_second
+
+run_mutation "pricer tile: a tick does not stale the sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '    fn reprice_all(&mut self, cx: &mut Context<Self>) {
+        self.sheet.mark_all_stale();' \
+  '    fn reprice_all(&mut self, cx: &mut Context<Self>) {' \
+  geode-pricer the_refresh_tick_marks_every_line_stale_and_submits
+
+run_mutation "pricer tile: the flip barrier waits for the pricer" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if f.arrived(key, now) {' \
+  '                    if false && f.arrived(key, now) {' \
+  geode-pricer the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
+
+run_mutation "pricer tile: the entry field is dropped unblurred" \
+  crates/geode-pricer/src/tile.rs \
+  '        if entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if false && entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
+  geode-pricer escape_removes_the_placeholder_and_the_field_blurs_before_it_drops
+
+run_mutation "pricer tile: the cell editor is dropped unblurred" \
+  crates/geode-pricer/src/tile.rs \
+  '        if editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  geode-pricer the_editor_gives_up_focus_before_it_is_dropped
+
+run_mutation "pricer tile: a commit ignores that its line went away" \
+  crates/geode-pricer/src/tile.rs \
+  '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
+  '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
+  geode-pricer a_commit_whose_line_went_away_is_refused
+
+run_mutation "pricer tile: a refused save is silent" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_notice = Some(NOT_SAVED.into());' \
+  '            let _ = NOT_SAVED;' \
+  geode-pricer a_refused_save_notices_and_the_next_burst_retries
+
+run_mutation "pricer tile: a close drops a pending save" \
+  crates/geode-pricer/src/tile.rs \
+  '            if this.dirty {
+                this.save_now();
+            }' \
+  '            let _ = this.dirty;' \
+  geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
+
+# A pending load (Part 4's production restore) holds the session record's
+# expansion and cursor for the rows; pruned or reconciled against the
+# empty fallback, the restored tile opens collapsed on the wrong row.
+run_mutation "pricer tile: a pending load drops the record's expansion" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(held) = self.held_expanded.take() {
+            self.expansion = Expansion::from_ids(held);
+        }' \
+  '        let _ = self.held_expanded.take();' \
+  geode-pricer a_pending_load_keeps_the_records_cursor_and_expansion
+
+run_mutation "pricer tile: a pending load reconciles the record's cursor away" \
+  crates/geode-pricer/src/tile.rs \
+  '    fn reconcile_cursor(&mut self) {
+        if self.loading {
+            return;
+        }' \
+  '    fn reconcile_cursor(&mut self) {' \
+  geode-pricer a_pending_load_keeps_the_records_cursor_and_expansion
+
+# `:shift`/`:spot`/`:group`/`:ungroup` during a pending load would edit
+# the fallback sheet the load then replaces; `loaded` also drops any
+# undo recorded against it (strict LIFO).
+run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.loading {
+            Err("the sheet is still loading".into())' \
+  '        if false {
+            Err("the sheet is still loading".into())' \
+  geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
+
+run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
+  crates/geode-pricer/src/tile.rs \
+  '                    // over it. Nothing to undo into is the safe state.
+                    self.undo.clear();' \
+  '                    // over it. Nothing to undo into is the safe state.' \
+  geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
+
+run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
+  crates/geode-pricer/src/tile.rs \
+  '        // to wherever it was (review finding).
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }' \
+  '        // to wherever it was (review finding).
+        let _ = &place;' \
+  geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
+
+# The paint floor moves toward the ground's black/white pole: anchored on
+# the colour itself, a colour equal to its ground has nothing to bisect
+# toward and stays unreadable.
+run_mutation "pricer paint: the floor anchors on the colour it floors" \
+  crates/geode-pricer/src/paint.rs \
+  '    to_hsla(readable_on(to_rgb(c), bg, pole(bg)))' \
+  '    to_hsla(readable_on(to_rgb(c), bg, to_rgb(c)))' \
+  geode-pricer the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio
+
+run_mutation "pricer paint: the floor moves toward the weaker pole" \
+  crates/geode-pricer/src/paint.rs \
+  '    if contrast_ratio(BLACK, bg) >= contrast_ratio(WHITE, bg) {' \
+  '    if contrast_ratio(BLACK, bg) < contrast_ratio(WHITE, bg) {' \
+  geode-pricer the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio
+
+run_mutation "pricer core: a tick stales no line" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            if self.is_line(row) {
+                self.state[row] = LineState::Stale;' \
+  '            if false {
+                self.state[row] = LineState::Stale;' \
+  geode-pricer mark_all_stale_stales_every_line_and_bumps_no_revision
+
+run_mutation "pricer entry: o below a leg lands before it" \
+  crates/geode-pricer/src/core/entry.rs \
+  '            leg: if below { leg + 1 } else { leg },' \
+  '            leg: if below { leg } else { leg },' \
+  geode-pricer o_lands_after_the_cursor_row_and_shift_o_before_it
+
+run_mutation "pricer cell: an empty shift commits zero" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    if t.is_empty() {
+        return Ok(None);
+    }' \
+  '    if t.is_empty() {
+        return Ok(Some(0.0));
+    }' \
+  geode-pricer an_empty_shift_commit_inherits_and_a_signed_number_is_owned
+
+run_mutation "pricer app: a config reload never reaches the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.reload(views, refresh, stale_after, cx);' \
+  '            let _ = (views, refresh, stale_after);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_views
+
+# The free underlying typeahead: ranking is a subsequence match, so an
+# untouched highlight is a guess (`HSI` ranks `HSCEI`); `enter` takes it
+# only when the query equals it or the trader moved it.
+run_mutation "pricer tile: the free typeahead commits an unmoved subsequence guess" \
+  crates/geode-pricer/src/tile.rs \
+  '                        let take_highlight = *moved
+                            || highlighted
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
+  '                        let take_highlight = {
+                            let _ = moved;
+                            true
+                        };' \
+  geode-pricer a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved
+
+# A failed load shows a fallback; publishing it would make it the real
+# document's latest generation.
+run_mutation "pricer tile: a failed load's fallback is saved over the document" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_blocked {
+            return;
+        }
+        let Some(rows) = to_rows(&self.sheet) else {' \
+  '        let Some(rows) = to_rows(&self.sheet) else {' \
+  geode-pricer a_failed_load_blocks_every_save_and_says_so_past_escape
+
+# After a refused save the idle task has already fired: a close that
+# flushes only a pending task loses the unsaved sheet.
+run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
+  crates/geode-pricer/src/tile.rs \
+  '            this.save_task = None;
+            if this.dirty {' \
+  '            if this.save_task.take().is_some() {' \
+  geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
+
+# ---- The cursor rests only on rows with a verb (ruling 2026-09-23) ----
+
+# The predicate itself. Calling every row a stop puts the cursor back on
+# Groupings' `Slot` row, which is exactly what the ruling removed.
+run_mutation "objectdialog: every row is a cursor stop again" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
+        self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert' \
+  '    pub fn is_cursor_stop(&self, domain: Domain, row: EditRow) -> bool {
+        true || self.vocabulary_of(Some(row), domain) != RowVocabulary::Inert' \
+  geode-shell \
+  the_slot_and_dimensions_rows_are_not_cursor_stops
+
+# Its other half: a row that opens a stage is a stop even though every
+# value verb refuses it. Dropped, Schema's column rows stop being
+# reachable and its stage has no cursor at all.
+run_mutation "objectdialog: a row that only opens a stage is not a cursor stop" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || self.column_stage_target(domain, row).is_some()' \
+  '            || false' \
+  geode-shell \
+  a_row_that_opens_a_stage_is_a_stop_even_when_every_value_verb_refuses_it
+
+# The opening cursor. Without the settle, a Groupings slot opens with the
+# cursor on its number and the first `space` steps nothing.
+run_mutation "objectdialog: the edit stage opens on row 0 whatever it answers to" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        draft.settle_selection(self.domain);
+        // Every domain opens in normal mode' \
+  '        // Every domain opens in normal mode' \
+  geode-shell \
+  the_slot_and_dimensions_rows_are_not_cursor_stops
+
+# Motion. Mutated to plain `vimnav::apply`, `j` and `k` park on the
+# header rows again — the report this ruling came from.
+run_mutation "objectdialog: motion lands wherever vimnav puts it" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.snap_selection(domain, forward, wrap);' \
+  '        let _ = (forward, wrap);' \
+  geode-shell \
+  motion_skips_the_rows_that_answer_to_nothing
+
+# The query mirror's settle. A filter keystroke parks the cursor on the
+# top match, which can be a list header; without the settle the trader
+# types their way onto a row where every key does nothing.
+run_mutation "objectdialog: a filter keystroke can leave the cursor on a header" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if draft.text_entry.is_none() {
+                draft.settle_selection(self.domain);
+            }' \
+  '            if draft.text_entry.is_none() {
+                let _ = self.domain;
+            }' \
+  geode-shell \
+  a_filter_keystroke_never_leaves_the_cursor_on_a_header
+
+# The key handler's tail settle, which catches every way the row list
+# moves that is not a motion: a delivered Values list is the one an
+# existing test can see, since its rows replace the loading row wholesale.
+run_mutation "objectdialog: nothing settles the cursor after the list changes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    draft.settle_selection(Domain::Scopes);' \
+  '    let _ = Domain::Scopes;' \
+  geode-shell \
+  ticking_a_value_writes_the_selection_and_unticking_all_removes_it
+
+# The mouse half of the rule (§17.1 parity): a click on a row the
+# keyboard cannot reach must not put the cursor there either.
+run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => return,' \
+  '            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => {}' \
+  geode-shell \
+  a_click_on_the_slot_row_is_dropped
+
+# The pricer's entry field must read as insert focus to the shell, or a
+# shifted letter typed into it runs a shell binding (shift+d duplicated
+# the tile, 2026-09-24).
+run_mutation "pricer tile: the entry field is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.editor.is_some() {' \
+  geode-app \
+  typing_into_the_pricer_entry_field_fires_no_shell_binding
+
+# ---- Pricer post-merge cleanup (2026-09-24) ----
+
+# The entry placeholder is a grid row: a chevron's row read after the
+# entry closes names the package below the one clicked.
+run_mutation "pricer tile: a chevron click reads its row after the entry closes" \
+  crates/geode-pricer/src/tile.rs \
+  '        let line = self.line_at(row);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);' \
+  '        self.close_entry(window, cx);
+        self.close_editor(window, cx);
+        let line = self.line_at(row);' \
+  geode-pricer a_chevron_click_below_an_open_entry_toggles_that_package
+
+# The same for a cell click: the cursor lands one row low.
+run_mutation "pricer tile: a cell click reads its row after the entry closes" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                if let Some(id) = line {' \
+  '                self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                let line = self.line_at(*row);
+                if let Some(id) = line {' \
+  geode-pricer a_cell_click_below_an_open_entry_lands_on_that_row
+
+# A double-click's second press carries a row index the first press's
+# close has shifted: without the hand-off it edits the next line.
+run_mutation "pricer tile: a double-click's second press ignores the first's line" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
+  '                self.pressed = None;' \
+  geode-pricer a_double_click_below_an_open_entry_edits_that_row
+
+# The hand-off is for the very next press only: kept longer, a later
+# double-click at the same spot edits the line that used to be there.
+run_mutation "pricer tile: the closing press's line outlives the next press" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
+  '                self.pressed = self.click_anchor.filter(|(r, _)| r == row);' \
+  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
+
+# "loading…" is the only sign a load is pending.
+run_mutation "pricer tile: escape clears the loading notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !self.loading {
+                    self.notice = None;
+                }' \
+  '                self.notice = None;' \
+  geode-pricer escape_keeps_the_loading_notice_until_the_rows_arrive
+
+# A refusal with nothing left to submit said "retrying" with no retry
+# that could succeed.
+run_mutation "pricer tile: a refusal stands when nothing is left to submit" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.refusals > 0 {
+                self.end_refusals();' \
+  '            if false {
+                self.end_refusals();' \
+  geode-pricer a_refusal_with_nothing_left_to_price_clears
+
+# A closed channel was asked every second forever.
+run_mutation "pricer tile: retries never back off" \
+  crates/geode-pricer/src/tile.rs \
+  '        let wait = retry_delay(self.refusals);' \
+  '        let wait = RETRY_AFTER;' \
+  geode-pricer consecutive_refusals_back_off
+
+# A refusal used to overwrite the notice it found.
+run_mutation "pricer tile: a refusal destroys the standing notice" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.refusals = self.refusals.saturating_add(1);' \
+  '            self.refusals = self.refusals.saturating_add(1);
+            self.notice = None;' \
+  geode-pricer a_standing_notice_survives_a_refusal_and_returns_after_it
+
+# Pruning the open set on every edit brings an undone package back
+# closed.
+run_mutation "pricer tile: an edit prunes the open set" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.rebuild(cx);' \
+  '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.expansion.retain_packages(&self.sheet);
+        self.rebuild(cx);' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# Unpruned, the set would carry a deleted package's id into the session.
+run_mutation "pricer tile: the session record carries dead package ids" \
+  crates/geode-pricer/src/tile.rs \
+  '                None => self.expansion.live_ids(&self.sheet).collect(),' \
+  '                None => self.expansion.ids().collect(),' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# Undo of `d d` left the cursor on the row that had followed the rows.
+run_mutation "pricer tile: an undo that restores rows leaves the cursor below them" \
+  crates/geode-pricer/src/tile.rs \
+  '                if let Some(id) = restored {' \
+  '                if let Some(id) = restored.filter(|_| false) {' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# A leg restored under a closed package would put the cursor on a hidden
+# row.
+run_mutation "pricer tile: a restored leg's package stays closed" \
+  crates/geode-pricer/src/tile.rs \
+  '                        self.expansion.set(self.sheet.id(p), true);' \
+  '                        let _ = p;' \
+  geode-pricer undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg
+
+# A press on the placeholder must hand on "nothing" too, or its
+# double-click edits the row that slides up under the second press.
+run_mutation "pricer tile: a placeholder press hands nothing on" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.click_anchor = Some((*row, line));' \
+  '                    self.click_anchor = line.map(|id| (*row, Some(id)));' \
+  geode-pricer a_double_click_on_the_placeholder_opens_nothing
+
+# The handed-on line must reach the cursor before the tree-column return,
+# or a tree-column double-click leaves it on the row that slid up.
+run_mutation "pricer tile: a tree-column double-click keeps the slid-up row" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.cursor.line = Some(id);
+                self.sync_cursor(cx);
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  geode-pricer a_tree_column_double_click_below_an_open_entry_keeps_that_row
+
+# Planning decision 4's gate: every line in flight at its revision asks
+# for nothing more.
+run_mutation "pricer tile: a submit ignores what is already in flight" \
+  crates/geode-pricer/src/tile.rs \
+  '            .any(|r| self.in_flight.get(&self.sheet.id(*r)) != Some(&self.sheet.revision(*r)));' \
+  '            .any(|_| true);' \
+  geode-pricer price_submits_nothing_while_every_line_is_in_flight
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -560,7 +560,7 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
     );
     cx.simulate_keystrokes("f o n t");
     cx.run_until_parked();
-    let (query, visible) = shell.read_with(&cx, |s, _| {
+    let (query, visible) = shell.read_with(&cx, |s, cx| {
         let state = s.settings.as_ref().unwrap();
         let rows = settings_view::derive_rows(
             &s.services.theme.names(),
@@ -570,7 +570,7 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
             s.line_numbers,
             s.add_direction,
             s.default_source.as_deref(),
-            &s.fetch_sources,
+            &cx.global::<crate::series::SeriesSettings>().names(),
         );
         (
             state.query.clone(),

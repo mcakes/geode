@@ -13,8 +13,10 @@ Current behavior and rationale:
 |---|---|
 | `core` | Pure model, range, source resolution, request building, chart-model preparation, and session conversion. |
 | `commands` | The tile-local `:` vocabulary. |
-| `tile` | The retained entity, frame observation, fetch/query/delivery flow, focus, popup ownership, and chart cache key. |
-| `popup` | Series list, add picker, expression editor, and range editor behind one popup state. |
+| `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
+| `tile::data` | Deliveries, the fetch of waiting pairs, the query, and flip-barrier staging and promotion. |
+| `tile::popups` | Opening, keying, committing, and closing the four popups. |
+| `popup` | Popup state and painting: series list, add picker, expression editor, and range editor, whose list rows share one row shell. |
 | `header` | Prepared chips and controls. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 

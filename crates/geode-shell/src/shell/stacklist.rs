@@ -1,4 +1,4 @@
-//! The transient stack-member list (tile-stacks spec §5.2): shell-owned,
+//! The transient stack-member list: shell-owned,
 //! painted in the palette's mould under the focused tile's header, no
 //! `Input`, so no focus dance. The pure state is [`StackList`]; the two
 //! motion rules are [`step`] and [`jump`]; [`render`] paints from
@@ -22,10 +22,7 @@ pub const MAX_WIDTH: f32 = 320.0;
 pub const MIN_WIDTH: f32 = 160.0;
 
 /// One-based row gutter digits, `1`–`9` — a stack has at most nine
-/// members (`ctrl+0..9` slot numbering's own bound), so a static lookup
-/// spares nine per-frame `String` allocations `(i + 1).to_string()` would
-/// cost while the list is open (fix round 1, Minor 3 — PHILOSOPHY.md:
-/// "per-frame heap churn is a defect").
+/// members, so static labels avoid per-frame digit formatting.
 const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +41,7 @@ pub struct Row {
     pub kind: &'static str,
 }
 
-/// `j`/`k`/arrows: a bare ±1 wraps (the one motion rule, spec §20).
+/// Move by `delta` with wrap; an empty list stays unchanged.
 pub fn step(list: &mut StackList, delta: i64) {
     let len = list.members.len() as i64;
     if len == 0 {
@@ -73,8 +70,7 @@ pub fn render(
         (tile_rect.w - scale::design_px(8.0, rem_size)).max(scale::design_px(MIN_WIDTH, rem_size)),
     );
     // The 2 px left offset stays a raw window pixel (a hairline inset off
-    // the tile's own border, the same as the command-line strip's own
-    // `tile.x + 1.0` — fix round 1, Minor 6).
+    // the tile's own border, independent of the application rem scale).
     let left = tile_rect.x + 2.0;
     let top = tile_rect.y + scale::design_px(TOP_INSET, rem_size);
 

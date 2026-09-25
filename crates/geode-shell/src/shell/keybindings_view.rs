@@ -40,9 +40,7 @@ use crate::keymap_edit::{
 };
 use crate::listfilter::{self, Ranked};
 use crate::palette;
-// The title/category index splitter lives in the palette's pure core
-// (2026-09-12: the palette matches `"{title} {category}"` too) and is
-// re-exported here for `settings_view`, which imported it from this module.
+// Share the palette's title/category match-index splitter with settings.
 pub(crate) use crate::palette::split_label_indices;
 use crate::vimnav;
 
@@ -54,11 +52,9 @@ use super::scale;
 // Pure core — no gpui. Row derivation and capture-state transitions.
 // ---------------------------------------------------------------------
 
-/// One row's currently-effective binding: the keystroke sequence itself,
-/// plus the two pieces of provenance a rebind needs to reconstruct a
-/// [`Rebind`] later — [`crate::keymap::Binding::context_source`] (Part A's
-/// seam for this exact purpose) and the layer it came from (`Layer::User`
-/// decides `Rebind::old_key_is_user_layer`).
+/// Displayed binding with the context, layer, and original key spelling needed to
+/// construct a rebind or removal. The layer determines whether the old key is removed
+/// from the user document or shadowed there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundKey {
     pub keystrokes: Vec<Keystroke>,
@@ -88,32 +84,13 @@ pub struct KeybindingRow {
     pub overrides: Vec<UserOverride>,
 }
 
-/// Build the dialog's row list: every action in `registry`, each paired
-/// with its currently *effective* binding — see [`effective_binding`] for
-/// the exact resolution rule, which mirrors the real `Matcher`'s own
-/// keystroke-keyed last-wins (not a plain "last binding for this action
-/// id", which the first cut of this function used and which a review round
-/// caught: it let a bare unbind — `"mod+h" = "none"` with no replacement
-/// key — leave the row showing the OLD binding as if still live, because an
-/// action-id-only search skips `"none"` entries outright rather than
-/// letting them shadow the real binding they were written to silence).
+/// Derive registered actions with their display binding and user override set, sorted
+/// by `(category, title)`. [`effective_binding`] accounts for shadows by key and
+/// context source; it does not evaluate predicates against a live context stack.
+/// [`user_overrides_for`] finds reset targets beyond the displayed key.
 ///
-/// Sorted by `(category, title)` — the dialog's own display order (unlike
-/// `palette::build_items`, which keeps `ActionRegistry::iter`'s id-sorted
-/// order as-is). Also unlike `palette::build_binding_index`, which keeps
-/// the FIRST-declared binding for a quick display hint next to a palette
-/// row — this dialog deliberately resolves the actual effective (last,
-/// shadow-aware) binding instead, since it exists to show, and let the
-/// user edit, what a keystroke actually fires today, not just a hint.
-///
-/// Called fresh on every render (`build`) and on every keystroke
-/// (`handle_key`) rather than cached in [`KeybindingsState`] — see the
-/// module doc's "What this dialog does NOT do". The action list itself
-/// never changes at runtime (every action is registered before the window
-/// opens), so `rows.len()` — and therefore the valid range of
-/// `KeybindingsState::selected` — is stable across every call within one
-/// open dialog session, even though individual rows' `current` can change
-/// under it.
+/// Re-derive on rendering and input handling so accepted keymap reloads supply the
+/// rows; [`KeybindingsState`] does not cache bindings or write outcomes.
 pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<KeybindingRow> {
     let bindings = keymap.bindings();
     let mut rows: Vec<KeybindingRow> = registry
@@ -138,14 +115,10 @@ pub fn derive_rows(registry: &ActionRegistry, keymap: &Keymap) -> Vec<Keybinding
     rows
 }
 
-/// The destructive question `d`/`r`/`shift+r` arm (spec §20.1): the same
-/// ask-then-act shape the object dialog's `Confirm` has, on this dialog's
-/// three verbs. `Unbind` writes the `"none"` shadow (or removes the
-/// user's own entry); `Reset` removes every user override of the row's
-/// action; `ResetAll` drops every user-layer binding. Armed only where
-/// the write would actually happen — `d` on an unbound row, `r` on a row
-/// with no user override and `shift+r` with no user bindings keep giving
-/// their notices unarmed.
+/// Confirmation for unbinding, resetting one action, or resetting all user keys. Arm
+/// only when the loaded keymap identifies a target; otherwise report a notice. Unbind
+/// removes a user key or shadows a lower-layer key. Reset removes the action's entire
+/// user override set; ResetAll drops the user bindings array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeybindingConfirm {
     Unbind,
@@ -163,11 +136,8 @@ impl KeybindingConfirm {
     }
 }
 
-/// The question the confirm row asks, from the selected row and the live
-/// keymap. Pure and public so a test can read the exact sentence the
-/// painter paints: `Reset` names the one key it removes or the count when
-/// a rebind left two; `ResetAll` names the user-layer key count and says
-/// what it leaves alone.
+/// Build the displayed confirmation from the selected row and loaded keymap. Reset
+/// names the key or override count; ResetAll names the parsed user-key count.
 pub fn confirm_prompt(
     confirm: KeybindingConfirm,
     row: Option<&KeybindingRow>,
@@ -195,14 +165,10 @@ pub fn confirm_prompt(
     }
 }
 
-/// How many keys the user layer binds — what `shift+r` would remove, and
-/// `0` is where it gives its notice unarmed and paints no button. Counts
-/// PARSED bindings: a user key that failed to parse, or names an unknown
-/// action, is skipped by `build_keymap` with a diagnostic and is not
-/// counted here, though `apply_reset_all` would remove it too. A file
-/// whose only entries are such keys therefore reads as "nothing to
-/// reset" — the diagnostics section names them, and the gap is accepted
-/// over gating a destructive verb on unparsed text.
+/// Count parsed user bindings for ResetAll's prompt and availability. Invalid keys or
+/// unknown actions omitted by `build_keymap` are not counted, although
+/// `apply_reset_all` would remove them too. A file containing only rejected bindings
+/// therefore reports nothing to reset through this dialog.
 pub fn user_binding_count(bindings: &[Binding]) -> usize {
     bindings.iter().filter(|b| b.layer == Layer::User).count()
 }
@@ -211,11 +177,9 @@ pub fn user_binding_count(bindings: &[Binding]) -> usize {
 /// keeping state transitions testable without a window.
 #[derive(Debug)]
 pub struct KeybindingsState {
-    /// Index into the **filtered** row list ([`visible_rows`]), not into
-    /// the full one — the palette's convention, and the `len` bound
-    /// `vimnav::apply` moves within (wrapping a bare ±1, clamping a
-    /// larger or counted step — spec §20.5). Row identity for clicks and
-    /// rebinds is resolved through `visible_rows(..)[selected].row`.
+    /// Index into [`visible_rows`], bounded by filtered length. Bare single steps wrap;
+    /// larger or counted moves clamp. Resolve row identity through the ranked match's
+    /// `row` index before rebinding.
     pub selected: usize,
     /// Captured sequence, extended by every key except bare Enter/Escape. Capture owns
     /// routing before list-filter exits and forces the shared input to blur through
@@ -232,33 +196,16 @@ pub struct KeybindingsState {
     /// accepts text input. Capture takes precedence over either mode and forces input
     /// blur. `sync_dialog_text` reconciles these states with actual focus.
     pub mode: DialogMode,
-    /// A one-line report about the keystroke *just* pressed, painted in
-    /// the footer above the hint row and cleared by the next normal-mode
-    /// command. It exists for exactly one situation: a verb the user
-    /// pressed deliberately that had nothing to do — `r` on a row with
-    /// no user override, `d` on a row that is already unbound. A verb
-    /// that silently does nothing is the defect class this whole model
-    /// exists to remove, so "nothing happened" is *said*, not implied by
-    /// an unchanged screen.
-    ///
-    /// This is **not** the forbidden cache of a write's outcome (see the
-    /// module doc's "What this dialog does NOT do"): it never records
-    /// what a binding now is, and no row is ever rendered from it. It
-    /// only records that a keystroke declined to write, which is
-    /// knowledge no later re-derivation of the rows could recover —
-    /// precisely because nothing was written.
+    /// Latest refusal or dispatched-write notice, cleared by the next command or row
+    /// click. It does not confirm write completion or supply displayed bindings; those
+    /// still derive from the loaded keymap.
     pub notice: Option<String>,
-    /// `Some` while `d`/`r`'s question stands (spec §20.1). Every other
-    /// key is claimed and dropped until it is answered; a row click, the
-    /// frozen-row click and the action buttons are dropped too.
+    /// Armed destructive question. Other keys and list/action clicks are consumed until
+    /// it is answered.
     pub confirm: Option<KeybindingConfirm>,
 }
 
-/// Hand-written rather than derived so the opening mode is one explicit,
-/// greppable line: `DialogMode` has no `Default` of its own on purpose
-/// (a filter-only surface has no mode at all — see [`DialogMode`]), and
-/// deriving one there would quietly make "normal" the answer for every
-/// future surface instead of this dialog's own stated choice.
+/// Opening mode is explicit per dialog; `DialogMode` has no global default.
 impl Default for KeybindingsState {
     fn default() -> Self {
         Self {
@@ -278,26 +225,10 @@ impl KeybindingsState {
         Self::default()
     }
 
-    /// Replace the query — the pure half of the `InputEvent::Change`
-    /// subscription. Resets the selection to the top match (the
-    /// palette's `set_query` semantics: after an edit the old index
-    /// points at an unrelated row) and cancels any in-progress capture,
-    /// since typing is an external interruption to it — unlike a click
-    /// ([`click_listens`]), which always starts a fresh capture rather
-    /// than cancelling one.
-    /// A notice names the row a verb was pressed on ("Toggle command
-    /// palette has no user override to reset"); an edit re-ranks the
-    /// list and moves the selection off that row, so keeping it would
-    /// leave a complaint pointing at nothing.
-    ///
-    /// Clearing `listening` here is reached from the `Change`
-    /// subscription, which is not one of `sync_dialog_text`'s seams — so
-    /// it relies on an invariant rather than a reconcile: no `Change` can
-    /// fire while a capture is listening, because the sync keeps the
-    /// `Input` blurred for the whole capture and `dialog::filter_row`
-    /// paints frozen text (not the live field) while the query is
-    /// frozen, so nothing can type into it. If either of those ever
-    /// changes, this line becomes a fourth, unreconciled seam.
+    /// Mirror an input change into the query and reset selection to the top match.
+    /// Cancel capture and clear notices because they refer to the previous row or
+    /// query. Capture normally keeps this Input blurred and renders frozen text, so
+    /// user typing cannot reach the Change subscription while it is listening.
     pub fn set_query(&mut self, query: String) {
         self.query = query;
         self.selected = 0;
@@ -306,11 +237,8 @@ impl KeybindingsState {
     }
 }
 
-/// The rows this dialog currently shows, ranked — [`crate::listfilter::rank`]
-/// over each row's [`searchable_text`]. Derived fresh at every call site
-/// (render, key handling, click resolution), never cached: the same
-/// no-caching contract [`derive_rows`] itself has, and the row counts
-/// here are small enough that one ranking pass costs nothing measurable.
+/// Rank rows against their visible title/category text. Recompute from current state
+/// for rendering, key handling, and click resolution.
 pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<Ranked> {
     let texts: Vec<String> = rows.iter().map(searchable_text).collect();
     listfilter::rank(&texts, &state.query)
@@ -383,27 +311,14 @@ pub fn click_listens(state: &mut KeybindingsState, clicked_ix: usize) {
     state.listening = Some(Vec::new());
 }
 
-/// The text one row exposes to the filter: title and category — exactly
-/// what the row displays, and nothing more. The action id deliberately
-/// does NOT participate (a user-visible bug caught in review: `mo`
-/// matched "Toggle light/dark theme" via the invisible `theme::
-/// toggle_mode`, with no highlight to explain why, while "Move down" glowed
-/// further down the list) — matching text the user can't see breaks the
-/// rank/highlight agreement this feature depends on.
+/// Search title and category, matching the text available for highlighting. Exclude the
+/// invisible action ID so a match always has visible evidence.
 pub fn searchable_text(row: &KeybindingRow) -> String {
     format!("{} {}", row.title, row.category)
 }
 
-/// True when a just-committed capture (`new_keystrokes`) is byte-for-byte
-/// the same keystroke sequence `row` is already effectively bound to — a
-/// "recapture" that would only ever produce a no-op rebind (the same key,
-/// re-typed, e.g. a user opening the dialog to confirm what a row is
-/// already bound to rather than to change it). The caller
-/// ([`handle_key`]) skips scheduling [`apply_rebind`] entirely in this
-/// case, saving a pointless disk write plus the reload watcher's next
-/// pickup cycle for a change that wouldn't have changed anything. An
-/// unbound row (`row.current: None`) is never a recapture — any capture
-/// there is a genuine new binding.
+/// Detect a capture equal to the displayed binding. The caller skips persistence and
+/// its reload cycle for this no-op. Any sequence on an unbound row is new.
 pub fn is_same_key_recapture(row: &KeybindingRow, new_keystrokes: &[Keystroke]) -> bool {
     row.current
         .as_ref()
@@ -414,10 +329,8 @@ pub fn is_same_key_recapture(row: &KeybindingRow, new_keystrokes: &[Keystroke]) 
 // Rendering (gpui) — everything above this line is the pure core.
 // ---------------------------------------------------------------------
 
-/// Row height estimate for sizing the scrollable viewport (two lines: title
-/// plus muted category). Not load-bearing for correctness, same caveat as
-/// `palette::ROW_HEIGHT`: scroll-follow goes through the real
-/// `ScrollHandle::scroll_to_item`, which measures actual layout.
+/// Estimated two-line row height for viewport sizing. Keyboard scroll-follow uses
+/// `ScrollHandle::scroll_to_item`, which measures the actual layout.
 const ROW_HEIGHT: f32 = 44.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
@@ -425,10 +338,8 @@ const VISIBLE_ROWS: usize = 10;
 /// (`shell::scale`).
 const WIDTH: f32 = 640.0;
 
-/// Open the keybinding dialog (`keybindings::open`, palette-only today —
-/// see `defaults::register_builtin_actions`'s doc comment on that action).
-/// A no-op if a modal is already open, mirroring `settings_view::open`'s
-/// own guard.
+/// Open a fresh keybinding dialog through the shared modal lifecycle. Leave an
+/// already-open modal intact.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
@@ -444,21 +355,11 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Keyboard shortcuts",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        // `false`: `focus_filter` is for a dialog with no mode, and this
-        // one has one. Its initial focus comes from `open_shell_dialog_
-        // with_key`'s own `dialog::sync_dialog_text` call instead (spec
-        // §16.1) — which is why `view.keybindings` is set *above*, before
-        // the door runs: the sync reads the `DialogMode::Normal` this
-        // dialog opens in and parks the keys on the shell root, so a bare
-        // letter reaches [`handle_key`] as a verb rather than being eaten
-        // as text by a focused `Input`. The shared field is still emptied
-        // on open (the door does that unconditionally), so the first `/`
-        // session starts from the same blank slate `state.query` does.
+        // Mode state is already installed, so shared synchronization parks Normal focus
+        // on the shell. `focus_filter` is only for surfaces without a mode.
         false,
     );
-    // §18.1: the mode pill now lives in the modal's own title row rather
-    // than in this dialog's content — see `dialog::render_modal`'s
-    // `title_extra` slot.
+    // Build the mode pill in the modal's title-extra slot.
     dialog::set_title_extra(view, |shell, cx| {
         shell
             .keybindings
@@ -468,13 +369,8 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     });
 }
 
-/// One keystroke as a small muted pill — the look of gpui-component's
-/// `Kbd`, but labeled with [`palette::render_keystroke`]'s lowercase
-/// `ctrl+k` text in the data face, matching how the palette and which-key
-/// render bindings (`Kbd` itself hardwires uppercase key names, so this
-/// dialog stopped routing through it). `pub(crate)` since the
-/// settings-dialog rewrite: `settings_view`'s footer hints reuse the exact
-/// same chip rather than growing a second, drifting copy.
+/// Shared muted keystroke chip, using [`palette::render_keystroke`]'s lowercase labels
+/// and the data font. Used by binding rows and dialog footer hints.
 pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla, radius: Pixels) -> AnyElement {
     div()
         .font_family(crate::fonts::MONO)
@@ -491,10 +387,8 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla, radius: Pixels) -> An
         .into_any_element()
 }
 
-/// Whether `d` on `row` would actually silence something — the row has
-/// *some* effective binding, from any layer. `false` is where `d` gives
-/// its "already unbound" notice unarmed rather than asking a question
-/// with nothing behind it.
+/// Whether the displayed binding gives `d` a removal or shadow target. An unbound row
+/// reports a notice without arming confirmation.
 fn can_unbind(row: Option<&KeybindingRow>) -> bool {
     row.is_some_and(|r| r.current.is_some())
 }
@@ -510,15 +404,9 @@ fn can_reset(row: Option<&KeybindingRow>) -> bool {
     row.is_some_and(|r| !r.overrides.is_empty())
 }
 
-/// The ONE arm-or-notice decision for `d`/`r`/`shift+r` (spec §20.1, controller
-/// ruling: this was spelled three times — [`handle_key`]'s two `Verb`
-/// arms and [`press_verb`] — and is now spelled once, called from both).
-/// Arms the matching [`KeybindingConfirm`] where [`can_unbind`]/
-/// [`can_reset`] holds; otherwise runs the existing unarmed writers
-/// ([`unbind_selected`]/[`reset_selected`]) into `state.notice`, exactly
-/// as before this dialog grew a confirm at all — so a keystroke or a
-/// button press on a row with nothing to change still says so rather
-/// than silently asking a question about doing nothing.
+/// Shared keyboard and pointer decision for `d`, `r`, and Shift-R. Arm a confirmation
+/// when the loaded keymap supplies a target; otherwise populate the same refusal notice
+/// without writing.
 fn arm_verb(
     state: &mut KeybindingsState,
     key: char,
@@ -570,24 +458,9 @@ fn handle_key(
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
     };
-    // A notice reports on the keystroke (or click) that produced it and
-    // nothing else, so it is dropped at the DOOR — here, and in
-    // [`on_row_clicked`] — rather than in each branch that happens to
-    // move the selection. Fix round 1 found four such branches (this
-    // function's normal-mode `match`, the `EscapeStep::ClearQuery` rung,
-    // the unclaimed-key early return, and the click path) of which only
-    // the first cleared it; a complaint about the row you were on,
-    // hanging under the row you are on now, is precisely the stale lie
-    // the notice exists to avoid. Two doors is the whole surface: every
-    // change to `selected` or `mode` arrives through one of them, and an
-    // arm that wants to say something sets a fresh notice after this
-    // line.
-    //
-    // `take` + a conditional `notify` rather than a bare assignment: two
-    // of those four paths (`normal_command`'s claim-and-drop early
-    // return, and a click that resolves to no row) return without
-    // notifying, so a cleared notice would stay painted until something
-    // else happened to request a frame.
+    // Clear the previous command's notice before any routing or early return. Notify on
+    // removal so paths that otherwise request no frame cannot leave it painted under a
+    // different selection. Pointer row entry does the same.
     if state.notice.take().is_some() {
         cx.notify();
     }
@@ -637,41 +510,20 @@ fn handle_key(
     }
 
     if state.mode == DialogMode::Normal {
-        // Modifiers are ignored on `escape` here and in filter mode
-        // below: `handle_key_down`'s own close never looked at them
-        // (`event.keystroke.key == "escape"`), so a bare-only guard would
-        // turn `shift+escape` from "close the dialog" into a key normal
-        // mode claims and drops — visibly nothing. The one place a
-        // modified escape still differs is rebind capture, which treats
-        // it as a capturable keystroke on purpose (see
-        // [`press_while_listening`]) and has already returned above.
+        // Outside capture, Escape ignores modifiers just like the shell's modal-close
+        // fallback. Capture has already returned above and can record modified Escape.
         if ks.key == "escape" {
-            // `has_previous_stage: false` — this dialog is one flat list,
-            // with no nested stage to step back into (the picker's own
-            // two-stage shape is what that rung exists for). The
-            // `PreviousStage` and `LeaveFilter` arms are therefore
-            // unreachable here; they are kept folded into the catch-all
-            // rather than special-cased away, because `escape_step` is
-            // the one ladder every modal surface walks and forking it per
-            // call site is how the rungs drift apart.
+            // This flat Normal-mode list has neither a previous stage nor Filter focus;
+            // those ladder outcomes are unreachable here.
             match dialogmode::escape_step(state.mode, state.query.is_empty(), false) {
                 EscapeStep::ClearQuery => {
                     state.query.clear();
                     state.selected = 0;
-                    // The viewport has to follow the selection here for
-                    // the same reason it does on every motion: clearing a
-                    // filter re-expands the list under a scroll offset
-                    // that is still parked where the *filtered* list left
-                    // it, so row 0 would be above the top of the screen
-                    // with only the index having moved. `ShellView::new`'s
-                    // query-change subscription pairs `set_query` with
-                    // this same call for exactly that reason, and it
-                    // cannot cover this path: `set_value` deliberately
-                    // emits no `InputEvent::Change`.
+                    // Clearing the filter changes row indices; reset both selection and
+                    // viewport.
                     shell.keybindings_scroll.scroll_to_item(0);
-                    // The `Input` is emptied by `dialog::sync_dialog_text`
-                    // on this handler's return — the mirrored copy is the
-                    // only thing this rung touches (spec §16.1).
+                    // The shell's modal key tail reconciles Input text and focus from
+                    // state.
                     cx.notify();
                     return true;
                 }
@@ -691,11 +543,7 @@ fn handle_key(
                 shell.keybindings_scroll.scroll_to_item(selected);
             }
             NormalCommand::EnterFilter => {
-                // The one switch, thrown the other way — a pure mutation:
-                // `dialog::sync_dialog_text` gives the filter focus on
-                // this handler's return, and printable keys become text
-                // again. Through `enter_filter` so the query is recorded
-                // for the `escape` that backs out of the search.
+                // Enter through the shared helper to snapshot the current query.
                 dialogmode::enter_filter(
                     &mut state.mode,
                     &mut state.filter_entry_query,
@@ -705,10 +553,7 @@ fn handle_key(
             NormalCommand::Commit => {
                 begin_capture(state, visible.len());
             }
-            // The two write verbs (spec §8, §20.1): [`arm_verb`] is the
-            // ONE arm-or-notice decision, shared with [`press_verb`] so
-            // the keyboard and the mouse can never disagree on which rows
-            // arm a question.
+            // Destructive verbs share confirmation and refusal handling with buttons.
             NormalCommand::Verb(key @ ('d' | 'r' | 'R')) => {
                 let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
                 arm_verb(state, key, row, user_bindings, &user_dir, cx);
@@ -797,15 +642,12 @@ fn on_row_clicked(
     let Some(state) = shell.keybindings.as_mut() else {
         return;
     };
-    // The dialog's other door — see [`handle_key`]'s own clear for why
-    // this belongs at the entrance rather than beside each selection
-    // change. A click is the one state change that never passes through
-    // `handle_key` at all.
+    // Clear command notices on pointer entry too, including paths that return without
+    // selecting a row.
     if state.notice.take().is_some() {
         cx.notify();
     }
-    // Spec §20.1: a click is claimed and dropped while a question stands —
-    // the object dialog's tick-click rule (§18.9.2) on this surface.
+    // An armed question owns input until answered; ignore list clicks.
     if state.confirm.is_some() {
         return;
     }
@@ -820,13 +662,10 @@ fn on_row_clicked(
     cx.notify();
 }
 
-/// Build a [`Rebind`] for `row` from the just-committed `new_keystrokes`
-/// and run [`apply_rebind`] on the background executor (philosophy: no
-/// file I/O on the UI thread) — args captured, task spawned and detached, a
-/// warning logged from inside the task on `Err` or on
-/// [`Displacement::OldKeyNotFound`]. See the module doc's "What this dialog
-/// does NOT do": this never touches `shell`'s own state — the dialog's rows
-/// pick the change up on their own once the reload watcher applies it.
+/// Submit a rebind through the ordered configuration writer. Capture arguments before
+/// detaching; no file I/O or optimistic keymap mutation occurs on the UI thread. Errors
+/// and [`Displacement::OldKeyNotFound`] are logged. The accepted watcher reload updates
+/// bindings and dialog rows.
 fn spawn_rebind(
     row: &KeybindingRow,
     new_keystrokes: Vec<Keystroke>,
@@ -879,57 +718,21 @@ fn spawn_rebind(
     .detach();
 }
 
-/// How a silenced builtin or desk binding comes back: `r` on the same
-/// row lifts the `"none"` shadow `d` wrote (2026-09-19 —
-/// [`user_overrides_for`] finds the shadow by keystroke and context, so
-/// the row does not need to display a key for `r` to know what to
-/// remove). Exact for a contexted binding as well as a bare one: the
-/// shadow lands in the entry whose `context` is the binding's own, and
-/// that is the context the override set matches on. Before 2026-09-19
-/// the recovery was `enter`-then-retype for a bare binding and "undo it
-/// in keymap.toml" for a contexted one (the retype wrote the no-context
-/// entry, escalating the binding to global); both sentences are gone
-/// because both doors were worse than the one that now opens.
-///
-/// Not offered for `d` on the USER's own binding: that write removes the
-/// key, and there is no lower entry for `r` to uncover it from — see
-/// [`unbind_selected`].
+/// Reset removes a lower-layer binding's user `"none"` shadow in its original context.
+/// This recovery hint is not offered when Unbind removes a user key: reset cannot
+/// reconstruct that deleted user entry.
 const RECOVERY: &str = "press r to restore it";
 
-/// `d`: silence the selected row's currently-effective binding.
+/// Remove the selected user key or shadow a displayed lower-layer key with `"none"`.
+/// The binding's own provenance determines which operation is valid; user removal uses
+/// its original document spelling.
 ///
-/// Returns the notice ([`KeybindingsState::notice`]) to show when the
-/// keystroke deliberately declined to write, `None` when a write was
-/// actually spawned. `row` is `None` only when the filter hid every row
-/// ("no matches"), which is not a row the user was pointing at, so it
-/// says nothing.
+/// Removing a user key can reveal a lower-layer binding on the same key. It does not
+/// reset the action's other overrides, and Reset cannot reconstruct the removed user
+/// entry. A lower-layer shadow can be removed by Reset.
 ///
-/// **The `is_user_layer` derivation, which is the dangerous input.** It
-/// is read off [`BoundKey::layer`] — the layer `derive_rows` copied from
-/// the very [`Binding`] this row is currently displaying, resolved by
-/// [`effective_binding`]'s shadow-aware last-wins scan — and never
-/// inferred from anything else. Getting it wrong is destructive in two
-/// different directions (a wrong `true` deletes whatever the user
-/// actually had on that key; a wrong `false` buries the user's own entry
-/// under a redundant `"none"` so the key stays dead with nothing in the
-/// file explaining why — see [`Unbind::is_user_layer`]), which is why
-/// the layer travels with the binding from `derive_rows` rather than
-/// being recomputed here from the action id.
-///
-/// One consequence worth stating: when the effective binding IS the
-/// user's, `is_user_layer` is `true`, so the write removes the key from
-/// the user entry rather than shadowing it — which silences that
-/// keystroke (no lower layer binds it, or the user would not have been
-/// the effective layer for it) but lets the *action* fall back to
-/// whatever lower-layer binding it has. It is the right shape: writing
-/// `"none"` over a key the user themselves put there would leave a
-/// self-shadowing entry no reader could explain. It is NOT the same
-/// write as `r` — `r` removes the action's whole override set (a rebind's
-/// shadow included), this removes one displayed key — and `r` cannot
-/// undo it, since the removed key was the user's and no lower entry
-/// holds it; so this branch's notice does not promise [`RECOVERY`].
-/// The removal names the key by [`BoundKey::key_source`], the file's own
-/// spelling, for the reason that field's doc gives.
+/// Return a refusal or dispatched-write notice; no visible row yields no notice.
+/// Completion is asynchronous and rows change only after an accepted reload.
 fn unbind_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
@@ -937,9 +740,7 @@ fn unbind_selected(
 ) -> Option<String> {
     let row = row?;
     let Some(bound) = row.current.as_ref() else {
-        // Nothing to silence. Said out loud rather than dropped: a verb
-        // that appears inert is exactly what this interaction model
-        // exists to remove.
+        // Report the missing target without submitting a write.
         return Some(format!("{} is already unbound", row.title));
     };
     let is_user_layer = bound.layer == Layer::User;
@@ -954,13 +755,8 @@ fn unbind_selected(
         is_user_layer,
     };
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
-        // Present tense on purpose (whole-branch review, Minor 3): the
-        // write is still on the background executor and can come back
-        // `removed: false` — a stale row — in which case only stderr
-        // ever says so. "silenced" asserted an outcome this keystroke
-        // has not confirmed and cannot wait for (the row does not
-        // relabel until the ~500ms watcher); "silencing" says what is
-        // actually known, which is that the write was dispatched.
+        // Describe a dispatched write, not a confirmed result. A stale on-disk key or
+        // write failure is logged; the watcher reload supplies the eventual row.
         .or_else(|| {
             Some(if is_user_layer {
                 format!("removing your {key} binding")
@@ -970,22 +766,9 @@ fn unbind_selected(
         })
 }
 
-/// `r`: remove every user-layer override of the selected row's action, so
-/// the layers beneath show through again.
-///
-/// The set is [`KeybindingRow::overrides`] ([`user_overrides_for`] over
-/// the whole keymap), not the row's displayed binding — the two differ in
-/// exactly the cases that made the old `r` not reset: a rebind of a
-/// builtin leaves the new key on the row and the `"none"` shadow off it
-/// (removing only the new key left the action UNBOUND), and a `d` on a
-/// builtin leaves the row unbound with the shadow as the only thing to
-/// remove (the old `r` could only point at the recovery). Both go in one
-/// [`apply_reset`] write.
-///
-/// A row with nothing of the user's is the case the brief singles out: a
-/// silent no-op there would be a key that visibly does nothing, so it
-/// returns a notice and writes nothing at all. That sentence is honest
-/// now — the whole user layer was consulted, not one row's binding.
+/// Remove the selected action's complete user override set in one write. This includes
+/// both replacement keys and `"none"` shadows, even if no binding is currently
+/// displayed. With no overrides, report a notice and write nothing.
 fn reset_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
@@ -1000,14 +783,13 @@ fn reset_selected(
         many => format!("your {} overrides", many.len()),
     };
     spawn_reset(row.overrides.clone(), row.action.0.clone(), user_dir, cx)
-        // Present tense, as `d` and the old `r`: the write is dispatched,
-        // not confirmed, and the row relabels only on the ~500ms watcher.
+        // The notice describes dispatch; only an accepted reload changes the row.
         .or_else(|| Some(format!("removing {what} on {}", row.title)))
 }
 
-/// `shift+r`: drop every user-layer binding, so every action is back on
-/// what desk and builtin say. `user_bindings` is the count the caller
-/// already gated the confirm on; `0` is the unarmed notice.
+/// Drop the user bindings array, exposing desk and builtin bindings. The caller gates
+/// confirmation on the parsed `user_bindings` count; zero yields a notice. Other keymap
+/// document fields are retained.
 fn reset_all(
     user_bindings: usize,
     user_dir: &Option<PathBuf>,
@@ -1037,11 +819,9 @@ fn reset_all(
     ))
 }
 
-/// Run one [`apply_reset`] on the background executor — [`spawn_unbind`]'s
-/// contract for the reset of one action: no file I/O on the render thread,
-/// args captured, task detached, failures logged from inside the task, no
-/// touch of `shell`'s own state. A `removed` short of the request is the
-/// stale-belief warning [`UnbindOutcome::removed`] `false` is.
+/// Submit one action's reset through the ordered configuration writer. Keep shell state
+/// unchanged until reload; log failures or a removal count smaller than the requested
+/// override set, which indicates the loaded keymap differs from disk.
 fn spawn_reset(
     overrides: Vec<UserOverride>,
     action: String,
@@ -1074,8 +854,7 @@ fn spawn_reset(
     None
 }
 
-/// The one refusal every spawner owns: no writable user config dir at all,
-/// in which case nothing was even attempted.
+/// Report that no user configuration directory is available for the write.
 fn no_user_dir_notice(what: &str) -> String {
     tracing::warn!(target: "geode::config",
         "no writable user config dir; the binding change for {what} was not saved"
@@ -1083,22 +862,12 @@ fn no_user_dir_notice(what: &str) -> String {
     "no writable user config directory — nothing was saved".to_string()
 }
 
-/// Run one [`apply_unbind`] on the background executor — the unbind twin
-/// of [`spawn_rebind`], and the same contract in every respect: no file
-/// I/O on the render thread (PHILOSOPHY: "nothing may stall the render
-/// thread"), args captured, task spawned and detached, failures logged
-/// as a warning from inside the task, and no touch of `shell`'s own
-/// state — the row picks the change up when the reload watcher applies
-/// it.
+/// Submit unbind through the ordered configuration writer, leaving live bindings
+/// unchanged until reload. Log errors and user-key removals that find no matching
+/// entry; a stale key or context can leave the binding reachable.
 ///
-/// `Ok(UnbindOutcome { removed: false })` from a `is_user_layer: true`
-/// write means the key was not where the row said it was (a stale read,
-/// a `context` that does not match the entry it actually lives in) — the
-/// [`Displacement::OldKeyNotFound`] contract restated for unbind, and
-/// warned about for the same reason: the binding may still be live.
-///
-/// Returns a notice only for the one refusal it owns: no writable user
-/// config dir at all, in which case nothing was even attempted.
+/// Return a notice only if the user configuration directory is unavailable. The
+/// detached writer reports its result through logs.
 fn spawn_unbind(
     unbind: Unbind,
     action: String,
@@ -1127,14 +896,8 @@ fn spawn_unbind(
     None
 }
 
-/// Paint `text` with the fuzzy-match `indices` (char offsets into
-/// `text`) highlighted — the index-based twin of the palette's own
-/// `highlighted_title`, using the same pure
-/// [`palette::highlight_runs`] char-index → merged-byte-range
-/// conversion. Replaced this helper's old substring-query signature
-/// when the dialogs moved from `/` find to fuzzy filtering: a
-/// subsequence match has no single contiguous range to hand
-/// `match_range`.
+/// Highlight fuzzy-match character offsets using [`palette::highlight_runs`] to merge
+/// them into byte ranges. Subsequence matches can produce disjoint runs.
 pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> AnyElement {
     let runs = palette::highlight_runs(text, indices);
     if runs.is_empty() {
@@ -1150,14 +913,9 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
         .into_any_element()
 }
 
-/// A verb pressed with the mouse (spec §20.1) — one door with the key
-/// via [`arm_verb`] (the shared arm-or-notice decision [`handle_key`]'s
-/// `Verb` arm also calls), so a button and its letter can never differ:
-/// arms, never writes. Keeps its own guards a keystroke does not need —
-/// clearing a standing notice, and refusing outright while a question is
-/// already armed or a capture is listening — because a button click, and
-/// so a second `press_verb` call before the first's write lands, can
-/// happen with no keystroke in between at all.
+/// Handle an action-button click through the same [`arm_verb`] decision as keys. Refuse
+/// while capture or confirmation owns input; otherwise clear the previous notice, arm a
+/// question or report a refusal, and synchronize the dialog.
 fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Context<ShellView>) {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let user_bindings = user_binding_count(shell.services.keymap.bindings());
@@ -1178,11 +936,8 @@ fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Co
     cx.notify();
 }
 
-/// The action bar under the list: `d` where the row has a binding to
-/// silence, `r` where it has a user override to remove, `shift+r` where
-/// the user layer binds anything at all — `danger` outline buttons
-/// showing their key chip, `keybindings-action-{key}`. Replaced by the
-/// confirm row while a question stands.
+/// Action buttons for available unbind/reset targets and all-user reset. Each uses
+/// `keybindings-action-{key}`; an armed confirmation replaces the bar.
 fn action_block(
     state: &KeybindingsState,
     row: Option<&KeybindingRow>,
@@ -1258,14 +1013,9 @@ fn action_block(
     bar.into_any_element()
 }
 
-/// The [`dialog::ShellModal::build`] closure body: a scrollable row list
-/// (title + category on the left, the current binding as [`key_chip`]s —
-/// or "unbound" — on the right, live capture chips while listening) plus a
-/// muted footer hint. `entity` is the `Entity<ShellView>` every row's click
-/// handler captures to reach [`on_row_clicked`] later, at click time —
-/// `shell` itself is only this call's own plain-borrow read of whatever's
-/// needed right now (see `ShellModal::build`'s doc comment for why the two
-/// are both needed rather than one substituting for the other).
+/// Build the filtered binding list, capture chips, actions, and mode-specific hints.
+/// Read render state from the borrowed shell; capture `entity` only for pointer
+/// callbacks that run after rendering.
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,
@@ -1387,11 +1137,8 @@ fn build(
     }
 
     if visible.is_empty() {
-        // Zero matches: one muted line where the rows would be — the same
-        // muted treatment "unbound" gets, so an over-narrow filter reads
-        // as a state, not a rendering glitch. Enter is inert here
-        // (`handle_key` swallows it rather than listening on a row that
-        // isn't there).
+        // An empty result displays a message and supplies no capture target. Filter
+        // Enter still accepts the query and returns to Normal.
         list = list.child(
             div()
                 .px_2()
@@ -1412,12 +1159,7 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
-    // The hint rows state the CURRENT mode's vocabulary, not the union of
-    // both: a modal surface's whole risk is a user who cannot tell which
-    // mode they are in, and a footer listing keys that are inert right
-    // now is exactly the lie the mode pill exists to prevent. Which row
-    // a hint paints on is `crate::footer`'s call (move / edit / go, spec
-    // §19), not this dialog's.
+    // Show only the active mode's key vocabulary, tagged with each hint's category.
     let hints: Vec<Hint> = if state.confirm.is_some() {
         vec![
             Hint::prose(HintRow::Go, "this needs an answer first"),
@@ -1437,11 +1179,8 @@ fn build(
                 Hint::new(HintRow::Move, &["ctrl+d", "ctrl+u"], "±5"),
                 Hint::new(HintRow::Move, &["ctrl+f", "ctrl+b"], "±10"),
                 Hint::new(HintRow::Edit, &["enter"], "rebind"),
-                // The two verbs normal mode exists to make room for
-                // (spec §8/§9). Since spec §20.1 they are buttons too
-                // (`action_block`), so the footer is where the KEYS are
-                // discovered — a bare letter has no visible target of
-                // its own — rather than the verbs' only door.
+                // Teach keyboard access to the same verbs exposed by the action
+                // buttons.
                 Hint::new(HintRow::Edit, &["d"], "unbind"),
                 Hint::new(HintRow::Edit, &["r"], "reset"),
                 Hint::new(HintRow::Edit, &["shift+r"], "reset all"),
@@ -1478,12 +1217,8 @@ fn build(
         .pt_2()
         .border_t_1()
         .border_color(theme.border)
-        // The notice sits ABOVE the hints, in `theme.warning` rather
-        // than the hints' muted grey: it is a report about the keystroke
-        // just pressed ("… has no user override to reset"), and a verb
-        // that wrote nothing has to say so somewhere the eye is already
-        // going. `debug_selector` so a test can prove it painted rather
-        // than only that the field was set.
+        // Paint refusal and dispatched-write notices above the hints. The selector lets
+        // tests check the visible notice as well as retained state.
         .children(state.notice.as_ref().map(|notice| {
             div()
                 .text_sm()
@@ -1512,17 +1247,8 @@ fn build(
                 ]),
         );
 
-    // The live `Input` is rendered only when it actually owns the
-    // keystrokes — filter mode, capture closed. In normal mode, and while
-    // listening, the same query paints as static muted text: a caret
-    // blinking in a field that is not receiving the keys is the single
-    // most misleading thing a modal surface can show.
-    //
-    // `slash_filters` is false for the whole of a capture: `handle_key`
-    // hands every keystroke to `press_while_listening` there, so `/` is
-    // the binding being recorded, not the filter's key. This is the one
-    // frozen state in the app where §18.1's `press / to filter`
-    // placeholder would be a lie — see `dialog::FrozenFilter`.
+    // Render the live Input only in Filter with no capture. Otherwise echo frozen query
+    // text. Hide the slash hint during capture because `/` records a key.
     let frozen_query = (state.listening.is_some() || state.mode == DialogMode::Normal).then_some(
         dialog::FrozenFilter {
             query: state.query.as_str(),
@@ -1535,10 +1261,7 @@ fn build(
 
     v_flex()
         .gap_2()
-        // §18.1: the mode badge lives in the modal's own title row now
-        // (`dialog::render_modal`'s `title_extra` slot, set in `open` via
-        // `dialog::set_title_extra`) rather than as a row here — the pill
-        // was moved out of this dialog's content entirely.
+        // The mode pill is supplied by the modal title-extra builder.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
         .child(action_block(
@@ -1636,14 +1359,8 @@ mod tests {
         assert!(bound.keystrokes[0].mods.ctrl && bound.keystrokes[0].mods.shift);
     }
 
-    // Regression (review round): a bare unbind — the SAME key rewritten to
-    // "none", no replacement key at all — must hide the row's binding,
-    // exactly as it hides it from the real `Matcher` (proved for the
-    // matcher itself by `keymap::matcher::tests::unbind_swallows_key`). The
-    // first cut of `derive_rows` searched by action id alone, which skips a
-    // "none" entry outright (it never carries the real action id) and so
-    // reported the OLD binding as still live — the bug these two tests
-    // pin down, one variant per `context_source` shape.
+    // A same-key `"none"` entry hides the displayed binding for both bare and contexted
+    // keys. Looking up only the action ID would miss that shadow.
 
     #[test]
     fn a_bare_unbind_in_the_same_context_hides_the_binding() {
@@ -1703,14 +1420,9 @@ mod tests {
         assert_eq!(bound.layer, Layer::User);
     }
 
-    /// A module's fragment binding (market-data documents §8.4) lists as
-    /// `Layer::Builtin`, carrying its predicate like any other binding —
-    /// which is what makes this dialog's `d` write a user-layer `"none"`
-    /// shadow over it and its `r` leave it alone, with no branch here
-    /// that has to know a module exists. Built through the roster and
-    /// `splice`, the real path `main.rs` uses, so a fragment that stopped
-    /// reporting `Builtin` (or stopped reaching the keymap at all) fails
-    /// here rather than in a dialog test that could only say "no row".
+    /// Module fragment bindings enter through the roster and splice as Builtin, with
+    /// their predicates intact. The dialog can shadow them using ordinary layer
+    /// provenance without a module-specific branch.
     #[test]
     fn a_modules_fragment_binding_lists_as_a_builtin_layer_binding() {
         use crate::keymap::fragments::splice;
@@ -1843,9 +1555,8 @@ mod tests {
 
     // -- click_listens ----------------------------------------------------
 
-    /// §17.1 rule 2: one click, capture at once — on any row, selected
-    /// or not, listening or not (a repeat click restarts the capture
-    /// with the partial sequence dropped).
+    /// Any row click starts a fresh capture, discarding a partial sequence even when
+    /// clicking the same row again.
     #[test]
     fn a_click_selects_and_listens_in_one_step() {
         let mut state = KeybindingsState {
@@ -1955,11 +1666,8 @@ mod tests {
 
     #[test]
     fn a_query_matching_only_an_invisible_action_id_matches_nothing() {
-        // "three" is a subsequence of `a::three` and of no title or
-        // category in the fixture. The action id is invisible in the UI,
-        // so matching it would select and highlight nothing the user can
-        // see — the `/mo` bug [`searchable_text`]'s own doc comment
-        // records, and a spec-level property of the match text.
+        // Only the invisible action ID contains "three" in this fixture. It must not
+        // produce a visible row match.
         let rows = test_rows();
         let mut state = KeybindingsState::new();
         state.set_query("three".to_string());
@@ -1980,9 +1688,7 @@ mod tests {
 
     #[test]
     fn a_click_resolves_an_action_id_to_its_filtered_position() {
-        // The list the user clicks is the filtered one, so a row's click
-        // handler (keyed by ActionId, as it always was) must resolve to a
-        // position in THAT list, not in the full one.
+        // Resolve clicked ActionId against the filtered list, not the full row order.
         let rows = test_rows();
         let mut state = KeybindingsState::new();
         state.set_query(rows[2].title.clone());
@@ -2010,10 +1716,7 @@ mod tests {
 
     #[test]
     fn setting_a_query_cancels_an_in_progress_capture() {
-        // The filter is always live; a query edit is an external
-        // interruption that cancels an in-progress capture outright —
-        // unlike a click (`click_listens`), which never cancels one,
-        // only ever starts a fresh capture on the row it landed on.
+        // Query replacement cancels capture; a row click instead starts a fresh one.
         let mut state = KeybindingsState::new();
         state.listening = Some(vec![key("a")]);
         state.set_query("foc".to_string());

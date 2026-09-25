@@ -4,10 +4,12 @@
 //! `parent`, and `parent` itself is rebuilt by one walk after every
 //! structural edit.
 //!
-//! Mutation goes through [`Sheet::apply`] (`edit.rs`); the other `pub`
-//! mutators are [`Sheet::deliver`] and [`Sheet::deliver_all`] (a result
-//! landing, one or a batch) and [`Sheet::fold_packages`] (a recompute),
-//! and both are called by `apply` where they matter.
+//! Mutation goes through [`Sheet::apply`] (`edit.rs`). The other `pub`
+//! mutators change no row's identity or request: [`Sheet::deliver`] and
+//! [`Sheet::deliver_all`] (a result landing, one or a batch),
+//! [`Sheet::mark_all_stale`] (a tick, a load, `:price`; never called by
+//! `apply`) and [`Sheet::fold_packages`] (a recompute, which `apply` runs
+//! after every edit).
 
 use crate::core::shorthand::{render_line, render_package};
 use crate::core::template::Template;
@@ -339,6 +341,20 @@ impl Sheet {
         out
     }
 
+    /// Every line `Stale` at its current revision, then one fold (spec
+    /// §9.4's tick, §8.6's `:price`). The third state-only mutator beside
+    /// `deliver`/`deliver_all`: a tick is not an edit, so no revision
+    /// moves — a result already in flight at the current revision must
+    /// still install when it lands.
+    pub fn mark_all_stale(&mut self) {
+        for row in 0..self.len() {
+            if self.is_line(row) {
+                self.state[row] = LineState::Stale;
+            }
+        }
+        self.fold_packages();
+    }
+
     /// One result into its row; everything `deliver` does except the
     /// fold, so a batch can fold once (spec §9.2).
     fn install(
@@ -561,7 +577,7 @@ impl Sheet {
 
     /// Rotate the flat range `a.start..b.end` so block `b` comes before
     /// block `a` (the two are adjacent: `a.end == b.start`).
-    // Task 6's `Move` arm is the only caller.
+    // `Edit::Move` is the only caller.
     pub(crate) fn swap_adjacent_blocks(&mut self, a: Range<usize>, b: Range<usize>) {
         debug_assert_eq!(a.end, b.start);
         let whole = a.start..b.end;
@@ -885,8 +901,8 @@ pub(crate) mod tests {
             vol_pts: Some(-1.0),
         }))
         .unwrap();
-        // A row's own shift is set through Task 5's SetShift; here use the
-        // record/restore door to build one with an own vol shift.
+        // Build a row with an own vol shift through the record/restore
+        // door rather than `SetShift`.
         let mut rec = own.record(0);
         rec.shift = OwnShifts {
             spot_pct: None,
@@ -912,7 +928,7 @@ pub(crate) mod tests {
         let mut s = Sheet::new("t");
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
         let id = s.id(0);
-        // Pretend an edit bumped the revision (Task 5 does this through apply).
+        // Pretend an edit bumped the revision (`apply` does this for real).
         let mut rec = s.record(0);
         rec.revision = 2;
         s.apply(Edit::Remove { at: 0 }).unwrap();
@@ -1075,5 +1091,45 @@ pub(crate) mod tests {
         s.apply(Edit::Remove { at: 4 }).unwrap();
         s.apply(Edit::Remove { at: 4 }).unwrap();
         assert_eq!(s.shorthand(3), "", "an empty package renders nothing");
+    }
+
+    /// The refresh tick and `:price` (spec §9.4, §8.6; Part 3 planning
+    /// decision 3): every LINE goes `Stale` — a failed one too, since a
+    /// refusal may be transient — at its CURRENT revision, so a result
+    /// already in flight still installs; packages fold to `Stale`.
+    #[test]
+    fn mark_all_stale_stales_every_line_and_bumps_no_revision() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![callspread(1)]);
+        let lines: Vec<usize> = (0..s.len()).filter(|r| s.is_line(*r)).collect();
+        let answers: Vec<_> = lines
+            .iter()
+            .map(|r| (s.id(*r), s.revision(*r), Ok(result(10.0))))
+            .collect();
+        s.deliver_all(answers, at(0));
+        // One line fails, so the sweep is seen to cover `Failed` too.
+        let first = s.id(0);
+        let rev = s.revision(0);
+        s.apply(Edit::SetQty { row: 0, qty: 2 }).unwrap();
+        assert_eq!(s.revision(0), rev, "SetQty changes no request");
+        s.deliver(first, rev, Err("refused".into()), at(1));
+        let before: Vec<u64> = (0..s.len()).map(|r| s.revision(r)).collect();
+
+        s.mark_all_stale();
+
+        for r in lines {
+            assert_eq!(s.state(r), &LineState::Stale, "row {r}");
+        }
+        assert_eq!(s.state(1), &LineState::Stale, "the package folds to Stale");
+        let after: Vec<u64> = (0..s.len()).map(|r| s.revision(r)).collect();
+        assert_eq!(before, after, "a tick is not an edit");
+        // A result at the unchanged revision still installs.
+        let leg = 2;
+        assert_eq!(
+            s.deliver(s.id(leg), s.revision(leg), Ok(result(3.0)), at(2)),
+            Delivered::Installed
+        );
+        assert_eq!(s.state(leg), &LineState::Fresh);
     }
 }

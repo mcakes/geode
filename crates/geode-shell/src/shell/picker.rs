@@ -1,111 +1,20 @@
-//! The two-stage dimension picker (Phase 4a spec §3.3, §3.4, §3.11): a
-//! keyed modal in [`keybindings_view`](super::keybindings_view)'s mould —
-//! same "pure core + gpui shell" split, same
-//! [`dialog::open_shell_dialog_with_key`] door — that lets the user pick a
-//! column (`Stage::Columns`) and then a set of its values (`Stage::
-//! Values`), fed by `Request::Distinct` through the app bridge
-//! (`geode-shell` cannot depend on `geode-data`, so the request leaves as
-//! [`ShellEvent::DistinctRequested`] and the outcome comes back through
-//! [`ShellView::deliver_distinct`]).
+//! The dimension picker: choose a column, then apply a set of its values.
+//! [`PickerState`] owns filtering and ticks; the shell sends a tagged
+//! [`ShellEvent::DistinctRequested`] and accepts results through
+//! [`ShellView::deliver_distinct`]. Requests omit the selected column's
+//! own dimension constraint so its value counts reflect the other filters.
 //!
-//! ## Two amendments to the spec (recorded here, to land in spec §3.3 in
-//! Task 9)
+//! Values starts with the current column selection ticked. Tab toggles the
+//! highlight, Ctrl+A adds all shown values, and Ctrl+X clears every tick.
+//! Enter applies visible pre-ticks or edited ticks. Only an untouched empty
+//! tick set falls back to the highlighted value; if no value is highlighted,
+//! that empty result removes the column constraint. Loading and query errors
+//! do not disable Enter. Row clicks move the highlight; tick clicks toggle.
 //!
-//! Keys: `tab` toggles the highlighted value — a printable `space` would
-//! be typed into the filter input instead, and `tab` is already reclaimed
-//! to `NoAction` inside every Geode modal
-//! (`dialog::init_reclaimed_keybindings`). "Clear all" is `ctrl+x`, not
-//! `ctrl+c` or a bare "clear" key — `ctrl+n` is already "down" on every
-//! list surface in this shell, and `ctrl+x` reads as "cut everything",
-//! pairing naturally with `ctrl+a` ("tick every value the filter
-//! currently shows" — also reclaimed, see
-//! [`super::dialog::init_reclaimed_keybindings`]'s own doc comment,
-//! bullet 3).
-//!
-//! ## `enter`, and the two meanings of an empty tick set
-//!
-//! Because `tab` is the selector and nothing on screen said so, the most
-//! natural single-value gesture — arrow to a value, press `enter` —
-//! applied an empty tick set, which [`PickerState::apply`] read as "drop
-//! this column". The resulting scope equalled the one it started from,
-//! `Frame::set_scope` returned `false`, and the modal closed having
-//! changed nothing: indistinguishable, from the outside, from a broken
-//! picker.
-//!
-//! An empty tick set therefore means two opposite things, and
-//! [`PickerState::ticks_touched`] separates them: empty because the user
-//! never touched it commits the highlighted value; empty because the user
-//! pressed `ctrl+x` drops the column's selection. `ctrl+x` then `enter`
-//! stays the keyboard route to clearing one dimension, which
-//! `docs/PHILOSOPHY.md`'s keyboard-reach rule requires — the scope chip's
-//! close glyph is mouse-only. The pre-tick in [`request_values`] reflects
-//! the scope rather than an act of the user's, so it leaves the flag
-//! false.
-//!
-//! A reviewer asked for more: on an already-scoped column
-//! [`request_values`]'s pre-tick makes `ticked` non-empty, so arrowing to
-//! a *different* value and pressing `enter` re-commits the pre-tick and
-//! changes nothing — the same shape of no-op, reached a different way.
-//! Rejected, because the proposed remedy (let an untouched pre-tick
-//! yield to the highlight too) would silently discard a tick the user
-//! can see on screen: open `book` with `BK000` ticked, arrow to `BK001`,
-//! press `enter`, and `BK000`'s visible tick would vanish without anyone
-//! unticking it. The two cases differ in exactly the way that matters —
-//! the original defect was invisible (an empty tick set with nothing on
-//! screen to say so), while this one is fully legible: the ticks are
-//! painted, the footer says `enter apply`, and applying them is what it
-//! does. Changing the selection is `tab`, which the footer now names.
-//!
-//! Both stages now also paint a footer hint row ([`hints`],
-//! [`hint_row`]), and the two empty states name which emptiness they are
-//! ([`columns_empty_message`], [`values_empty_message`]) — an empty
-//! `ShellView::pickable` means no `datasets` doc is loaded, which no
-//! amount of backspacing in the filter will fix.
-//!
-//! ## §20.2: `escape` walks the ladder
-//!
-//! The picker is filter-only — there is no `DialogMode` here, no normal
-//! mode to fall out of — so its ladder is the shortest one in the shell:
-//! `Values` → `Columns` → close. `escape` on `Values` used to close the
-//! whole modal in one keystroke, indistinguishable from `Columns`'
-//! `escape`; it now steps back to `Columns` first
-//! ([`back_to_columns`]), dropping the Values stage's query and ticks and
-//! landing the cursor back on the column just left, the same "undo the
-//! stage transition" shape [`commit_column`] walks forward. A second
-//! `escape` from `Columns` is unclaimed here and falls through to
-//! `handle_key_down`'s own modal branch, which closes exactly as before.
-//!
-//! ## §20.3: a Values row click selects, its tick toggles
-//!
-//! [`build_values`]'s row used to toggle the tick on any click anywhere
-//! in the row. It now splits the way the object dialog's list rows do:
-//! clicking the row moves the cursor there (the mouse form of arrowing to
-//! it), and only clicking the tick glyph itself toggles it (the mouse
-//! form of `tab`) — the tick carries its own `debug_selector` and
-//! `on_mouse_down`, `cx.stop_propagation`ed so the row's own handler
-//! underneath it never also fires.
-//!
-//! ## Architecture
-//!
-//! [`PickerState`] — `stage`, `selected`, `query`, `values`, `ticked`,
-//! `tag` — is pure (no `gpui`), stored on `ShellView` as `picker:
-//! Option<PickerState>`, exactly like `palette`/`keybindings`/`settings`.
-//! Its sibling scroll handle (`ShellView::picker_scroll`) is a
-//! `gpui::UniformListScrollHandle`, not the plain `gpui::ScrollHandle` the
-//! other three use: the `Values` stage's list is a `uniform_list`
-//! (self-virtualizing — see [`build_values`]), and `uniform_list` only
-//! tracks scroll-follow through its own handle type. See
-//! [`sync_picker_scroll`] for the call sites that keep it following
-//! `selected`.
-//!
-//! [`open`] is the only entry point (`frame::pick`/`frame::pick_<column>`,
-//! a chip body click) and the only place a `PickerState` is constructed —
-//! nothing survives a close/reopen, the same contract every other modal
-//! here keeps. [`request_values`] is what turns "the values stage just
-//! opened" into a `ShellEvent::DistinctRequested` — it also pre-ticks
-//! whatever the scope already selects for that column, so opening the
-//! picker on an already-scoped dimension shows its current selection
-//! rather than a blank slate.
+//! This dialog is filter-only. Escape from Values discards that stage's query
+//! and ticks and returns to Columns; Escape there closes the modal. Neither
+//! step applies a draft. Closing and reopening starts with fresh state.
+//! The Values list uses a uniform-list scroll handle to follow selection.
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -134,29 +43,21 @@ use super::{PICKER_KEY, Pickable, ShellEvent, ShellView};
 // Pure core — no gpui.
 // ---------------------------------------------------------------------
 
-/// Which half of the picker is showing. `Values` carries the column it's
-/// showing values for — the reason this whole modal exists.
+/// The current stage; Values carries the column being edited.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
     Columns,
     Values { column: String },
 }
 
-/// Persistent state for one open picker session — the analogue of
-/// `KeybindingsState`/`SettingsState`. Holds no `gpui` types, so every
-/// transition is unit-testable without a window (see the `tests` module
-/// below).
+/// Pure state for one open picker session.
 #[derive(Debug, Clone)]
 pub struct PickerState {
     pub stage: Stage,
-    /// Index into the **filtered** list for the current stage —
-    /// [`PickerState::columns`] on `Columns`, [`PickerState::shown`] on
-    /// `Values`. The palette's own convention.
+    /// Index into the current filtered list: [`PickerState::columns`] or
+    /// [`PickerState::shown`].
     pub selected: usize,
-    /// The dialog filter's query, mirrored here from `ShellView::
-    /// dialog_input`'s `InputEvent::Change` subscription — the same
-    /// routing the keybinding/settings dialogs already use (`shell/mod.rs`'s
-    /// own subscription, set up once in `ShellView::new`).
+    /// Query mirrored from the shared dialog Input's change subscription.
     pub query: String,
     /// `None` while a `Values`-stage request is in flight (or the stage
     /// hasn't requested anything yet); `Some(Ok(..))` once
@@ -168,29 +69,19 @@ pub struct PickerState {
     /// `apply`'s `Scope::dimensions` selection comes out in a stable,
     /// sorted order regardless of tick order.
     pub ticked: BTreeSet<String>,
-    /// Whether the user has operated on `ticked` themselves this session
-    /// (`tab`, `ctrl+a` or `ctrl+x`) — false through
-    /// [`request_values`]'s pre-tick, which reflects the scope rather
-    /// than an act of the user's.
-    ///
-    /// [`apply`](PickerState::apply) needs the distinction because an
-    /// empty tick set means two opposite things: *untouched* and empty is
-    /// "I arrowed to a value and pressed enter", which must commit that
-    /// value; *touched* and empty is "I pressed `ctrl+x`", which must
-    /// drop the column's selection. Conflating them is what made the
-    /// single-value flow — arrow, enter — silently do nothing.
+    /// Whether a successful toggle, nonempty select-all, or explicit clear
+    /// has operated on the ticks. Pre-ticking the current scope leaves this
+    /// false. An untouched empty set applies the highlight; a touched empty
+    /// set removes the column constraint.
     pub ticks_touched: bool,
-    /// Bumped once per [`request_values`] call; a `DistinctOutcome`
-    /// whose tag doesn't match the *latest* bump is stale and dropped
-    /// (§7.3) — see [`ShellView::deliver_distinct`].
+    /// Latest distinct-request tag, allocated from the shell-wide counter.
+    /// [`ShellView::deliver_distinct`] rejects outcomes with an older tag.
     pub tag: u64,
 }
 
 impl PickerState {
-    /// Filtered indices into `pickable`, plus each match's char offsets,
-    /// best match first — [`crate::listfilter::rank`] over the column
-    /// names, the same fuzzy-filter rule (and empty-query "keep schema
-    /// order") both list dialogs and the palette already share.
+    /// Fuzzy-ranked column-name indices and matched character offsets.
+    /// An empty query preserves schema order.
     pub fn columns(pickable: &[Pickable], query: &str) -> Vec<(usize, Vec<usize>)> {
         let texts: Vec<String> = pickable.iter().map(|p| p.column.clone()).collect();
         listfilter::rank(&texts, query)
@@ -199,12 +90,8 @@ impl PickerState {
             .collect()
     }
 
-    /// Filtered indices into `self.values`'s value list, plus each
-    /// match's char offsets, best match first — empty when `self.values`
-    /// isn't `Some(Ok(..))` (loading, or a failed request has nothing to
-    /// show). `DistinctOutcome::values` is already sorted by value, so a
-    /// non-empty query's stable sort-by-score keeps that order as the
-    /// tie-break for free — no separate secondary sort key needed.
+    /// Fuzzy-ranked value indices and matched character offsets; empty while
+    /// loading or failed. Equal scores preserve the incoming value order.
     pub fn shown(&self) -> Vec<(usize, Vec<usize>)> {
         let Some(Ok(values)) = &self.values else {
             return Vec::new();
@@ -229,11 +116,7 @@ impl PickerState {
             return;
         };
         let value = values[idx].0.clone();
-        // Only a keystroke that actually moved a tick counts as a touch
-        // (review finding): setting the flag ahead of these guards let a
-        // `tab` that visibly did nothing — nothing shown, or no values
-        // delivered yet — disarm `apply`'s highlight-commit for the rest
-        // of the session.
+        // A key with no selectable row must leave highlight fallback armed.
         self.ticks_touched = true;
         if !self.ticked.remove(&value) {
             self.ticked.insert(value);
@@ -280,22 +163,11 @@ impl PickerState {
         values.get(*idx).map(|(v, _)| v.clone())
     }
 
-    /// Replace `scope`'s selection for this stage's column with whatever
-    /// is ticked — an *explicitly* emptied tick set
-    /// ([`ticks_touched`](Self::ticks_touched)) drops the column's
-    /// selection entirely rather than writing an empty
-    /// `DimensionSelection` (spec: empty `values` already means "no
-    /// constraint", so a dropped selection and an explicit "everything"
-    /// selection must not be conflated). A no-op clone of `scope` on the
-    /// `Columns` stage — there is no column to apply anything to yet.
-    ///
-    /// A tick set that is empty because the user never touched it commits
-    /// the **highlighted** value instead: arrowing to a value and
-    /// pressing `enter` is the obvious single-value gesture, and treating
-    /// it as "select nothing" made it close the modal having changed
-    /// nothing at all. Multi-select is unaffected — it is already
-    /// tick-then-enter — and `ctrl+x` then `enter` remains the keyboard
-    /// route to clearing one dimension.
+    /// Replace all selections for this stage's column in the supplied scope.
+    /// Apply sorted ticks, or the highlighted value when ticks are untouched
+    /// and empty. If the resulting set is empty, remove the column constraint.
+    /// Keep the other scope fields, including `impossible`, unchanged.
+    /// Columns returns the scope unchanged.
     pub fn apply(&self, scope: &Scope) -> Scope {
         let Stage::Values { column } = &self.stage else {
             return scope.clone();
@@ -321,9 +193,7 @@ impl PickerState {
 // gpui shell.
 // ---------------------------------------------------------------------
 
-/// Target picker panel width in pixels — between the palette's 560px and
-/// the two list dialogs' 640px, since the values list's rows (a tick, a
-/// value, a right-aligned count) are narrower than either.
+/// Dialog width on the design scale, sized for value and count rows.
 const WIDTH: f32 = 480.0;
 
 /// Open the picker (`frame::pick` with `column: None`, `frame::
@@ -345,12 +215,8 @@ pub fn open(
         Some(c) if view.pickable.iter().any(|p| p.column == c) => Stage::Values { column: c },
         Some(_) | None => Stage::Columns,
     };
-    // `tag: 0` here is only ever a placeholder: a `Columns`-stage open
-    // makes no request yet (nothing to compare it against), and a
-    // `Values`-stage open below calls `request_values` in the same
-    // synchronous call, which overwrites it with a real tag (Phase 4b
-    // M5: drawn from `ShellView::next_picker_tag`, the session-wide
-    // counter) before any outcome could possibly arrive.
+    // Zero is a placeholder until `request_values` assigns a shell-wide tag.
+    // Direct Values opens request synchronously before any result can arrive.
     view.picker = Some(PickerState {
         stage,
         selected: 0,
@@ -376,23 +242,13 @@ pub fn open(
     );
 }
 
-/// Submit a fresh `Request::Distinct` for `column` (spec §3.4): bumps the
-/// picker's tag, clears any previous values (back to "loading…"),
-/// pre-ticks whatever the current scope already selects for `column` (so
-/// re-opening an already-scoped dimension shows its live selection), and
-/// emits [`ShellEvent::DistinctRequested`] with that column's own
-/// selection removed from the scope the request carries — the query asks
-/// "how many rows would each value leave, ignoring what this column
-/// itself currently narrows to", which is what makes a value's count
-/// meaningful rather than self-referential.
+/// Request distinct values under the current scope and as-of. Clear prior
+/// results, allocate a fresh tag, and pre-tick the first current selection
+/// for this column. Remove every selection for the column from the request
+/// scope so counts measure the effect of each value under the other filters.
 fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
-    // Phase 4b M5: drawn from the shell's own monotonic counter (never
-    // reset per open), not a `+= 1` on the picker's own tag — a fresh
-    // `PickerState` always starts at the same value, so two separate
-    // opens on the same column used to hand out the identical sequence
-    // of tags, and a stale outcome from the first open could pass the
-    // second open's tag check. See `ShellView::next_picker_tag`'s own
-    // doc comment.
+    // Tags span picker opens, preventing an outcome from a closed picker
+    // from matching a new request for the same column.
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
     let Some(p) = view.picker.as_mut() else {
@@ -411,9 +267,8 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
         .find(|d| d.column == column)
         .map(|d| d.values.iter().cloned().collect())
         .unwrap_or_default();
-    // The pre-tick reflects the scope, not an act of the user's — a
-    // freshly-entered column starts untouched, so `enter` on it commits
-    // the highlighted value (see `PickerState::ticks_touched`).
+    // Pre-ticks reflect the current scope. Only an empty pre-tick set can
+    // use the untouched-highlight fallback on Enter.
     p.ticks_touched = false;
     let mut minus_own = scope;
     minus_own.dimensions.retain(|d| d.column != column);
@@ -463,12 +318,9 @@ fn commit_column(
     cx.notify();
 }
 
-/// `escape` on the Values stage (spec §20.2, `EscapeStep::PreviousStage`):
-/// back to `Columns` with the ticks and the Values query dropped and the
-/// cursor on the column just left — `commit_column` walked backwards. A
-/// no-op when the stage is already `Columns`, whose own `escape` falls
-/// through to the shell's modal branch and closes. Nothing is applied on
-/// the way back: `PickerState::apply` is still reached only from `enter`.
+/// Return Values to Columns, discarding query, results, and ticks and
+/// selecting the column just left. No scope change is applied. Columns
+/// itself leaves Escape to the shell, which closes the modal.
 fn back_to_columns(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(Stage::Values { column }) = shell.picker.as_ref().map(|p| p.stage.clone()) else {
         return;
@@ -492,24 +344,9 @@ fn back_to_columns(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
-/// Scroll the picker's `Values`-stage `uniform_list` so the currently
-/// selected row stays visible (fix round 1, Finding 1) —
-/// `UniformListScrollHandle::scroll_to_item` with `ScrollStrategy::
-/// Nearest`, gpui's own idiom for a `uniform_list` (the div-based
-/// `ScrollHandle::scroll_to_item` every other list here uses doesn't
-/// apply — see the module doc). Called from every path that can change
-/// `self.picker`'s `selected` field while `Stage::Values` is showing:
-/// [`handle_values_key`]'s up/down/ctrl+p/ctrl+n arm, a value row's mouse
-/// click (`build_values`'s row `on_mouse_down`, which sets `selected`
-/// alone — §20.3, a row click selects, only the tick's own `on_mouse_down`
-/// toggles), [`commit_column`] (which resets `selected` to 0 on the
-/// fresh `Values` stage it just switched to), and the shared dialog
-/// filter's `InputEvent::Change` subscription (`ShellView::new`, `shell/
-/// mod.rs`), which resets `selected` to 0 on every query edit exactly
-/// like `keybindings_scroll`/`settings_scroll` do for their own dialogs.
-/// A no-op on `Stage::Columns` (that stage's row list is a plain,
-/// unvirtualized `v_flex` — nothing to scroll) or while no picker is
-/// open.
+/// Keep the selected Values row visible through its uniform-list handle.
+/// Navigation, row clicks, query changes, and stage entry call this.
+/// Columns is an unvirtualized list and needs no scroll synchronization.
 pub(super) fn sync_picker_scroll(shell: &ShellView) {
     if let Some(picker) = shell.picker.as_ref()
         && let Stage::Values { .. } = &picker.stage
@@ -590,8 +427,7 @@ fn handle_values_key(
                 }
             });
         }
-        // `close_modal`: the same door the ladder's last rung takes
-        // (a bare `escape` in Values steps back to Columns first, §20.2).
+        // Apply closes through the same cleanup and focus-return path as cancel.
         shell.close_modal(window, cx);
         return true;
     }
@@ -607,17 +443,8 @@ fn handle_values_key(
     false
 }
 
-/// The [`dialog::ModalKeyHandler`] for this modal — dispatches to
-/// [`handle_columns_key`]/[`handle_values_key`] by the open picker's
-/// current stage. `escape` walks the ladder (spec §20.2, §5): on `Values`
-/// it is claimed by [`handle_values_key`], which steps back to `Columns`
-/// through [`back_to_columns`] rather than closing; on `Columns` it is
-/// claimed by neither arm (both fall through their final `false`), so it
-/// reaches `handle_key_down`'s own modal branch, which closes the modal
-/// exactly as it does for every other dialog — and `ShellView::
-/// close_modal` clears `self.picker`, so a closed picker leaves nothing
-/// behind. The picker is filter-only (no `DialogMode`), so its whole
-/// ladder is just `Values` → `Columns` → close.
+/// Dispatch keys by stage. Escape returns Values to Columns, then the
+/// shell closes from Columns. This filter-only dialog has no Normal mode.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -633,22 +460,14 @@ fn handle_key(
     }
 }
 
-/// One element of a stage's footer hint: a key chip, or the prose
-/// between chips. Kept as data (rather than built straight into elements)
-/// so [`hints`] is a pure function this module's own `mod tests` can
-/// assert on without a window — the same "pure core + gpui shell" split
-/// the rest of this file keeps.
+/// A footer key chip or prose fragment, kept as data for rendering and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hint {
     Key(&'static str),
     Text(&'static str),
 }
 
-/// The keyboard vocabulary a stage advertises. Neither stage said
-/// anything before, which is how `tab` — the only key that selects a
-/// value, chosen because `space` is printable and would be typed into
-/// the filter (module doc) — stayed invisible to anyone who had not read
-/// the source.
+/// The keyboard operations advertised by each stage's footer.
 pub fn hints(stage: &Stage) -> &'static [Hint] {
     match stage {
         Stage::Columns => &[
@@ -680,21 +499,9 @@ pub fn hints(stage: &Stage) -> &'static [Hint] {
     }
 }
 
-/// What the `Columns` stage prints when its row list comes out empty.
-/// The three emptinesses are different failures and must not share a
-/// string. A filter that matched nothing is the user's own doing and
-/// self-corrects on backspace. An empty `ShellView::pickable` means
-/// *every* query will match nothing and the picker is not the thing to
-/// fix — printing "no matches" for that is what makes an unconfigured
-/// `frame::pick` read as a broken picker.
-///
-/// The last two are worth separating (review finding) because
-/// [`pickable_columns`](super::pickable_columns) comes out empty for two
-/// unrelated reasons: no `datasets` doc at all, or a doc whose columns
-/// are all keys, measures or plain attributes — including dimensions
-/// `validate_dataset` dropped at load for a bad `grain`. Naming a missing
-/// file for the second sends the reader to the wrong place, in a change
-/// whose whole point is an accurate empty state.
+/// Distinguish a filter with no matches, a missing datasets document, and
+/// a loaded schema with no categorical columns. Only the first is fixed by
+/// editing the query; only the second should name a missing document.
 fn columns_empty_message(pickable_is_empty: bool, has_datasets_doc: bool) -> &'static str {
     match (pickable_is_empty, has_datasets_doc) {
         (false, _) => "no matches",
@@ -724,11 +531,8 @@ fn empty_row(text: &str, muted: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-/// The `Columns` stage's row list: `column · role · datasets`, the
-/// selected row highlighted — the palette's own row styling
-/// (`h_flex().justify_between()...`, `theme.selection`/`theme.primary`
-/// when selected). A row click commits that column
-/// ([`commit_column`]), the mouse-driven twin of `enter`.
+/// Column rows show name, role, and datasets. Clicking commits the column,
+/// using the same transition as Enter.
 fn build_columns(
     shell: &ShellView,
     picker: &PickerState,
@@ -799,16 +603,9 @@ fn build_columns(
     list.into_any_element()
 }
 
-/// The `Values` stage's body: `loading…`, the error text, or a
-/// `uniform_list` of `[tick] value    count` rows — the tick is `✓` in
-/// `theme.primary` when ticked, a muted `·` otherwise; the count is
-/// right-aligned in the mono face (§data face convention). `shown` is
-/// computed once here (a `Vec` allocation per render — acceptable in a
-/// modal that only re-renders on a keystroke or a delivery, the same
-/// concession the palette's own per-keystroke filter makes) and moved
-/// into the `uniform_list` closure alongside the value list itself, so
-/// the closure stays `'static` without re-reading `picker` from `shell`
-/// on every range it's asked to render.
+/// Render loading, the query error, or virtualized value/count rows.
+/// Compute the filtered indices once per render and move them and the values
+/// into the list closure, avoiding repeated picker reads for each range.
 fn build_values(
     picker: &PickerState,
     entity: &Entity<ShellView>,
@@ -859,8 +656,7 @@ fn build_values(
                             div().text_color(muted).child("·")
                         }
                         .debug_selector(move || format!("picker-tick-{value_for_tick}"))
-                        // §20.3's rule on this list: the tick is `tab`'s
-                        // mouse form; the row is the cursor's.
+                        // The tick toggles; the rest of the row only selects.
                         .on_mouse_down(
                             gpui::MouseButton::Left,
                             move |_event, _window, cx| {
@@ -960,13 +756,8 @@ fn build(
         .into_any_element()
 }
 
-/// The footer hint line — `settings_view::build`'s own footer, narrowed
-/// to one row: a top border, then `hints` rendered as key chips
-/// (`keybindings_view::key_chip`, so a key's spelling looks identical
-/// across every dialog here) interleaved with muted prose. Shared with
-/// the grouping picker (`groupingpicker`), the other filter-only dialog
-/// with a one-line vocabulary: `selector` is the line's own id and debug
-/// selector, `width` the dialog's.
+/// Render footer hints as shared key chips interleaved with muted prose.
+/// Choice dialogs reuse this helper with their own selector and width.
 pub(crate) fn hint_row(
     hints: &[Hint],
     selector: &'static str,
@@ -1079,13 +870,7 @@ mod tests {
         assert_eq!(out.dimensions[0].column, "lhu");
     }
 
-    /// Review finding: `tab` and `ctrl+a` set `ticks_touched` before
-    /// their own guards, so a keystroke that visibly did nothing —
-    /// `tab` while the filter matches nothing, or before the distinct
-    /// query has returned — permanently disarmed the highlight-commit
-    /// path. Backspace the filter, arrow to a value, press `enter`, and
-    /// the modal closes having changed nothing: the exact defect this
-    /// work exists to remove, reachable by a different route.
+    /// Unusable toggle/select-all keys leave untouched-highlight commit enabled.
     #[test]
     fn a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching() {
         // `tab` with a filter that matches nothing.
@@ -1114,11 +899,7 @@ mod tests {
         assert_eq!(out.dimensions[0].values, vec!["BK001".to_string()]);
     }
 
-    /// The single-value flow: arrow to a value and press `enter` without
-    /// ever pressing `tab`. Before this, `apply` saw an empty tick set,
-    /// dropped the column entirely and produced a scope identical to the
-    /// one it started from — `Frame::set_scope` returned `false`, no chip
-    /// appeared, and the modal closed as if the pick had worked.
+    /// An untouched empty tick set applies the highlighted value.
     #[test]
     fn enter_on_an_untouched_tick_set_commits_the_highlighted_value() {
         let mut s = state_with(&[("BK000", 1), ("BK001", 2), ("BK002", 3)]);
@@ -1129,10 +910,7 @@ mod tests {
         assert_eq!(out.dimensions[0].values, vec!["BK001".to_string()]);
     }
 
-    /// …but an empty tick set the user *made* empty still means "drop
-    /// this column's selection". `ctrl+x` then `enter` is the keyboard
-    /// route to clearing one dimension, and PHILOSOPHY's keyboard-reach
-    /// rule means it cannot become mouse-only (the chip's close glyph).
+    /// Explicitly clearing ticks removes the dimension on Enter.
     #[test]
     fn an_explicit_clear_makes_enter_drop_the_selection() {
         let mut s = state_with(&[("BK000", 1), ("BK001", 2)]);
@@ -1151,10 +929,7 @@ mod tests {
         );
     }
 
-    /// The two empty states printed the same string, so "nothing is
-    /// configured to pick" and "your filter matched nothing" were
-    /// indistinguishable — the reason an unconfigured `alt+p` reads as a
-    /// broken picker rather than an empty one.
+    /// Missing configuration and unmatched filters need distinct empty states.
     #[test]
     fn the_empty_states_say_which_emptiness_it_is() {
         // A filter that matched nothing, whatever the config looks like.
@@ -1163,9 +938,7 @@ mod tests {
         assert_eq!(values_empty_message(false), "no matches");
         assert_ne!(values_empty_message(true), values_empty_message(false));
 
-        // Nothing to pick, for either of its two unrelated reasons — and
-        // the no-doc case is the only one allowed to blame a missing
-        // file (review finding).
+        // Distinguish a missing datasets document from one with no pickable columns.
         let no_doc = columns_empty_message(true, false);
         let no_categoricals = columns_empty_message(true, true);
         assert_ne!(no_doc, "no matches");
@@ -1240,17 +1013,8 @@ mod tests {
         );
     }
 
-    /// A trimmed dataset shaped like `examples/demo-config/datasets.toml`'s
-    /// `risk_snapshot` — the same subset `geode_core::schema`'s own tests
-    /// use as `CARRIED` (`book`/`lhu`/`position_ref`/`counterparty`/
-    /// `instrument_ref`/`underlying_ref`/`currency`/`expiry`/`npv`/
-    /// `delta01`), rather than a literal copy of the full real file: the
-    /// full file's column ORDER differs (`underlying_ref` precedes
-    /// `counterparty`, `currency` precedes `expiry` there), which would
-    /// change `categorical_columns()`'s schema-declaration-order output
-    /// and so the exact assertion below — this subset is what reproduces
-    /// it. Chosen deliberately over "read the real file at test time"
-    /// (the brief's other option) for that reason.
+    /// A compact carried-dimension schema fixture. Its declaration order fixes
+    /// the expected categorical-column order independently of the demo config.
     const CARRIED_DEMO: &str = r#"
 [risk_snapshot.columns.book]
 type = "utf8"

@@ -1,5 +1,5 @@
 //! The one-line shorthand (line-pricer spec §6.3), parsed here and
-//! rendered here (Task 3), so the two halves share one table of tokens.
+//! rendered here, so the two halves share one table of tokens.
 //!
 //! `[qty] UNDERLYING EXPIRY STRIKES TYPE [BARRIER level]`, whitespace-
 //! separated, case-insensitive. A month form (`Z26`, `DEC26`) resolves to
@@ -124,7 +124,7 @@ pub fn parse_strike(token: &str) -> Result<Strike, String> {
     })
 }
 
-fn parse_barrier_kind(token: &str) -> Option<BarrierKind> {
+pub(crate) fn parse_barrier_kind(token: &str) -> Option<BarrierKind> {
     match token.to_ascii_uppercase().as_str() {
         "UI" => Some(BarrierKind::UpIn),
         "UO" => Some(BarrierKind::UpOut),
