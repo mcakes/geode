@@ -193,7 +193,9 @@ open field first. A click outside the grid leaves a text editor open until the n
 grid click or verb, as in the market-data panel; the typeahead popup closes on
 an outside click. Both the entry field and the cell editor blur before they
 drop, and no chord is bound while one is open, so `ctrl+k` still opens the
-palette.
+palette. Either field puts the tile in insert mode, so bare and shifted letters
+and digits are typed into it and never reach a shell binding (`shift+d` would
+otherwise duplicate the tile).
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,

@@ -17566,6 +17566,16 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
   geode-shell \
   a_click_on_the_slot_row_is_dropped
 
+# The pricer's entry field must read as insert focus to the shell, or a
+# shifted letter typed into it runs a shell binding (shift+d duplicated
+# the tile, 2026-09-24).
+run_mutation "pricer tile: the entry field is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.editor.is_some() {' \
+  geode-app \
+  typing_into_the_pricer_entry_field_fires_no_shell_binding
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

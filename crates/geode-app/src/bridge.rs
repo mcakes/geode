@@ -1252,6 +1252,90 @@ role = "key"
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
     }
 
+    /// A shell holding one restored pricer tile, its roster, actions and
+    /// keymap fragment wired exactly as `main` wires them — so a typed
+    /// key travels the shell's real matcher and insert-focus predicate.
+    fn test_shell_services_with_a_pricer_tile() -> ShellServices {
+        let mut services = test_shell_services();
+        let (handle, _rx) = DataHandle::for_tests();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(PricerFactory::new(
+            handle,
+            Rc::new(MemorySheetStore::default()),
+            Views::builtin(),
+            PricerSettings::default(),
+        )));
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "pricer"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        services
+    }
+
+    /// The pricer's entry field must count as insert focus for the shell:
+    /// a shifted letter typed after `o` is text, never a shell binding
+    /// (`shift+d` is `workspace::duplicate_horizontal`). The shell treats
+    /// keys as typing only while the focused tile's context reads
+    /// `mode == insert` AND the tile holds focus
+    /// (`ShellView::occupant_insert_stack`).
+    #[gpui::test]
+    fn typing_into_the_pricer_entry_field_fires_no_shell_binding(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        let services = test_shell_services_with_a_pricer_tile();
+        let tail = services.action_tail.clone();
+        cx.update(geode_pricer::init);
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let dispatched = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().any(|x| x == h)
+        };
+        vcx.simulate_keystrokes("o");
+        assert!(
+            dispatched("pricer::add_below"),
+            "fixture: `o` reached the pricer"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ec26");
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the entry field ran a shell binding"
+        );
+    }
+
     /// Resolve pricing.adapter through the supplied registry. Unknown names must
     /// warn with the requested and available pricers without preventing setup.
     /// Use both required documents so this reaches registry resolution.

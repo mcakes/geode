@@ -78,9 +78,12 @@ pub const ACTIONS: &[(&str, &str)] = &[
 pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 
 /// The module's keymap fragment (spec §8.4–§8.5). Every predicate is a
-/// plain conjunction whose first identifier is `pricer`. No chord is bound
-/// in `insert` or `entry` mode, so `ctrl+k` keeps opening the palette
-/// from inside a field. `y` alone is NOT bound (planning decision 16): an
+/// plain conjunction whose first identifier is `pricer`. Both text fields
+/// (the entry field and the cell editor) report `mode == insert` — the one
+/// word the shell's insert-focus predicate reads — and share one block;
+/// the tile routes `commit`/`cancel`/`insert_*` by which field is open. No
+/// chord is bound there, so `ctrl+k` keeps opening the palette from inside
+/// a field. `y` alone is NOT bound (planning decision 16): an
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
 /// `g u`).
@@ -143,14 +146,6 @@ context = "pricer && mode == insert"
 "down" = "pricer::insert_down"
 "shift+up" = "pricer::insert_up_big"
 "shift+down" = "pricer::insert_down_big"
-
-[[bindings]]
-context = "pricer && mode == entry"
-[bindings.keys]
-"enter" = "pricer::commit"
-"escape" = "pricer::cancel"
-"up" = "pricer::insert_up"
-"down" = "pricer::insert_down"
 
 [[bindings]]
 context = "pricer && mode == menu"
@@ -465,8 +460,14 @@ mod tests {
             resolve("z shift+r", "normal").as_deref(),
             Some("pricer::expand_all")
         );
-        assert_eq!(resolve("enter", "entry").as_deref(), Some("pricer::commit"));
-        assert_eq!(resolve("up", "entry").as_deref(), Some("pricer::insert_up"));
+        assert_eq!(
+            resolve("enter", "insert").as_deref(),
+            Some("pricer::commit")
+        );
+        assert_eq!(
+            resolve("up", "insert").as_deref(),
+            Some("pricer::insert_up")
+        );
         assert_eq!(
             resolve("shift+up", "insert").as_deref(),
             Some("pricer::insert_up_big")

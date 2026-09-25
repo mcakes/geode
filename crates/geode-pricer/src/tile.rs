@@ -463,15 +463,19 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal`, `entry`, `insert` or `menu`.
+    /// `normal`, `insert` or `menu`.
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("pricer").pair("mode", self.mode()).counts()
     }
 
+    /// `insert` while EITHER text field is open — the entry field or the
+    /// cell editor. The shell treats a key as typing only when the focused
+    /// tile holds focus AND its context reads `mode == insert`
+    /// (`ShellView::occupant_insert_stack`); any other word lets a bare or
+    /// shifted letter reach the shell's own bindings (`shift+d` duplicated
+    /// the tile). `dispatch` tells the two fields apart by which is open.
     pub(crate) fn mode(&self) -> &'static str {
-        if self.entry.is_some() {
-            "entry"
-        } else if self.editor.is_some() {
+        if self.entry.is_some() || self.editor.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
@@ -3225,7 +3229,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open(cx);
         h.visible(&mut vcx, true);
         h.dispatch(&mut vcx, "add_below", None);
-        assert_eq!(h.mode(&mut vcx), "entry");
+        assert_eq!(h.mode(&mut vcx), "insert");
         assert!(focused(&mut vcx), "the field owns focus");
         typed(&h, &mut vcx, "-5 SPX Z26 5000 C");
         h.dispatch(&mut vcx, "commit", None);
@@ -3233,7 +3237,11 @@ pub(crate) mod tests {
         let batches = h.prices();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].lines.len(), 1);
-        assert_eq!(h.mode(&mut vcx), "entry", "a fresh placeholder opens below");
+        assert_eq!(
+            h.mode(&mut vcx),
+            "insert",
+            "a fresh placeholder opens below"
+        );
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), Some(1));
         typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
         h.dispatch(&mut vcx, "commit", None);
@@ -3252,7 +3260,7 @@ pub(crate) mod tests {
         typed(&h, &mut vcx, "SPX Z26 5000 CX");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.sheet_len(&vcx), 0);
-        assert_eq!(h.mode(&mut vcx), "entry");
+        assert_eq!(h.mode(&mut vcx), "insert");
         let footer = h.footer(&vcx).unwrap();
         assert!(footer.ends_with("(column 14)"), "{footer}");
         let text = h.tile.read_with(&vcx, |t, cx| {
@@ -3287,7 +3295,7 @@ pub(crate) mod tests {
             h.footer(&vcx).as_deref(),
             Some("a package cannot hold a package")
         );
-        assert_eq!(h.mode(&mut vcx), "entry");
+        assert_eq!(h.mode(&mut vcx), "insert");
     }
 
     #[gpui::test]
