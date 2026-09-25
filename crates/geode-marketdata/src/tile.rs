@@ -506,8 +506,8 @@ pub struct MarketDataTile {
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
-    /// The eligible upload targets for this panel's own document (Task
-    /// 8): every resolved `egress.toml` target whose `documents` list
+    /// The eligible upload targets for this panel's own document: every
+    /// resolved `egress.toml` target whose `documents` list
     /// names [`PanelSpec::document`], in `egress.toml` order — set once
     /// at construction from `MarketDataFactory::create`'s own
     /// `targets_for`, since the resolved list is a startup fact (egress
@@ -4257,7 +4257,7 @@ impl MarketDataTile {
         }
         // Every cell's `bumped()` result is checked — document rows AND
         // inserted rows together — before either write door opens
-        // (controller ruling, fix round 1): a mixed row with an I64 node
+        // (controller ruling): a mixed row with an I64 node
         // behind an F64 one must not land the F64 cells through
         // `Draft::bump` and only then hit the I64 refusal in the
         // `set_row_cell` loop below, since a partial bump on a row an
@@ -8101,7 +8101,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     }
 
     /// The shipped `DIVIDEND` panel's own `Columns::Values` branch of
-    /// `ty_of` (task 3 review, fix round 1): a row bump lands `amount` as
+    /// `ty_of`: a row bump lands `amount` as
     /// `Value::F64` — proven against the REAL spec, not `SCHEDULE`'s
     /// three-column stand-in, since `ty_of`'s positional read off
     /// `spec.flat_columns()` is only as trustworthy as the spec it is
@@ -8138,7 +8138,7 @@ edits = [["2026-11-20", "-1", 9.5]]
     }
 
     /// An inserted row's own cells land at each column's DECLARED type,
-    /// not a blanket `Value::F64` (task 3 review, fix round 1): `amt` is
+    /// not a blanket `Value::F64`: `amt` is
     /// `F64`, `n` is `I64`, and a whole-number delta bumps both through
     /// the production `:bump` route, `set_row_cell`'s own door.
     #[gpui::test]
@@ -8178,8 +8178,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(cells.get("n"), Some(&Value::I64(4)));
     }
 
-    /// The atomicity fix itself (task 3 review, fix round 1, controller
-    /// ruling): a row bump across an inserted row's `F64` cell and `I64`
+    /// Bump atomicity (controller ruling): a row bump across an inserted row's `F64` cell and `I64`
     /// cell, with a FRACTIONAL delta the `I64` cell refuses, must not
     /// land the `F64` cell first and then refuse — every cell's `bumped`
     /// result is computed before either write door (`Draft::bump`,

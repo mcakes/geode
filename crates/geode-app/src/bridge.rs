@@ -257,7 +257,7 @@ pub fn start(
     let dimensions = setup.dimensions.clone();
     let sources = source_shapes(&setup.config.sources, &schema);
     let local_datasets = Rc::new(setup.local_datasets);
-    // Task 8: target name → accepted document names, in `egress.toml`
+    // Target name → accepted document names, in `egress.toml`
     // order — captured before `DataService::spawn` moves `setup.config`,
     // and shared unmodified between the CVI and dividend factories built
     // below over the SAME resolved list (`MarketDataFactory::create`
@@ -570,11 +570,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 match event {
                     // Routed by the submitting tile's key, exactly as a
-                    // `Query`/`Series` outcome is (Task 8). `geode_data::
-                    // egress` already logs the outcome under `geode::
-                    // ingest`; `MarketDataTile::deliver_upload` is a stub
-                    // through Task 8 — Task 9 wires the `Sent`/failure
-                    // transition it triggers here.
+                    // `Query`/`Series` outcome is: the tile that uploaded
+                    // is the one whose draft enters `Sent` or shows the
+                    // failure. `geode_data::egress` already logs the
+                    // outcome under `geode::ingest`.
                     DataEvent::Upload(outcome) => {
                         shell.update(cx, |s, cx| {
                             s.deliver(
@@ -1608,10 +1607,10 @@ role = "key"
         );
     }
 
-    /// The drain loop's `DataEvent::Upload` arm used to only log (Task
-    /// 7's placeholder); Task 8 routes it into `Delivery::Upload`,
-    /// addressed to the submitting tile's key exactly as a `Query`/
-    /// `Series` outcome is.
+    /// The drain loop routes a `DataEvent::Upload` into
+    /// `Delivery::Upload`, addressed to the submitting tile's key exactly
+    /// as a `Query`/`Series` outcome is — an arm that only logged would
+    /// leave the panel waiting for an outcome forever.
     #[gpui::test]
     fn an_upload_outcome_is_routed_to_its_tile(cx: &mut gpui::TestAppContext) {
         let (services, log) = test_shell_services_with_a_recording_tile();

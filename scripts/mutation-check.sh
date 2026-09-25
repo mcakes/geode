@@ -1389,7 +1389,7 @@ run_mutation "sources: a pattern without a batch capture is dropped" \
   geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
-# ---- egress config (market-data egress, Task 6)
+# ---- egress config (market-data egress spec §4)
 
 run_mutation "egress config: an unknown document is dropped" \
   crates/geode-core/src/egress_config.rs \
@@ -1420,7 +1420,7 @@ run_mutation "egress config: a config_version header is not a spurious diagnosti
   geode-core \
   an_egress_config_version_header_is_not_a_spurious_diagnostic
 
-# ---- egress workers (market-data egress, Task 7)
+# ---- egress workers (market-data egress spec §5)
 
 run_mutation "egress: a write error answers Err" \
   crates/geode-data/src/egress.rs \
@@ -11686,7 +11686,7 @@ run_mutation "mdtile: a panel with no catalog requests one" \
 # next launch — work lost silently, with the restored panel looking
 # perfectly healthy.
 #
-# Re-anchored 2026-09-24 (Task 4's rebase guard, amendment 4): the guard
+# Re-anchored 2026-09-24 (the rebase guard, egress amendment 4): the guard
 # is now followed by a group-capture block before the `match` on the key,
 # so the two-line anchor that used to reach `match &self.key {` no longer
 # does; the guard line alone is unique against `revert`'s own (the
@@ -14957,7 +14957,7 @@ run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
   geode-marketdata rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size
 
 # `MarketDataTile::bump` checks every INSERTED-row cell's `bumped()`
-# result before either write door opens (task 3 review, fix round 1).
+# result before either write door opens.
 # Mutated away, a mixed F64/I64 inserted row writes its F64 cell through
 # `set_row_cell` before the I64 cell's fractional-delta refusal is ever
 # reached — a partial bump the trader never asked for.
@@ -17386,7 +17386,7 @@ run_mutation "objectdialog: enter in browse filter mode is not an exit" \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
-# ---- market-data egress, Task 8: Delivery::Upload and geode-app wiring ----
+# ---- market-data egress: Delivery::Upload and geode-app wiring ----
 
 # `Delivery::key()`'s per-variant answer, mutated to `None` for the new
 # variant — exactly the shape the `Series`/`Price` entries above use. A
@@ -17399,8 +17399,7 @@ run_mutation "shell: an upload delivery routes by key" \
   geode-shell \
   an_upload_delivery_reaches_its_tile_and_no_other
 
-# The bridge's own arm (Task 7's placeholder only logged; Task 8 routes
-# it): a revert to a bare log-and-drop arm is silent, exactly the
+# The bridge's own arm: a revert to a bare log-and-drop arm is silent, exactly the
 # SeriesFetched entry above guards the same failure mode for its own event.
 run_mutation "bridge: a DataEvent::Upload reaches the shell" \
   crates/geode-app/src/bridge.rs \
@@ -17422,8 +17421,8 @@ run_mutation "bridge: a DataEvent::Upload reaches the shell" \
   geode-app \
   an_upload_outcome_is_routed_to_its_tile
 
-# `data_setup` used to hardcode `egress: Vec::new()` (Task 7 left egress.
-# toml unread); a revert to that is silent — no diagnostic, and every
+# `data_setup` must pass the resolved egress list, not `Vec::new()`
+# (egress.toml unread); a revert to that is silent — no diagnostic, and every
 # resolved target simply vanishes from the running service.
 run_mutation "bridge: data_setup wires the resolved egress list into DataServiceConfig" \
   crates/geode-app/src/bridge.rs \
@@ -17450,7 +17449,7 @@ run_mutation "frame: an egress change is a restart, not a silent apply" \
   an_egress_change_asks_for_a_restart
 
 # `targets_for`'s own narrowing predicate: dropped, every resolved target
-# would appear eligible for every document, offering `:upload` (Task 9) a
+# would appear eligible for every document, offering `:upload` a
 # target that does not actually accept the panel's document.
 run_mutation "marketdata: targets_for narrows to targets that accept the document" \
   crates/geode-marketdata/src/content.rs \

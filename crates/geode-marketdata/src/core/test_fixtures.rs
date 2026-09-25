@@ -338,13 +338,13 @@ pub(crate) fn ladder_snapshot(rows: &[(i64, f64)]) -> Snapshot {
 /// panel's own five value columns, for the one production-route test that
 /// must prove `MarketDataTile::bump`'s `ty_of` reads the REAL spec's
 /// `Columns::Values` branch correctly, not `SCHEDULE`'s three-column
-/// stand-in (task 3 review, fix round 1).
+/// stand-in.
 pub(crate) fn dividend_snapshot(rows: &[(&str, &str, &str, &str, f64, &str)]) -> Snapshot {
     dividend_snapshot_at(rows, BASE)
 }
 
 /// [`dividend_snapshot`] stamped as a generation of the caller's choosing
-/// (Task 4) — a second delivery at a later `as_of` is what moves a
+/// — a second delivery at a later `as_of` is what moves a
 /// dividend panel's draft to `Behind`, the tile-level rebase-guard test's
 /// own door onto `:rebase`.
 pub(crate) fn dividend_snapshot_at(
@@ -391,7 +391,7 @@ pub(crate) fn dividend_snapshot_at(
 }
 
 /// A [`DIVIDEND`] model whose rows carry exactly the given `dividend_id`
-/// labels — Task 4's rebase-guard tests, which key a cell edit by a
+/// labels — for the rebase-guard tests, which key a cell edit by a
 /// same-date ordinal (`2026-09-18#2`) and need only the row IDENTITY, not
 /// any particular dates or amount. Built with `MatrixModel::build`, not by
 /// hand, so this exercises the same `RowState::Document` labelling a real
@@ -415,8 +415,7 @@ pub(crate) fn flat_model(labels: &[&str]) -> MatrixModel {
     MatrixModel::build(&snapshot, &DIVIDEND, &Draft::default()).expect("a valid dividend fixture")
 }
 
-/// A flat panel with one `F64` and one `I64` value column (task 3 review,
-/// fix round 1) — cheap to add as a `const`, and the one shape neither
+/// A flat panel with one `F64` and one `I64` value column — cheap to add as a `const`, and the one shape neither
 /// [`SCHEDULE`] (no `I64` column) nor [`LADDER`] (its `I64` is the row
 /// AXIS, never a value cell `:bump` can reach) offers: a row whose cells
 /// `:bump` must land at TWO different declared types, the fixture the

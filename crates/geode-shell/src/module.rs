@@ -58,8 +58,8 @@ pub enum Delivery {
     /// submitting tile's key like a `Query`. Plain fields so the shell,
     /// which never names `geode-data`, can carry `geode_data::egress::
     /// UploadOutcome` across the boundary. Only `MarketDataTile::deliver_
-    /// upload` acts on it (a stub through Task 8; Task 9 wires the
-    /// `Sent`/failure transition); every other occupant ignores it.
+    /// upload` acts on it (entering `Sent`, or painting the failure);
+    /// every other occupant ignores it.
     Upload(UploadDelivery),
 }
 

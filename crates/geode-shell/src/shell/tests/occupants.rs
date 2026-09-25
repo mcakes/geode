@@ -1527,7 +1527,7 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
     );
 }
 
-/// The other keyed variant introduced by egress (Task 8): a `Delivery::
+/// The keyed variant egress adds: a `Delivery::
 /// Upload` reaches the tile that submitted it and no other, exactly as
 /// `Query`/`Price`/`Series` already do — `deliver`'s keyed arm must name
 /// it beside them, not drop it into the broadcast one.

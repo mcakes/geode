@@ -259,7 +259,7 @@ pub struct MarketDataFactory {
     /// over this crate's one shared `marketdata` context ships it.
     ships_keymap: bool,
     /// Every resolved egress target, as name → accepted document names in
-    /// `egress.toml` order (Task 8) — empty until `geode-app` calls
+    /// `egress.toml` order — empty until `geode-app` calls
     /// [`Self::with_egress`]. `Arc`, not `Rc`: `geode-app` builds one list
     /// from `egress.toml` and shares it, unmodified, between the CVI and
     /// dividend factories built over the same resolved targets. `create`
@@ -545,7 +545,7 @@ mod tests {
         }
     }
 
-    /// Task 8: `targets_for` narrows the resolved `egress.toml` list to
+    /// `targets_for` narrows the resolved `egress.toml` list to
     /// the targets that actually accept ONE document, preserving the
     /// order `egress.toml` declared the targets in — a target that lists
     /// a different document only must not appear, and a target that
