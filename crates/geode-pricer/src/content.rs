@@ -42,7 +42,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::yank_col", "Yank column"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
-    ("pricer::escape", "Clear find and notice"),
+    ("pricer::escape", "Clear find and dismissible notice"),
     ("pricer::add_below", "Add a line below"),
     ("pricer::add_above", "Add a line above"),
     ("pricer::edit", "Edit cell"),

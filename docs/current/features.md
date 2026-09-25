@@ -191,14 +191,15 @@ the grid, including a package chevron, cancels an open editor or entry field
 and never commits it, and acts on the row it was painted on: the entry
 placeholder is a row, so closing it moves the rows below up, but a click below
 it still lands on (or toggles, or double-click edits) the row the trader
-aimed at. A click on the placeholder itself only closes it. A `:` command or a `/` search closes the menu and any
-open field first. A click outside the grid leaves a text editor open until the next
-grid click or verb, as in the market-data panel; the typeahead popup closes on
-an outside click. Both the entry field and the cell editor blur before they
-drop, and no chord is bound while one is open, so `ctrl+k` still opens the
-palette. Either field puts the tile in insert mode, so bare and shifted letters
-and digits are typed into it and never reach a shell binding (`shift+d` would
-otherwise duplicate the tile).
+aimed at. A click or double-click on the placeholder itself only closes it. A
+`:` command or a `/` search closes the menu and any open field first. A click
+outside the grid leaves a text editor open until the next grid click or verb,
+as in the market-data panel; the typeahead popup closes on an outside click.
+Both the entry field and the cell editor blur before they drop, and no chord
+is bound while one is open, so `ctrl+k` still opens the palette. Either field
+puts the tile in insert mode, so bare and shifted letters and digits are typed
+into it and never reach a shell binding (`shift+d` would otherwise duplicate
+the tile).
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
@@ -253,9 +254,11 @@ While a load is pending the header reads `loading…`; `escape` does not clear
 it (it is the only sign the load has not answered), and the answer does.
 
 The session record keeps the sheet name, view, refresh setting, cursor line,
-and open packages (only those still on the sheet: a deleted package's id is
-kept in the tile while an undo could bring it back, but never saved). A new tile takes the next free `untitled-N` name, and names
-open in another tile are skipped.
+and open packages (only those still on the sheet: a deleted or ungrouped
+package's id stays in the tile's open set until a load or `z shift+r` /
+`z shift+m` replaces the set, so an undo reinstates it open, but it is never
+saved). A new tile takes the next free `untitled-N` name, and names open in
+another tile are skipped.
 
 **Known limitation:** the sheet store is in memory until the DuckDB store
 lands. A sheet survives closing and reopening its tile within one run, not a

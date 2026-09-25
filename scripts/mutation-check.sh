@@ -17681,6 +17681,24 @@ run_mutation "pricer tile: a restored leg's package stays closed" \
   '                        let _ = p;' \
   geode-pricer undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg
 
+# A press on the placeholder must hand on "nothing" too, or its
+# double-click edits the row that slides up under the second press.
+run_mutation "pricer tile: a placeholder press hands nothing on" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.click_anchor = Some((*row, line));' \
+  '                    self.click_anchor = line.map(|id| (*row, Some(id)));' \
+  geode-pricer a_double_click_on_the_placeholder_opens_nothing
+
+# The handed-on line must reach the cursor before the tree-column return,
+# or a tree-column double-click leaves it on the row that slid up.
+run_mutation "pricer tile: a tree-column double-click keeps the slid-up row" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.cursor.line = Some(id);
+                self.sync_cursor(cx);
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  geode-pricer a_tree_column_double_click_below_an_open_entry_keeps_that_row
+
 # Planning decision 4's gate: every line in flight at its revision asks
 # for nothing more.
 run_mutation "pricer tile: a submit ignores what is already in flight" \

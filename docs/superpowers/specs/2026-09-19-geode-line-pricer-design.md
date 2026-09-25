@@ -1220,6 +1220,11 @@ Part 4 obligations:
 - `keep_generations` for local datasets.
 - Catalogue underlyings for the typeahead, if a source for them exists
   by then.
+- Decide the header precedence of a refusal streak over `loading…`. Once
+  `:e` makes loads happen mid-life, a streak standing when a load starts
+  paints `REFUSED` over `loading…`, and a retry that fires while loading
+  submits nothing and is not re-armed (`loaded` resubmits, which ends or
+  continues the streak, so it self-heals).
 
 Deferred minors, none blocking: `escape` clears `loading…` (or
 `REFUSED`) mid-flight; the 1 s retry is unbounded with no backoff; the
@@ -1232,14 +1237,19 @@ command; `redo`'s clear-on-error arm is untested.
 
 Post-merge cleanup (2026-09-24, `worktree-pricer-cleanup`): clicks below
 an open entry resolve their row to a `LineId` before the entry closes
-(a double-click's first press hands its line to the second); `escape`
+(a double-click's first press hands its line, or the placeholder, to the
+second); the `pricer::escape` title is "Clear find and dismissible
+notice"; `escape`
 leaves `loading…`; `REFUSED` is its own state over the notice, cleared
 when nothing is left to submit, backing off 1 s → 30 s and logging once
 per streak; a refused `apply_edits` rollback logs and clears the undo
 history; the open set is no longer pruned by edits, so `d d`/`g u` then
 `u` restores a package open, with the cursor on the first restored row.
-This closes the first three of the deferred minors above and the
-`dd`/`g u` one.
+Of the deferred minors above this closes three: `escape` clearing
+`loading…`/`REFUSED`, the unbounded 1 s retry, and `dd`/`g u` then `u`
+restoring a package collapsed. The config-counter re-read/re-warn, the
+editor's stale column after a view reload, the unrefreshed menu enabled
+states and the untested `redo` clear-on-error arm remain open.
 
 Unverified on a real window: the header row, the tree column's indent
 and package ground, stale versus fresh contrast, the entry field over

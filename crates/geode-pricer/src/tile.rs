@@ -261,13 +261,14 @@ pub struct PricerTile {
     pub(crate) editor: Option<Editor>,
     /// The `.` action menu: `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
-    /// The line a cell press that closed the entry field resolved, with
-    /// the grid row it was painted at (see `on_table_event`).
-    click_anchor: Option<(usize, LineId)>,
+    /// What a cell press that closed the entry field resolved — its line,
+    /// `None` on the placeholder — with the grid row it was painted at
+    /// (see `on_table_event`).
+    click_anchor: Option<(usize, Option<LineId>)>,
     /// `click_anchor`, taken by the next press when it hit the same row:
     /// read only by that press's own `DoubleClickedCell` (every press
     /// emits `SelectCell` first, which overwrites it).
-    pressed: Option<(usize, LineId)>,
+    pressed: Option<(usize, Option<LineId>)>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -2188,7 +2189,7 @@ impl PricerTile {
                 // what is painted under it).
                 self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);
                 if self.entry.is_some() {
-                    self.click_anchor = line.map(|id| (*row, id));
+                    self.click_anchor = Some((*row, line));
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
@@ -2206,15 +2207,25 @@ impl PricerTile {
             // `SelectCell` (emitted first) already cancelled whatever was
             // open; the tree column and the placeholder open nothing.
             TableEvent::DoubleClickedCell(row, col) => {
+                // A handed-on line wins, placeholder (`None`) included:
+                // the row now painted under the pointer slid up there.
                 let line = match self.pressed.take() {
-                    Some((_, id)) => Some(id),
+                    Some((_, line)) => line,
                     None => self.line_at(*row),
                 };
                 self.close_entry(window, cx);
-                let (Some(id), Some(c)) = (line, SheetDelegate::plan_col(*col)) else {
+                let Some(id) = line else {
                     return;
                 };
+                // Before the tree-column check: this press's `SelectCell`
+                // moved the cursor to the row that slid up.
                 self.cursor.line = Some(id);
+                self.sync_cursor(cx);
+                let Some(c) = SheetDelegate::plan_col(*col) else {
+                    self.rebuild_chrome();
+                    cx.notify();
+                    return;
+                };
                 self.cursor.col = c;
                 self.sync_cursor(cx);
                 self.footer = None;
@@ -4658,6 +4669,38 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "insert");
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"), "B's strike");
+    }
+
+    /// A double-click on the placeholder only closes the entry: the row
+    /// that slides up under its second press opens nothing.
+    #[gpui::test]
+    fn a_double_click_on_the_placeholder_opens_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-1-4"); // the placeholder
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(editor_text(&h, &vcx), None, "no editor on B");
+    }
+
+    /// A double-click on the tree column opens nothing, but the cursor
+    /// stays on the row it was aimed at, not the one that slid up.
+    #[gpui::test]
+    fn a_tree_column_double_click_below_an_open_entry_keeps_that_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-2-0"); // B's shorthand
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on B, not C");
     }
 
     /// The closing press's line is handed to the next press only: a
