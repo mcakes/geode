@@ -17316,13 +17316,9 @@ run_mutation "pricer tile: a refused submission never retries" \
 
 run_mutation "pricer tile: a tick does not stale the sheet" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.sheet.is_empty() || self.loading {
-            return;
-        }
+  '    fn reprice_all(&mut self, cx: &mut Context<Self>) {
         self.sheet.mark_all_stale();' \
-  '        if self.sheet.is_empty() || self.loading {
-            return;
-        }' \
+  '    fn reprice_all(&mut self, cx: &mut Context<Self>) {' \
   geode-pricer the_refresh_tick_marks_every_line_stale_and_submits
 
 run_mutation "pricer tile: the flip barrier waits for the pricer" \
