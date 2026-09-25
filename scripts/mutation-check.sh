@@ -15636,11 +15636,11 @@ run_mutation "tilepicker: the door requires the placeholder to be focused" \
 # the longer one, so the bare line would match the main-tree site first.
 run_mutation "tilepicker: the dock listener calls the door" \
   crates/geode-shell/src/shell/render.rs \
-  '                            // same gesture table.
-                            if view.try_fullscreen_on_double_click(id, event, window, cx)
-                                || view.try_pick_tile_on_double_click(id, event, window, cx)' \
-  '                            // same gesture table.
-                            if view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  '                                    // same gesture table.
+                                    if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                        || view.try_pick_tile_on_double_click(id, event, window, cx)' \
+  '                                    // same gesture table.
+                                    if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
 
@@ -18380,6 +18380,154 @@ run_mutation "pricer tile: a submit ignores what is already in flight" \
   '            .any(|_| true);' \
   geode-pricer price_submits_nothing_while_every_line_is_in_flight
 
+# ---- timeseries mouse pass (2026-09-24): every pointer door and gesture ----
+
+# The divider band is asked before the plots: its margins overlap their
+# edges on purpose.
+run_mutation "timeseries mouse: the divider band outranks the plot edge" \
+  crates/geode-chart/src/core/hit.rs \
+  '    if divider_band(layout, bounds, rem_px).is_some_and(|b| b.contains(x, y)) {' \
+  '    if false {' \
+  geode-chart the_divider_band_is_the_gap_plus_a_margin_each_side_and_only_with_two_panes
+
+# A pointer zoom keeps the point under the pointer still, not the centre.
+run_mutation "timeseries mouse: zoom_at pivots on the pointer" \
+  crates/geode-timeseries/src/core/model.rs \
+  '        self.view.zoom(factor, about, self.full);' \
+  '        self.view.zoom(factor, 0.5, self.full);' \
+  geode-timeseries a_pointer_zoom_keeps_its_point_still_and_a_pointer_pan_moves_by_a_fraction
+
+# The dominant axis wins: a sideways wheel pans and never zooms.
+run_mutation "timeseries mouse: a sideways wheel pans, not zooms" \
+  crates/geode-timeseries/src/tile/pointer.rs \
+  '        let changed = if dx.abs() > dy.abs() {' \
+  '        let changed = if false {' \
+  geode-timeseries a_wheel_over_the_plot_zooms_about_the_pointer_and_a_sideways_wheel_pans
+
+# Rolled away zooms in; the inverse would zoom out on the first notch.
+run_mutation "timeseries mouse: the wheel sign is rolled-away-in" \
+  crates/geode-timeseries/src/tile/pointer.rs \
+  '                ZOOM_FACTOR.powf((dy / WHEEL_ZOOM_PX) as f64),' \
+  '                ZOOM_FACTOR.powf(-(dy / WHEEL_ZOOM_PX) as f64),' \
+  geode-timeseries a_wheel_over_the_plot_zooms_about_the_pointer_and_a_sideways_wheel_pans
+
+# The second press of a double-click arms nothing: the shell owns it.
+run_mutation "timeseries mouse: a double-click arms no drag" \
+  crates/geode-timeseries/src/tile/pointer.rs \
+  '        if event.button != MouseButton::Left || event.click_count > 1 || event.modifiers.modified()' \
+  '        if event.button != MouseButton::Left || event.click_count > 2 || event.modifiers.modified()' \
+  geode-timeseries a_drag_on_the_plot_pans_and_ends_on_release_or_a_buttonless_move
+
+# A buttonless move is the release that was missed.
+run_mutation "timeseries mouse: a buttonless move ends the drag" \
+  crates/geode-timeseries/src/tile/pointer.rs \
+  '            None => self.drag_finished(cx),' \
+  '            None => {}' \
+  geode-timeseries a_drag_on_the_plot_pans_and_ends_on_release_or_a_buttonless_move
+
+# The split follows the pointer's y.
+run_mutation "timeseries mouse: a split drag reads the pointer" \
+  crates/geode-timeseries/src/tile/pointer.rs \
+  '                let raw = (y - upper.y - gap / 2.0) / avail;' \
+  '                let raw = self.model.split();' \
+  geode-timeseries a_drag_on_the_divider_moves_the_split
+
+# The slot section is disabled, with its reason, while the tile is empty.
+run_mutation "timeseries mouse: an empty tile disables the slot rows" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '        None => Err("add a series first"),' \
+  '        None => Ok(()),' \
+  geode-timeseries an_empty_tile_lists_every_verb_and_disables_the_slot_section
+
+# Stepping never lands on a separator or a section heading.
+run_mutation "timeseries mouse: menu stepping skips non-rows" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '        .filter_map(|(i, r)| matches!(r, MenuRow::Action { .. }).then_some(i))' \
+  '        .map(|(i, _)| i)' \
+  geode-timeseries stepping_skips_separators_and_sections_and_clamps
+
+# The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
+# own `on_mouse_down_out`; in the bubble phase a second click reopens.
+run_mutation "timeseries mouse: the actions button toggles in capture" \
+  crates/geode-timeseries/src/header.rs \
+  '            ))
+            .capture_any_mouse_down({' \
+  '            ))
+            .on_any_mouse_down({' \
+  geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The readout toggles for the same reason, in the same phase: in the
+# bubble phase the open range popup's `on_mouse_down_out` closes it
+# first and the click meant to close reopens on a fresh seed.
+run_mutation "timeseries mouse: the readout toggles in capture" \
+  crates/geode-timeseries/src/header.rs \
+  '            // would reopen on a fresh seed instead.
+            .capture_any_mouse_down({' \
+  '            // would reopen on a fresh seed instead.
+            .on_any_mouse_down({' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# A right press focuses the tile it lands on (review M1: a context menu
+# opened in an unfocused tile answers to the wrong tile's keys).
+run_mutation "shell: a right press focuses the tile" \
+  crates/geode-shell/src/shell/render.rs \
+  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                view.leave_command_line(window, cx);
+                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
+  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                view.leave_command_line(window, cx);
+                                if false {' \
+  geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
+
+# A verb outside the menu's own closes it first.
+run_mutation "timeseries mouse: a foreign verb closes the menu" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"' \
+  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick" | "zoom_in"' \
+  geode-timeseries the_menu_keys_step_over_action_rows_pick_and_close
+
+# A swatch click flips visibility through `v`'s own path.
+run_mutation "timeseries mouse: the swatch toggles visibility" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        let flipped = self.model.toggle_visible();' \
+  '        let flipped = Changed::NONE;' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# A right-click selects the slot under the pointer before opening.
+run_mutation "timeseries mouse: a right-click selects its chip" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        let changed = self.model.set_cursor(index);
+        self.apply_changed(changed, cx);
+        if self.popup.is_some() {' \
+  '        let changed = Changed::NONE;
+        self.apply_changed(changed, cx);
+        if self.popup.is_some() {' \
+  geode-timeseries a_right_click_on_a_chip_selects_it_and_opens_the_menu_on_it
+
+# The readout opens the RANGE popup, not another.
+run_mutation "timeseries mouse: the readout opens the range popup" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
+  '        self.dispatch(&ActionId("timeseries::list".into()), None, window, cx);' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# A frequency chip's write reaches the chrome (the header readout).
+run_mutation "timeseries mouse: a frequency chip rebuilds the chrome" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                    r.frequency = f;
+                }
+                self.apply_changed(changed, cx);' \
+  '                    r.frequency = f;
+                }
+                self.apply_changed(Changed::NONE, cx);' \
+  geode-timeseries a_frequency_chip_writes_at_once_keeps_the_popup_open_and_refuses_inline
+
+# The empty state's first button adds, the second composes.
+run_mutation "timeseries mouse: the empty-state buttons dispatch their own verbs" \
+  crates/geode-timeseries/src/header.rs \
+  '    ("Add series…", "timeseries::add"),' \
+  '    ("Add series…", "timeseries::expr"),' \
+  geode-timeseries the_empty_state_buttons_open_the_picker_and_the_expression_field
 # A refused redo drops the rest of both sides, as a refused undo does:
 # the redo still waiting would replay against rows the refusal moved.
 run_mutation "pricer undo: a refused redo clears the whole history" \

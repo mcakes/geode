@@ -569,7 +569,7 @@ impl Harness {
                 .and_then(|p| match p {
                     Popup::Picker(p) => Some(p.input.clone()),
                     Popup::Expr(f) => Some(f.input.clone()),
-                    Popup::Series(_) | Popup::Range(_) => None,
+                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) => None,
                 })
                 .expect("a field popup is open");
             input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
@@ -2095,4 +2095,452 @@ fn the_chart_offset_follows_the_app_clock(cx: &mut gpui::TestAppContext) {
         "a moved offset is a real rebuild"
     );
     assert_ne!(before.offset_secs, after.offset_secs);
+}
+
+// ---- the mouse pass (2026-09-24) ---------------------------------
+
+/// A loaded tile: one source, one delivered result of `n` hourly
+/// buckets, painted once so the chart surface has bounds.
+fn open_loaded(cx: &mut gpui::TestAppContext, n: usize) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open(cx);
+    h.visible(&mut vcx, true);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.requests();
+    h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+    let tag = h.series_request().unwrap().tag;
+    h.deliver_series(&mut vcx, tag, result_with(&[1], n));
+    h.draw(&mut vcx);
+    (h, vcx)
+}
+
+impl Harness {
+    fn drag(&self, vcx: &gpui::VisualTestContext) -> Option<Drag> {
+        self.tile.read_with(vcx, |t, _| t.drag())
+    }
+    fn popup_is_menu(&self, vcx: &gpui::VisualTestContext) -> bool {
+        self.tile
+            .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Menu(_))))
+    }
+    /// The menu's rows as `(title, highlighted)` — its own "painted
+    /// text".
+    fn menu_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let title = match r {
+                        menu::MenuRow::Action { title, .. } => title.to_string(),
+                        menu::MenuRow::Separator => "---".into(),
+                        menu::MenuRow::Section(s) => format!("[{s}]"),
+                    };
+                    (title, i == m.highlighted)
+                })
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
+    fn menu_row_index(&self, vcx: &gpui::VisualTestContext, title: &str) -> usize {
+        self.menu_rows(vcx)
+            .iter()
+            .position(|(t, _)| t == title)
+            .unwrap_or_else(|| panic!("{title} is a menu row"))
+    }
+    fn view(&self, vcx: &gpui::VisualTestContext) -> (f64, f64) {
+        let v = self.model(vcx).view();
+        (v.lo, v.hi)
+    }
+    /// A real right-button press and release on a painted element.
+    fn right_click(&self, vcx: &mut gpui::VisualTestContext, selector: &str) {
+        let at = centre_of(vcx, selector);
+        vcx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Right,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Right,
+            click_count: 1,
+        });
+        self.draw(vcx);
+    }
+    fn wheel(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        dx: f32,
+        dy: f32,
+    ) {
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(dx), gpui::px(dy))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        self.draw(vcx);
+    }
+}
+
+/// The painted chart surface's bounds.
+fn chart_bounds(vcx: &mut gpui::VisualTestContext) -> gpui::Bounds<gpui::Pixels> {
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let selector: &'static str = Box::leak(format!("timeseries-chart-{TILE}").into_boxed_str());
+    vcx.debug_bounds(selector)
+        .expect("the chart surface is painted")
+}
+
+/// A point inside the upper plot: the surface's centre is always in
+/// it (the axis column is 44 px wide, the x strip 18 px tall).
+fn plot_point(vcx: &mut gpui::VisualTestContext, dx: f32) -> gpui::Point<gpui::Pixels> {
+    let b = chart_bounds(vcx);
+    gpui::point(b.center().x + gpui::px(dx), b.origin.y + gpui::px(20.))
+}
+
+#[gpui::test]
+fn a_wheel_over_the_plot_zooms_about_the_pointer_and_a_sideways_wheel_pans(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_loaded(cx, 100);
+    assert_eq!(h.view(&vcx), (0.0, 100.0));
+    let at = plot_point(&mut vcx, 0.);
+    // Rolled away (positive y): in.
+    h.wheel(&mut vcx, at, 0., 48.);
+    let (lo, hi) = h.view(&vcx);
+    assert!(
+        (hi - lo - 80.0).abs() < 1e-6,
+        "one ZOOM_FACTOR step: {lo}..{hi}"
+    );
+    // About the pointer, which sat near the plot's middle: the window
+    // shrank from both ends.
+    assert!(lo > 0.0 && hi < 100.0, "{lo}..{hi}");
+    // The dominant axis wins: a sideways wheel pans and does not zoom.
+    let before = h.view(&vcx);
+    h.wheel(&mut vcx, at, -40., 5.);
+    let after = h.view(&vcx);
+    assert!(
+        (after.1 - after.0 - (before.1 - before.0)).abs() < 1e-6,
+        "span kept"
+    );
+    assert!(
+        after.0 > before.0,
+        "content dragged left shows later buckets"
+    );
+    // Rolled toward (negative y): out, and it never leaves the full range.
+    h.wheel(&mut vcx, at, 0., -480.);
+    assert_eq!(h.view(&vcx), (0.0, 100.0));
+    // Over the x-axis strip (below the plot) nothing answers.
+    let b = chart_bounds(&mut vcx);
+    let strip = gpui::point(b.center().x, b.origin.y + b.size.height - gpui::px(4.));
+    h.wheel(&mut vcx, strip, 0., 48.);
+    assert_eq!(h.view(&vcx), (0.0, 100.0), "the strip is not a plot");
+}
+
+#[gpui::test]
+fn a_drag_on_the_plot_pans_and_ends_on_release_or_a_buttonless_move(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 100);
+    h.dispatch(&mut vcx, "zoom_in", None);
+    let before = h.view(&vcx);
+    let at = plot_point(&mut vcx, 0.);
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    h.draw(&mut vcx);
+    assert!(matches!(h.drag(&vcx), Some(Drag::Pan { .. })), "armed");
+    let to = gpui::point(at.x + gpui::px(40.), at.y);
+    vcx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    let after = h.view(&vcx);
+    assert!(
+        (after.1 - after.0 - (before.1 - before.0)).abs() < 1e-6,
+        "a pan keeps the span"
+    );
+    assert!(
+        after.0 < before.0,
+        "dragged right: earlier buckets ({before:?} → {after:?})"
+    );
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: to,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.drag(&vcx), None, "released");
+    // A second press of a double-click arms nothing.
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 2,
+        first_mouse: false,
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.drag(&vcx), None, "the shell owns the double-click");
+    // A missed release: the next buttonless move ends the drag.
+    click_at_down(&mut vcx, at);
+    h.draw(&mut vcx);
+    assert!(h.drag(&vcx).is_some());
+    vcx.simulate_mouse_move(to, None, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(h.drag(&vcx), None, "a buttonless move is the release");
+}
+
+/// A left press only, for the drag tests.
+fn click_at_down(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+}
+
+#[gpui::test]
+fn a_drag_on_the_divider_moves_the_split(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_loaded(cx, 20);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "yaxis s2 bottomleft").unwrap();
+    h.requests();
+    h.deliver_fetched(&mut vcx, "demo_kdb", "VIX", Ok(1));
+    let tag = h.series_request().unwrap().tag;
+    h.deliver_series(&mut vcx, tag, result_with(&[1, 2], 20));
+    h.draw(&mut vcx);
+    // The band paints only once the surface's bounds are known — the
+    // frame after the first paint.
+    h.draw(&mut vcx);
+    let before = h.model(&vcx).split();
+    let band = centre_of(&mut vcx, &format!("timeseries-divider-{TILE}"));
+    click_at_down(&mut vcx, band);
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.drag(&vcx),
+        Some(Drag::Split),
+        "the band arms a split drag"
+    );
+    let to = gpui::point(band.x, band.y + gpui::px(40.));
+    vcx.simulate_mouse_move(to, gpui::MouseButton::Left, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    let after = h.model(&vcx).split();
+    assert!(
+        after > before,
+        "dragged down: a taller upper pane ({before} → {after})"
+    );
+    assert!(
+        ((after / 0.01).round() * 0.01 - after).abs() < 1e-6,
+        "quantised: {after}"
+    );
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: to,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.drag(&vcx), None);
+    // With one pane there is no band at all.
+    h.command(&mut vcx, "yaxis s2 left").unwrap();
+    h.draw(&mut vcx);
+    h.draw(&mut vcx);
+    let selector: &'static str = Box::leak(format!("timeseries-divider-{TILE}").into_boxed_str());
+    assert!(vcx.debug_bounds(selector).is_none(), "one pane: no divider");
+}
+
+#[gpui::test]
+fn the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    assert!(h.popup_is_menu(&vcx));
+    assert_eq!(
+        h.key_context_pair(&mut vcx, "popup").as_deref(),
+        Some("menu")
+    );
+    assert_eq!(h.key_context_mode(&mut vcx), "normal");
+    let rows = h.menu_rows(&vcx);
+    assert_eq!(rows[0], ("Add series…".to_string(), true), "{rows:?}");
+    assert!(rows.contains(&("[no series]".to_string(), false)));
+    // A disabled row explains and stays.
+    let remove = h.menu_row_index(&vcx, "Remove");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{remove}"));
+    assert!(h.popup_is_menu(&vcx), "a disabled row keeps the menu");
+    assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
+    // The button closes it.
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    assert!(h.popup_is_none(&vcx), "a second click closes");
+    // An enabled row closes the menu and takes the verb's own path.
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    let range = h.menu_row_index(&vcx, "Range…");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{range}"));
+    assert!(h.popup_is_range(&vcx), "the row opened the range popup");
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+}
+
+#[gpui::test]
+fn the_menu_keys_step_over_action_rows_pick_and_close(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(h.popup_is_menu(&vcx));
+    // Three down from `Add series…` lands on `Range…`; one more skips
+    // the separator and the section and lands on `Hide`.
+    h.dispatch(&mut vcx, "list_down", Some(3));
+    assert!(h.menu_rows(&vcx)[3].1, "{:?}", h.menu_rows(&vcx));
+    h.dispatch(&mut vcx, "list_down", None);
+    let rows = h.menu_rows(&vcx);
+    let lit = rows.iter().position(|(_, on)| *on).unwrap();
+    assert_eq!(rows[lit].0, "Hide");
+    // Pick: the slot hides, the menu is gone.
+    h.dispatch(&mut vcx, "menu_pick", None);
+    assert!(h.popup_is_none(&vcx));
+    assert!(!h.model(&vcx).slots()[0].visible);
+    // `escape`'s verb closes; `.` toggles.
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(h.popup_is_menu(&vcx));
+    h.dispatch(&mut vcx, "list_close", None);
+    assert!(h.popup_is_none(&vcx));
+    h.dispatch(&mut vcx, "menu", None);
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(h.popup_is_none(&vcx), "a second `.` closes");
+    // Any other verb closes the menu first and then acts.
+    h.dispatch(&mut vcx, "menu", None);
+    h.dispatch(&mut vcx, "zoom_in", None);
+    assert!(h.popup_is_none(&vcx));
+}
+
+#[gpui::test]
+fn a_menu_row_hover_moves_the_highlight(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "menu", None);
+    let range = h.menu_row_index(&vcx, "Range…");
+    let at = centre_of(&mut vcx, &format!("ts-menu-row-{TILE}-{range}"));
+    vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    assert!(h.menu_rows(&vcx)[range].1, "the pointer's row is lit");
+}
+
+#[gpui::test]
+fn a_right_click_on_a_chip_selects_it_and_opens_the_menu_on_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    assert_eq!(h.model(&vcx).cursor(), Some(1));
+    h.right_click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
+    assert_eq!(h.model(&vcx).cursor(), Some(0));
+    assert!(h.popup_is_menu(&vcx));
+    assert!(
+        h.menu_rows(&vcx)
+            .contains(&("[SPX.close]".to_string(), false)),
+        "{:?}",
+        h.menu_rows(&vcx)
+    );
+}
+
+#[gpui::test]
+fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.click(&mut vcx, &format!("timeseries-swatch-{TILE}-1"));
+    let m = h.model(&vcx);
+    assert!(!m.slots()[0].visible, "hidden");
+    assert_eq!(m.cursor(), Some(0), "the toggled slot is the cursor");
+    assert!(
+        h.painted_text(&mut vcx).contains("SPX.close"),
+        "still in the strip"
+    );
+    h.click(&mut vcx, &format!("timeseries-swatch-{TILE}-1"));
+    assert!(h.model(&vcx).slots()[0].visible, "shown again");
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert!(h.popup_is_range(&vcx));
+    // A second click closes rather than reseeding over typed dates
+    // (`left` onto the month, then a digit typed into it — a bare
+    // digit on an unedited popup would be a preset and commit).
+    vcx.simulate_keystrokes("left 3");
+    assert!(h.popup_is_range(&vcx));
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert!(h.popup_is_none(&vcx), "the readout toggles");
+}
+
+#[gpui::test]
+fn an_outside_click_closes_the_menu_and_the_menu_follows_the_cursor_slot(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_loaded(cx, 20);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(h.menu_rows(&vcx).contains(&("[VIX]".to_string(), false)));
+    // A `:` line under the open menu moves the cursor slot: the rows
+    // follow it.
+    h.command(&mut vcx, "remove s2").unwrap();
+    assert!(h.popup_is_menu(&vcx), "`:` leaves the menu up");
+    let rows = h.menu_rows(&vcx);
+    assert!(
+        rows.contains(&("[SPX.close]".to_string(), false)),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|(_, on)| *on), "the highlight survived");
+    // A click on the chart, outside the menu, closes it; the press
+    // that closed it arms no lingering drag once released.
+    let at = plot_point(&mut vcx, 0.);
+    click_at(&mut vcx, at, 1);
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx), "an outside click closes the menu");
+    assert_eq!(h.drag(&vcx), None);
+}
+
+#[gpui::test]
+fn a_frequency_chip_writes_at_once_keeps_the_popup_open_and_refuses_inline(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.dispatch(&mut vcx, "range", None);
+    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1h"));
+    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
+    assert!(h.popup_is_range(&vcx), "a setting, not a commit");
+    assert!(h.painted_text(&mut vcx).contains("1y · 1h"));
+    // A year of minutes is over the point cap: refused inline, the
+    // frequency untouched.
+    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1m"));
+    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
+    assert!(h.range_error(&vcx).is_some(), "the cap refusal is inline");
+    assert!(h.popup_is_range(&vcx));
+    // A good chip clears it.
+    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1d"));
+    assert_eq!(h.range_error(&vcx), None);
+    assert_eq!(h.model(&vcx).frequency(), Frequency::D1);
+}
+
+#[gpui::test]
+fn the_empty_state_buttons_open_the_picker_and_the_expression_field(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-empty-{TILE}-0"));
+    assert!(
+        h.tile
+            .read_with(&vcx, |t, _| matches!(t.popup(), Some(Popup::Picker(_))))
+    );
+    h.dispatch(&mut vcx, "cancel", None);
+    h.click(&mut vcx, &format!("timeseries-empty-{TILE}-1"));
+    assert!(h.popup_is_expr(&vcx));
+    h.dispatch(&mut vcx, "cancel", None);
+    // Loaded, the buttons are gone with the hint.
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.draw(&mut vcx);
+    let selector: &'static str = Box::leak(format!("timeseries-empty-{TILE}-0").into_boxed_str());
+    assert!(vcx.debug_bounds(selector).is_none());
 }

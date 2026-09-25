@@ -3,6 +3,7 @@
 
 pub mod axis;
 pub mod decimate;
+pub mod hit;
 pub mod layout;
 pub mod palette;
 pub mod scale;

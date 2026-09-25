@@ -728,6 +728,26 @@ impl Model {
         self.view.reset(self.full);
         self.view_changed()
     }
+    /// The pointer's zoom (mouse pass, 2026-09-24): `factor > 1` zooms
+    /// in, `< 1` out, keeping the point `about` (0 = the visible left
+    /// edge, 1 = the right) where it is — the thing under the wheel
+    /// stays under the wheel. A non-finite or non-positive factor is a
+    /// no-op, as `View::zoom` already makes it.
+    pub fn zoom_at(&mut self, factor: f64, about: f64) -> Changed {
+        self.view.zoom(factor, about, self.full);
+        self.view_changed()
+    }
+    /// The pointer's pan: shift the view by `fraction` of its own width
+    /// (negative = left). A drag hands over the dragged distance as a
+    /// fraction of the plot's width, so the data follows the pointer
+    /// one-to-one; a wheel hands over its pixels the same way.
+    pub fn pan_by(&mut self, fraction: f64) -> Changed {
+        if !fraction.is_finite() || fraction == 0.0 {
+            return Changed::NONE;
+        }
+        self.view.pan(fraction, self.full);
+        self.view_changed()
+    }
     pub fn jump_start(&mut self) -> Changed {
         self.view.jump_start(self.full);
         self.view_changed()
@@ -1047,6 +1067,32 @@ mod tests {
         m.zoom_in(1);
         m.set_full((0.0, 50.0));
         assert!(m.view().hi <= 50.0, "set_full re-clamps the view");
+    }
+
+    #[test]
+    fn a_pointer_zoom_keeps_its_point_still_and_a_pointer_pan_moves_by_a_fraction() {
+        let mut m = two_sources();
+        m.set_full((0.0, 100.0));
+        // Zoom in by 2 about the right edge: the right edge stays put.
+        let ch = m.zoom_at(2.0, 1.0);
+        assert!(ch.chrome());
+        assert_eq!((m.view().lo, m.view().hi), (50.0, 100.0));
+        // Zoom out by the same about the LEFT edge of that window: the
+        // left edge stays and the width doubles, clamped to the full.
+        m.zoom_at(0.5, 0.0);
+        assert_eq!((m.view().lo, m.view().hi), (0.0, 100.0));
+        m.zoom_at(4.0, 0.5);
+        assert_eq!((m.view().lo, m.view().hi), (37.5, 62.5));
+        // A drag of a tenth of the plot moves a tenth of the window.
+        m.pan_by(-0.1);
+        assert!((m.view().lo - 35.0).abs() < 1e-9, "{}", m.view().lo);
+        assert!((m.view().hi - 60.0).abs() < 1e-9);
+        // Nothing to do answers nothing.
+        assert!(m.pan_by(0.0).is_none());
+        assert!(m.pan_by(f64::NAN).is_none());
+        let before = m.view();
+        m.zoom_at(f64::NAN, 0.5);
+        assert_eq!(m.view(), before, "a bad factor moves nothing");
     }
 
     #[test]

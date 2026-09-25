@@ -152,10 +152,27 @@ coverage. Expression slots may narrow the result to buckets shared by their
 operands.
 
 `geode-chart` is independent of series and shell concepts. Its pure core owns
-scales, axes, layout, viewport, crosshair, decimation, and palette derivation.
-`ChartElement` paints an immutable `ChartModel` through gpui-component's plot
-surface. Paths and chrome are cached by the values that affect them; cursor
-movement does not rebuild the data model.
+scales, axes, layout, viewport, crosshair, hit-testing, decimation, and palette
+derivation. `ChartElement` paints an immutable `ChartModel` through
+gpui-component's plot surface. Paths and chrome are cached by the values that
+affect them; cursor movement does not rebuild the data model.
+
+Every verb has a pointer route beside its key, and both take the tile's one
+`dispatch` path. The header's `⋯` button and a right-click on a chip open an
+action menu (`.` from the keyboard) listing the openers, the cursor slot's
+verbs, the frequency steps, the two toggles with their state, and the view
+reset; a disabled row names its reason as the notice. A chip click selects
+its slot, a click on its swatch shows or hides it, and the `range · freq`
+readout opens the range popup, which also carries a frequency row whose chips
+write at once and leave the popup open. Over the chart, a wheel zooms about
+the pointer (the dominant axis wins, so a sideways wheel pans instead), a drag
+on a plot pans, and a drag on the band between two panes moves the split. A
+drag ends on release, on a release anywhere off the chart, or on the first
+move that arrives with no button held; a modified press or a double-click's
+second press arms nothing, because those are the shell's tile gestures. The
+empty tile offers the add and compose verbs as buttons under its hint. A
+right press focuses a tile exactly as a left one does, so a module's context
+menu always opens in the tile whose keys it will answer to.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
