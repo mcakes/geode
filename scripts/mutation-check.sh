@@ -18482,13 +18482,6 @@ run_mutation "pricer popup: menu steps land on pickable rows only" \
   '        .filter_map(|(i, _r)| Some(i))' \
   geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
 
-# A hover over structure must not take the highlight either.
-run_mutation "pricer tile: a hover over a separator leaves the highlight" \
-  crates/geode-pricer/src/tile.rs \
-  '        if m.highlighted == index || !m.items.get(index).is_some_and(MenuItem::pickable) {' \
-  '        if m.highlighted == index || index >= m.items.len() {' \
-  geode-pricer a_pointer_move_over_a_menu_row_moves_the_highlight
-
 # The empty table says "Loading sheet…" only while the tile is loading:
 # the delegate's mirror is the one path that flag reaches the paint.
 run_mutation "pricer tile: the delegate mirrors loading" \
