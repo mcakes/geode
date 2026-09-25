@@ -1384,17 +1384,15 @@ impl MarketDataTile {
                 }
             },
         };
-        if self.in_flight.is_some() {
-            return Err("an upload is in flight".into());
+        if let Some(flight) = &self.in_flight {
+            let (key, target) = (display_key(&flight.key), &flight.target);
+            return Err(format!("an upload of {key} to {target} is in flight"));
         }
         if self.draft.is_empty() {
             return Err("nothing to upload".into());
         }
-        // An upload is a whole document: one assembled over a historical
-        // generation would revert every untouched row upstream.
-        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {
-            let when = as_of_text(*at, chrono::Utc::now(), self.clock);
-            return Err(format!("upload: the panel shows {when}, not live"));
+        if let Some(refusal) = self.not_live(cx) {
+            return Err(refusal);
         }
         if self.draft.is_behind() {
             return Err(UPLOAD_BEHIND.into());
@@ -1513,10 +1511,43 @@ impl MarketDataTile {
 
     /// `y`: submit the document assembled at arm time. Refused by the data
     /// tier's bounded queue → a notice and nothing kept as `sent`.
+    /// Why an upload cannot be sent now, if it cannot: the frame asks
+    /// for a historical as-of, or the snapshot on screen (the one
+    /// `:upload` assembles) was delivered for one. An upload is a whole
+    /// document: one assembled over a historical generation would revert
+    /// every untouched row upstream. The second check covers the window
+    /// after the frame goes live, while the historical generation stays
+    /// painted until a live one is applied — briefly behind the barrier,
+    /// indefinitely if the live requery is refused or answers `Err`.
+    fn not_live(&self, cx: &App) -> Option<String> {
+        let now = chrono::Utc::now();
+        if let geode_core::query::AsOf::At(at) = self.frame.read(cx).as_of() {
+            let when = as_of_text(*at, now, self.clock);
+            return Some(format!("upload: the panel shows {when}, not live"));
+        }
+        let painted = self
+            .painted_snapshot()
+            .and_then(|s| s.provenance().as_of_request.clone());
+        if let Some(at) = painted {
+            let when = chrono::DateTime::parse_from_rfc3339(&at)
+                .map(|t| as_of_text(t.with_timezone(&chrono::Utc), now, self.clock))
+                .unwrap_or(at);
+            return Some(format!("upload: the panel shows {when}, not live"));
+        }
+        None
+    }
+
     fn submit_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = self.disarm_upload(window, cx) else {
             return;
         };
+        // Re-checked at `y`: nothing that makes the panel historical
+        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx) {
+            self.notice = Some(refusal.into());
+            self.changed(cx);
+            return;
+        }
         if pending.draft != self.draft {
             self.notice = Some("upload cancelled: the draft changed under the question".into());
             self.changed(cx);
@@ -5199,9 +5230,6 @@ fn same_edits(a: &Draft, b: &Draft) -> bool {
     a.edits == b.edits && a.attrs == b.attrs && a.rows == b.rows
 }
 
-/// A delivered document's own source time — the identity a [`Draft`]
-/// compares its `base` against (§8.4: per-document `as_of`, never the
-/// dataset-wide `gen_id` a live query's provenance carries).
 /// A historical as-of in the trader's clock, the way the as-of chip
 /// spells one: `HH:MM` today, `YYYY-MM-DD HH:MM` on any other day.
 fn as_of_text(
@@ -5217,6 +5245,9 @@ fn as_of_text(
     }
 }
 
+/// A delivered document's own source time — the identity a [`Draft`]
+/// compares its `base` against (§8.4: per-document `as_of`, never the
+/// dataset-wide `gen_id` a live query's provenance carries).
 fn source_time_of(snapshot: &Snapshot) -> Option<String> {
     snapshot
         .provenance()
@@ -5524,6 +5555,11 @@ mod tests {
     /// 0.01 × term index, `skew` = −1.0 − 0.1 × term index, repeated on
     /// every node row of the term.
     fn document_of(terms: &[&str], nodes: &[f64], as_of: &str) -> Snapshot {
+        document_with(terms, nodes, provenance(as_of))
+    }
+
+    /// [`document_of`] over a caller-supplied provenance.
+    fn document_with(terms: &[&str], nodes: &[f64], provenance: Provenance) -> Snapshot {
         let mut cells: Vec<(String, f64, f64)> = Vec::new();
         let mut slices: Vec<(f64, f64, f64)> = Vec::new();
         for (t, term) in terms.iter().enumerate() {
@@ -5578,12 +5614,21 @@ mod tests {
                 ),
             ],
             0,
-            provenance(as_of),
+            provenance,
         )
     }
 
     fn cvi(as_of: &str) -> Snapshot {
         document_of(&TERMS, &NODES, as_of)
+    }
+
+    /// [`cvi`] as the data tier delivers it for a HISTORICAL request:
+    /// `as_of_request` carries the requested instant, as
+    /// `query::read::provenance` records it for `AsOf::At`.
+    fn cvi_requested_at(as_of: &str, at: chrono::DateTime<chrono::Utc>) -> Snapshot {
+        let mut p = provenance(as_of);
+        p.as_of_request = Some(at.to_rfc3339());
+        document_with(&TERMS, &NODES, p)
     }
 
     /// The view under the window's `Root`: renders the tile, and nothing
@@ -13580,6 +13625,91 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live again: armed");
     }
 
+    /// The frame goes live, but the generation on screen — the one
+    /// `:upload` assembles — was delivered for a historical request and
+    /// stays painted until a live one is applied. Harness: frame `At`,
+    /// the historical document delivered, frame `Live` with its
+    /// requery left unanswered (`answer`: `None`) or answered `Err`
+    /// (`Some`). An edit, then `:upload`, is refused naming the painted
+    /// as-of, and nothing is sent.
+    fn upload_refused_over_a_painted_historical_generation(
+        cx: &mut gpui::TestAppContext,
+        answer: Option<&str>,
+    ) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let tag = h.document_request().expect("the historical request").tag;
+        h.deliver(&mut vcx, tag, Arc::new(cvi_requested_at(BASE, at)));
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::Live);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let live = h.document_request().expect("the live request").tag;
+        if let Some(error) = answer {
+            h.deliver_err(&mut vcx, live, error);
+        }
+        h.edit_one_cell(&mut vcx);
+        let when = as_of_text(at, chrono::Utc::now(), clock);
+        assert_eq!(
+            h.command(&mut vcx, "upload"),
+            Err(format!("upload: the panel shows {when}, not live"))
+        );
+        assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+        assert!(h.upload_request().is_none(), "nothing sent");
+
+        // Positive control: the live generation applied, `:upload` arms.
+        h.deliver(&mut vcx, live, Arc::new(cvi(BASE)));
+        assert_eq!(h.command(&mut vcx, "upload"), Ok(()), "live painted: armed");
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_while_a_historical_generation_is_painted(cx: &mut gpui::TestAppContext) {
+        upload_refused_over_a_painted_historical_generation(cx, None);
+    }
+
+    #[gpui::test]
+    fn upload_is_refused_when_the_live_requery_fails_over_a_historical_generation(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        upload_refused_over_a_painted_historical_generation(cx, Some("disk gone"));
+    }
+
+    /// `y` re-checks: a confirm armed live, then the frame moved to a
+    /// historical as-of before the answer, sends nothing and says why.
+    #[gpui::test]
+    fn upload_confirm_rechecks_the_as_of_at_y(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        let clock = h.tile.read_with(&vcx, |t, _| t.clock);
+        let at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(geode_core::query::AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        type_keys(&mut vcx, "y");
+        assert!(h.upload_request().is_none(), "nothing sent");
+        let when = as_of_text(at, chrono::Utc::now(), clock);
+        let refusal = format!("upload: the panel shows {when}, not live");
+        assert!(
+            h.header_texts(&vcx).contains(&refusal),
+            "{:?}",
+            h.header_texts(&vcx)
+        );
+    }
+
     /// A second `:upload` while the first awaits its outcome is refused:
     /// it would race the first's echo.
     #[gpui::test]
@@ -13595,7 +13725,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.edit_one_cell(&mut vcx);
         assert_eq!(
             h.command(&mut vcx, "upload"),
-            Err("an upload is in flight".into())
+            Err("an upload of SPX.Z to sophis is in flight".into())
         );
         assert_eq!(h.upload_prompt(&vcx), None);
         assert!(h.upload_request().is_none());

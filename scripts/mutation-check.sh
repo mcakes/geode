@@ -17648,14 +17648,35 @@ run_mutation "panel: upload is refused under a historical as-of" \
   geode-marketdata \
   upload_is_refused_under_a_historical_as_of
 
+# The frame gone live does not make the painted generation live: until the
+# live one is applied (behind the barrier, or never when the requery is
+# refused or fails) the historical document stays on screen, and :upload
+# assembles what is painted. Mutated to ignore the painted provenance, an
+# edit over the historical generation arms the confirm.
+run_mutation "panel: upload is refused while a historical generation is painted" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(at) = painted {' \
+  '        if let Some(at) = painted.filter(|_| false) {' \
+  geode-marketdata \
+  upload_is_refused_while_a_historical_generation_is_painted
+
+# y re-checks the as-of: a frame moved to history between arming and
+# answering must send nothing. Mutated away, y submits.
+run_mutation "panel: upload confirm rechecks the as-of at y" \
+  crates/geode-marketdata/src/tile.rs \
+  '        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx) {' \
+  '        // between arming and answering may slip through.
+        if let Some(refusal) = self.not_live(cx).filter(|_| false) {' \
+  geode-marketdata \
+  upload_confirm_rechecks_the_as_of_at_y
+
 # A second upload while the first awaits its outcome would race the first's
 # echo. Mutated away, a second :upload arms.
 run_mutation "panel: upload is refused while an upload is in flight" \
   crates/geode-marketdata/src/tile.rs \
-  '        if self.in_flight.is_some() {
-            return Err("an upload is in flight".into());' \
-  '        if false {
-            return Err("an upload is in flight".into());' \
+  '        if let Some(flight) = &self.in_flight {' \
+  '        if let Some(flight) = None::<&InFlightUpload> {' \
   geode-marketdata \
   upload_is_refused_while_an_upload_is_in_flight
 

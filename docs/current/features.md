@@ -83,9 +83,15 @@ XSD may supply.
 an egress target that accepts the panel's document. It is refused, naming
 why, for a clean, `Behind`, already-sent or incomplete draft, for a missing
 or ineligible target, while another upload from the panel is in flight (`an
-upload is in flight`), and while the frame's as-of is historical (`upload:
-the panel shows <time>, not live`): an upload is a whole document, and one
-assembled over an old generation would revert every untouched row upstream.
+upload of <key> to <target> is in flight`), and while the panel is not live
+(`upload: the panel shows <time>, not live`): the frame's as-of is
+historical, or the generation on screen was delivered for a historical
+request. The second case covers the frame gone live before its live
+generation is painted — behind the barrier, or indefinitely when the live
+requery is refused or fails and the last good generation stays on screen.
+An upload is a whole document, and one assembled over an old generation
+would revert every untouched row upstream. `y` re-checks the same
+condition and sends nothing, naming why, if it no longer holds.
 Otherwise it assembles the document and asks
 `upload N cells, [K attributes, ]A rows added, D removed of <key> to
 <target>? (y/n)` in the
