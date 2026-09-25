@@ -2,8 +2,9 @@
 //! theme and floored to `READABLE_RATIO` against the ground each paints
 //! on (planning decision 14): an own value in `foreground`, a stale
 //! result or an inherited shift `muted`, a failed row's cells in
-//! `Tone::DangerText`, and a package row on `secondary` with its own
-//! floored trio. Resolved in `render_td` from the cell's `CellState`; the
+//! `Tone::DangerText`, a package row on `secondary` with its own
+//! floored trio, and the action menu's text on the popover and on its
+//! `accent` highlight. Resolved in `render_td` from the cell's `CellState`; the
 //! `GridModel` stays theme-free. The tile re-derives it when the theme
 //! global changes (an observer, never a per-cell check).
 //!
@@ -63,6 +64,14 @@ pub struct Paints {
     pub package_own: Hsla,
     pub package_muted: Hsla,
     pub package_danger: Hsla,
+    /// The action menu's text (`render_menu`): `popover_foreground` and
+    /// `muted_foreground` (disabled rows, the section header, the
+    /// trailing key lane) floored on the popover, and the highlighted
+    /// row's `accent_foreground` and muted floored on `accent` over it.
+    pub menu_text: Hsla,
+    pub menu_muted: Hsla,
+    pub menu_active_text: Hsla,
+    pub menu_active_muted: Hsla,
 }
 
 impl Paints {
@@ -70,6 +79,7 @@ impl Paints {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let package: Rgb = over(theme.secondary, ground);
         let danger = chip_paint(theme, Tone::DangerText).text;
+        let (popover, active) = Self::menu_grounds(theme);
         Paints {
             own: floor_toward_pole(theme.foreground, ground),
             muted: floor_toward_pole(theme.muted_foreground, ground),
@@ -78,7 +88,18 @@ impl Paints {
             package_own: floor_toward_pole(theme.foreground, package),
             package_muted: floor_toward_pole(theme.muted_foreground, package),
             package_danger: floor_toward_pole(danger, package),
+            menu_text: floor_toward_pole(theme.popover_foreground, popover),
+            menu_muted: floor_toward_pole(theme.muted_foreground, popover),
+            menu_active_text: floor_toward_pole(theme.accent_foreground, active),
+            menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
         }
+    }
+
+    /// The popover over the window background, and the highlighted row's
+    /// `accent` over that: the two grounds the menu's text paints on.
+    fn menu_grounds(theme: &Theme) -> (Rgb, Rgb) {
+        let popover = over(theme.popover, to_rgb(theme.background));
+        (popover, over(theme.accent, popover))
     }
 
     pub fn text(&self, state: CellState, package: bool) -> Hsla {
@@ -117,6 +138,7 @@ mod tests {
                 let p = Paints::derive(theme);
                 let ground = over(theme.table, to_rgb(theme.background));
                 let package = to_rgb(p.package_ground);
+                let (popover, active) = Paints::menu_grounds(theme);
                 for (label, text, bg) in [
                     ("own", p.own, ground),
                     ("muted", p.muted, ground),
@@ -124,6 +146,12 @@ mod tests {
                     ("package own", p.package_own, package),
                     ("package muted", p.package_muted, package),
                     ("package danger", p.package_danger, package),
+                    // The chevron paints `package_muted` on the package
+                    // ground (swept above); the menu's four on theirs.
+                    ("menu text", p.menu_text, popover),
+                    ("menu muted", p.menu_muted, popover),
+                    ("menu active text", p.menu_active_text, active),
+                    ("menu active muted", p.menu_active_muted, active),
                 ] {
                     checked += 1;
                     let ratio = contrast_ratio(to_rgb(text), bg);
@@ -134,7 +162,7 @@ mod tests {
             });
         }
         assert!(
-            checked >= 6 * 40,
+            checked >= 10 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(

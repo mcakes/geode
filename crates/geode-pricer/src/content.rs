@@ -30,22 +30,22 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::up", "Cursor up"),
     ("pricer::left", "Cursor left"),
     ("pricer::right", "Cursor right"),
-    ("pricer::top", "First row"),
-    ("pricer::bottom", "Last row"),
+    ("pricer::top", "Cursor to top"),
+    ("pricer::bottom", "Cursor to bottom"),
     ("pricer::first_col", "First column"),
     ("pricer::last_col", "Last column"),
     ("pricer::page_down", "Half page down"),
     ("pricer::page_up", "Half page up"),
-    ("pricer::page_down_full", "Page down"),
-    ("pricer::page_up_full", "Page up"),
+    ("pricer::page_down_full", "Full page down"),
+    ("pricer::page_up_full", "Full page up"),
     ("pricer::yank_row", "Yank row"),
     ("pricer::yank_col", "Yank column"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
     ("pricer::escape", "Clear find and dismissible notice"),
-    ("pricer::add_below", "Add a line below"),
-    ("pricer::add_above", "Add a line above"),
-    ("pricer::edit", "Edit cell"),
+    ("pricer::add_below", "Add line below…"),
+    ("pricer::add_above", "Add line above…"),
+    ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
     ("pricer::redo", "Redo"),
@@ -53,7 +53,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::put_above", "Put above"),
     ("pricer::move_down", "Move row down"),
     ("pricer::move_up", "Move row up"),
-    ("pricer::group", "Group into a package"),
+    ("pricer::group", "Group into package"),
     ("pricer::ungroup", "Ungroup package"),
     ("pricer::menu", "Pricer actions…"),
     ("pricer::toggle", "Toggle package"),
@@ -61,18 +61,29 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::collapse", "Collapse package"),
     ("pricer::expand_all", "Expand all packages"),
     ("pricer::collapse_all", "Collapse all packages"),
-    ("pricer::price", "Reprice every line"),
-    ("pricer::commit", "Commit"),
-    ("pricer::cancel", "Cancel"),
-    ("pricer::insert_up", "Up"),
-    ("pricer::insert_down", "Down"),
-    ("pricer::insert_up_big", "Up ten"),
-    ("pricer::insert_down_big", "Down ten"),
-    ("pricer::menu_down", "Menu: down"),
-    ("pricer::menu_up", "Menu: up"),
+    ("pricer::price", "Reprice all lines"),
+    ("pricer::commit", "Commit edit"),
+    ("pricer::cancel", "Cancel edit"),
+    ("pricer::insert_up", "Insert: up"),
+    ("pricer::insert_down", "Insert: down"),
+    ("pricer::insert_up_big", "Insert: up (big)"),
+    ("pricer::insert_down_big", "Insert: down (big)"),
+    ("pricer::menu_down", "Menu: next"),
+    ("pricer::menu_up", "Menu: previous"),
     ("pricer::menu_pick", "Menu: pick"),
     ("pricer::menu_close", "Menu: close"),
 ];
+
+/// An action's palette title: the one name a command has, so the action
+/// menu and the palette can never disagree. Every id asked for is a
+/// literal from this crate; an unknown one answers its own id, which
+/// `every_menu_action_is_titled_as_in_the_palette` would catch.
+pub(crate) fn action_title(id: &'static str) -> &'static str {
+    ACTIONS
+        .iter()
+        .find(|(a, _)| *a == id)
+        .map_or(id, |(_, title)| title)
+}
 
 /// Registered but deliberately unbound: `:price` and the menu reach it.
 pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];

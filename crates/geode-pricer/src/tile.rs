@@ -237,6 +237,8 @@ pub struct PricerTile {
     pub(crate) footer_text: Option<SharedString>,
     pub(crate) header: HeaderModel,
     title: SharedString,
+    /// The header `⋯` tooltip's selector, built once from the tile id.
+    menu_tip: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
     /// What `p`/`shift+p` put: the last `y y` or `d d`.
@@ -473,6 +475,7 @@ impl PricerTile {
             footer_text: None,
             header: HeaderModel::default(),
             title: SharedString::default(),
+            menu_tip: format!("tip-pricer-menu-button-{}", id.0).into(),
             stack: None,
             clock: app_clock(cx),
             register: None,
@@ -986,6 +989,26 @@ impl PricerTile {
                     cx.notify();
                 }
             }
+        }
+    }
+
+    /// A hover over painted typeahead row `row` — the pointer's form of
+    /// `up`/`down` for the highlight (market-data's `choice_hover`), with
+    /// the same change-only rule as `menu_hover`. It does NOT set `moved`:
+    /// in a free list an untouched highlight is a guess, and a pointer
+    /// that merely crossed the list while the trader typed must not turn
+    /// `enter` into a commit of the row under it (`HSI` → `HSCEI`); a
+    /// click, or `up`/`down`, still does.
+    pub(crate) fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
+        let changed = match &mut self.editor {
+            Some(Editor::Choice { list, .. }) => {
+                list.highlighted() != row && list.set_highlighted(row)
+            }
+            _ => false,
+        };
+        if changed {
+            self.sync_editor(cx);
+            cx.notify();
         }
     }
 
@@ -1523,13 +1546,12 @@ impl PricerTile {
             }
             "menu_down" | "menu_up" => {
                 if let Some(m) = self.menu.as_mut() {
-                    let len = m.items.len() as isize;
-                    let step = if verb == "menu_down" {
+                    let delta = if verb == "menu_down" {
                         n as isize
                     } else {
                         -(n as isize)
                     };
-                    m.highlighted = (m.highlighted as isize + step).clamp(0, len - 1) as usize;
+                    m.highlighted = crate::popup::step(&m.items, m.highlighted, delta);
                 }
             }
             "menu_pick" => {
@@ -1734,70 +1756,78 @@ impl PricerTile {
         }
     }
 
+    /// The action menu's rows, in the market-data list's shape: the
+    /// sheet-wide verb, the package verbs, history, the destructive verb
+    /// set apart, then the `View` section. Each action's title is the
+    /// palette's own (`content::ACTIONS`), and its trailing lane the
+    /// default key — or, disabled, the reason.
     fn menu_items(&self) -> Vec<MenuItem> {
         let row = self.cursor_sheet_row();
         let root_line =
             row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
         let packaged =
             row.is_some_and(|r| self.sheet.is_package(r) || self.sheet.parent(r).is_some());
+        let action = |id: &'static str, hint, enabled| MenuItem::Action {
+            id,
+            title: crate::content::action_title(id),
+            hint,
+            enabled,
+        };
         let mut items = vec![
-            MenuItem::Action {
-                id: "pricer::price",
-                title: "Price all",
-                enabled: Ok(()),
-            },
-            MenuItem::Action {
-                id: "pricer::group",
-                title: "Group",
-                enabled: if root_line {
+            action("pricer::price", ":price", Ok(())),
+            MenuItem::Separator,
+            action(
+                "pricer::group",
+                "g p",
+                if root_line {
                     Ok(())
                 } else {
                     Err("group needs a top-level line")
                 },
-            },
-            MenuItem::Action {
-                id: "pricer::ungroup",
-                title: "Ungroup",
-                enabled: if packaged {
+            ),
+            action(
+                "pricer::ungroup",
+                "g u",
+                if packaged {
                     Ok(())
                 } else {
                     Err("not in a package")
                 },
-            },
-            MenuItem::Action {
-                id: "pricer::undo",
-                title: "Undo",
-                enabled: if self.undo.can_undo() {
+            ),
+            MenuItem::Separator,
+            action(
+                "pricer::undo",
+                "u",
+                if self.undo.can_undo() {
                     Ok(())
                 } else {
                     Err("nothing to undo")
                 },
-            },
-            MenuItem::Action {
-                id: "pricer::redo",
-                title: "Redo",
-                enabled: if self.undo.can_redo() {
+            ),
+            action(
+                "pricer::redo",
+                "ctrl+r",
+                if self.undo.can_redo() {
                     Ok(())
                 } else {
                     Err("nothing to redo")
                 },
-            },
-            MenuItem::Action {
-                id: "pricer::delete",
-                title: "Delete row",
-                enabled: if row.is_some() { Ok(()) } else { Err("no row") },
-            },
+            ),
+            MenuItem::Separator,
+            action(
+                "pricer::delete",
+                "d d",
+                if row.is_some() { Ok(()) } else { Err("no row") },
+            ),
         ];
-        for name in self.shared.views.borrow().names() {
-            let label = if name == self.sheet.view {
-                format!("view: {name} \u{2713}")
-            } else {
-                format!("view: {name}")
-            };
-            items.push(MenuItem::View {
+        let views = self.shared.views.borrow();
+        if !views.is_empty() {
+            items.push(MenuItem::Separator);
+            items.push(MenuItem::Section("View"));
+            items.extend(views.names().map(|name| MenuItem::View {
                 name: name.to_string().into(),
-                label: label.into(),
-            });
+                current: name == self.sheet.view,
+            }));
         }
         items
     }
@@ -1810,6 +1840,21 @@ impl PricerTile {
                 highlighted: 0,
             }),
         };
+        cx.notify();
+    }
+
+    /// A hover over menu row `index` — the mouse form of `j`/`k`
+    /// (market-data's `menu_hover`). `on_mouse_move` fires on every
+    /// pointer move over the row, so only a CHANGE notifies; a separator
+    /// or section never takes the highlight.
+    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(m) = self.menu.as_mut() else {
+            return;
+        };
+        if m.highlighted == index || !m.items.get(index).is_some_and(MenuItem::pickable) {
+            return;
+        }
+        m.highlighted = index;
         cx.notify();
     }
 
@@ -1837,6 +1882,8 @@ impl PricerTile {
                 self.menu = None;
                 self.dispatch(&ActionId(id.to_string()), None, window, cx);
             }
+            // Structure, not a row: nothing to pick.
+            MenuItem::Separator | MenuItem::Section(_) => {}
             MenuItem::View { name, .. } => {
                 self.menu = None;
                 if let Err(why) = self.set_view(&name, cx) {
@@ -2069,8 +2116,10 @@ impl PricerTile {
     /// The only way a model reaches the table (spec §8.2).
     pub(crate) fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
+        let loading = self.loading;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
+            t.delegate_mut().loading = loading;
             t.refresh(cx);
         });
         // A rebuild moves grid rows, and a new plan moves columns: the
@@ -2141,7 +2190,7 @@ impl PricerTile {
             settings: &settings,
             clock: self.clock,
         });
-        self.title = format!("pricer · {}", self.sheet.name).into();
+        self.title = format!("Pricer · {}", self.sheet.name).into();
         self.footer_text = self.footer.clone().or_else(|| {
             let row = self.cursor_row().and_then(|r| self.model.rows[r].row)?;
             match self.sheet.state(row) {
@@ -2153,11 +2202,11 @@ impl PricerTile {
         // answer, a reload or a delivery can change what they would say
         // without a verb closing the menu, so they are re-checked here
         // rather than trusted from when it opened. The highlight keeps its
-        // index, clamped to the new list.
+        // index, clamped to the new list and snapped onto a pickable row.
         if self.menu.is_some() {
             let items = self.menu_items();
             if let Some(m) = self.menu.as_mut() {
-                m.highlighted = m.highlighted.min(items.len().saturating_sub(1));
+                m.highlighted = crate::popup::snap(&items, m.highlighted);
                 m.items = items;
             }
         }
@@ -2327,7 +2376,19 @@ impl gpui::Render for PricerTile {
         });
         let theme = cx.theme();
         let tile = cx.entity();
-        let header = header::render(&self.header, stale, theme, self.stack.as_ref(), self.id);
+        let header = header::render(
+            &self.header,
+            header::HeaderChrome {
+                stale,
+                stack: self.stack.as_ref(),
+                tile_id: self.id,
+                tile: &tile,
+                menu_open: self.menu.is_some(),
+                menu_tip: self.menu_tip.clone(),
+            },
+            theme,
+        );
+        let paints = self.table.read(cx).delegate().paints;
         // The menu is anchored off a zero-size, absolutely positioned
         // sibling at the header's own right edge (the market-data
         // arrangement) — `relative` on the wrapper is what makes that
@@ -2343,7 +2404,7 @@ impl gpui::Render for PricerTile {
                             .absolute()
                             .right_0()
                             .top(scale::design(header::HEADER_HEIGHT))
-                            .child(render_menu(m, &tile, cx)),
+                            .child(render_menu(m, &paints, &tile, cx)),
                     )
                 });
         let body = div().flex_1().min_h_0().w_full().child(
@@ -2590,7 +2651,14 @@ pub(crate) mod tests {
                 t.model.rows.iter().map(|r| r.tree.to_string()).collect()
             })
         }
+        /// The planned columns' vocabulary names, in order.
         pub fn columns(&self, vcx: &VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.model.columns.iter().map(|c| c.name.to_string()).collect()
+            })
+        }
+        /// The planned columns' header labels, in order.
+        pub fn labels(&self, vcx: &VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| {
                 t.model
                     .columns
@@ -2599,14 +2667,14 @@ pub(crate) mod tests {
                     .collect()
             })
         }
-        /// One cell's painted text, by grid row and column label.
+        /// One cell's painted text, by grid row and vocabulary name.
         pub fn cell(&self, vcx: &VisualTestContext, row: usize, column: &str) -> String {
             self.tile.read_with(vcx, |t, _| {
                 let c = t
                     .model
                     .columns
                     .iter()
-                    .position(|c| c.label.as_ref() == column)
+                    .position(|c| c.name == column)
                     .expect("column");
                 t.model.rows[row].cells[c].text.to_string()
             })
@@ -2661,7 +2729,7 @@ pub(crate) mod tests {
         let (h, mut vcx) = open(cx);
         assert_eq!(h.factory.kind(), "pricer");
         assert_eq!(h.factory.contexts(), vec!["pricer"]);
-        assert_eq!(h.title(&mut vcx), "pricer · untitled-1");
+        assert_eq!(h.title(&mut vcx), "Pricer · untitled-1");
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.columns(&vcx)[0], "qty", "the vanilla view");
         // A second tile skips the name the first holds.
@@ -2677,7 +2745,7 @@ pub(crate) mod tests {
         });
         assert_eq!(
             vcx.update(|_, cx| second.content.title(cx).to_string()),
-            "pricer · untitled-2"
+            "Pricer · untitled-2"
         );
     }
 
@@ -2696,7 +2764,7 @@ pub(crate) mod tests {
         );
         record.insert("view".into(), "barrier".into());
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
-        assert_eq!(h.title(&mut vcx), "pricer · book");
+        assert_eq!(h.title(&mut vcx), "Pricer · book");
         assert_eq!(
             h.tree(&vcx).len(),
             5,
@@ -2725,7 +2793,7 @@ pub(crate) mod tests {
             MemorySheetStore::default(),
             PricerSettings::default(),
         );
-        assert_eq!(h.title(&mut vcx), "pricer · gone");
+        assert_eq!(h.title(&mut vcx), "Pricer · gone");
         assert_eq!(
             h.notice(&vcx).as_deref(),
             Some("sheet 'gone' was not found; opened empty")
@@ -2892,7 +2960,7 @@ pub(crate) mod tests {
             .unwrap();
             title
         });
-        assert_eq!(title, "pricer · untitled-1");
+        assert_eq!(title, "Pricer · untitled-1");
     }
 
     pub(crate) fn centre_of(
@@ -3392,7 +3460,9 @@ pub(crate) mod tests {
         let (h, vcx) = open_full(cx, None, MemorySheetStore::default(), settings);
         assert_eq!(
             h.notice(&vcx).as_deref(),
-            Some("pricer \"vendor\" is not built into this binary")
+            Some(
+                "pricer 'vendor' is not built into this binary; set [pricing] adapter and restart"
+            )
         );
     }
 
@@ -4015,7 +4085,7 @@ pub(crate) mod tests {
             vec![3, 4, 5],
             "line 1 has its own spot shift"
         );
-        assert!(h.header(&vcx).contains(&"spot +2%".to_string()));
+        assert!(h.header(&vcx).contains(&"spot +2.0%".to_string()));
         h.command(&mut vcx, "shift spot clear").unwrap();
         assert!(!h.header(&vcx).iter().any(|t| t.starts_with("spot")));
     }
@@ -4094,7 +4164,7 @@ pub(crate) mod tests {
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
-            Some(5),
+            Some(8),
             "the highlight stays where it was"
         );
         h.dispatch(&mut vcx, "menu_pick", None);
@@ -4123,14 +4193,14 @@ pub(crate) mod tests {
                 .items
                 .iter()
                 .filter_map(|i| match i {
-                    MenuItem::View { label, .. } => Some(label.to_string()),
-                    MenuItem::Action { .. } => None,
+                    MenuItem::View { name, current } => Some(format!("{name} {current}")),
+                    _ => None,
                 })
                 .collect();
             (views, m.highlighted)
         });
-        assert_eq!(views, vec!["view: slim"]);
-        assert_eq!(highlighted, 6, "clamped to the last row");
+        assert_eq!(views, vec!["slim false"]);
+        assert_eq!(highlighted, 11, "clamped to the last row");
     }
 
     #[gpui::test]
@@ -4388,7 +4458,7 @@ pub(crate) mod tests {
             title
         });
         assert_eq!(
-            title, "pricer · book",
+            title, "Pricer · book",
             "the name was given back, so it opens under it"
         );
     }
@@ -4933,5 +5003,200 @@ pub(crate) mod tests {
         click_at(&mut vcx, at, 2);
         h.draw(&mut vcx);
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3000"), "C's strike");
+    }
+
+    // ---- visual polish: empty state, labels, menu, trigger ----
+
+    fn empty_text(h: &Harness, vcx: &VisualTestContext) -> &'static str {
+        h.tile
+            .read_with(vcx, |t, cx| t.table.read(cx).delegate().empty_text())
+    }
+
+    fn painted(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.debug_bounds(selector).is_some()
+    }
+
+    /// The empty table says what to do next, not a faded icon — and,
+    /// while the sheet is loading, that it is loading (an `o` there is
+    /// refused). The delegate's mirror follows `loaded`; the text is
+    /// painted, and the entry placeholder (a row) replaces it.
+    #[gpui::test]
+    fn an_empty_table_names_the_next_action_or_that_it_is_loading(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(empty_text(&h, &vcx), "No lines — press o to add one");
+        assert!(painted(&mut vcx, "pricer-empty"));
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(
+            !painted(&mut vcx, "pricer-empty"),
+            "the placeholder is a row"
+        );
+
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        assert_eq!(empty_text(&h, &vcx), "Loading sheet…");
+        assert!(painted(&mut vcx, "pricer-empty"));
+        h.tile
+            .update(&mut vcx, |t, cx| t.loaded(Ok(Some(rows)), cx));
+        assert_eq!(empty_text(&h, &vcx), "No lines — press o to add one");
+        assert!(!painted(&mut vcx, "pricer-empty"), "the row arrived");
+    }
+
+    /// Headers read as words carrying their unit; the table keys stay
+    /// the vocabulary's names; both bundled views end in `status`.
+    #[gpui::test]
+    fn columns_are_labelled_in_words_and_the_views_show_status(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.command(&mut vcx, "view barrier").unwrap();
+        let labels = h.labels(&vcx);
+        for want in ["barrier type", "spot %", "vol pt", "status"] {
+            assert!(labels.contains(&want.to_string()), "{want}: {labels:?}");
+        }
+        assert!(!labels.iter().any(|l| l.contains('_')), "{labels:?}");
+        assert_eq!(h.columns(&vcx).last().map(String::as_str), Some("status"));
+        assert_eq!(h.cell(&vcx, 0, "status"), "pricing…");
+    }
+
+    fn menu_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+        h.tile.read_with(vcx, |t, _| {
+            t.menu
+                .as_ref()
+                .expect("the menu is open")
+                .items
+                .iter()
+                .map(|i| match i {
+                    MenuItem::Action {
+                        title,
+                        hint,
+                        enabled,
+                        ..
+                    } => match enabled {
+                        Ok(()) => format!("{title} | {hint}"),
+                        Err(why) => format!("{title} | ({why})"),
+                    },
+                    MenuItem::View { name, current } => {
+                        format!("{} {name}", if *current { "✓" } else { " " })
+                    }
+                    MenuItem::Separator => "—".into(),
+                    MenuItem::Section(s) => format!("[{s}]"),
+                })
+                .collect()
+        })
+    }
+
+    /// The menu's shape (market-data's list): one name per command (the
+    /// palette's), the key in the trailing lane or the reason on a
+    /// disabled row, separators, `Delete row` alone, a `View` section
+    /// with the tick in a leading slot. The highlight never lands on
+    /// structure.
+    #[gpui::test]
+    fn the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(
+            menu_rows(&h, &vcx),
+            vec![
+                "Reprice all lines | :price",
+                "—",
+                "Group into package | g p",
+                "Ungroup package | (not in a package)",
+                "—",
+                "Undo | (nothing to undo)",
+                "Redo | (nothing to redo)",
+                "—",
+                "Delete row | d d",
+                "—",
+                "[View]",
+                "✓ vanilla",
+                "  barrier",
+            ]
+        );
+        for (id, title) in crate::content::ACTIONS {
+            if ["pricer::price", "pricer::group", "pricer::ungroup"].contains(id) {
+                assert!(
+                    menu_rows(&h, &vcx)
+                        .iter()
+                        .any(|r| r.starts_with(&format!("{title} |"))),
+                    "{id}: the menu says the palette's '{title}'"
+                );
+            }
+        }
+        h.dispatch(&mut vcx, "menu_down", Some(1));
+        let at = h
+            .tile
+            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+        assert_eq!(at, Some(2), "over the separator onto Group");
+        h.dispatch(&mut vcx, "menu_down", Some(5));
+        let at = h
+            .tile
+            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+        assert_eq!(at, Some(11), "over the section header onto a view");
+    }
+
+    /// A real pointer move over a menu row moves the highlight there (the
+    /// mouse form of `j`/`k`), so the pointer's row and the highlighted
+    /// row are one row; `enter` then picks it.
+    #[gpui::test]
+    fn a_pointer_move_over_a_menu_row_moves_the_highlight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "menu", None);
+        let at = centre_of(&mut vcx, "pricer-menu-row-12"); // barrier
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        let highlighted = h
+            .tile
+            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+        assert_eq!(highlighted, Some(12));
+        h.dispatch(&mut vcx, "menu_pick", None);
+        assert!(h.columns(&vcx).contains(&"barrier".to_string()));
+    }
+
+    /// A pointer move over a typeahead row moves its highlight — and
+    /// does not count as the trader choosing it (`moved` stays unset, so
+    /// a free list's `enter` still commits the typed text: the `HSI` →
+    /// `HSCEI` guard).
+    #[gpui::test]
+    fn a_pointer_move_over_a_typeahead_row_moves_its_highlight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "right", Some(4)); // type: C, P
+        h.dispatch(&mut vcx, "edit", None);
+        let at = centre_of(&mut vcx, "pricer-choice-row-1");
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+        let (highlighted, moved) = h.tile.read_with(&vcx, |t, _| match &t.editor {
+            Some(Editor::Choice { list, moved, .. }) => (list.highlighted(), *moved),
+            _ => panic!("the typeahead is open"),
+        });
+        assert_eq!(highlighted, 1);
+        assert!(!moved, "a hover is not a choice");
+        let painted = h.tile.read_with(&vcx, |t, cx| {
+            t.table
+                .read(cx)
+                .delegate()
+                .editor
+                .as_ref()
+                .and_then(|e| e.choice.as_ref().map(|c| c.highlighted))
+        });
+        assert_eq!(painted, Some(1), "the delegate's copy follows");
+    }
+
+    /// The header's `⋯` is the pointer's `.`: a click opens the menu, a
+    /// second click closes it (the capture-phase toggle runs ahead of
+    /// the menu's own outside-click close).
+    #[gpui::test]
+    fn the_header_trigger_toggles_the_menu(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let at = centre_of(&mut vcx, "pricer-menu-button");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "menu");
+        let at = centre_of(&mut vcx, "pricer-menu-button");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "a second click closes it");
     }
 }

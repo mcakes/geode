@@ -2,8 +2,14 @@
 //! `Rc<GridModel>` swapped wholesale by `PricerTile::install_model`, a
 //! mirror of the tile's cursor, and mirrors of the open entry
 //! field and cell editor. The tile's own state is the truth; nothing here
-//! decides anything. Column 0 is the tree column (indent, chevron,
-//! shorthand), pinned left; the cursor never enters it.
+//! decides anything. Column 0 is the tree column (indent, a fixed
+//! chevron slot, shorthand), pinned left; the cursor never enters it.
+//!
+//! A row's own ground (a package's `secondary`, the entry row's active
+//! fill) is painted on the ROW by `render_tr`, never per cell: the table
+//! paints its hover and selected-row fills on the row after refining the
+//! delegate's style, so a per-cell fill would sit above them and leave
+//! the highlight showing only in the cell padding.
 
 use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
@@ -11,20 +17,29 @@ use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
 use geode_shell::fonts;
 use geode_shell::shell::control::{self, PointerStates as _};
+use geode_shell::shell::scale;
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Entity, EventEmitter, SharedString, TextAlign, WeakEntity, Window,
-    div, px,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, SharedString, Stateful, TextAlign,
+    WeakEntity, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Theme};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex};
 use std::rc::Rc;
 
 /// The tree column: pixels, like every width here (the vocabulary's own
 /// known gap); not resizable, since a dragged width has nowhere to live.
 const TREE_WIDTH: f32 = 260.0;
+/// One depth step, and the chevron slot every non-entry row reserves
+/// (empty on a line or leg), both on the rem scale: roots share one
+/// leading edge whether or not they carry a chevron, and a leg sits
+/// exactly one step in from its package.
 const INDENT: f32 = 14.0;
+const CHEVRON_SLOT: f32 = 14.0;
+/// What the empty table says: the next action, not an icon.
+pub(crate) const EMPTY_TEXT: &str = "No lines — press o to add one";
+pub(crate) const LOADING_TEXT: &str = "Loading sheet…";
 pub(crate) const TREE_COL: usize = 0;
 
 /// A chevron click, re-implemented from the blotter (spec §8.2: "the
@@ -51,6 +66,10 @@ pub struct SheetDelegate {
     /// `(grid row, plan column)`; `None` with no cursor row.
     pub(crate) cursor: Option<(usize, usize)>,
     pub(crate) paints: Paints,
+    /// The tile's `loading`, mirrored by `install_model`: the empty table
+    /// says `Loading sheet…` rather than inviting an `o` the tile would
+    /// refuse.
+    pub(crate) loading: bool,
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
     /// The tile's open entry field, mirrored here so `render_td` can paint
     /// it (the `Entry` row); the tile's `entry` is the source of
@@ -69,6 +88,7 @@ impl SheetDelegate {
             model: Rc::new(GridModel::default()),
             cursor: None,
             paints: Paints::derive(theme),
+            loading: false,
             chevron: None,
             entry: None,
             editor: None,
@@ -81,12 +101,25 @@ impl SheetDelegate {
         (col_ix != TREE_COL).then(|| col_ix - 1)
     }
 
+    /// What the empty table paints: `Loading sheet…` while the tile's
+    /// load is pending, else the next action.
+    pub(crate) fn empty_text(&self) -> &'static str {
+        if self.loading {
+            LOADING_TEXT
+        } else {
+            EMPTY_TEXT
+        }
+    }
+
+    /// The chevron only ever sits on a package row, so its states are
+    /// computed against the package ground with the package's floored
+    /// muted text — the colours it actually paints on and in.
     fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
         let inputs = control::ControlInputs::new(
             theme,
             control::Rest::Bare,
-            theme.table,
-            theme.muted_foreground,
+            self.paints.package_ground,
+            self.paints.package_muted,
         );
         match &self.chevron {
             Some((have, paint)) if *have == inputs => *paint,
@@ -125,7 +158,7 @@ impl TableDelegate for SheetDelegate {
             };
         };
         Column {
-            key: c.label.clone(),
+            key: SharedString::new_static(c.name),
             name: c.label.clone(),
             align: if c.right {
                 TextAlign::Right
@@ -159,6 +192,40 @@ impl TableDelegate for SheetDelegate {
             .child(column.name)
     }
 
+    /// A package row's ground and the entry row's active fill, on the row
+    /// (see the module doc). A filler row past the model paints nothing.
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let ground = match self.model.rows.get(row_ix).map(|r| r.kind) {
+            Some(GridRowKind::Package { .. }) => Some(self.paints.package_ground),
+            Some(GridRowKind::Entry) => Some(cx.theme().table_active),
+            _ => None,
+        };
+        div()
+            .id(("row", row_ix))
+            .when_some(ground, |el, g| el.bg(g))
+    }
+
+    /// Words, not the library's faded icon: the next action, or that the
+    /// sheet is still loading. Muted text floored on the table ground, at
+    /// full opacity.
+    fn render_empty(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        h_flex()
+            .size_full()
+            .justify_center()
+            .text_color(self.paints.muted)
+            .debug_selector(|| "pricer-empty".into())
+            .child(self.empty_text())
+    }
+
     /// One prepared cell. Nothing is formatted or allocated here beyond
     /// the `debug_selector` closure (dropped unevaluated outside tests):
     /// the text is a `SharedString` refcount out of the model, the colours
@@ -179,13 +246,9 @@ impl TableDelegate for SheetDelegate {
             return div().into_any_element();
         };
         let package = matches!(row.kind, GridRowKind::Package { .. });
-        let (active_border, chevron_text, radius) = {
+        let (active_border, radius) = {
             let t = cx.theme();
-            (
-                t.table_active_border,
-                t.muted_foreground,
-                t.radius_tokens().sm,
-            )
+            (t.table_active_border, t.radius_tokens().sm)
         };
         let base = div()
             .size_full()
@@ -194,50 +257,71 @@ impl TableDelegate for SheetDelegate {
             .font_family(fonts::MONO)
             .whitespace_nowrap()
             .overflow_hidden()
-            .when(package, |el| el.bg(paints.package_ground))
             .debug_selector(|| format!("pricer-cell-{row_ix}-{col_ix}"));
         let Some(plan_col) = Self::plan_col(col_ix) else {
-            // The tree column: indent by depth, a chevron on a package,
-            // then the row's shorthand — except the entry placeholder,
-            // which paints the open field (or nothing, mid-transition)
-            // over the table's active-row ground instead.
+            // The tree column: indent by depth, then the fixed chevron
+            // slot (a chevron on a package, empty otherwise), then the
+            // row's shorthand — except the entry placeholder, which puts
+            // the open field (or nothing, mid-transition) where its row
+            // will land: the same indent and slot.
+            let slot = div()
+                .w(scale::design(CHEVRON_SLOT))
+                .h_full()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center();
+            let el = base.pl(scale::design(row.depth as f32 * INDENT));
             if row.kind == GridRowKind::Entry {
-                let ground = cx.theme().table_active;
                 return match &self.entry {
-                    Some(input) => base
-                        .bg(ground)
+                    Some(input) => el
                         .debug_selector(|| "pricer-entry".into())
-                        .child(div().flex_1().child(Input::new(input)))
+                        .child(slot)
+                        .child(div().flex_1().min_w_0().child(Input::new(input).xsmall()))
                         .into_any_element(),
-                    None => base.bg(ground).into_any_element(),
+                    None => el.into_any_element(),
                 };
             }
-            let mut el = base
-                .pl(px(row.depth as f32 * INDENT))
-                .text_color(paints.text(crate::core::CellState::Own, package));
-            if let GridRowKind::Package { open } = row.kind {
-                let states = self.chevron_states(cx.theme());
-                el = el.child(
+            let slot = match row.kind {
+                GridRowKind::Package { open } => {
+                    let states = self.chevron_states(cx.theme());
+                    slot.child(
+                        div()
+                            .id(("pricer-chevron", row_ix))
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(radius)
+                            .text_color(paints.package_muted)
+                            .pointer_states(states)
+                            .debug_selector(|| format!("pricer-chevron-{row_ix}"))
+                            .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
+                                cx.stop_propagation();
+                                // A double-click toggles once (the blotter's rule).
+                                if e.click_count() > 1 {
+                                    return;
+                                }
+                                this.set_selected_row(row_ix, cx);
+                                cx.emit(ChevronClicked(row_ix));
+                            }))
+                            .child(if open { "▾" } else { "▸" }),
+                    )
+                }
+                _ => slot,
+            };
+            return el
+                .text_color(paints.text(crate::core::CellState::Own, package))
+                .child(slot)
+                .child(
                     div()
-                        .id(("pricer-chevron", row_ix))
-                        .w(px(14.))
-                        .rounded(radius)
-                        .text_color(chevron_text)
-                        .pointer_states(states)
-                        .debug_selector(|| format!("pricer-chevron-{row_ix}"))
-                        .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
-                            cx.stop_propagation();
-                            // A double-click toggles once (the blotter's rule).
-                            if e.click_count() > 1 {
-                                return;
-                            }
-                            this.set_selected_row(row_ix, cx);
-                            cx.emit(ChevronClicked(row_ix));
-                        }))
-                        .child(if open { "▾" } else { "▸" }),
-                );
-            }
-            return el.child(row.tree.clone()).into_any_element();
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(row.tree.clone()),
+                )
+                .into_any_element();
         };
         let at_cursor = self.cursor == Some((row_ix, plan_col));
         let right = model.columns.get(plan_col).is_some_and(|c| c.right);
@@ -263,8 +347,9 @@ impl TableDelegate for SheetDelegate {
                 el.child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .debug_selector(|| format!("pricer-editor-{row_ix}-{col_ix}"))
-                        .child(Input::new(&e.input)),
+                        .child(Input::new(&e.input).xsmall()),
                 )
                 .when_some(popup, |el, popup| {
                     el.relative()
@@ -279,5 +364,72 @@ impl TableDelegate for SheetDelegate {
                 })
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::columns::{COLUMNS, ColumnKind};
+    use geode_shell::fontsize::FontSize;
+    use gpui_component::Size;
+
+    /// JetBrains Mono (`fonts::MONO`) advances every glyph 600/1000 em.
+    const MONO_ADVANCE_EM: f32 = 0.6;
+    /// gpui-component's table paints its text at `text_sm`.
+    const TABLE_TEXT_REM: f32 = 0.875;
+
+    /// The widest value a column is expected to paint, beside its label.
+    /// A right-aligned cell that overflows loses its LEADING characters
+    /// (`-12,345.6789` reads `2,345.6789`), so a width that fits only the
+    /// usual case is a plausible-wrong number waiting for a big book.
+    fn worst_case(kind: ColumnKind) -> &'static str {
+        match kind {
+            ColumnKind::Qty => "-1000",
+            ColumnKind::Underlying => "SX5E",
+            ColumnKind::Expiry => "20DEC26",
+            ColumnKind::Strike | ColumnKind::Barrier => "12345.5",
+            ColumnKind::Type => "C",
+            ColumnKind::BarrierType => "DO",
+            ColumnKind::SpotShift | ColumnKind::VolShift => "-100.0",
+            ColumnKind::Price => "-1,234,567.89",
+            ColumnKind::Delta
+            | ColumnKind::Gamma
+            | ColumnKind::Vega
+            | ColumnKind::Theta
+            | ColumnKind::Rho => "-123,456.7890",
+            ColumnKind::PricedAt => "23:59:59",
+            // Prose: a failure's reason may be longer than any width and
+            // is read in the footer too.
+            ColumnKind::Status => "pricing…",
+        }
+    }
+
+    /// Column widths are pixels (`view_presentation.toml`'s contract) and
+    /// do not follow the rem, so each default label and worst-case value
+    /// must fit its width at the LARGEST font size, inside the XSmall
+    /// cell padding.
+    #[test]
+    fn every_default_label_and_worst_case_value_fits_its_width() {
+        let advance = FontSize::Large.rem_px() * TABLE_TEXT_REM * MONO_ADVANCE_EM;
+        let pad = Size::XSmall.table_cell_padding();
+        let padding = f32::from(pad.left) + f32::from(pad.right);
+        let mut failures = Vec::new();
+        for c in &COLUMNS {
+            for text in [c.label, worst_case(c.kind)] {
+                let need = text.chars().count() as f32 * advance + padding;
+                if need > c.default_width {
+                    failures.push(format!(
+                        "{}: '{text}' needs {need:.1}px in {}px",
+                        c.name, c.default_width
+                    ));
+                }
+            }
+            assert!(
+                !c.label.contains('_'),
+                "{}: a label is words, not the config name",
+                c.name
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
