@@ -244,6 +244,13 @@ pub struct PricerTile {
     pub(crate) editor: Option<Editor>,
     /// The `.` action menu (Task 11): `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
+    /// The line a cell press that closed the entry field resolved, with
+    /// the grid row it was painted at (see `on_table_event`).
+    click_anchor: Option<(usize, LineId)>,
+    /// `click_anchor`, taken by the next press when it hit the same row:
+    /// read only by that press's own `DoubleClickedCell` (every press
+    /// emits `SelectCell` first, which overwrites it).
+    pressed: Option<(usize, LineId)>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -358,16 +365,10 @@ impl PricerTile {
             this.on_table_event(event, window, cx)
         })
         .detach();
-        // A chevron click is a click: it cancels an open entry or editor
-        // first, never commits it (global constraints), then toggles.
         cx.subscribe_in(
             &table,
             window,
-            |this, _, event: &ChevronClicked, window, cx| {
-                this.close_entry(window, cx);
-                this.close_editor(window, cx);
-                this.toggle_grid_row(event.0, cx)
-            },
+            |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
         )
         .detach();
         // Planning decision 6: arrive at every flip barrier at once.
@@ -455,6 +456,8 @@ impl PricerTile {
             entry: None,
             editor: None,
             menu: None,
+            click_anchor: None,
+            pressed: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -1808,12 +1811,6 @@ impl PricerTile {
         true
     }
 
-    /// The chevron at grid row `row` (spec §8.2: its click is `space`).
-    pub(crate) fn toggle_grid_row(&mut self, row: usize, cx: &mut Context<Self>) {
-        self.set_cursor_row(row);
-        self.tree_verb(None, cx);
-    }
-
     fn row_labels(&self) -> Vec<String> {
         self.model.rows.iter().map(|r| r.tree.to_string()).collect()
     }
@@ -2073,6 +2070,27 @@ impl PricerTile {
         });
     }
 
+    /// The line painted at grid row `row` — `None` on the entry
+    /// placeholder. Read BEFORE any field closes: the placeholder is a
+    /// grid row, so once `close_entry` rebuilds the model every row below
+    /// it names the line one lower.
+    fn line_at(&self, row: usize) -> Option<LineId> {
+        self.model.rows.get(row).and_then(|r| r.id)
+    }
+
+    /// The chevron at grid row `row` (spec §8.2: its click is `space`).
+    /// A click is a click: it cancels an open entry or editor first,
+    /// never commits it; a click on the placeholder only closes it.
+    fn chevron_clicked(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let line = self.line_at(row);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);
+        if let Some(id) = line {
+            self.cursor.line = Some(id);
+            self.tree_verb(None, cx);
+        }
+    }
+
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TableEvent::SelectCell(row, col) => {
@@ -2082,30 +2100,49 @@ impl PricerTile {
                 // it mirrors the cursor into the table (including from
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
                 // so only a real cell click — `SelectCell` — closes a field.
+                let line = self.line_at(*row);
+                // A double-click's second press carries its first press's
+                // row index. When the first press closed the entry, the
+                // rows below the placeholder moved up under the pointer,
+                // so that index now names the next line: the first press's
+                // line is handed to the NEXT press only, and only for its
+                // `DoubleClickedCell` (a lone click there still selects
+                // what is painted under it).
+                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);
+                if self.entry.is_some() {
+                    self.click_anchor = line.map(|id| (*row, id));
+                }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
-                self.set_cursor_row(*row);
-                if let Some(c) = SheetDelegate::plan_col(*col) {
-                    self.cursor.col = c;
+                if let Some(id) = line {
+                    self.cursor.line = Some(id);
+                    if let Some(c) = SheetDelegate::plan_col(*col) {
+                        self.cursor.col = c;
+                    }
                 }
                 self.sync_cursor(cx);
                 self.rebuild_chrome();
                 cx.notify();
             }
-            // The mouse form of `i` (spec §8.4). The first click of the
-            // pair already landed as `SelectCell` and cancelled whatever
-            // was open; the tree column opens nothing.
+            // The mouse form of `i` (spec §8.4). The press's own
+            // `SelectCell` (emitted first) already cancelled whatever was
+            // open; the tree column and the placeholder open nothing.
             TableEvent::DoubleClickedCell(row, col) => {
+                let line = match self.pressed.take() {
+                    Some((_, id)) => Some(id),
+                    None => self.line_at(*row),
+                };
                 self.close_entry(window, cx);
-                self.set_cursor_row(*row);
-                if let Some(c) = SheetDelegate::plan_col(*col) {
-                    self.cursor.col = c;
-                    self.sync_cursor(cx);
-                    self.footer = None;
-                    self.begin_edit(window, cx);
-                    self.rebuild_chrome();
-                    cx.notify();
-                }
+                let (Some(id), Some(c)) = (line, SheetDelegate::plan_col(*col)) else {
+                    return;
+                };
+                self.cursor.line = Some(id);
+                self.cursor.col = c;
+                self.sync_cursor(cx);
+                self.footer = None;
+                self.begin_edit(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
             }
             // `SelectRow`/`SelectColumn` are what `sync_cursor` itself
             // emits: deliberately unmatched.
@@ -4270,5 +4307,101 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "nothing was committed");
         assert_eq!(h.tree(&vcx).len(), 5, "and the package toggled");
+    }
+
+    // ---- clicks while the entry field is open ----
+
+    /// [A, P, Q], both packages closed: grid rows A=0, P=1, Q=2.
+    const TWO_PACKAGES: [&str; 3] = [
+        "SPX Z26 5000 C",
+        "-5 SPX Z26 4800/5200 CS",
+        "SPX Z26 4000/4400 CS",
+    ];
+
+    /// Three roots A, B, C: strikes 5000, 4000, 3000.
+    const THREE_LINES: [&str; 3] = ["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"];
+
+    /// The placeholder is a grid row: a click painted below it names the
+    /// row one index lower once the entry closes. The chevron's row must
+    /// be read before the close, or P's chevron toggles Q.
+    #[gpui::test]
+    fn a_chevron_click_below_an_open_entry_toggles_that_package(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &TWO_PACKAGES);
+        h.dispatch(&mut vcx, "down", None); // P
+        h.dispatch(&mut vcx, "add_above", None);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), Some(1));
+        let at = centre_of(&mut vcx, "pricer-chevron-2"); // P, under the placeholder
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "the click closed the entry");
+        assert_eq!(
+            h.tree(&vcx),
+            vec![
+                "SPX Z26 5000 C".to_string(),
+                "-5 SPX Z26 4800/5200 CS".to_string(),
+                "-5 SPX Z26 4800 C".to_string(),
+                "5 SPX Z26 5200 C".to_string(),
+                "SPX Z26 4000/4400 CS".to_string(),
+            ],
+            "P opened, not Q"
+        );
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on P");
+    }
+
+    #[gpui::test]
+    fn a_cell_click_below_an_open_entry_lands_on_that_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cursor(&vcx), Some((1, 3)), "B's strike, not C's");
+    }
+
+    /// A click on the placeholder itself only closes the entry.
+    #[gpui::test]
+    fn a_click_on_the_placeholder_only_closes_the_entry(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-1-4"); // the placeholder
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cursor(&vcx), Some((1, 0)), "the cursor stays on B");
+    }
+
+    #[gpui::test]
+    fn a_double_click_below_an_open_entry_edits_that_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"), "B's strike");
+    }
+
+    /// The closing press's line is handed to the next press only: a
+    /// later double-click at the same spot edits what is painted there.
+    #[gpui::test]
+    fn a_later_double_click_at_the_same_spot_edits_the_row_painted_there(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "down", None); // B
+        h.dispatch(&mut vcx, "add_above", None);
+        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.cursor(&vcx), Some((1, 3)), "on B");
+        click_at(&mut vcx, at, 1);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3000"), "C's strike");
     }
 }
