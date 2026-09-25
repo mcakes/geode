@@ -865,6 +865,17 @@ impl TimeseriesTile {
             );
             self.popup = Some(Popup::Series(rows));
         }
+        // The menu's rows read the cursor slot the same way, and a `:`
+        // line runs under an open menu (the menu context leaves `:` to
+        // the tile). The highlight stays on its row where that row is
+        // still an action, else lands on the first enabled one.
+        if matches!(self.popup, Some(Popup::Menu(_))) {
+            let rows = self.menu_rows(cx);
+            if let Some(Popup::Menu(m)) = &mut self.popup {
+                m.highlighted = menu::step(&rows, m.highlighted, 0);
+                m.rows = rows;
+            }
+        }
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
             &self.model,

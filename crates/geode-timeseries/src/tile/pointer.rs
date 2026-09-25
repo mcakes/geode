@@ -134,9 +134,12 @@ impl TimeseriesTile {
 
     /// A left press on the surface: on a plot it arms a pan, on the
     /// divider band a split drag, anywhere else nothing. A second press
-    /// of a double-click arms nothing — the shell owns the tile's
-    /// double-click (fullscreen), and a pan armed under it would follow
-    /// the pointer into the toggle.
+    /// of a double-click arms nothing — a tile's double-click is the
+    /// shell's (with the mod key it toggles fullscreen), and a pan armed
+    /// under it would follow the pointer into the toggle. A MODIFIED
+    /// press arms nothing either: with the mod key the shell arms a
+    /// tile drag on the same press, and a second catcher under its own
+    /// would only paint a second cursor.
     ///
     /// Deliberately no `stop_propagation`: the shell's tile-level
     /// mouse-down (click-to-focus, the command-line leave, the
@@ -148,7 +151,8 @@ impl TimeseriesTile {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if event.button != MouseButton::Left || event.click_count > 1 {
+        if event.button != MouseButton::Left || event.click_count > 1 || event.modifiers.modified()
+        {
             return;
         }
         let rem_px = window.rem_size().as_f32();

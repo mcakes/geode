@@ -853,6 +853,32 @@ fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui:
     );
 }
 
+/// A RIGHT press focuses the tile it lands on exactly as a left one does
+/// (timeseries mouse pass, 2026-09-24: a module's context menu opens on
+/// it, and its keys reach the occupant only through the focused tile),
+/// and arms nothing — mod key or not.
+#[gpui::test]
+fn a_right_click_focuses_the_tile_and_never_arms_a_drag(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+    let focused = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        })
+    };
+    assert_eq!(focused(&cx), Some(left));
+    let click = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+    cx.simulate_mouse_down(click, MouseButton::Right, gpui::Modifiers::none());
+    assert_eq!(focused(&cx), Some(right), "a right press focuses");
+    assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
+    let back = main_tile_point(&mut cx, &shell, left, 0.5, 0.5);
+    cx.simulate_mouse_down(back, MouseButton::Right, alt_held());
+    assert_eq!(focused(&cx), Some(left), "with the mod key too");
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+        "a right press never arms a drag"
+    );
+}
+
 /// End-to-end: a plain (no-mod) click on a tile still focuses it and
 /// never arms a drag — the tile-drag feature leaves click-to-focus
 /// byte-for-byte in behavior.

@@ -227,7 +227,11 @@ pub(crate) fn render_header(
     //    2026-09-24): a click opens the range popup, which is where
     //    both halves of the readout are set. Through `dispatch` on the
     //    verb's own id, the path `r` takes.
-    let readout_states = control::paint(
+    // One bare-control derivation for the readout, every swatch target
+    // and the `⋯` button: all three are muted text (or no text) on the
+    // tile surface, and `control::paint` can run an OKLab bisection —
+    // not a per-chip-per-frame cost.
+    let bare_states = control::paint(
         theme,
         control::Rest::Bare,
         theme.background,
@@ -241,7 +245,7 @@ pub(crate) fn render_header(
             .px_1()
             .rounded(theme.radius)
             .font_family(fonts::MONO)
-            .pointer_states(readout_states)
+            .pointer_states(bare_states)
             .child(h.range_freq.clone())
             .debug_selector(move || format!("timeseries-range-{tile_id}"))
             .tooltip(tips::tip(
@@ -250,12 +254,18 @@ pub(crate) fn render_header(
                 Some("timeseries::range"),
                 None,
             ))
-            .on_mouse_down(MouseButton::Left, {
+            // Capture phase, the `⋯` button's reason (below): an open
+            // range popup's own `on_mouse_down_out` is a capture
+            // listener that would close it before a bubble handler
+            // here could see it open, and the click meant to close
+            // would reopen on a fresh seed instead.
+            .capture_any_mouse_down({
                 let tile = tile.clone();
-                move |_: &MouseDownEvent, window, cx| {
-                    tile.update(cx, |t, cx| {
-                        t.dispatch(&ActionId("timeseries::range".into()), None, window, cx);
-                    });
+                move |event: &MouseDownEvent, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
                 }
             }),
     );
@@ -315,12 +325,7 @@ pub(crate) fn render_header(
                     .items_center()
                     .justify_center()
                     .rounded(theme.radius_tokens().sm)
-                    .pointer_states(control::paint(
-                        theme,
-                        control::Rest::Bare,
-                        theme.background,
-                        paint.text,
-                    ))
+                    .pointer_states(bare_states)
                     .tooltip(tips::tip_with(
                         chip.swatch_tip_selector.clone(),
                         SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
@@ -411,14 +416,7 @@ pub(crate) fn render_header(
             // Open, the button keeps its persistent fill and answers the
             // pointer with nothing, as the guide asks of a button that
             // owns a popup.
-            .when(!menu_open, |d| {
-                d.pointer_states(control::paint(
-                    theme,
-                    control::Rest::Bare,
-                    theme.background,
-                    muted,
-                ))
-            })
+            .when(!menu_open, |d| d.pointer_states(bare_states))
             .child("⋯")
             .tooltip(tips::tip(
                 "tip-timeseries-menu",

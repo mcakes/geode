@@ -721,6 +721,26 @@ impl Render for ShellView {
                                 view.pending_focus_restore = true;
                                 cx.notify();
                             }),
+                        )
+                        // A RIGHT press focuses the tile too (timeseries
+                        // mouse pass, 2026-09-24): a module's context
+                        // menu opens on it, and the menu's keys reach the
+                        // occupant only through the focused tile's key
+                        // context — a right-click on an unfocused tile
+                        // used to paint a menu whose `j`/`k`/`enter`
+                        // drove whichever tile the shell still had. The
+                        // left press's focus tail exactly, with none of
+                        // its gestures: no double-click, no drag arm.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                view.leave_command_line(window, cx);
+                                if view.services.workspaces.active_mut().focus_main_tile(id) {
+                                    view.session_dirty = true;
+                                }
+                                view.pending_focus_restore = true;
+                                cx.notify();
+                            }),
                         ),
                 );
             }
@@ -748,42 +768,63 @@ impl Render for ShellView {
                     // above — a docked tile is the same kind of tile, and
                     // drags work from any source region.
                     let view = self.occupants.get(&id).map(|o| o.view.clone());
-                    surface = surface.child(tile_cell(id, tr, is_focused, view, cx).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                            // Same command-line leave as the tree-tile
-                            // listener above (commits a find, cancels a
-                            // command — `leave_command_line`), and for
-                            // the identical reason (fix round 1, finding
-                            // 2, and spec §20.4).
-                            view.leave_command_line(window, cx);
-                            // The fullscreen door refuses a docked tile
-                            // (fullscreen is main-tree-only), but it is
-                            // called here too so both listeners read the
-                            // same gesture table.
-                            if view.try_fullscreen_on_double_click(id, event, window, cx)
-                                || view.try_pick_tile_on_double_click(id, event, window, cx)
-                                || view.try_arm_tile_drag(id, event, cx)
-                            {
-                                return;
-                            }
-                            if view
-                                .services
-                                .workspaces
-                                .active_mut()
-                                .focus_dock_tile(side, id)
-                            {
-                                view.session_dirty = true;
-                            }
-                            // Docked tiles get real occupants too (a
-                            // focus-tracking occupant like the recording
-                            // module can steal focus on this same
-                            // mouse-down) — re-arm the identical restore
-                            // the tree-tile listener above uses (§3.3).
-                            view.pending_focus_restore = true;
-                            cx.notify();
-                        }),
-                    ));
+                    surface = surface.child(
+                        tile_cell(id, tr, is_focused, view, cx)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                    // Same command-line leave as the tree-tile
+                                    // listener above (commits a find, cancels a
+                                    // command — `leave_command_line`), and for
+                                    // the identical reason (fix round 1, finding
+                                    // 2, and spec §20.4).
+                                    view.leave_command_line(window, cx);
+                                    // The fullscreen door refuses a docked tile
+                                    // (fullscreen is main-tree-only), but it is
+                                    // called here too so both listeners read the
+                                    // same gesture table.
+                                    if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                        || view.try_pick_tile_on_double_click(id, event, window, cx)
+                                        || view.try_arm_tile_drag(id, event, cx)
+                                    {
+                                        return;
+                                    }
+                                    if view
+                                        .services
+                                        .workspaces
+                                        .active_mut()
+                                        .focus_dock_tile(side, id)
+                                    {
+                                        view.session_dirty = true;
+                                    }
+                                    // Docked tiles get real occupants too (a
+                                    // focus-tracking occupant like the recording
+                                    // module can steal focus on this same
+                                    // mouse-down) — re-arm the identical restore
+                                    // the tree-tile listener above uses (§3.3).
+                                    view.pending_focus_restore = true;
+                                    cx.notify();
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                // The tree tile's right-press focus tail, for a
+                                // docked tile (same reason, same shape).
+                                cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                    view.leave_command_line(window, cx);
+                                    if view
+                                        .services
+                                        .workspaces
+                                        .active_mut()
+                                        .focus_dock_tile(side, id)
+                                    {
+                                        view.session_dirty = true;
+                                    }
+                                    view.pending_focus_restore = true;
+                                    cx.notify();
+                                }),
+                            ),
+                    );
                 }
             } else {
                 let (hint, selector) = match side {

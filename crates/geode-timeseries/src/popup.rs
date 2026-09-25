@@ -567,6 +567,7 @@ pub(crate) fn render_series_popup(
     cx: &App,
 ) -> Deferred {
     let theme = cx.theme();
+    let hover = row_paint(theme).hover;
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("ts-list-{tile_id}"))
         // Without this gpui keeps hit-testing the chart painted beneath
@@ -586,6 +587,7 @@ pub(crate) fn render_series_popup(
         list = list.child(
             row_shell(
                 theme,
+                hover,
                 ElementId::NamedInteger(SharedString::new_static("ts-list-row"), i as u64),
                 highlighted,
                 move || format!("ts-list-row-{tile_id}-{i}"),
@@ -633,15 +635,17 @@ pub(crate) fn render_series_popup(
 ///
 /// `id` is the row's stable identity, needed for the hover state:
 /// `(kind, index)` per popup, and a popup never shares a frame with
-/// another.
+/// another. `hover` is `row_paint(theme).hover`, derived ONCE per
+/// popup paint by the caller: `row_paint` floors its accent with a
+/// possible OKLab bisection, which is not a per-row cost.
 fn row_shell(
     theme: &Theme,
+    hover: Hsla,
     id: ElementId,
     highlighted: bool,
     selector: impl FnOnce() -> String,
     on_down: impl Fn(&mut Window, &mut App) + 'static,
 ) -> Stateful<Div> {
-    let hover = row_paint(theme).hover;
     h_flex()
         .id(id)
         .h(scale::design(ROW_HEIGHT))
@@ -704,6 +708,7 @@ pub(crate) fn render_picker(
     cx: &App,
 ) -> Deferred {
     let theme = cx.theme();
+    let hover = row_paint(theme).hover;
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("ts-picker-{tile_id}"))
         // The series list's reasons, exactly (see `render_series_popup`).
@@ -730,6 +735,7 @@ pub(crate) fn render_picker(
         list = list.child(
             row_shell(
                 theme,
+                hover,
                 ElementId::NamedInteger(SharedString::new_static("ts-picker-row"), row as u64),
                 highlighted,
                 move || format!("ts-picker-row-{tile_id}-{row}"),
@@ -760,6 +766,7 @@ pub(crate) fn render_picker(
             // paints lit.
             row_shell(
                 theme,
+                hover,
                 ElementId::Name(SharedString::new_static("ts-picker-add")),
                 true,
                 move || format!("ts-picker-add-{tile_id}"),

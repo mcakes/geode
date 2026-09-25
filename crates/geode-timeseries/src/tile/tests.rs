@@ -2376,7 +2376,7 @@ fn the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains(
     let remove = h.menu_row_index(&vcx, "Remove");
     h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{remove}"));
     assert!(h.popup_is_menu(&vcx), "a disabled row keeps the menu");
-    assert_eq!(h.notice(&vcx).as_deref(), Some("no series"));
+    assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
     // The button closes it.
     h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
     assert!(h.popup_is_none(&vcx), "a second click closes");
@@ -2467,6 +2467,40 @@ fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
     assert!(h.model(&vcx).slots()[0].visible, "shown again");
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
     assert!(h.popup_is_range(&vcx));
+    // A second click closes rather than reseeding over typed dates
+    // (`left` onto the month, then a digit typed into it — a bare
+    // digit on an unedited popup would be a preset and commit).
+    vcx.simulate_keystrokes("left 3");
+    assert!(h.popup_is_range(&vcx));
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert!(h.popup_is_none(&vcx), "the readout toggles");
+}
+
+#[gpui::test]
+fn an_outside_click_closes_the_menu_and_the_menu_follows_the_cursor_slot(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_loaded(cx, 20);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "menu", None);
+    assert!(h.menu_rows(&vcx).contains(&("[VIX]".to_string(), false)));
+    // A `:` line under the open menu moves the cursor slot: the rows
+    // follow it.
+    h.command(&mut vcx, "remove s2").unwrap();
+    assert!(h.popup_is_menu(&vcx), "`:` leaves the menu up");
+    let rows = h.menu_rows(&vcx);
+    assert!(
+        rows.contains(&("[SPX.close]".to_string(), false)),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|(_, on)| *on), "the highlight survived");
+    // A click on the chart, outside the menu, closes it; the press
+    // that closed it arms no lingering drag once released.
+    let at = plot_point(&mut vcx, 0.);
+    click_at(&mut vcx, at, 1);
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx), "an outside click closes the menu");
+    assert_eq!(h.drag(&vcx), None);
 }
 
 #[gpui::test]

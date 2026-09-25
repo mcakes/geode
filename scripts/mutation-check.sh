@@ -15437,11 +15437,11 @@ run_mutation "tilepicker: the door requires the placeholder to be focused" \
 # the longer one, so the bare line would match the main-tree site first.
 run_mutation "tilepicker: the dock listener calls the door" \
   crates/geode-shell/src/shell/render.rs \
-  '                            // same gesture table.
-                            if view.try_fullscreen_on_double_click(id, event, window, cx)
-                                || view.try_pick_tile_on_double_click(id, event, window, cx)' \
-  '                            // same gesture table.
-                            if view.try_fullscreen_on_double_click(id, event, window, cx)' \
+  '                                    // same gesture table.
+                                    if view.try_fullscreen_on_double_click(id, event, window, cx)
+                                        || view.try_pick_tile_on_double_click(id, event, window, cx)' \
+  '                                    // same gesture table.
+                                    if view.try_fullscreen_on_double_click(id, event, window, cx)' \
   geode-shell \
   a_docked_placeholder_double_click_opens_the_picker_and_fills_it
 
@@ -17741,8 +17741,8 @@ run_mutation "timeseries mouse: the wheel sign is rolled-away-in" \
 # The second press of a double-click arms nothing: the shell owns it.
 run_mutation "timeseries mouse: a double-click arms no drag" \
   crates/geode-timeseries/src/tile/pointer.rs \
-  '        if event.button != MouseButton::Left || event.click_count > 1 {' \
-  '        if event.button != MouseButton::Left || event.click_count > 2 {' \
+  '        if event.button != MouseButton::Left || event.click_count > 1 || event.modifiers.modified()' \
+  '        if event.button != MouseButton::Left || event.click_count > 2 || event.modifiers.modified()' \
   geode-timeseries a_drag_on_the_plot_pans_and_ends_on_release_or_a_buttonless_move
 
 # A buttonless move is the release that was missed.
@@ -17762,7 +17762,7 @@ run_mutation "timeseries mouse: a split drag reads the pointer" \
 # The slot section is disabled, with its reason, while the tile is empty.
 run_mutation "timeseries mouse: an empty tile disables the slot rows" \
   crates/geode-timeseries/src/core/menu.rs \
-  '        None => Err("no series"),' \
+  '        None => Err("add a series first"),' \
   '        None => Ok(()),' \
   geode-timeseries an_empty_tile_lists_every_verb_and_disables_the_slot_section
 
@@ -17777,9 +17777,34 @@ run_mutation "timeseries mouse: menu stepping skips non-rows" \
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
 run_mutation "timeseries mouse: the actions button toggles in capture" \
   crates/geode-timeseries/src/header.rs \
-  '            .capture_any_mouse_down({' \
-  '            .on_any_mouse_down({' \
+  '            ))
+            .capture_any_mouse_down({' \
+  '            ))
+            .on_any_mouse_down({' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The readout toggles for the same reason, in the same phase: in the
+# bubble phase the open range popup's `on_mouse_down_out` closes it
+# first and the click meant to close reopens on a fresh seed.
+run_mutation "timeseries mouse: the readout toggles in capture" \
+  crates/geode-timeseries/src/header.rs \
+  '            // would reopen on a fresh seed instead.
+            .capture_any_mouse_down({' \
+  '            // would reopen on a fresh seed instead.
+            .on_any_mouse_down({' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# A right press focuses the tile it lands on (review M1: a context menu
+# opened in an unfocused tile answers to the wrong tile's keys).
+run_mutation "shell: a right press focuses the tile" \
+  crates/geode-shell/src/shell/render.rs \
+  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                view.leave_command_line(window, cx);
+                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
+  '                            cx.listener(move |view, _event: &MouseDownEvent, window, cx| {
+                                view.leave_command_line(window, cx);
+                                if false {' \
+  geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
 
 # A verb outside the menu's own closes it first.
 run_mutation "timeseries mouse: a foreign verb closes the menu" \
@@ -17808,9 +17833,9 @@ run_mutation "timeseries mouse: a right-click selects its chip" \
 
 # The readout opens the RANGE popup, not another.
 run_mutation "timeseries mouse: the readout opens the range popup" \
-  crates/geode-timeseries/src/header.rs \
-  '                        t.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
-  '                        t.dispatch(&ActionId("timeseries::list".into()), None, window, cx);' \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
+  '        self.dispatch(&ActionId("timeseries::list".into()), None, window, cx);' \
   geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
 
 # A frequency chip's write reaches the chrome (the header readout).

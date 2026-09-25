@@ -94,7 +94,7 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     out.push(MenuRow::Section(heading));
     let none: Result<(), &'static str> = match slot {
         Some(_) => Ok(()),
-        None => Err("no series"),
+        None => Err("add a series first"),
     };
     let is_source = slot.is_some_and(|s| matches!(s.kind, SlotKind::Source { .. }));
     let visible = slot.is_none_or(|s| s.visible);
@@ -242,7 +242,7 @@ mod tests {
             "timeseries::edit",
             "timeseries::remove",
         ] {
-            assert_eq!(enabled(&rows, id), Err("no series"), "{id}");
+            assert_eq!(enabled(&rows, id), Err("add a series first"), "{id}");
         }
         assert_eq!(enabled(&rows, "timeseries::add"), Ok(()));
         assert_eq!(first_enabled(&rows), 0);

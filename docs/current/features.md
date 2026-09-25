@@ -95,10 +95,12 @@ readout opens the range popup, which also carries a frequency row whose chips
 write at once and leave the popup open. Over the chart, a wheel zooms about
 the pointer (the dominant axis wins, so a sideways wheel pans instead), a drag
 on a plot pans, and a drag on the band between two panes moves the split. A
-drag ends on release, on a release outside the window, or on the first move
-that arrives with no button held. The empty tile offers the add and compose
-verbs as buttons under its hint. A double-click is the shell's fullscreen
-toggle and arms nothing here.
+drag ends on release, on a release anywhere off the chart, or on the first
+move that arrives with no button held; a modified press or a double-click's
+second press arms nothing, because those are the shell's tile gestures. The
+empty tile offers the add and compose verbs as buttons under its hint. A
+right press focuses a tile exactly as a left one does, so a module's context
+menu always opens in the tile whose keys it will answer to.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,

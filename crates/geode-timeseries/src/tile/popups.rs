@@ -48,7 +48,7 @@ impl TimeseriesTile {
                 self.close_popup_with_window(window, cx);
                 true
             }
-            "menu_pick" | "commit" if menu_open => {
+            "menu_pick" if menu_open => {
                 let Some(Popup::Menu(m)) = &self.popup else {
                     return false;
                 };
@@ -759,9 +759,21 @@ impl TimeseriesTile {
         self.open_menu(cx);
     }
 
-    /// Build and install the menu over the current model. Every row's
-    /// `hint` is its action's live chord, the footer's own rule.
+    /// Build and install the menu over the current model.
     pub(super) fn open_menu(&mut self, cx: &mut Context<Self>) {
+        let rows = self.menu_rows(cx);
+        let highlighted = menu::first_enabled(&rows);
+        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// The menu's rows over the model as it is now, every `hint` its
+    /// action's live chord (the footer's own rule). Called at open and
+    /// from `rebuild_chrome` while the menu is up — a `:` line or a
+    /// delivery can move the cursor slot under an open menu, and a row
+    /// must keep its promise (the heading, Hide/Show, the enablement).
+    pub(super) fn menu_rows(&self, cx: &App) -> Vec<menu::MenuRow> {
         let default_source = cx
             .try_global::<SeriesSettings>()
             .and_then(|s| s.default_source.clone());
@@ -781,10 +793,19 @@ impl TimeseriesTile {
                     .unwrap_or_default();
             }
         }
-        let highlighted = menu::first_enabled(&rows);
-        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
-        self.notice = None;
-        cx.notify();
+        rows
+    }
+
+    /// A click on the `range · freq` readout: opens the range popup
+    /// through `r`'s own path, or CLOSES it when it is already up — a
+    /// second click that reopened would seed fresh fields over dates
+    /// the trader had started typing.
+    pub(crate) fn readout_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some(Popup::Range(_))) {
+            self.close_popup_with_window(window, cx);
+            return;
+        }
+        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);
     }
 
     /// A pointer resting on menu row `index`: the mouse form of `j`/`k`.
