@@ -4527,6 +4527,62 @@ pub(crate) mod tests {
         assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30, 30]);
     }
 
+    // ---- the repricing rules ----
+
+    /// Planning decision 4: `in_flight` decides WHETHER to submit. Every
+    /// line in flight at its current revision asks for nothing more; an
+    /// edit to one line sends a batch of every stale line.
+    #[gpui::test]
+    fn price_submits_nothing_while_every_line_is_in_flight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let first = h.prices().remove(0);
+        h.command(&mut vcx, "price").unwrap();
+        h.dispatch(&mut vcx, "price", None);
+        assert!(h.prices().is_empty(), "every line is already on its way");
+        let e = new_strike(&h, &vcx, 0, 5100.0);
+        edit(&h, &mut vcx, e);
+        let again = h.prices();
+        assert_eq!(again.len(), 1);
+        assert_eq!(
+            again[0].lines.iter().map(|l| l.id).collect::<Vec<_>>(),
+            vec![1, 3, 4, 5],
+            "the edited line and every other still-stale one"
+        );
+        assert!(again[0].tag > first.tag);
+    }
+
+    #[gpui::test]
+    fn an_admitted_submission_clears_the_refusal(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 12.5);
+        h.fill_queue();
+        h.dispatch(&mut vcx, "price", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        let _ = h.requests(); // the queue drains
+        h.dispatch(&mut vcx, "price", None);
+        assert_eq!(h.prices().len(), 1);
+        assert_eq!(h.notice(&vcx), None);
+    }
+
+    /// A hide cancels by key, so the batch before it may answer in part;
+    /// the show's batch carries a newer tag and the old outcome installs
+    /// nothing.
+    #[gpui::test]
+    fn an_outcome_from_before_a_hide_installs_nothing_after_the_show(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let before = h.prices().remove(0);
+        h.visible(&mut vcx, false);
+        h.visible(&mut vcx, true);
+        let after = h.prices().remove(0);
+        assert_eq!(after.tag, before.tag + 1);
+        h.answer(&mut vcx, &before, 99.0);
+        assert_eq!(h.cell(&vcx, 0, "price"), "", "the older tag is dropped");
+        h.answer(&mut vcx, &after, 12.5);
+        assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
+    }
+
     // ---- clicks while the entry field is open ----
 
     /// [A, P, Q], both packages closed: grid rows A=0, P=1, Q=2.

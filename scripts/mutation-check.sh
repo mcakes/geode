@@ -17576,6 +17576,123 @@ run_mutation "pricer tile: the entry field is not insert mode" \
   geode-app \
   typing_into_the_pricer_entry_field_fires_no_shell_binding
 
+# ---- Pricer post-merge cleanup (2026-09-24) ----
+
+# The entry placeholder is a grid row: a chevron's row read after the
+# entry closes names the package below the one clicked.
+run_mutation "pricer tile: a chevron click reads its row after the entry closes" \
+  crates/geode-pricer/src/tile.rs \
+  '        let line = self.line_at(row);
+        self.close_entry(window, cx);
+        self.close_editor(window, cx);' \
+  '        self.close_entry(window, cx);
+        self.close_editor(window, cx);
+        let line = self.line_at(row);' \
+  geode-pricer a_chevron_click_below_an_open_entry_toggles_that_package
+
+# The same for a cell click: the cursor lands one row low.
+run_mutation "pricer tile: a cell click reads its row after the entry closes" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                if let Some(id) = line {' \
+  '                self.close_entry(window, cx);
+                self.close_editor(window, cx);
+                let line = self.line_at(*row);
+                if let Some(id) = line {' \
+  geode-pricer a_cell_click_below_an_open_entry_lands_on_that_row
+
+# A double-click's second press carries a row index the first press's
+# close has shifted: without the hand-off it edits the next line.
+run_mutation "pricer tile: a double-click's second press ignores the first's line" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
+  '                self.pressed = None;' \
+  geode-pricer a_double_click_below_an_open_entry_edits_that_row
+
+# The hand-off is for the very next press only: kept longer, a later
+# double-click at the same spot edits the line that used to be there.
+run_mutation "pricer tile: the closing press's line outlives the next press" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
+  '                self.pressed = self.click_anchor.filter(|(r, _)| r == row);' \
+  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
+
+# "loading…" is the only sign a load is pending.
+run_mutation "pricer tile: escape clears the loading notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !self.loading {
+                    self.notice = None;
+                }' \
+  '                self.notice = None;' \
+  geode-pricer escape_keeps_the_loading_notice_until_the_rows_arrive
+
+# A refusal with nothing left to submit said "retrying" with no retry
+# that could succeed.
+run_mutation "pricer tile: a refusal stands when nothing is left to submit" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.refusals > 0 {
+                self.end_refusals();' \
+  '            if false {
+                self.end_refusals();' \
+  geode-pricer a_refusal_with_nothing_left_to_price_clears
+
+# A closed channel was asked every second forever.
+run_mutation "pricer tile: retries never back off" \
+  crates/geode-pricer/src/tile.rs \
+  '        let wait = retry_delay(self.refusals);' \
+  '        let wait = RETRY_AFTER;' \
+  geode-pricer consecutive_refusals_back_off
+
+# A refusal used to overwrite the notice it found.
+run_mutation "pricer tile: a refusal destroys the standing notice" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.refusals = self.refusals.saturating_add(1);' \
+  '            self.refusals = self.refusals.saturating_add(1);
+            self.notice = None;' \
+  geode-pricer a_standing_notice_survives_a_refusal_and_returns_after_it
+
+# Pruning the open set on every edit brings an undone package back
+# closed.
+run_mutation "pricer tile: an edit prunes the open set" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.rebuild(cx);' \
+  '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.expansion.retain_packages(&self.sheet);
+        self.rebuild(cx);' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# Unpruned, the set would carry a deleted package's id into the session.
+run_mutation "pricer tile: the session record carries dead package ids" \
+  crates/geode-pricer/src/tile.rs \
+  '                None => self.expansion.live_ids(&self.sheet).collect(),' \
+  '                None => self.expansion.ids().collect(),' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# Undo of `d d` left the cursor on the row that had followed the rows.
+run_mutation "pricer tile: an undo that restores rows leaves the cursor below them" \
+  crates/geode-pricer/src/tile.rs \
+  '                if let Some(id) = restored {' \
+  '                if let Some(id) = restored.filter(|_| false) {' \
+  geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
+
+# A leg restored under a closed package would put the cursor on a hidden
+# row.
+run_mutation "pricer tile: a restored leg's package stays closed" \
+  crates/geode-pricer/src/tile.rs \
+  '                        self.expansion.set(self.sheet.id(p), true);' \
+  '                        let _ = p;' \
+  geode-pricer undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg
+
+# Planning decision 4's gate: every line in flight at its revision asks
+# for nothing more.
+run_mutation "pricer tile: a submit ignores what is already in flight" \
+  crates/geode-pricer/src/tile.rs \
+  '            .any(|r| self.in_flight.get(&self.sheet.id(*r)) != Some(&self.sheet.revision(*r)));' \
+  '            .any(|_| true);' \
+  geode-pricer price_submits_nothing_while_every_line_is_in_flight
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
