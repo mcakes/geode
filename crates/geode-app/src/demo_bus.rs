@@ -417,4 +417,169 @@ mod tests {
             geode_documents::dividend::STATUSES
         );
     }
+
+    /// Task 11 (the market-data egress plan's end-to-end check): a headless
+    /// upload-then-echo loop through the real `DataService` built from the
+    /// demo config — no internal mutator stands in for any hop. The path
+    /// exercised: `service.upload` resolves the `[sophis]` egress target
+    /// and hands written bytes to `ChannelEgress`; that publish lands on
+    /// `marketdata/dividend/XYZ`, which the `[dividend]` source's own
+    /// subscription (topics `marketdata/dividend/>`) receives and parses
+    /// exactly as a real broker source would; the resulting publish is
+    /// read back through an ordinary document request. Every wait is
+    /// bounded so a broken hop fails the test rather than hanging it.
+    #[test]
+    fn an_uploaded_dividend_document_echoes_through_the_real_data_service() {
+        use geode_core::config::{Config, ConfigSources};
+        use geode_core::document::{Column, DocumentRows, Value};
+        use geode_core::query::{DocumentParams, QueryKey};
+        use geode_data::adapter::AdapterRegistry;
+        use geode_data::egress::UploadParams;
+        use geode_data::query::as_of::AsOf;
+        use geode_data::{DataEvent, DataService, PricerRegistry};
+
+        // An empty directory rather than a nonexistent path: the demo
+        // layer's own `[demo]` csv_dir source polls it, and this test has
+        // no interest in that source's health, only that `DataService::open`
+        // does not fail to construct over it.
+        let src_dir = tempfile::tempdir().unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: crate::demo::layer(src_dir.path()),
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+
+        let mut adapters = AdapterRegistry::default();
+        let (bus, _feed) = ChannelAdapter::new("demo_bus");
+        adapters.register(bus);
+        let mut pricers = PricerRegistry::default();
+        pricers.register(Arc::new(geode_pricing::MockPricer::new()));
+
+        let db_dir = tempfile::tempdir().unwrap();
+        let setup = crate::bridge::data_setup(
+            &config,
+            db_dir.path().join("geode.duckdb"),
+            adapters,
+            pricers,
+        )
+        .expect("the demo layer carries both a datasets and a views document");
+        assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
+        assert_eq!(setup.config.egress.len(), 1);
+        assert_eq!(setup.config.egress[0].name, "sophis");
+
+        let (service, rx) = DataService::open_channel(setup.config)
+            .expect("the demo schema opens cleanly against a fresh database");
+
+        // Two rows share an ex date (to prove ordinal minting through the
+        // real pipeline, not only `mint_ids` in isolation) and a third
+        // falls on a different date. The axis carries placeholder labels —
+        // exactly what a fresh draft's `Inserted` rows would ("new-<n>",
+        // spec §10 amendment 3) — since `DividendKind::write` never emits
+        // an id: the assembled rows on the wire carry none, and the
+        // ordinal position each id occupies is what `mint_ids` reads back.
+        let ex1 = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let ex2 = NaiveDate::from_ymd_opt(2027, 1, 5).unwrap();
+        let uploaded = DocumentRows {
+            key: vec!["XYZ".to_string()],
+            attributes: vec![
+                ("currency".to_string(), Value::Utf8("USD".to_string())),
+                ("schedule_date".to_string(), Value::Date(ex1)),
+            ],
+            axes: vec![(
+                "dividend_id".to_string(),
+                Column::Utf8(vec!["new-1".into(), "new-2".into(), "new-3".into()]),
+            )],
+            values: vec![
+                ("ex_date".to_string(), Column::Date(vec![ex1, ex1, ex2])),
+                (
+                    "announced_date".to_string(),
+                    Column::Date(vec![ex1, ex1, ex2]),
+                ),
+                ("pay_date".to_string(), Column::Date(vec![ex1, ex1, ex2])),
+                ("amount".to_string(), Column::F64(vec![1.0, 2.0, 3.0])),
+                (
+                    "status".to_string(),
+                    Column::Utf8(vec![
+                        "declared".into(),
+                        "declared".into(),
+                        "estimated".into(),
+                    ]),
+                ),
+            ],
+        };
+
+        service.upload(UploadParams {
+            key: QueryKey(1),
+            tag: 1,
+            target: "sophis".to_string(),
+            document: "dividend_schedule".to_string(),
+            rows: uploaded,
+        });
+
+        let timeout = Duration::from_secs(15);
+        let upload_result = loop {
+            match rx.recv_timeout(timeout).expect("an upload outcome arrives") {
+                DataEvent::Upload(outcome) => break outcome.result,
+                _ => continue,
+            }
+        };
+        assert_eq!(upload_result, Ok(()));
+
+        let (dataset, batch) = loop {
+            match rx.recv_timeout(timeout).expect("a publish arrives") {
+                DataEvent::Published { dataset, batch, .. } if dataset == "dividend_schedule" => {
+                    break (dataset, batch);
+                }
+                _ => continue,
+            }
+        };
+        assert_eq!(
+            (dataset.as_str(), batch.as_str()),
+            ("dividend_schedule", "XYZ")
+        );
+
+        service
+            .document(&DocumentParams {
+                key: QueryKey(2),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "dividend_schedule".to_string(),
+                document_key: vec!["XYZ".to_string()],
+                as_of: AsOf::Live,
+            })
+            .expect("the document request is admitted");
+        let snap = loop {
+            match rx.recv_timeout(timeout).expect("a query outcome arrives") {
+                DataEvent::Query(outcome) if outcome.key == QueryKey(2) => {
+                    break outcome.snapshot.expect("the document reads back");
+                }
+                _ => continue,
+            }
+        };
+
+        let expected_ids = geode_documents::dividend::mint_ids(&[ex1, ex1, ex2]);
+        assert!(
+            expected_ids.iter().all(|id| !id.starts_with("new-")),
+            "{expected_ids:?}"
+        );
+        let ex_dates = [ex1, ex1, ex2];
+        let amounts = [1.0, 2.0, 3.0];
+        let statuses = ["declared", "declared", "estimated"];
+        assert_eq!(snap.rows(), 3);
+        for i in 0..3 {
+            assert_eq!(
+                snap.text_value("dividend_id", i),
+                Some(expected_ids[i].as_str()),
+                "row {i}: the id is re-minted from the ex date, not carried from the upload"
+            );
+            assert_eq!(
+                snap.display_value("ex_date", i),
+                Some(ex_dates[i].format("%Y-%m-%d").to_string())
+            );
+            assert_eq!(snap.f64_value("amount", i), Some(amounts[i]));
+            assert_eq!(snap.text_value("status", i), Some(statuses[i]));
+        }
+
+        service.shutdown();
+    }
 }
