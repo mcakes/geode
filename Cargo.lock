@@ -2511,6 +2511,7 @@ dependencies = [
  "geode-diagnostics",
  "geode-documents",
  "geode-marketdata",
+ "geode-pricer",
  "geode-pricing",
  "geode-shell",
  "geode-timeseries",
@@ -2653,6 +2654,12 @@ dependencies = [
  "chrono",
  "criterion",
  "geode-core",
+ "geode-data",
+ "geode-shell",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]

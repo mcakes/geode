@@ -7,22 +7,33 @@ publish.workspace = true
 [lib]
 bench = false
 
-# Part 2 (line-pricer spec §14): the pure core alone. `geode-core` for the
-# pricing vocabulary, `ColumnFormat`/`format_number`, `DocumentRows` and
-# the config model — the views doc is read through `geode_core::config`,
-# so this crate names no `toml` of its own; `chrono` for the third-Friday
-# rule and `priced_at`. Part 3 adds `geode-shell` and gpui with the tile.
-# Never `geode-pricing`: a module reaches the pricer only through the
-# data tier's request door (PHILOSOPHY §1, "In-process calculation").
+# The pure core (`core`) needs `geode-core` and `chrono` alone. The tile
+# (Part 3) adds `geode-shell` for the module-hosting contract (`TileContent`,
+# `Frame`, the keymap and action vocabulary, `ChoiceList`, the chip, colour,
+# list-row and control doors), `geode-data` for `DataHandle` alone — the one
+# door a module asks for data (pricing) through — `gpui`/`gpui-component`
+# for the tile and its `DataTable`, `toml` for the session record, and
+# `tracing` for the delivery bug log (spec §10.1). Never `geode-pricing`: a
+# module reaches the pricer only through the data tier's request door
+# (PHILOSOPHY §1, "In-process calculation"); never a sibling module.
 [dependencies]
 geode-core.workspace = true
+geode-shell.workspace = true
+geode-data = { path = "../geode-data" }
+gpui.workspace = true
+gpui-component.workspace = true
 chrono = "0.4.42"
+toml = "1.1.4"
+tracing.workspace = true
 
 # Dev-dependencies ask for the same geode-* features `--workspace`
 # resolves (test-feature parity, 2026-09-19), or this crate builds a
 # private copy of the stack.
 [dev-dependencies]
 geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 
 [[bench]]

@@ -46,6 +46,9 @@ geode-marketdata = { path = "../geode-marketdata" }
 # reason — it asks for its series through the same `DataHandle`, and the
 # reload handler needs a clone to hand it a reparsed `colours` doc.
 geode-timeseries.workspace = true
+# The line pricer (line-pricer spec §8): one roster factory, built beside
+# the others in `bridge::start` because it needs the same `DataHandle`.
+geode-pricer.workspace = true
 geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # The demo bus (`src/demo_bus.rs`, market-data-documents plan Task 10)

@@ -15853,6 +15853,84 @@ run_mutation "pricer shorthand: a template quantity overflows silently" \
   '                qty: qty.wrapping_mul(l.weight),' \
   geode-pricer every_error_names_the_offending_offset
 
+# Line pricer Part 3 Task 4: the strictly-LIFO undo stack and the `:`
+# command vocabulary (spec §6.2/§8.5, §8.6).
+run_mutation "pricer undo: depth trims the oldest entry, not the newest" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_front();
+        }' \
+  '        if self.done.len() > UNDO_DEPTH {
+            self.done.pop_back();
+        }' \
+  geode-pricer the_stack_keeps_the_newest_hundred
+
+run_mutation "pricer undo: a fresh edit forks history by dropping the redo side" \
+  crates/geode-pricer/src/core/undo.rs \
+  '    pub fn record(&mut self, undo: Undo) {
+        self.undone.clear();' \
+  '    pub fn record(&mut self, undo: Undo) {' \
+  geode-pricer a_new_edit_clears_the_redo_side
+
+run_mutation "pricer undo: a refused inverse mid-undo clears the whole history" \
+  crates/geode-pricer/src/core/undo.rs \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                self.clear();
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  '        match sheet.undo(&undo) {
+            Ok(redo) => {
+                self.undone.push(redo);
+                Ok(true)
+            }
+            Err(e) => {
+                Err(e)
+            }
+        }
+    }
+
+    /// Re-apply the newest undone edit.' \
+  geode-pricer a_refused_inverse_mid_undo_drops_the_rest_of_both_sides
+
+run_mutation "pricer commands: group accepts a zero count" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()
+            .filter(|n| *n >= 1)' \
+  '        ["group", n] => n
+            .parse::<usize>()
+            .ok()' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: refresh accepts a zero duration" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        ["refresh", d] => parse_duration(d)
+            .filter(|d| !d.is_zero())' \
+  '        ["refresh", d] => parse_duration(d)' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: a Part 4 verb answers 'unknown command' instead of naming itself" \
+  crates/geode-pricer/src/core/commands.rs \
+  '        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  '        [verb, ..] if false && NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
+  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+
+run_mutation "pricer commands: completions offer the word under the cursor as a choice" \
+  crates/geode-pricer/src/core/commands.rs \
+  '    words.pop(); // the word under the cursor' \
+  '    // words.pop(); // the word under the cursor' \
+  geode-pricer completions_offer_each_positions_vocabulary_unfiltered
+
 # The document family's numeric-only VALUE-column rule exempts a `local`
 # dataset (the pricer's sheets store enumerable text per row); this pins
 # the exemption's own boundary — a bool/timestamp value still drops.
@@ -17193,6 +17271,226 @@ run_mutation "objectdialog: enter in browse filter mode is not an exit" \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
+# Line pricer Part 3 (tile): the repricing rules, the two inputs'
+# blur-then-drop, write-behind, the pending load, placement, the paint
+# floor and the reload. (The undo stack's fork and refused-inverse rules
+# are the Task 4 entries above.)
+run_mutation "pricer tile: an older submission's outcome is installed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.tag {' \
+  '        if outcome.key != QueryKey(self.id.0) {' \
+  geode-pricer an_older_submissions_outcome_is_dropped_whole
+
+run_mutation "pricer tile: a batch carries only the lines not in flight" \
+  crates/geode-pricer/src/tile.rs \
+  '        let lines: Vec<PriceLine> = stale
+            .iter()
+            .filter_map(|r| {' \
+  '        let lines: Vec<PriceLine> = stale
+            .iter()
+            .filter(|r| self.in_flight.get(&self.sheet.id(**r)) != Some(&self.sheet.revision(**r)))
+            .filter_map(|r| {' \
+  geode-pricer an_older_submissions_outcome_is_dropped_whole
+
+run_mutation "pricer tile: a hidden tile still submits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.visible || self.loading {' \
+  '        if self.loading {' \
+  geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
+
+run_mutation "pricer tile: a hide does not cancel by key" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.data.cancel(QueryKey(self.id.0));
+            self.in_flight.clear();
+            self.refresh_task = None;' \
+  '            self.in_flight.clear();
+            self.refresh_task = None;' \
+  geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
+
+run_mutation "pricer tile: a refused submission never retries" \
+  crates/geode-pricer/src/tile.rs \
+  '                t.retry_task = None;
+                t.submit(cx);' \
+  '                t.retry_task = None;' \
+  geode-pricer a_refused_submission_notices_and_retries_after_a_second
+
+run_mutation "pricer tile: a tick does not stale the sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.sheet.is_empty() || self.loading {
+            return;
+        }
+        self.sheet.mark_all_stale();' \
+  '        if self.sheet.is_empty() || self.loading {
+            return;
+        }' \
+  geode-pricer the_refresh_tick_marks_every_line_stale_and_submits
+
+run_mutation "pricer tile: the flip barrier waits for the pricer" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if f.arrived(key, now) {' \
+  '                    if false && f.arrived(key, now) {' \
+  geode-pricer the_tile_answers_a_flip_barrier_it_has_nothing_coming_for
+
+run_mutation "pricer tile: the entry field is dropped unblurred" \
+  crates/geode-pricer/src/tile.rs \
+  '        if entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if false && entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
+  geode-pricer escape_removes_the_placeholder_and_the_field_blurs_before_it_drops
+
+run_mutation "pricer tile: the cell editor is dropped unblurred" \
+  crates/geode-pricer/src/tile.rs \
+  '        if editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  geode-pricer the_editor_gives_up_focus_before_it_is_dropped
+
+run_mutation "pricer tile: a commit ignores that its line went away" \
+  crates/geode-pricer/src/tile.rs \
+  '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
+  '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
+  geode-pricer a_commit_whose_line_went_away_is_refused
+
+run_mutation "pricer tile: a refused save is silent" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_notice = Some(NOT_SAVED.into());' \
+  '            let _ = NOT_SAVED;' \
+  geode-pricer a_refused_save_notices_and_the_next_burst_retries
+
+run_mutation "pricer tile: a close drops a pending save" \
+  crates/geode-pricer/src/tile.rs \
+  '            if this.dirty {
+                this.save_now();
+            }' \
+  '            let _ = this.dirty;' \
+  geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
+
+# A pending load (Part 4's production restore) holds the session record's
+# expansion and cursor for the rows; pruned or reconciled against the
+# empty fallback, the restored tile opens collapsed on the wrong row.
+run_mutation "pricer tile: a pending load drops the record's expansion" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Some(held) = self.held_expanded.take() {
+            self.expansion = Expansion::from_ids(held);
+        }' \
+  '        let _ = self.held_expanded.take();' \
+  geode-pricer a_pending_load_keeps_the_records_cursor_and_expansion
+
+run_mutation "pricer tile: a pending load reconciles the record's cursor away" \
+  crates/geode-pricer/src/tile.rs \
+  '    fn reconcile_cursor(&mut self) {
+        if self.loading {
+            return;
+        }' \
+  '    fn reconcile_cursor(&mut self) {' \
+  geode-pricer a_pending_load_keeps_the_records_cursor_and_expansion
+
+# `:shift`/`:spot`/`:group`/`:ungroup` during a pending load would edit
+# the fallback sheet the load then replaces; `loaded` also drops any
+# undo recorded against it (strict LIFO).
+run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.loading {
+            Err("the sheet is still loading".into())' \
+  '        if false {
+            Err("the sheet is still loading".into())' \
+  geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
+
+run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
+  crates/geode-pricer/src/tile.rs \
+  '                    // over it. Nothing to undo into is the safe state.
+                    self.undo.clear();' \
+  '                    // over it. Nothing to undo into is the safe state.' \
+  geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
+
+run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
+  crates/geode-pricer/src/tile.rs \
+  '        // to wherever it was (review finding).
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }' \
+  '        // to wherever it was (review finding).
+        let _ = &place;' \
+  geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
+
+# The paint floor moves toward the ground's black/white pole: anchored on
+# the colour itself, a colour equal to its ground has nothing to bisect
+# toward and stays unreadable.
+run_mutation "pricer paint: the floor anchors on the colour it floors" \
+  crates/geode-pricer/src/paint.rs \
+  '    to_hsla(readable_on(to_rgb(c), bg, pole(bg)))' \
+  '    to_hsla(readable_on(to_rgb(c), bg, to_rgb(c)))' \
+  geode-pricer the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio
+
+run_mutation "pricer paint: the floor moves toward the weaker pole" \
+  crates/geode-pricer/src/paint.rs \
+  '    if contrast_ratio(BLACK, bg) >= contrast_ratio(WHITE, bg) {' \
+  '    if contrast_ratio(BLACK, bg) < contrast_ratio(WHITE, bg) {' \
+  geode-pricer the_floor_moves_a_colour_equal_to_its_ground_to_the_readable_ratio
+
+run_mutation "pricer core: a tick stales no line" \
+  crates/geode-pricer/src/core/sheet.rs \
+  '            if self.is_line(row) {
+                self.state[row] = LineState::Stale;' \
+  '            if false {
+                self.state[row] = LineState::Stale;' \
+  geode-pricer mark_all_stale_stales_every_line_and_bumps_no_revision
+
+run_mutation "pricer entry: o below a leg lands before it" \
+  crates/geode-pricer/src/core/entry.rs \
+  '            leg: if below { leg + 1 } else { leg },' \
+  '            leg: if below { leg } else { leg },' \
+  geode-pricer o_lands_after_the_cursor_row_and_shift_o_before_it
+
+run_mutation "pricer cell: an empty shift commits zero" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    if t.is_empty() {
+        return Ok(None);
+    }' \
+  '    if t.is_empty() {
+        return Ok(Some(0.0));
+    }' \
+  geode-pricer an_empty_shift_commit_inherits_and_a_signed_number_is_owned
+
+run_mutation "pricer app: a config reload never reaches the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '            pricer.reload(views, refresh, stale_after, cx);' \
+  '            let _ = (views, refresh, stale_after);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_views
+
+# The free underlying typeahead: ranking is a subsequence match, so an
+# untouched highlight is a guess (`HSI` ranks `HSCEI`); `enter` takes it
+# only when the query equals it or the trader moved it.
+run_mutation "pricer tile: the free typeahead commits an unmoved subsequence guess" \
+  crates/geode-pricer/src/tile.rs \
+  '                        let take_highlight = *moved
+                            || highlighted
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
+  '                        let take_highlight = {
+                            let _ = moved;
+                            true
+                        };' \
+  geode-pricer a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved
+
+# A failed load shows a fallback; publishing it would make it the real
+# document's latest generation.
+run_mutation "pricer tile: a failed load's fallback is saved over the document" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_blocked {
+            return;
+        }
+        let Some(rows) = to_rows(&self.sheet) else {' \
+  '        let Some(rows) = to_rows(&self.sheet) else {' \
+  geode-pricer a_failed_load_blocks_every_save_and_says_so_past_escape
+
+# After a refused save the idle task has already fired: a close that
+# flushes only a pending task loses the unsaved sheet.
+run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
+  crates/geode-pricer/src/tile.rs \
+  '            this.save_task = None;
+            if this.dirty {' \
+  '            if this.save_task.take().is_some() {' \
+  geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
+
 # ---- The cursor rests only on rows with a verb (ruling 2026-09-23) ----
 
 # The predicate itself. Calling every row a stop puts the cursor back on
@@ -17267,6 +17565,16 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
   '            (Some(domain), Some(row)) if !draft.is_cursor_stop(domain, row) => {}' \
   geode-shell \
   a_click_on_the_slot_row_is_dropped
+
+# The pricer's entry field must read as insert focus to the shell, or a
+# shifted letter typed into it runs a shell binding (shift+d duplicated
+# the tile, 2026-09-24).
+run_mutation "pricer tile: the entry field is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.editor.is_some() {' \
+  geode-app \
+  typing_into_the_pricer_entry_field_fires_no_shell_binding
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

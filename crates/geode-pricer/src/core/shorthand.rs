@@ -124,7 +124,7 @@ pub fn parse_strike(token: &str) -> Result<Strike, String> {
     })
 }
 
-fn parse_barrier_kind(token: &str) -> Option<BarrierKind> {
+pub(crate) fn parse_barrier_kind(token: &str) -> Option<BarrierKind> {
     match token.to_ascii_uppercase().as_str() {
         "UI" => Some(BarrierKind::UpIn),
         "UO" => Some(BarrierKind::UpOut),

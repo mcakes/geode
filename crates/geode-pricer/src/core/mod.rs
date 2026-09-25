@@ -3,14 +3,21 @@
 //! package templates, the column vocabulary, the views doc and the
 //! storage row shape. No gpui type appears here.
 
+pub mod cell;
+pub mod clip;
 pub mod columns;
+pub mod commands;
 pub mod edit;
+pub mod entry;
 pub mod sheet;
 pub mod shorthand;
 pub mod storage;
 pub mod template;
+pub mod tree;
+pub mod undo;
 pub mod views;
 
+pub use cell::{CellEditor, READ_ONLY};
 pub use columns::{
     Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
 };
@@ -24,6 +31,8 @@ pub use storage::{
     LINE_AXIS, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, SHEET_KEY, from_rows, to_rows,
 };
 pub use template::{LegSpec, Template};
+pub use tree::{Expansion, visible_rows};
+pub use undo::{UNDO_DEPTH, UndoStack};
 pub use views::{
     BUILTIN_VIEWS, ColumnPlan, PRICER_VIEWS_DOC, PlannedColumn, PricerView, ViewColumn, Views,
 };

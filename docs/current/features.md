@@ -163,13 +163,121 @@ map and observer, notification, and allocation contracts.
 `Pricer` vocabulary. `geode-pricing` contains implementations of that trait.
 The current `MockPricer` is deterministic test and demo behavior, not a
 financial model. The pricing worker applies one override set per batch,
-contains panics, supports cancellation between lines, and answers every line
-with either values or an error.
+contains panics, and returns values or an error for each completed line.
+Cancellation can drop a queued batch or stop a running batch between lines,
+so cancelled requests need not return an outcome for every submitted line.
 
-`geode-pricer` currently contains the pure line-pricer core: a struct-of-arrays
-sheet, edits and undo, shorthand parsing/rendering, package folding, column
-planning, and document storage conversion. It has no tile and is not registered
-in the application roster. UI hosting and persistent workflow remain unbuilt.
+`geode-pricer` is the line-pricer module: a pure core (a struct-of-arrays
+sheet, edits and undo, shorthand parsing and rendering, package folding, column
+planning, and document storage conversion) and the `pricer` tile registered in
+the application roster.
+
+### The tile
+
+The tile shows one named sheet under a single dense header: the sheet name,
+its view, any sheet-wide shift chips, `N pricing…` while lines are stale, the
+configured pricer's name, and the last priced time, which reads `stale` once
+it is older than the shell's `stale_after`. Lines and packages are rows of one
+table; a package row sums its legs and opens and closes like a tree node
+(`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
+package created in the session opens so its legs show; a restored tile opens
+the packages its session record names. Package rows are read-only in every
+column.
+
+Normal-mode keys:
+
+| Keys | Effect |
+|---|---|
+| `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
+| `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries |
+| `d d` | Delete the row (a package with its legs) |
+| `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out |
+| `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
+| `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
+| `shift+j` / `shift+k` | Move the row within its parent |
+| `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
+| `.` | The action menu: price all, group, ungroup, undo, redo, delete row, and one row per view |
+
+`y` alone is unbound: the key matcher dispatches an exact match at once, so a
+binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
+the same reason.
+
+The underlying, type, and barrier-type cells edit through a typeahead. The
+underlying list offers the sheet's own underlyings and also takes free text.
+Ranking is a case-insensitive subsequence match, so the top-ranked option is
+only a guess: `enter` commits the highlighted underlying only when the query
+equals it (in any case) or the highlight was moved with `up`/`down` or a row
+click since the query last changed. Otherwise the typed text is committed
+(upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
+typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
+cell's value. Type and barrier type accept only their vocabulary, and `enter`
+commits the highlighted option. A commit whose line was deleted, or whose
+column moved under a view change, is refused with a footer message. A click in
+the grid, including a package chevron, cancels an open editor or entry field
+and never commits it. A `:` command or a `/` search closes the menu and any
+open field first. A click outside the grid leaves a plain text editor open
+until the next grid click or verb; the typeahead popup closes on an outside
+click. Both the entry field and the cell editor blur before they
+drop. Their insert-mode bindings leave shell chords available, including
+`ctrl+k` for the palette. Either field puts the tile in insert mode, so bare and shifted letters
+and digits are typed into it and never reach a shell binding (`shift+d` would
+otherwise duplicate the tile).
+
+The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
+`spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
+`group [n]`, and `ungroup`. `e`, `name`, `new`, and `rm` parse and refuse as
+not built yet. `view`, `refresh`, `shift`, `spot`, `group`, and `ungroup` (and
+the menu's view rows) are refused while the sheet is still loading, because the
+loaded document would replace what they set.
+
+### Repricing
+
+Every edit that changes a line's request bumps that line's revision and marks
+it stale. The tile submits when some stale line is not already in flight at its
+current revision, and each submission carries every stale line in one batch.
+An outcome tagged older than the latest submission is dropped whole. A result
+for an older revision is ignored, and the line, still stale, is resubmitted.
+Hiding a tile requests cancellation by key and defers further pricing until
+shown, keeping its stale marks. Cancellation is best effort and cannot retract
+emitted outcomes; matching deliveries can still apply while hidden. A refused
+submission paints a header notice
+and retries after one second.
+
+The refresh timer marks every line stale and resubmits while the tile is
+visible and the sheet has a line. `[pricing] refresh` sets the default
+interval (see [configuration](configuration.md)), and `:refresh` overrides it
+per sheet. `:price` reprices at once. The tile answers frame flip barriers
+itself because it submits no view query, so a scope change never waits on it.
+
+### Persistence
+
+The tile attempts a whole-document save after one idle second following a
+change. Closing makes one final attempt for unsaved changes, including a
+pending idle save or a previous refusal. The store can refuse again; releasing
+the tile then loses those unsaved changes. A refused save paints a notice
+in the header's own save slot, separate from pricing notices: a refused pricing
+request cannot overwrite it, a later successful request cannot clear it, and
+`escape` does not clear it. Only an accepted save does. The next change and
+the close both retry. An empty sheet publishes nothing.
+
+If a sheet's document fails to load (its rows do not decode, or the store
+answers with an error), the tile shows an empty fallback and the save slot
+reads `sheet 'NAME' did not load (…); edits are not saved`. Nothing is
+published from that tile, so the fallback cannot become the document's latest
+generation. A name with no document is not a failure: it opens empty and saves
+normally. The session record keeps the sheet name, view, refresh setting, cursor line, and
+open packages. A new tile takes the next free `untitled-N` name, and names
+open in another tile are skipped.
+
+The application uses `MemorySheetStore`, shared by its pricer tiles. Accepted
+saves survive closing and reopening a tile in the same process. They do not
+survive a restart: session restoration retains the sheet name and UI state,
+but a missing document opens empty with a notice. Durable storage is not
+implemented.
+
+Other known gaps: the underlying typeahead does not yet offer catalogue
+underlyings; result cells are not sign-coloured; column widths are the
+vocabulary's fixed pixel widths and cannot be resized.
 
 In-process pricing remains an upstream leaf. A feature submits definitions
 through the data-service request path and receives outcomes through shell
@@ -197,6 +305,6 @@ headless context. Display checks remain necessary for exact color, geometry,
 and animation.
 
 Benchmarks cover blotter flattening and formatting, market-data model building,
-chart preparation, series querying, document parsing, and line-pricer core
-operations. Budgets and current gaps are recorded in
-[performance.md](performance.md).
+chart preparation, series querying, document parsing, line-pricer core
+operations, and the line-pricer grid build. Budgets and current gaps are
+recorded in [performance.md](performance.md).

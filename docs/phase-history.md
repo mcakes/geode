@@ -217,3 +217,22 @@ mode is a mouse-only route now (§17.1 rule 2, §18.9.1) — the tests that
 covered `escape`-cancels-a-capture and open-from-a-filtered-list were
 moved onto the click door rather than deleted, since both hazards
 survive there.
+
+### Line pricer Part 3 — the tile (2026-09-24, worktree)
+
+Part 3 (spec `2026-09-19-geode-line-pricer-design.md` §18, plan
+`2026-09-23-line-pricer-part-3-tile.md`) put the line pricer on screen
+as the `pricer` tile, registered in the roster, against an in-memory
+`MemorySheetStore`: sheets survive closing a tile, not a restart, until
+Part 4's DuckDB store answers the same `SheetStore` seam (`Pending`, then
+`PricerTile::loaded`). Four decisions matter to whoever edits it next.
+A submission carries EVERY stale line and the in-flight map only decides
+whether to submit — submitting just the lines not in flight loses them,
+because an older-tagged outcome is dropped whole. The tile arrives at
+flip barriers itself, since it submits no view query and would otherwise
+hold every scope keystroke to the barrier deadline. A config reload
+reaches the pricer factory through the frame's config counter, not
+`ShellEvent::ConfigReloaded`, which fires only for five named documents.
+And `nudge_text` moved to `geode_core::nudge` (re-exported by
+`geode_marketdata::core`) so the pricer could step numbers without
+depending on a sibling module.
