@@ -1509,8 +1509,6 @@ impl MarketDataTile {
         self.changed(cx);
     }
 
-    /// `y`: submit the document assembled at arm time. Refused by the data
-    /// tier's bounded queue → a notice and nothing kept as `sent`.
     /// Why an upload cannot be sent now, if it cannot: the frame asks
     /// for a historical as-of, or the snapshot on screen (the one
     /// `:upload` assembles) was delivered for one. An upload is a whole
@@ -1537,6 +1535,8 @@ impl MarketDataTile {
         None
     }
 
+    /// `y`: submit the document assembled at arm time. Refused by the data
+    /// tier's bounded queue → a notice and nothing kept as `sent`.
     fn submit_upload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pending) = self.disarm_upload(window, cx) else {
             return;

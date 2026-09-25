@@ -91,7 +91,7 @@ generation is painted — behind the barrier, or indefinitely when the live
 requery is refused or fails and the last good generation stays on screen.
 An upload is a whole document, and one assembled over an old generation
 would revert every untouched row upstream. `y` re-checks the same
-condition and sends nothing, naming why, if it no longer holds.
+condition and sends nothing, naming why, if the panel is no longer live.
 Otherwise it assembles the document and asks
 `upload N cells, [K attributes, ]A rows added, D removed of <key> to
 <target>? (y/n)` in the
