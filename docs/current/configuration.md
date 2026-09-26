@@ -21,8 +21,9 @@ TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
-`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `dimensions`,
-`colours`, `pricer_views`, and `overrides` replace whole named objects.
+`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`,
+`dimensions`, `colours`, `pricer_views`, and `overrides` replace whole named
+objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
