@@ -61,7 +61,7 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
         "precision" => p.precision.is_some(),
         "thousands" => p.thousands.is_some(),
         "negative" => p.negative.is_some(),
-        "colour" => p.colour.is_some(),
+        "color" => p.colour.is_some(),
         // A key this stage does not paint is set at no layer, so it
         // carries no provenance — the same answer `differs_from`'s own
         // fallthrough gives, and between them this function answers
@@ -89,9 +89,9 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
                 options.get(*selected).map(String::as_str)
                     != Some(views::negative_key(effective.negative))
             }
-            ("colour", FieldKind::Choice { options, selected }) => {
+            ("color", FieldKind::Choice { options, selected }) => {
                 options.get(*selected).map(String::as_str)
-                    != Some(views::colour_key(&effective.colour).as_str())
+                    != Some(views::color_key(&effective.colour).as_str())
             }
             _ => false,
         }
@@ -176,7 +176,7 @@ pub fn item_for(
 ///
 /// A non-numeric column is `"dimension"`, so `views::kind_default` gives
 /// it [`ColumnFormat::TEXT`]: precision 0, no thousands separator, no
-/// colour — the format a text column actually has in a blotter. A numeric
+/// color — the format a text column actually has in a blotter. A numeric
 /// one answers `None` and keeps the MEASURE default, which is right for
 /// it: a numeric attribute is formatted like a measure even though it
 /// does not sum.
@@ -253,7 +253,7 @@ pub fn table(draft: &Draft) -> toml_edit::Table {
         if effective.colour != kind.colour
             && let Some(v) = &p.colour
         {
-            t["colour"] = toml_edit::value(views::colour_key(v));
+            t["color"] = toml_edit::value(views::color_key(v));
         }
         if effective.scale != kind.scale
             && let Some(v) = p.scale
@@ -373,7 +373,7 @@ mod tests {
             Some(Provenance::View)
         );
         assert_eq!(
-            provenance(&c, &field(&c, "colour")),
+            provenance(&c, &field(&c, "color")),
             None,
             "kind default: no chip"
         );

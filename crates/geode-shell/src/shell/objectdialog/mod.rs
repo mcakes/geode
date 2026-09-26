@@ -53,9 +53,9 @@ pub enum Domain {
     Schema,
     /// The ingest feeds, one object per source.
     Sources,
-    /// The shared colour vocabulary a column's `colour` field and a chart series can
-    /// name — one object per named colour, a hue (with its tone) or a theme token.
-    Colours,
+    /// The shared color vocabulary a column's `colour` field and a chart series can
+    /// name — one object per named color, a hue (with its tone) or a theme token.
+    Colors,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -161,7 +161,7 @@ impl Domain {
             Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
-            Domain::Colours => colours::DOC,
+            Domain::Colors => colours::DOC,
         }
     }
 
@@ -173,7 +173,7 @@ impl Domain {
             Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
-            Domain::Colours => "Colours",
+            Domain::Colors => "Colors",
         }
     }
 
@@ -187,7 +187,7 @@ impl Domain {
             Domain::Scopes => "saved",
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
-            Domain::Colours => "colours",
+            Domain::Colors => "colors",
         }
     }
 
@@ -201,7 +201,7 @@ impl Domain {
             Domain::Scopes => scopes::summary,
             Domain::Schema => schema::summary,
             Domain::Sources => sources::summary,
-            Domain::Colours => colours::summary,
+            Domain::Colors => colours::summary,
         }
     }
 
@@ -216,7 +216,7 @@ impl Domain {
             | Domain::Scopes
             | Domain::Schema
             | Domain::Sources
-            | Domain::Colours => None,
+            | Domain::Colors => None,
         }
     }
 
@@ -226,7 +226,7 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours => {
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colors => {
                 None
             }
         }
@@ -257,7 +257,7 @@ impl Domain {
             | Domain::Groupings
             | Domain::Scopes
             | Domain::Schema
-            | Domain::Colours => None,
+            | Domain::Colors => None,
         }
     }
 
@@ -275,25 +275,25 @@ impl Domain {
         )
     }
 
-    /// Names reserved by syntax outside the domain's own document. Colours excludes
+    /// Names reserved by syntax outside the domain's own document. Colors excludes
     /// `none` and `sign`, which already mean built-in formatting choices. Scopes
     /// excludes the `save_current` action name to avoid ambiguous palette dispatch.
     /// Other domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
-            Domain::Colours => &geode_core::colour::RESERVED_NAMES,
+            Domain::Colors => &geode_core::colour::RESERVED_NAMES,
             Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
 
     /// Whether `name` is reserved in this domain: one of [`Self::reserved_names`],
-    /// or — for colours only — any name starting with `#`, which spells an
-    /// absolute `#rrggbb` colour wherever a colour name is also read
+    /// or — for colors only — any name starting with `#`, which spells an
+    /// absolute `#rrggbb` color wherever a color name is also read
     /// (`geode_core::colour::RESERVED_PREFIX`; the reader drops such a name too).
     pub fn is_reserved(self, name: &str) -> bool {
         self.reserved_names().contains(&name)
-            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))
+            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))
     }
 
     /// Whether a name is already present in a definition, fixed roster, or user
@@ -385,11 +385,20 @@ pub fn shadow_of(config: &Config, doc: &str, object: &str) -> Option<(Layer, tom
         .next_back()
 }
 
-/// The overrides sidecar's own entries, user layer only, as `key ->
-/// (shadowed_layer, shadowed_text)`. Private: every reader outside this
-/// module goes through [`stale_override_keys`] or `derive_rows`'s own
-/// drift computation, never the raw map.
-fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+/// The sidecar key as the current document name spells it: an entry recorded
+/// before a document rename (`colours.<name>`) names the renamed document
+/// (`colors.<name>`), so its fork baseline still counts.
+fn current_override_key(raw: &str) -> String {
+    raw.split_once('.')
+        .and_then(|(doc, object)| {
+            geode_core::config::renamed_doc(doc).map(|new| override_key(new, object))
+        })
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// The overrides sidecar's well-formed user-layer entries under their spelling in
+/// the file, as `(raw key, (shadowed_layer, shadowed_text))`.
+fn raw_override_entries(config: &Config) -> Vec<(String, (String, String))> {
     config
         .layered_docs(OVERRIDES_DOC)
         .iter()
@@ -409,21 +418,53 @@ fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
         .collect()
 }
 
-/// Whether `doc.object` has a recorded override entry — the gate
-/// [`render::removal_edits`] uses to decide whether a delete/revert also
-/// touches `overrides.toml`, so a missing sidecar is never created just
-/// to remove nothing from it.
-pub(super) fn has_override_entry(config: &Config, doc: &str, object: &str) -> bool {
-    override_entries(config).contains_key(&override_key(doc, object))
+/// The overrides sidecar's own entries, user layer only, as `key ->
+/// (shadowed_layer, shadowed_text)` under current document names; a
+/// current-spelled key wins over an old-spelled one for the same object.
+/// Private: every reader outside this module goes through
+/// [`stale_override_keys`] or `derive_rows`'s own drift computation, never
+/// the raw map.
+fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    for (raw, entry) in raw_override_entries(config) {
+        let key = current_override_key(&raw);
+        if key == raw {
+            out.insert(key, entry);
+        } else {
+            out.entry(key).or_insert(entry);
+        }
+    }
+    out
+}
+
+/// The sidecar keys, as spelled in the file, recording `doc.object` — what
+/// [`render::removal_edits`] removes beside a delete/revert, so a missing
+/// sidecar is never created just to remove nothing from it, and an entry
+/// recorded under an old document name goes with its object.
+pub(super) fn override_keys_of(config: &Config, doc: &str, object: &str) -> Vec<String> {
+    let key = override_key(doc, object);
+    raw_override_entries(config)
+        .into_iter()
+        .map(|(raw, _)| raw)
+        .filter(|raw| current_override_key(raw) == key)
+        .collect()
 }
 
 /// Entries that describe nothing any more: the user layer no longer holds the object,
-/// or no layer beneath shadows it. Ignored by `derive_rows` and pruned by the next
-/// overrides write.
+/// or no layer beneath shadows it, or an old-spelled key duplicates a current one.
+/// Ignored by `derive_rows` and pruned by the next overrides write. Keys are
+/// returned as the file spells them, so the prune removes them.
 pub fn stale_override_keys(config: &Config) -> Vec<String> {
-    override_entries(config)
-        .keys()
-        .filter(|key| {
+    let raws: Vec<String> = raw_override_entries(config)
+        .into_iter()
+        .map(|(raw, _)| raw)
+        .collect();
+    raws.iter()
+        .filter(|raw| {
+            let key = current_override_key(raw);
+            if key != **raw && raws.contains(&key) {
+                return true;
+            }
             let Some((doc, object)) = key.split_once('.') else {
                 return true;
             };
@@ -617,11 +658,11 @@ impl Destination {
             (Destination::Presentation, Domain::Sources) => {
                 unreachable!("Sources has no Presentation-destined fields")
             }
-            // Colours joins the same list: `colours.rs`'s module doc has
+            // Colors joins the same list: `colours.rs`'s module doc has
             // the reasoning (every field is `Destination::Doc`, there is
-            // no presentation overlay for a shared colour).
-            (Destination::Presentation, Domain::Colours) => {
-                unreachable!("Colours has no Presentation-destined fields")
+            // no presentation overlay for a shared color).
+            (Destination::Presentation, Domain::Colors) => {
+                unreachable!("Colors has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -2576,18 +2617,18 @@ impl Domain {
             Domain::Sources => sources::help(key),
             Domain::Groupings => groupings::help(key),
             Domain::Scopes => scopes::help(key),
-            Domain::Colours => colours::help(key),
+            Domain::Colors => colours::help(key),
             Domain::Schema => schema::help(key),
         }
     }
 
     /// Whether a text field permits typed editing. Sources permits its supported
     /// free-text settings; Scopes permits text and expression; Views and Schema permit
-    /// column label and width. Groupings' slot stays read-only, and Colours has no text
+    /// column label and width. Groupings' slot stays read-only, and Colors has no text
     /// field. Numeric and choice entry use their own field paths.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Colours => {
+            Domain::Groupings | Domain::Colors => {
                 let _ = key;
                 false
             }
@@ -2602,10 +2643,10 @@ impl Domain {
     /// committing.
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
-            // Colours joins for the same reason `text_editable` gives
+            // Colors joins for the same reason `text_editable` gives
             // it no `true` above: no `Text` row for this door to ever
             // be called on.
-            Domain::Groupings | Domain::Colours => {
+            Domain::Groupings | Domain::Colors => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
@@ -2631,7 +2672,7 @@ impl Domain {
             Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
-            Domain::Colours => colours::fields(config, object),
+            Domain::Colors => colours::fields(config, object),
         }
     }
 
@@ -2648,7 +2689,7 @@ impl Domain {
             | Domain::Groupings
             | Domain::Schema
             | Domain::Sources
-            | Domain::Colours => self.fields(config, None),
+            | Domain::Colors => self.fields(config, None),
         }
     }
 
@@ -2716,7 +2757,7 @@ impl Domain {
             Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
-            Domain::Colours => colours::to_table(draft, dest),
+            Domain::Colors => colours::to_table(draft, dest),
         }
     }
 
@@ -2729,7 +2770,7 @@ impl Domain {
             Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
-            Domain::Colours => colours::validate(draft, config),
+            Domain::Colors => colours::validate(draft, config),
         }
     }
 }
@@ -3476,6 +3517,51 @@ mod tests {
         ]);
         assert!(!Domain::Views.objects(&config)[0].drifted);
         assert_eq!(stale_override_keys(&config), vec!["views.tree".to_string()]);
+    }
+
+    /// An override recorded before `colours` became `colors` is keyed
+    /// `colours.<name>`: it still measures drift for the colors object, a
+    /// revert removes it under its own spelling, and beside a current-spelled
+    /// entry it is stale so the next overrides write prunes it.
+    #[test]
+    fn an_override_recorded_under_the_old_colours_key_still_counts() {
+        let desk_v1 = "[delta]\nhue = 240\n";
+        let user = "[delta]\nhue = 10\n";
+        let shadow_text = object_text(
+            "delta",
+            toml_value_to_item(&desk_v1.parse::<toml::Table>().unwrap()["delta"]),
+        );
+        let entry = |key: &str| {
+            format!(
+                "[\"{key}\"]\nshadowed_layer = \"desk\"\nshadowed_text = '''\n{shadow_text}'''\n"
+            )
+        };
+        let legacy = entry("colours.delta");
+        let desk_v2 = "[delta]\nhue = 250\n";
+        let config = config_from(&[
+            (Layer::Desk, "colors", desk_v2),
+            (Layer::User, "colors", user),
+            (Layer::User, "overrides", legacy.as_str()),
+        ]);
+        let rows = Domain::Colors.objects(&config);
+        assert!(rows[0].overridden);
+        assert!(rows[0].drifted, "the old-keyed baseline measures drift");
+        assert_eq!(
+            override_keys_of(&config, "colors", "delta"),
+            vec!["colours.delta".to_string()]
+        );
+        assert!(stale_override_keys(&config).is_empty());
+
+        let both = format!("{legacy}{}", entry("colors.delta"));
+        let config = config_from(&[
+            (Layer::Desk, "colors", desk_v1),
+            (Layer::User, "colors", user),
+            (Layer::User, "overrides", both.as_str()),
+        ]);
+        assert_eq!(
+            stale_override_keys(&config),
+            vec!["colours.delta".to_string()]
+        );
     }
 
     #[test]
@@ -4249,7 +4335,7 @@ mod tests {
             selected: 0,
         });
         assert_eq!(
-            draft.selected_vocabulary(Domain::Colours),
+            draft.selected_vocabulary(Domain::Colors),
             RowVocabulary::StepsAndTypes
         );
     }

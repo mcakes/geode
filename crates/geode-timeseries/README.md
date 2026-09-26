@@ -12,14 +12,14 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), and the absolute `#rrggbb` colour with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries, delivery filtering, and flip-barrier staging and promotion. |
-| `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component colour picker, the menus, and the range and frequency trigger doors. |
+| `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component color picker, the menus, and the range and frequency trigger doors. |
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
-| `popup` | State and rendering for the series list, add picker, custom dates editor, and the menus (one painter for the action list, range menu and frequency menu), plus expression-editor state. Series and picker rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own colour picker. |
-| `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, colour-picker trigger, and empty state. |
+| `popup` | State and rendering for the series list, add picker, custom dates editor, and the menus (one painter for the action list, range menu and frequency menu), plus expression-editor state. Series and picker rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own color picker. |
+| `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, color-picker trigger, and empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
 ## Commands
@@ -50,21 +50,21 @@ cargo bench -p geode-timeseries
 - Chart presses and ordinary header controls allow shell click-to-focus. The
   range and frequency triggers toggle in the capture phase, like the `⋯`
   button, because an open popup's `on_mouse_down_out` would close it first.
-  Popup rows and the component colour trigger consume their own presses.
+  Popup rows and the component color trigger consume their own presses.
 - Every painted popup's outside press goes through `outside_press`, which
   closes the popup only if it is still the one up: a trigger's capture-phase
   press may already have swapped another popup in.
 - A pointer gesture ends at the same tail as its key: pan and zoom at
   `view_moved`, a split at `apply_changed`.
-- The colour picker writes to the slot number it was opened for, never to the
+- The color picker writes to the slot number it was opened for, never to the
   cursor, through `Model::set_colour` and `apply_changed`, the same path as
-  `:colour`. The target and featured colours it writes against (`PickContext`)
+  `:color`. The target and featured colors it writes against (`PickContext`)
   outlive the popup, because the hex field's `enter` closes the popover
   before its commit arrives.
 - A pick is compared in 8-bit channels with a one-step tolerance
   (`core::within_a_step`), because the component's hex field truncates. A pick
   within a step of what the target already paints changes nothing, and one
-  within a step of a featured colour is that colour. Slider steps apply live,
+  within a step of a featured color is that color. Slider steps apply live,
   so Escape or a click outside closes the picker and keeps any slider change
   already applied.
 - The picker is an insert popup: `holds_focus` asks whether the picker's
@@ -91,18 +91,18 @@ calendar arithmetic and remain relative in sessions. Absolute ranges store
 inclusive UTC dates; reopening them retains their stored dates despite as-of
 clipping of queries.
 
-## Colour and menu contracts
+## Color and menu contracts
 
-The action menu's `Colour…` opens the picker for the selected slot. Palette
-and named featured colours retain their identities when selected; a custom
-colour is opaque RGB8, persists as lowercase `#rrggbb`, and receives no theme
-adaptation or readability adjustment. `:colour s<n> #rrggbb` accepts exactly six
+The action menu's `Color…` opens the picker for the selected slot. Palette
+and named featured colors retain their identities when selected; a custom
+color is opaque RGB8, persists as lowercase `#rrggbb`, and receives no theme
+adaptation or readability adjustment. `:color s<n> #rrggbb` accepts exactly six
 hex digits in either case and stores Custom directly; it does not remap a
 palette-identical hex value to a palette slot. Malformed session hex leaves
-the restored slot's default colour. Cycling colour from a name or Custom
+the restored slot's default color. Cycling color from a name or Custom
 restarts at the first palette entry.
 
-Featured colours are resolved at open. After the no-op check against the
+Featured colors are resolved at open. After the no-op check against the
 current painted target, picks within one byte step per channel map to the
 nearest featured entry by summed channel distance; ties keep the first.
 Escape and outside close discard uncommitted hex preview, but preserve slider

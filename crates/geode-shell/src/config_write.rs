@@ -172,10 +172,31 @@ pub(crate) fn try_edit<T>(
     let path = doc_path(user_dir, layer, doc)?;
     let writer = writer(user_dir);
     let _guard = writer.transaction.lock().unwrap_or_else(|e| e.into_inner());
-    let mut document = open_at(&path)?;
+    let legacy = legacy_source(user_dir, doc, &path);
+    let mut document = open_at(legacy.as_deref().unwrap_or(&path))?;
     let result = f(&mut document)?;
     write_file(&path, &document.to_string())?;
+    if let Some(old) = legacy {
+        // The edit above carried the old file's content into the current
+        // name. A failed removal leaves a copy the loader ignores with a
+        // warning (the current file wins in its layer), never lost content.
+        if let Err(e) = std::fs::remove_file(&old) {
+            tracing::warn!(target: "geode::config", "failed to remove {}: {e}", old.display());
+        }
+    }
     Ok(result)
+}
+
+/// The old-named file to read instead of a missing current one: a user who
+/// still has `colours.toml` edits their existing colors, and the write lands
+/// in `colors.toml`. Without this the first dialog save would create a
+/// one-entry `colors.toml` that hides every definition in the old file.
+fn legacy_source(user_dir: &Path, doc: &str, path: &Path) -> Option<PathBuf> {
+    let old = user_dir.join(format!(
+        "{}.toml",
+        geode_core::config::legacy_doc_name(doc)?
+    ));
+    (!path.exists() && old.exists()).then_some(old)
 }
 
 /// The read-or-create-and-parse half of [`edit`], by path.
@@ -359,6 +380,68 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         assert!(text.contains("large"), "{text}");
     }
+
+    /// An edit to `colors` while the user still has only `colours.toml`
+    /// starts from the old file, writes `colors.toml`, and retires the old
+    /// file — so no existing definition is hidden by a fresh one-entry file.
+    #[test]
+    fn an_edit_to_colors_carries_an_old_colours_file_across() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("colours.toml"),
+            "# mine\nconfig_version = 1\n\n[delta]\nhue = 240\n",
+        )
+        .unwrap();
+        edit(dir.path(), Layer::User, "colors", |doc| {
+            doc["gamma"]["hue"] = toml_edit::value(30);
+        })
+        .expect("edit");
+        let text = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(
+            text.contains("[delta]") && text.contains("hue = 240"),
+            "{text}"
+        );
+        assert!(text.contains("gamma"), "{text}");
+        assert!(
+            !dir.path().join("colours.toml").exists(),
+            "the old file is retired once its content moved"
+        );
+    }
+
+    /// With `colors.toml` present the old file is not read, and a failed
+    /// edit leaves both files untouched.
+    #[test]
+    fn an_edit_to_colors_ignores_the_old_file_beside_the_current_one() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("colors.toml"), "config_version = 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("colours.toml"),
+            "config_version = 1\n[stale]\nhue = 90\n",
+        )
+        .unwrap();
+        edit(dir.path(), Layer::User, "colors", |doc| {
+            doc["gamma"]["hue"] = toml_edit::value(30);
+        })
+        .expect("edit");
+        let text = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
+        assert!(!text.contains("stale"), "{text}");
+        assert!(dir.path().join("colours.toml").exists());
+
+        let fresh = tempfile::tempdir().unwrap();
+        std::fs::write(
+            fresh.path().join("colours.toml"),
+            "config_version = 1\n[delta]\nhue = 240\n",
+        )
+        .unwrap();
+        let err = try_edit(fresh.path(), Layer::User, "colors", |_| {
+            Err::<(), _>("refused".to_string())
+        });
+        assert!(err.is_err());
+        assert!(fresh.path().join("colours.toml").exists());
+        assert!(!fresh.path().join("colors.toml").exists());
+    }
+
     #[gpui::test]
     async fn queued_edits_keep_submission_order_even_when_results_are_dropped(
         cx: &mut gpui::TestAppContext,

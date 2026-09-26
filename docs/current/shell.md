@@ -150,6 +150,27 @@ base scope, subsequent keystrokes coalesce, and returning exactly to the base
 removes the no-op undo entry. Changes made through another surface during the
 session remain distinct.
 
+The toolbar's scope segment paints the dimension chips, then one chip per
+top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
+flatten on both sides; an `or`, a `not`, or a single comparison is one term),
+then the contradiction chip. The frame still holds one `Expr`; the terms are
+a view of it, and an edit rebuilds a left-folded `and` chain from the
+remaining terms (`Expr::from_conjuncts`). A term chip's body opens the
+expression dialog on that term; the `×` inside it drops that term alone
+(`Frame::drop_expression_term`). As on a dimension chip, the `×` occludes the
+body's hitbox, which is what keeps its press from also opening the dialog.
+Term chips are addressed by index, which is stable within one scope version;
+the term dialog also carries the term it was seeded with and refuses inline
+unless that term is still at its index at commit time. Every term
+edit, append, and clear goes through undoable `set_scope`.
+
+The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
+dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
+and each row shows its action's live binding, if any. The `+` holds its
+pressed fill while the menu is open. The menu is shell-owned transient state
+(`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
+dispatch the shell's string actions and label them from the shell keymap.
+
 ## Module hosting and delivery
 
 `TileContent` is the module boundary. An occupant supplies its key context,
@@ -339,7 +360,7 @@ notification ordering, and restart requirements.
 ## Presentation rules
 
 Shared builders own repeated shell presentation: semantic chips, list rows,
-control interaction states, colours, and the rem-based geometry scale. Use
+control interaction states, colors, and the rem-based geometry scale. Use
 stable domain-derived element IDs. Stateful inputs, lists, and tables are
 created once and retained rather than rebuilt during render.
 

@@ -55,8 +55,8 @@ pub enum Negative {
     Parens,
 }
 
-/// Cell text colour: `Sign` uses bullish/bearish theme colours; `Named`
-/// references a shared colour definition for headers and additive values.
+/// Cell text color: `Sign` uses bullish/bearish theme colors; `Named`
+/// references a shared color definition for headers and additive values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Colour {
     None,
@@ -149,8 +149,12 @@ pub struct ColumnPresentation {
     pub hidden: Option<bool>,
 }
 
+/// The old spelling of a column's `color` key, still read with a warning so
+/// files written before the rename keep their colors.
+pub const LEGACY_COLOR_KEY: &str = "colour";
+
 impl ColumnPresentation {
-    /// Read `precision`, `thousands`, `negative`, `colour`, and `scale`.
+    /// Read `precision`, `thousands`, `negative`, `color`, and `scale`.
     /// View definitions pass a nested `format` table; presentation overlays
     /// pass the column table itself. `warn` receives a key relative to this
     /// table, and the caller adds the document and column path.
@@ -185,16 +189,35 @@ impl ColumnPresentation {
             ),
         }
         // `none` and `sign` are built in. Other strings name entries in
-        // `colours.toml`; `config::load_views` checks those references because
-        // this reader has no colour document.
-        match table.get("colour").or_else(|| table.get("color")) {
-            None => {}
-            Some(v) => match v.as_str() {
+        // `colors.toml`; `config::load_views` checks those references because
+        // this reader has no color document. `colour` is the old spelling of
+        // the key: read when `color` is absent, ignored beside it, and warned
+        // about either way so the file gets fixed (dialog writes say `color`).
+        let color = match (table.get("color"), table.get(LEGACY_COLOR_KEY)) {
+            (Some(v), None) => Some(v),
+            (Some(v), Some(_)) => {
+                warn(
+                    LEGACY_COLOR_KEY,
+                    "'colour' is ignored beside 'color' — delete it".into(),
+                );
+                Some(v)
+            }
+            (None, Some(v)) => {
+                warn(
+                    LEGACY_COLOR_KEY,
+                    "'colour' is the old spelling — read as 'color'; rename the key".into(),
+                );
+                Some(v)
+            }
+            (None, None) => None,
+        };
+        if let Some(v) = color {
+            match v.as_str() {
                 Some("none") => self.colour = Some(Colour::None),
                 Some("sign") => self.colour = Some(Colour::Sign),
                 Some(name) => self.colour = Some(Colour::Named(name.to_string())),
-                None => warn("colour", format!("'colour' must be a string (got {v})")),
-            },
+                None => warn("color", format!("'color' must be a string (got {v})")),
+            }
         }
         match table.get("scale").and_then(|v| v.as_str()) {
             None if table.get("scale").is_none() => {}
@@ -611,7 +634,7 @@ impl ViewSpec {
 
 /// A view's personal column order and display properties.
 ///
-/// Kept in a separate document so a width, colour, or visibility edit does
+/// Kept in a separate document so a width, color, or visibility edit does
 /// not replace the view's dataset and column definitions. Columns added to
 /// the desk view remain available after applying a personal overlay.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -988,7 +1011,8 @@ impl DatasetPresentationSpec {
                                 );
                             }
                             // Warn on unknown column keys as well as malformed known values.
-                            // `color` is an accepted alias; `hidden` has its own warning above.
+                            // The old `colour` spelling has its own warning in
+                            // `parse_format_keys`; `hidden` has its own warning above.
                             const COLUMN_KEYS: [&str; 9] = [
                                 "label",
                                 "width",
@@ -996,8 +1020,8 @@ impl DatasetPresentationSpec {
                                 "precision",
                                 "thousands",
                                 "negative",
-                                "colour",
                                 "color",
+                                LEGACY_COLOR_KEY,
                                 "hidden",
                             ];
                             for k in ct.keys() {
@@ -1389,7 +1413,7 @@ dataset = "risk_snapshot"
 grouping = ["lhu"]
 [[tree.columns]]
 name = "npv"
-format = { precision = 0, thousands = true, negative = "parens", colour = "sign", scale = "k" }
+format = { precision = 0, thousands = true, negative = "parens", color = "sign", scale = "k" }
 label = "NPV"
 width = 110
 [[tree.columns]]
@@ -1436,7 +1460,7 @@ dataset = "risk_snapshot"
 grouping = ["lhu"]
 [[tree.columns]]
 name = "npv"
-format = { precision = 40, negative = "red", colour = 42, thousands = "yes", scale = "bn" }
+format = { precision = 40, negative = "red", color = 42, thousands = "yes", scale = "bn" }
 width = -5
 "#));
         let p = views[0].presentation_of("npv");
@@ -1459,6 +1483,48 @@ format = { color = "none" }
         assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::None));
     }
 
+    /// Files written before the rename still say `colour`: the value is read,
+    /// and a warning at the old key tells the author to rename it.
+    #[test]
+    fn the_old_colour_key_is_read_with_a_warning_naming_color() {
+        let (views, diags) = ViewSpec::from_doc(&doc(r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[tree.columns]]
+name = "npv"
+format = { colour = "sign" }
+"#));
+        assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::Sign));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0]
+                .path
+                .as_deref()
+                .is_some_and(|p| p.ends_with("format.colour")),
+            "{diags:?}"
+        );
+        assert!(diags[0].message.contains("'color'"), "{}", diags[0].message);
+    }
+
+    /// Beside `color`, the old key is ignored — never merged over it — and
+    /// warned about once, not also reported as an unknown key.
+    #[test]
+    fn color_wins_over_the_old_colour_key() {
+        let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
+            "[risk.columns.npv]\ncolor = \"sign\"\ncolour = \"none\"\n",
+        ));
+        assert_eq!(spec.datasets["risk"]["npv"].colour, Some(Colour::Sign));
+        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
+        assert_eq!(
+            paths,
+            vec!["dataset_presentation.risk.columns.npv.colour"],
+            "{diags:?}"
+        );
+        assert!(diags[0].message.contains("ignored"), "{}", diags[0].message);
+    }
+
     #[test]
     fn a_column_colour_may_name_a_named_colour() {
         let doc = merge_docs(
@@ -1466,7 +1532,7 @@ format = { color = "none" }
             &[
                 LayerDoc::builtin(
                     "views",
-                    "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { colour = \"delta\" }\n",
+                    "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { color = \"delta\" }\n",
                 )
                 .unwrap(),
             ],
@@ -1519,7 +1585,7 @@ npv = 120
     #[test]
     fn the_overlay_reads_a_column_table_with_every_presentation_key() {
         let (spec, diags) = overlay(
-            "[tree]\norder = [\"npv\"]\n[tree.columns.npv]\nscale = \"k\"\nprecision = 0\nthousands = false\nnegative = \"parens\"\ncolour = \"delta\"\nlabel = \"NPV\"\nwidth = 120\nhidden = true\n",
+            "[tree]\norder = [\"npv\"]\n[tree.columns.npv]\nscale = \"k\"\nprecision = 0\nthousands = false\nnegative = \"parens\"\ncolor = \"delta\"\nlabel = \"NPV\"\nwidth = 120\nhidden = true\n",
         );
         assert!(diags.is_empty(), "{diags:?}");
         let p = &spec.views["tree"].columns["npv"];
@@ -1556,7 +1622,7 @@ npv = 120
         let views_doc = merge_docs("views", &[LayerDoc::builtin("views",
             "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n").unwrap()]);
         let (mut views, _) = ViewSpec::from_doc(&views_doc);
-        let (spec, _) = overlay("[tree.columns.npv]\nprecision = 0\ncolour = \"delta\"\n");
+        let (spec, _) = overlay("[tree.columns.npv]\nprecision = 0\ncolor = \"delta\"\n");
         let diags = spec.apply(&mut views);
         assert!(diags.is_empty(), "{diags:?}");
         let p = views[0].presentation_of("npv");
@@ -1768,7 +1834,7 @@ npv = 120
     fn dataset_presentation_reads_one_table_per_column_with_paths() {
         let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
             "[risk.columns.delta01]\nlabel = \"Δ\"\nwidth = 90\nscale = \"k\"\nprecision = 0\n\
-             thousands = true\nnegative = \"parens\"\ncolour = \"delta\"\n\
+             thousands = true\nnegative = \"parens\"\ncolor = \"delta\"\n\
              [risk.columns.npv]\nwidth = \"wide\"\n",
         ));
         let delta = &spec.datasets["risk"]["delta01"];
@@ -1894,7 +1960,7 @@ npv = 120
              format = { scale = \"m\", precision = 2 }\n",
         ));
         let (dataset, d) = DatasetPresentationSpec::from_doc(&dataset_doc(
-            "[risk.columns.delta01]\nlabel = \"dataset\"\nscale = \"k\"\ncolour = \"delta\"\n",
+            "[risk.columns.delta01]\nlabel = \"dataset\"\nscale = \"k\"\ncolor = \"delta\"\n",
         ));
         assert!(d.is_empty(), "{d:?}");
         assert!(dataset.apply(&mut views, &schema).is_empty());

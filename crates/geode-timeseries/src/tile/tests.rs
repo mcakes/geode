@@ -169,7 +169,7 @@ impl ModuleFactory for Handle {
 }
 
 /// A `colours.toml` holding one name, `spx`, at `degrees` on the
-/// wheel — what `:colour s1 spx` resolves against, and what a
+/// wheel — what `:color s1 spx` resolves against, and what a
 /// reload redefines.
 /// `n` HOURLY buckets ending an hour before the current hour, one
 /// `SlotResult` per number. Hourly and recent on purpose: every
@@ -895,7 +895,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     h.dispatch(&mut vcx, "toggle_visible", None);
     assert!(!h.model(&vcx).slots()[0].visible);
     assert!(!h.chart(&vcx).slots[0].visible);
-    h.dispatch(&mut vcx, "colour", None);
+    h.dispatch(&mut vcx, "color", None);
     assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
     h.dispatch(&mut vcx, "rule", None);
     assert!(matches!(
@@ -982,7 +982,7 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
     h.dispatch(&mut vcx, "axis_next", None);
     let after_axis = h.chart(&vcx).version;
     assert!(after_axis > v, "an axis change");
-    h.dispatch(&mut vcx, "colour", None);
+    h.dispatch(&mut vcx, "color", None);
     assert!(h.chart(&vcx).version > after_axis, "a colour change");
 }
 
@@ -990,7 +990,7 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
 fn a_reloaded_colours_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.command(&mut vcx, "color s1 spx").unwrap();
     h.draw(&mut vcx);
     let before = h.swatch(&vcx);
     let version = h.chart(&vcx).version;
@@ -1020,7 +1020,7 @@ fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         "expr s1 / s2",
         "remove s3",
         "rule s1 mean",
-        "colour s1 2",
+        "color s1 2",
         "axis time",
         "freq 1h",
         "range 6m",
@@ -1815,7 +1815,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
     h.dispatch(&mut vcx, "add", None);
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
     // The palette's path: an action the picker has no verb for.
-    h.dispatch(&mut vcx, "colour", None);
+    h.dispatch(&mut vcx, "color", None);
     assert!(h.popup_is_none(&vcx), "the picker closed first");
     assert_eq!(h.key_context_mode(&mut vcx), "normal");
     assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
@@ -1826,7 +1826,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
     );
     // The fieldless list remains open while changing slot colours.
     h.dispatch(&mut vcx, "list", None);
-    h.dispatch(&mut vcx, "colour", None);
+    h.dispatch(&mut vcx, "color", None);
     assert!(h.popup_is_series(&vcx));
 }
 
@@ -2889,11 +2889,11 @@ impl Harness {
     fn holds_focus(&self, vcx: &mut gpui::VisualTestContext) -> bool {
         vcx.update(|window, cx| self.content.holds_focus(window, cx))
     }
-    /// Open the menu and pick `Colour…` with the menu's own verbs (`j`
+    /// Open the menu and pick `Color…` with the menu's own verbs (`j`
     /// until it is lit, then `enter`).
     fn pick_colour_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
         self.dispatch(vcx, "menu", None);
-        let row = self.menu_row_index(vcx, "Colour…");
+        let row = self.menu_row_index(vcx, "Color…");
         while !self.menu_rows(vcx)[row].1 {
             self.dispatch(vcx, "list_down", None);
         }
@@ -2956,7 +2956,7 @@ fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
     // By pointer: a right-click on s1's chip opens the menu on it, and
     // a click on the row opens the picker there.
     h.right_click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
-    let row = h.menu_row_index(&vcx, "Colour…");
+    let row = h.menu_row_index(&vcx, "Color…");
     h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
     h.draw(&mut vcx);
     assert_eq!(h.colour_target(&vcx), Some(1));
@@ -2995,7 +2995,7 @@ fn a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolut
     assert!(
         toml::to_string(&h.tile.read_with(&vcx, |t, _| t.serialize()))
             .unwrap()
-            .contains("colour = \"#00cc44\"")
+            .contains("color = \"#00cc44\"")
     );
 }
 
@@ -3042,7 +3042,7 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
     assert!(!h.holds_focus(&mut vcx));
     assert_eq!(h.key_context_mode(&mut vcx), "normal");
     // The tile's own keys drive it again.
-    h.dispatch(&mut vcx, "colour", None);
+    h.dispatch(&mut vcx, "color", None);
     assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
 }
 
@@ -3070,14 +3070,14 @@ fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAp
 
 /// A pick that is (to a step) the colour the slot already paints
 /// changes nothing — even where a featured entry also matches it. Here
-/// the slot names a colour since deleted from `[colours]`, so it paints
+/// the slot names a color since deleted from `[colors]`, so it paints
 /// palette colour 1; `enter` on the untouched field keeps the name
 /// rather than rewriting it as `Palette(0)`.
 #[gpui::test]
 fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.command(&mut vcx, "color s1 spx").unwrap();
     h.factory.set_colours(NamedColours::default());
     h.draw(&mut vcx);
     let _root = focus_stand_in(&mut vcx);
@@ -3172,7 +3172,7 @@ fn removing_the_target_slot_closes_the_picker(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
-    assert!(!h.dispatch_handled(&mut vcx, "pick_colour", None));
+    assert!(!h.dispatch_handled(&mut vcx, "pick_color", None));
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
 }

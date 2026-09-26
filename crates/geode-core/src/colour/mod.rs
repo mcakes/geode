@@ -1,4 +1,4 @@
-//! Named colours are theme-relative hues or semantic tokens read from
+//! Named colors are theme-relative hues or semantic tokens read from
 //! configuration. Callers provide RGB anchors and tokens; this module has no
 //! GPUI dependency. Interpolation, optional sign tinting, and contrast
 //! adjustment are shared by cells, swatches, and charts.
@@ -24,7 +24,7 @@ pub enum Tone {
     Light,
 }
 
-/// Theme colours a definition can reference directly.
+/// Theme colors a definition can reference directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token {
     Foreground,
@@ -84,7 +84,7 @@ impl Token {
     }
 }
 
-/// How a colour's base is defined: a point on the canonical wheel the
+/// How a color's base is defined: a point on the canonical wheel the
 /// theme's anchors transform, or one of the theme's own tokens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Base {
@@ -92,7 +92,7 @@ pub enum Base {
     Token(Token),
 }
 
-/// A named colour: its [`Base`] plus whether a signed number painted in
+/// A named color: its [`Base`] plus whether a signed number painted in
 /// it shifts its hue by sign (`tint_sign`, see [`tint`]). The tint is
 /// orthogonal to how the base is defined — a hue and a token both tint
 /// — which is why it is a field beside the base rather than a variant.
@@ -115,14 +115,14 @@ impl Definition {
             tint_sign: false,
         }
     }
-    /// The same colour with `tint_sign` on.
+    /// The same color with `tint_sign` on.
     pub fn tinted(mut self) -> Definition {
         self.tint_sign = true;
         self
     }
 
     /// The browse summary: `hue 240`, `hue 210 · light`, `token chart.bullish`,
-    /// each with ` · ±sign` appended when the colour tints by sign.
+    /// each with ` · ±sign` appended when the color tints by sign.
     pub fn summary(&self) -> String {
         let mut out = match &self.base {
             Base::Hue {
@@ -142,12 +142,12 @@ impl Definition {
     }
 }
 
-/// A column's `colour` key already spells these two.
+/// A column's `color` key already spells these two.
 pub const RESERVED_NAMES: [&str; 2] = ["none", "sign"];
 
 /// A name starting with this is reserved too: `#rrggbb` is an absolute
-/// colour wherever a colour name is also accepted (a timeseries slot's
-/// `:colour` and its session entry), so such a name would be ambiguous.
+/// color wherever a color name is also accepted (a timeseries slot's
+/// `:color` and its session entry), so such a name would be ambiguous.
 pub const RESERVED_PREFIX: char = '#';
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -163,7 +163,7 @@ fn refuse_both(diags: &mut Vec<Diagnostic>, at: &dyn Fn(&str) -> String, name: &
         layer: None,
         file: None,
         message: format!(
-            "colour '{name}': both 'hue' and 'token' — a colour is one or the other; dropped"
+            "color '{name}': both 'hue' and 'token' — a color is one or the other; dropped"
         ),
         path: Some(at("")),
     });
@@ -186,9 +186,9 @@ impl NamedColours {
             }
             let at = |suffix: &str| {
                 if suffix.is_empty() {
-                    format!("colours.{name}")
+                    format!("{}.{name}", crate::config::COLORS_DOC)
                 } else {
-                    format!("colours.{name}.{suffix}")
+                    format!("{}.{name}.{suffix}", crate::config::COLORS_DOC)
                 }
             };
             if RESERVED_NAMES.contains(&name.as_str())
@@ -199,7 +199,7 @@ impl NamedColours {
                     Severity::Error,
                     at(""),
                     format!(
-                        "colour '{name}': the name is reserved or not a valid object name — dropped"
+                        "color '{name}': the name is reserved or not a valid object name — dropped"
                     ),
                 ));
                 continue;
@@ -208,7 +208,7 @@ impl NamedColours {
                 diags.push(diag(
                     Severity::Error,
                     at(""),
-                    format!("colour '{name}': not a table — dropped"),
+                    format!("color '{name}': not a table — dropped"),
                 ));
                 continue;
             };
@@ -225,7 +225,7 @@ impl NamedColours {
                             Severity::Warning,
                             at("tint_sign"),
                             format!(
-                                "colour '{name}': 'tint_sign' must be true or false (got {v}); using false"
+                                "color '{name}': 'tint_sign' must be true or false (got {v}); using false"
                             ),
                         ));
                         false
@@ -241,7 +241,7 @@ impl NamedColours {
                     diags.push(diag(
                         Severity::Error,
                         at(""),
-                        format!("colour '{name}': neither 'hue' nor 'token'; dropped"),
+                        format!("color '{name}': neither 'hue' nor 'token'; dropped"),
                     ));
                     continue;
                 }
@@ -251,7 +251,7 @@ impl NamedColours {
                         diags.push(diag(
                             Severity::Error,
                             at("hue"),
-                            format!("colour '{name}': 'hue' must be a number (got {h}); dropped"),
+                            format!("color '{name}': 'hue' must be a number (got {h}); dropped"),
                         ));
                         continue;
                     };
@@ -260,7 +260,7 @@ impl NamedColours {
                             Severity::Error,
                             at("hue"),
                             format!(
-                                "colour '{name}': 'hue' must be 0..360 (got {degrees}); dropped"
+                                "color '{name}': 'hue' must be 0..360 (got {degrees}); dropped"
                             ),
                         ));
                         continue;
@@ -273,7 +273,7 @@ impl NamedColours {
                                 Severity::Warning,
                                 at("tone"),
                                 format!(
-                                    "colour '{name}': 'tone' must be \"normal\" or \"light\" (got {other:?}); using normal"
+                                    "color '{name}': 'tone' must be \"normal\" or \"light\" (got {other:?}); using normal"
                                 ),
                             ));
                             Tone::Normal
@@ -289,9 +289,7 @@ impl NamedColours {
                         diags.push(diag(
                             Severity::Warning,
                             at("tone"),
-                            format!(
-                                "colour '{name}': 'tone' has no effect beside 'token'; ignored"
-                            ),
+                            format!("color '{name}': 'tone' has no effect beside 'token'; ignored"),
                         ));
                     }
                     match t.as_str().and_then(Token::parse) {
@@ -300,7 +298,7 @@ impl NamedColours {
                             diags.push(diag(
                                 Severity::Error,
                                 at("token"),
-                                format!("colour '{name}': unknown token {t}; dropped"),
+                                format!("color '{name}': unknown token {t}; dropped"),
                             ));
                             continue;
                         }
@@ -402,14 +400,14 @@ pub fn interpolate_hue(degrees: f32, tone: Tone, anchors: &Anchors) -> Rgb {
     to_srgb_in_gamut(lch)
 }
 
-/// Target contrast ratio for generated colours against the theme background.
+/// Target contrast ratio for generated colors against the theme background.
 /// `readable_on` may fall short if the supplied theme offers no reachable
 /// lightness with sufficient contrast.
 pub const READABLE_RATIO: f32 = 3.0;
 
 /// Move OKLCH lightness toward `toward` to seek `READABLE_RATIO` against
 /// `background`, retaining hue and clipping chroma to the display gamut.
-/// Already-readable colours are unchanged; otherwise 16 bisection steps
+/// Already-readable colors are unchanged; otherwise 16 bisection steps
 /// choose the adjustment. If no point on this lightness path clears the
 /// ratio, the endpoint is returned without a contrast guarantee.
 pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
@@ -439,7 +437,7 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
 
 /// Resolve a hue or token against a theme. Hues pass through `readable_on`;
 /// exact anchors stay unchanged when their contrast is sufficient. Tokens
-/// are returned unchanged as the theme's semantic colours. `tint_sign` is
+/// are returned unchanged as the theme's semantic colors. `tint_sign` is
 /// applied only by `resolve_signed`.
 pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     match &def.base {
@@ -452,10 +450,10 @@ pub fn resolve(def: &Definition, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     }
 }
 
-/// Resolve a signed cell colour. Without `tint_sign`, the sign is ignored.
+/// Resolve a signed cell color. Without `tint_sign`, the sign is ignored.
 /// With tinting, all three sign variants, including zero and token bases,
 /// pass through `readable_on` so zero/header cells do not bypass the contrast
-/// adjustment. Achievable contrast still depends on the theme's colours.
+/// adjustment. Achievable contrast still depends on the theme's colors.
 /// Achromatic bases have no visible hue shift.
 pub fn resolve_signed(def: &Definition, sign: Sign, anchors: &Anchors, tokens: &Tokens) -> Rgb {
     let base = resolve(def, anchors, tokens);
@@ -512,7 +510,7 @@ mod tests {
     use crate::config::{LayerDoc, merge_docs};
 
     fn doc(text: &str) -> crate::config::MergedDoc {
-        merge_docs("colours", &[LayerDoc::builtin("colours", text).unwrap()])
+        merge_docs("colors", &[LayerDoc::builtin("colors", text).unwrap()])
     }
     fn grey(v: f32) -> Rgb {
         Rgb { r: v, g: v, b: v }
@@ -609,7 +607,7 @@ mod tests {
             .filter(|d| d.severity == crate::config::Severity::Error)
             .filter_map(|d| d.path.as_deref())
             .collect();
-        assert_eq!(errors, vec!["colours.both", "colours.neither"]);
+        assert_eq!(errors, vec!["colors.both", "colors.neither"]);
         assert_eq!(
             colours.names().collect::<Vec<_>>(),
             vec!["delta", "gamma", "pnl", "wrap"],
@@ -634,16 +632,16 @@ mod tests {
         );
         let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
         assert!(
-            paths.contains(&"colours.sign")
-                && paths.contains(&"colours.big.hue")
-                && paths.contains(&"colours.tok.token")
-                && paths.contains(&"colours.tone.tone"),
+            paths.contains(&"colors.sign")
+                && paths.contains(&"colors.big.hue")
+                && paths.contains(&"colors.tok.token")
+                && paths.contains(&"colors.tone.tone"),
             "{paths:?}"
         );
     }
 
-    /// A `#` name is refused: `#rrggbb` is how a series' absolute colour
-    /// is spelled wherever a colour name is also accepted, so a name
+    /// A `#` name is refused: `#rrggbb` is how a series' absolute color
+    /// is spelled wherever a color name is also accepted, so a name
     /// starting with one could never be told from it.
     #[test]
     fn a_name_starting_with_a_hash_is_reserved() {
@@ -652,7 +650,7 @@ mod tests {
         assert!(colours.get("#ff8800").is_none());
         assert!(colours.get("ok").is_some());
         let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
-        assert_eq!(paths, vec!["colours.#ff8800"]);
+        assert_eq!(paths, vec!["colors.#ff8800"]);
     }
 
     #[test]
@@ -907,12 +905,12 @@ mod tests {
         );
         let warning = diags
             .iter()
-            .find(|d| d.path.as_deref() == Some("colours.bad.tint_sign"))
+            .find(|d| d.path.as_deref() == Some("colors.bad.tint_sign"))
             .expect("a diagnostic at the key");
         assert_eq!(warning.severity, crate::config::Severity::Warning);
     }
 
-    /// An in-gamut colour at OKLCH hue `degrees`, moderate chroma.
+    /// An in-gamut color at OKLCH hue `degrees`, moderate chroma.
     fn at_hue(degrees: f32) -> Rgb {
         oklab::oklab_to_srgb(oklab::lch_to_lab(Lch {
             l: 0.6,
@@ -1029,7 +1027,7 @@ mod tests {
     }
 
     /// Untinted semantic tokens remain unchanged. Tinted tokens apply contrast
-    /// adjustment to the entire sign triad, including the zero/header colour.
+    /// adjustment to the entire sign triad, including the zero/header color.
     #[test]
     fn a_tinted_token_is_floored_as_a_whole_triad_but_an_untinted_one_is_not() {
         let (a, mut t) = (anchors(), tokens());

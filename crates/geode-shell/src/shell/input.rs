@@ -104,6 +104,7 @@ impl ShellView {
         // its own bare keys before dispatch, so only external actions close it here.
         self.notice = None;
         self.stack_list = None;
+        self.add_filter_menu = None;
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
             // Stack cycling consumes the count before the count-free workspace router.
@@ -173,8 +174,8 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "config::sources" {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
-        } else if action.0 == "config::colours" {
-            objectdialog::render::open(self, objectdialog::Domain::Colours, window, cx);
+        } else if action.0 == "config::colors" {
+            objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's
@@ -287,8 +288,19 @@ impl ShellView {
             // Open the as-of selector.
             asof_view::open(self, window, cx);
         } else if action.0 == "frame::scope_expression" {
-            // Open the same frame-expression editor as the scope bar expression chip.
-            scope_expr_view::open(self, window, cx);
+            // Open the frame-expression editor on the whole expression.
+            scope_expr_view::open(self, scope_expr_view::Mode::Whole, window, cx);
+        } else if action.0 == "frame::add_expression" {
+            // Open the expression editor in add mode: the typed expression is
+            // joined to the current one with `and` (the `+` menu's Expression row).
+            scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
+        } else if action.0 == "frame::clear_expression" {
+            // Drop the whole expression layer through the undoable set_scope path.
+            self.frame.update(cx, |f, cx| {
+                if f.clear_expression() {
+                    cx.notify();
+                }
+            });
         } else if action.0 == "frame::grouping" {
             // Open the same grouping picker as the toolbar readout.
             choicedialog::open_grouping(self, window, cx);
@@ -744,6 +756,15 @@ impl ShellView {
             self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
+        }
+
+        if self.add_filter_menu.is_some() {
+            // The add-a-filter menu consumes every bare key; a chord passes to the
+            // matcher below, and its dispatch closes the menu.
+            let is_chord = convert_keystroke(&event.keystroke).is_some_and(|ks| ks.mods.is_chord());
+            if self.handle_add_filter_key(event.keystroke.key.as_str(), is_chord, window, cx) {
+                return;
+            }
         }
 
         if let Some(list) = self.stack_list.clone() {

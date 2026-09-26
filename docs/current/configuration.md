@@ -22,7 +22,7 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colours`, `pricer_views`, and `overrides` replace whole named objects.
+`colors`, `pricer_views`, and `overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -32,6 +32,19 @@ An individual file read or TOML parse failure produces an error diagnostic
 and skips that file. `config_version` must be the integer `1`; an unsupported
 value skips the file with an error, while an absent stamp warns and assumes
 version 1. Compiled builtin documents bypass the version check.
+
+Renamed documents keep loading under their old file name. A layer directory
+holding only `colours.toml` loads it as the `colors` document with a warning
+asking for the rename. When one directory holds both `colors.toml` and
+`colours.toml`, the old file is ignored with a warning naming it; the current
+file is never merged with the stale copy. "Holds" means the file exists: a
+`colors.toml` that fails to read or parse keeps its own error and still
+shadows the old file, which never stands in for it. `config::RENAMED_DOCS` lists these
+pairs. Runtime writes always target the current name: the first
+`config_write` edit of `colors` in a user directory holding only
+`colours.toml` starts from the old file's content, writes `colors.toml`, and
+then removes the old file. If that removal fails, the next load ignores the
+leftover copy with the both-files warning.
 
 `Config::read_docs` reads the layers; `Config::from_docs` merges supplied
 documents without I/O or typed validation. The latter preserves input order
@@ -52,7 +65,7 @@ The main configuration documents have distinct owners:
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
-| `colours.toml` | Named semantic data colours |
+| `colors.toml` | Named semantic data colors |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
 | `keymap.toml` | User bindings layered over builtin and module bindings |
@@ -84,12 +97,12 @@ accepted values, defaults, validation scope, and partial-result behavior.
 
 `load_views` resolves each presentation property in this order: kind default,
 view definition, dataset presentation, then view presentation. It checks named
-colour references at each definition site before overlays can hide an invalid
+color references at each definition site before overlays can hide an invalid
 value or reorder columns. Definition diagnostics use file column indices;
 overlay diagnostics use column names. The raw merged `views` document remains
 unchanged so dialogs can persist definitions and presentation separately. This loader
-returns view and overlay diagnostics, including unknown-colour warnings;
-schema and colour-definition diagnostics are reported by other callers.
+returns view and overlay diagnostics, including unknown-color warnings;
+schema and color-definition diagnostics are reported by other callers.
 
 Scope expressions use a restricted grammar validated against the schema. They
 are never raw SQL. Source adapter names, document kinds, module keymap
@@ -296,7 +309,7 @@ Accepted candidates update runtime state according to their inputs:
 | `groupings`, `datasets`, or `dimensions` | Rebuild shared grouping slots |
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
-| Views, either presentation document, dimensions, or colours | Emit `ConfigReloaded` for the app bridge |
+| Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
 | Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -315,7 +328,7 @@ data service, so a full request queue cannot permanently lose a configuration
 reload.
 
 The bridge's `ConfigReloaded` handler runs for changes to views, view/dataset
-presentation, dimensions, or colours. It uses the same presentation-aware
+presentation, dimensions, or colors. It uses the same presentation-aware
 view loader as startup, updates module factories, and offers views/dimensions
 to the service. This is not an atomic update across factories and workers;
 the handle acknowledges retention, not application. See
@@ -324,7 +337,7 @@ the handle acknowledges retention, not application. See
 That handler also rereads the stale threshold and factory validation schema.
 A stale-threshold-only edit does not trigger it, and dataset edits require
 restart. A later eligible reload can therefore update factory settings or
-schema before the running service is rebuilt. Presentation and colour-reader
+schema before the running service is rebuilt. Presentation and color-reader
 diagnostics append to the retained data-diagnostics lane; the shell remains
 responsible for replacing the current config-diagnostics batch.
 
@@ -347,10 +360,10 @@ for syntax, sequences, counts, module restrictions, and edit/reset behavior.
 ## Theme, time, and logging
 
 A theme name selects a complete light or dark theme; there is no independent
-mode toggle. Named data colours resolve from theme anchors in OKLCH and seek
+mode toggle. Named data colors resolve from theme anchors in OKLCH and seek
 a 3:1 contrast ratio. Custom themes can prevent the available lightness range
-from reaching that target; untinted semantic tokens retain their exact colour.
-See [colour resolution](typed-documents.md#colours-and-numeric-formatting).
+from reaching that target; untinted semantic tokens retain their exact color.
+See [color resolution](typed-documents.md#colors-and-numeric-formatting).
 
 `[time]` configures the trader-facing IANA time zone and start/end-of-day
 presets. Displayed times use `geode_core::clock::Clock`; crates do not read

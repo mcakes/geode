@@ -311,16 +311,15 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     );
 }
 
-/// The `+` pick chip paints regardless of the scope's own state — picking
-/// a dimension is how a scope starts — and its click opens the same
-/// picker `mod+p`/`frame::pick` does, with the filter field HOLDING the
-/// focus the open gave it (grouping-picker work, 2026-09-19): gpui's
-/// bubble-phase focus grab on the same mouse-down used to hand focus to
-/// the shell root a moment later, so typing after a chip click went
-/// nowhere. `open_shell_dialog_with_key`'s `prevent_default` is the fix,
-/// for every dialog a mouse-down opens.
+/// The `+` chip paints regardless of the scope's own state — adding a
+/// filter is how a scope starts — and its menu's "Dimension…" row opens
+/// the same picker `mod+p`/`frame::pick` does, with the filter field
+/// HOLDING the focus the open gave it, so typing after the click lands
+/// (the mouse-opened-dialog rule; the row stops its press's propagation,
+/// and `open_shell_dialog_with_key`'s `prevent_default` covers every
+/// other mouse-opened dialog).
 #[gpui::test]
-fn the_pick_chip_is_always_present_and_opens_the_picker(cx: &mut gpui::TestAppContext) {
+fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).scope().is_empty()));
@@ -330,8 +329,22 @@ fn the_pick_chip_is_always_present_and_opens_the_picker(cx: &mut gpui::TestAppCo
         .expect("the pick chip should paint even with an empty scope");
     vcx.simulate_click(pick.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_some()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s.picker.is_none()),
+        "the + opens its menu, not the picker"
+    );
+    let row = vcx
+        .debug_bounds("scope-add-menu-row-dimension")
+        .expect("the menu's Dimension row paints");
+    vcx.simulate_click(row.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
 
     assert!(shell.read_with(&vcx, |s, _| s.picker.is_some()));
+    assert!(
+        shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()),
+        "a commit closes the menu"
+    );
     let focused = vcx.update(|window, cx| {
         let input = shell.read(cx).dialog_input.clone();
         input.read(cx).focus_handle(cx).is_focused(window)

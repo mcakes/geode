@@ -44,8 +44,8 @@ pub struct DataSetup {
     pub views: Vec<ViewSpec>,
     /// Startup dimensions shared with the service and blotter's filter validation.
     pub dimensions: DerivedDimensions,
-    /// Named colours shared by module factories. Parse separately from load_views
-    /// to retain colour-definition diagnostics as well as unknown-reference warnings.
+    /// Named colors shared by module factories. Parse separately from load_views
+    /// to retain color-definition diagnostics as well as unknown-reference warnings.
     pub colours: NamedColours,
     pub diagnostics: Vec<Diagnostic>,
     /// Datasets declared local. Their publications update diagnostics but skip
@@ -104,7 +104,7 @@ pub fn data_setup(
     let (egress, d) = geode_data::egress::resolve(egress_specs, &adapters);
     diagnostics.extend(d);
     let (colours, colour_diags) = config
-        .doc("colours")
+        .doc(geode_core::config::COLORS_DOC)
         .map(NamedColours::from_doc)
         .unwrap_or_default();
     diagnostics.extend(colour_diags);
@@ -355,7 +355,7 @@ pub struct Bridge {
     /// Dividend factory sharing the marketdata context. Suppress its duplicate
     /// keymap fragment while retaining its own actions and stale threshold.
     pub dividend: Rc<MarketDataFactory>,
-    /// Timeseries factory sharing the data handle and named colours. Retained
+    /// Timeseries factory sharing the data handle and named colors. Retained
     /// so reload can update the chart palette.
     pub timeseries: Rc<geode_timeseries::content::TimeseriesFactory>,
     /// The line pricer's factory, sharing the handle. Retained so a reload
@@ -422,7 +422,7 @@ pub fn start(
             .collect(),
     );
     let handle = DataService::spawn(setup.config, sink);
-    // Both factories receive the same startup colours and later reload updates.
+    // Both factories receive the same startup colors and later reload updates.
     let timeseries = Rc::new(geode_timeseries::content::TimeseriesFactory::new(
         handle.clone(),
         setup.colours.clone(),
@@ -659,16 +659,16 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 for d in &presentation_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
-                // Parse named colours separately to retain their own validation diagnostics;
+                // Parse named colors separately to retain their own validation diagnostics;
                 // load_views uses them for reference checks but does not return those errors.
                 let (colours, colour_diags) = config
-                    .doc("colours")
+                    .doc(geode_core::config::COLORS_DOC)
                     .map(NamedColours::from_doc)
                     .unwrap_or_default();
                 for d in &colour_diags {
                     tracing::warn!(target: "geode::query", "{d}");
                 }
-                // Update both factories from one parsed colour definition set.
+                // Update both factories from one parsed color definition set.
                 timeseries.set_colours(colours.clone());
                 factory.set_colours(colours);
                 let (dims, _) = config
@@ -677,7 +677,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     .unwrap_or_default();
                 // Refresh factory settings on ConfigReloaded. A stale_after-only edit does
                 // not emit this event; it takes effect on a later view/presentation/dimensions/
-                // colours reload or restart.
+                // colors reload or restart.
                 factory.set_views(views.clone());
                 factory.set_find_style(FindStyle::from_config(config));
                 let stale_after = stale_after_from_config(config);
@@ -3297,13 +3297,13 @@ role = "key"
         );
     }
 
-    /// Reload named colours into the factory used by new and existing blotter tiles.
+    /// Reload named colors into the factory used by new and existing blotter tiles.
     #[gpui::test]
     fn a_reload_hands_the_factory_the_new_colours(cx: &mut gpui::TestAppContext) {
         let services = test_shell_services_with_sources(ConfigSources {
             builtin: vec![
                 LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
-                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
             ],
             desk: None,
             user: None,
@@ -4036,8 +4036,8 @@ role = "key"
         );
     }
 
-    /// Setup carries named colours and their reader diagnostics. load_views checks
-    /// colour references but does not retain colour-definition errors.
+    /// Setup carries named colors and their reader diagnostics. load_views checks
+    /// color references but does not retain color-definition errors.
     #[test]
     fn data_setup_carries_the_colours_and_reports_their_diagnostics() {
         let config = Config::load(&ConfigSources {
@@ -4050,7 +4050,7 @@ role = "key"
                 LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
                     .unwrap(),
                 LayerDoc::builtin(
-                    "colours",
+                    "colors",
                     "[delta]\nhue = 240\n[broken]\nhue = 240\ntoken = \"danger\"\n",
                 )
                 .unwrap(),
@@ -4076,7 +4076,7 @@ role = "key"
             setup
                 .diagnostics
                 .iter()
-                .any(|d| d.message.contains("colour 'broken'")),
+                .any(|d| d.message.contains("color 'broken'")),
             "a malformed colour must be reported, not dropped in silence: {:?}",
             setup.diagnostics
         );
@@ -4110,7 +4110,7 @@ role = "key"
         );
     }
 
-    /// Build the timeseries factory with the shared handle and startup colours.
+    /// Build the timeseries factory with the shared handle and startup colors.
     /// Its kind must match the roster/session identity used to restore the module.
     #[gpui::test]
     fn start_builds_a_timeseries_factory_beside_the_blotters(cx: &mut gpui::TestAppContext) {

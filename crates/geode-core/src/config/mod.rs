@@ -15,6 +15,33 @@ use std::path::PathBuf;
 /// Config schema version accepted by this build.
 pub const CONFIG_VERSION: i64 = 1;
 
+/// The named-color document, `colors.toml`.
+pub const COLORS_DOC: &str = "colors";
+
+/// Documents whose file was renamed: `(old stem, current doc name)`. A layer
+/// directory still holding only the old file loads it under the current name
+/// with a warning; when a layer holds both, the current file wins and the old
+/// one is ignored with a warning. Writes always target the current name
+/// (`geode_shell::config_write` carries an old user file across on its first
+/// edit), so an existing hand-written file is never silently discarded.
+pub const RENAMED_DOCS: &[(&str, &str)] = &[("colours", COLORS_DOC)];
+
+/// The current document name for a renamed file stem, if `stem` is an old one.
+pub fn renamed_doc(stem: &str) -> Option<&'static str> {
+    RENAMED_DOCS
+        .iter()
+        .find(|(old, _)| *old == stem)
+        .map(|(_, new)| *new)
+}
+
+/// The old file stem a current document was renamed from, if any.
+pub fn legacy_doc_name(doc: &str) -> Option<&'static str> {
+    RENAMED_DOCS
+        .iter()
+        .find(|(_, new)| *new == doc)
+        .map(|(old, _)| *old)
+}
+
 /// Precedence order: later layers override earlier ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Layer {

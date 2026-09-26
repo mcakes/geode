@@ -2709,9 +2709,9 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
 # Ordered persistence: filesystem transactions and accepted UI submissions.
 run_mutation "config ordering: the read begins after the previous commit" \
   crates/geode-shell/src/config_write.rs \
-  '    let mut document = open_at(&path)?;' \
+  '    let mut document = open_at(legacy.as_deref().unwrap_or(&path))?;' \
   '    drop(_guard);
-    let mut document = open_at(&path)?;' \
+    let mut document = open_at(legacy.as_deref().unwrap_or(&path))?;' \
   geode-shell concurrent_edits_read_after_the_previous_commit
 
 run_mutation "config ordering: pending writes run in submission order" \
@@ -3014,6 +3014,82 @@ run_mutation "delegate: the header marks an absolute sort" \
   geode-blotter \
   s_and_shift_s_cycle_signed_and_absolute_sorts
 
+# A sort that names a position is re-pointed by any reorder: the rows then
+# order by a column the trader never chose and the header agrees with it.
+run_mutation "flatten: a sort resolves its column by name, not by an index into the plan" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    let Some(column) = plan
+        .position_of(&spec.column)
+        .and_then(|i| plan.columns.get(i))
+    else {' \
+  '    let Some(column) = plan.columns.get(1) else {' \
+  geode-blotter \
+  a_sort_survives_a_column_move_because_it_names_the_column
+
+# A rebuild that only bounds-checks leaves an in-range index naming a
+# different column, and the siblings reorder by it in the same frame.
+run_mutation "delegate: a plan rebuild re-resolves a sort's column, not just its index" \
+  crates/geode-blotter/src/delegate.rs \
+  '                match self.plan.as_ref().and_then(|p| p.position_of(&s.column)) {' \
+  '                match Some(0usize) {' \
+  geode-blotter \
+  hiding_the_sorted_column_drops_the_sort_and_says_which
+
+# The notice is the whole remedy a trader gets when a sort is dropped;
+# losing the column's name here leaves the harness silent about it.
+run_mutation "delegate: a dropped sort keeps the column's name for the tile to report" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    None => self.dropped_sort = Some(s.column),' \
+  '                    None => self.dropped_sort = None,' \
+  geode-blotter \
+  hiding_the_sorted_column_drops_the_sort_and_says_which
+
+# The cursor is a screen position, so a reorder leaves it on a different
+# column and the next sort cycles something else. Anchored past the
+# `if let` itself and through the `move_column`-only trailing comment: a
+# plan rebuild re-resolves the cursor the same way, so the bare `if let`
+# line alone now matches twice in this file.
+run_mutation "delegate: the cursor is re-derived by column name across a move" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if let Some(name) = under_cursor
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
+  '        if let Some(name) = None::<String>
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
+  geode-blotter \
+  the_cursor_follows_its_column_across_a_move
+
+# The same re-derivation runs again in `apply_snapshot`, on a plan rebuild
+# rather than a drag — nearly identical to the `move_column` copy above,
+# so the anchor closes over the `if rebuild` block's own brace and the
+# line after it, both unique to this site, rather than the bare `if let`
+# the two copies share.
+run_mutation "delegate: a plan rebuild re-derives the cursor by column name" \
+  crates/geode-blotter/src/delegate.rs \
+  '            if let Some(name) = under_cursor
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  '            if let Some(name) = None::<String>
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  geode-blotter \
+  hiding_a_column_left_of_the_cursor_carries_it_by_name
+
 run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
   crates/geode-blotter/src/core/commands.rs \
   '    while !line.is_char_boundary(cursor) {' \
@@ -3203,8 +3279,8 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some(e);' \
-  '                self.error = Some(e);
+  '                self.error = Some((e, Tone::DangerText));' \
+  '                self.error = Some((e, Tone::DangerText));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
@@ -6505,10 +6581,203 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '                if f.set_scope(scope) {' \
-  '                if f.clear_scope() {' \
+  '            Ok(frame.set_scope(scope))' \
+  '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
+
+# ---- Expression term chips and the add-a-filter menu: the scope bar
+# splits the expression into its top-level `and` terms, one chip each,
+# and the `+` opens a menu onto the picker and the dialog's add mode.
+
+# A left-nested `and` must flatten too; pushing the left operand whole
+# leaves `(a and b) and c` as two terms.
+run_mutation "expr-chips: conjuncts flatten the left side of an and" \
+  crates/geode-core/src/scope/expr.rs \
+  '                a.walk_conjuncts(out);' \
+  '                out.push(a);' \
+  geode-core \
+  nested_ands_flatten_on_both_sides_in_order
+
+# The rebuild keeps the terms' order; folding the other way reverses it.
+run_mutation "expr-chips: from_conjuncts folds left in order" \
+  crates/geode-core/src/scope/expr.rs \
+  '            .reduce(|acc, term| Expr::And(Box::new(acc), Box::new(term)))' \
+  '            .reduce(|acc, term| Expr::And(Box::new(term), Box::new(acc)))' \
+  geode-core \
+  conjuncts_split_a_chain_and_rebuild_it
+
+# Dropping term i must drop that term, not whichever is last.
+run_mutation "expr-chips: dropping a term removes that term" \
+  crates/geode-shell/src/frame.rs \
+  '                terms.remove(i);' \
+  '                terms.pop();' \
+  geode-shell \
+  drop_expression_term_removes_only_that_term_and_is_undoable
+
+# A term index the scope no longer has refuses; without the check the
+# edit indexes past the end.
+run_mutation "expr-chips: an out-of-range term refuses" \
+  crates/geode-shell/src/frame.rs \
+  '        let Some(current) = terms.get(i) else {' \
+  '        let Some(current) = terms.get(i).or(terms.first()) else {' \
+  geode-shell \
+  drop_expression_term_removes_only_that_term_and_is_undoable
+
+# The index alone is not the term: a scope replaced underneath with the
+# same term count still has index 1, holding a different term. Without
+# the seeded-term comparison the dialog silently edits (or removes) it.
+run_mutation "expr-chips: a term changed underneath refuses" \
+  crates/geode-shell/src/frame.rs \
+  '        if expected.is_some_and(|e| e != current) {' \
+  '        if false && expected.is_some_and(|e| e != current) {' \
+  geode-shell \
+  a_term_replaced_underneath_refuses_edit_and_removal
+
+# Replacing term i keeps the others.
+run_mutation "expr-chips: a term edit replaces only that term" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(t) => terms[i] = t,' \
+  '            Some(t) => terms = vec![t],' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# Appending joins with `and`; replacing loses the existing expression.
+run_mutation "expr-chips: append joins the existing expression with and" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '            Some(_) => term,' \
+  geode-shell \
+  append_expression_joins_with_and_or_sets_it
+
+# The dialog's add mode appends; committing as whole mode replaces.
+run_mutation "expr-chips: the add dialog appends rather than replaces" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
+  '        Mode::Add => {
+            let mut scope = frame.scope().clone();
+            scope.expression = parsed;
+            Ok(frame.set_scope(scope))
+        }' \
+  geode-shell \
+  the_plus_menus_expression_row_appends_with_and
+
+# A term chip's body opens the dialog on that term, not the whole.
+run_mutation "expr-chips: a term chip opens term mode" \
+  crates/geode-shell/src/shell/render.rs \
+  '                scope_expr_view::open_term(view, i, window, cx);' \
+  '                scope_expr_view::open(view, scope_expr_view::Mode::Whole, window, cx);' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# A term chip's `×` drops its own term.
+run_mutation "expr-chips: a term's × drops its own index" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_expression_term(i) {' \
+  '                    if f.drop_expression_term(0) {' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# As on a dimension chip, `occlude()` on the `×` is the one mechanism
+# that keeps its press from also reaching the body and opening the
+# dialog; there is no `stop_propagation` beside it.
+run_mutation "expr-chips: the term × occludes the chip body" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .occlude()' \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .flex_shrink_0()' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# The menu's click catcher occludes: without it the closing press also
+# reaches what is beneath (the grouping readout opens its picker).
+run_mutation "add-filter: an outside press closes the menu and goes no further" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
+                        .occlude()' \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())' \
+  geode-shell \
+  a_click_outside_the_menu_closes_it_and_goes_no_further
+
+# `j` moves the highlight.
+run_mutation "add-filter: j moves the highlight" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '            "j" | "down" => step(menu, 1),' \
+  '            "j" | "down" => step(menu, 0),' \
+  geode-shell \
+  the_plus_menu_answers_j_k_enter_and_escape
+
+# `frame::clear_expression` drops the layer.
+run_mutation "add-filter: clear_expression drops the expression" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.clear_expression() {' \
+  '                if false {' \
+  geode-shell \
+  the_add_and_clear_expression_actions
+
+# Opening the menu takes the root's focus, so it records whether the
+# scope text field held focus first; without the record nothing returns.
+run_mutation "add-filter: the menu records the text field's focus at open" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        let return_to_filter = self.filter_field_focused(window, cx);' \
+  '        let return_to_filter = false;' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# The menu's own close (escape, outside press) returns focus to the field.
+run_mutation "add-filter: the menu's own close returns focus to the field" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        self.overlay_return_to_filter = menu.return_to_filter;
+        self.return_focus_from_overlay(window, cx);' \
+  '        self.overlay_return_to_filter = false;
+        self.return_focus_from_overlay(window, cx);' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# A row's dialog recorded the root as its origin; the commit hands it the
+# menu's record so closing that dialog returns to the field.
+run_mutation "add-filter: a row's dialog returns focus to the field" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '            if self.modal.is_some() {
+                self.overlay_return_to_filter = true;' \
+  '            if self.modal.is_some() {
+                self.overlay_return_to_filter = false;' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# The catcher swallows every button, so every button must close the menu.
+run_mutation "add-filter: any button outside closes the menu" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {' \
+  '                        .on_mouse_down(MouseButton::Left, cx.listener(|view, _event, window, cx| {' \
+  geode-shell \
+  any_button_outside_the_menu_closes_it
+
+# A chord prefix typed while the menu was open must not outlive it.
+run_mutation "add-filter: closing the menu cancels a pending sequence" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        self.matcher.cancel();
+        self.overlay_return_to_filter = menu.return_to_filter;' \
+  '        self.overlay_return_to_filter = menu.return_to_filter;' \
+  geode-shell \
+  closing_the_menu_cancels_a_pending_sequence
+
+# The palette opening over the menu closes it.
+run_mutation "add-filter: the palette toggle closes the menu" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.close_add_filter_menu(cx);' \
+  '        let _ = &self.add_filter_menu;' \
+  geode-shell \
+  the_palette_toggle_closes_the_menu
+
+# The `+` holds its pressed fill (and its open marker) while the menu is up.
+run_mutation "add-filter: the + holds its pressed fill while open" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    add_open.then_some("scope-pick-chip-open"),' \
+  '                    None,' \
+  geode-shell \
+  the_plus_holds_its_pressed_fill_while_the_menu_is_open
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
@@ -7811,8 +8080,10 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
 # drop still happens AND the picker opens.
 run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '                    .occlude()' \
-  '                    .flex_shrink_0()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .occlude()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .flex_shrink_0()' \
   geode-shell \
   the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
 
@@ -9845,8 +10116,8 @@ run_mutation "objectdialog: an unmatched diagnostic stays on the header" \
 # removal_edits`), distinct from the fork's own insert above.
 run_mutation "objectdialog: revert removes the overrides entry" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
-  '        if false && super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  '        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {' \
+  '        for okey in Vec::<String>::new() {' \
   geode-shell \
   a_fork_records_an_override_entry_and_revert_removes_it
 
@@ -10643,7 +10914,7 @@ run_mutation "colour: gamut clip pulls chroma" \
 # 2c §3: an unknown named colour warns with the column's file index.
 run_mutation "load_views: an unknown colour name warns with its path" \
   crates/geode-core/src/config/load.rs \
-  '                && colours.get(name).is_none()' \
+  '                && colors.get(name).is_none()' \
   '                && false' \
   geode-core \
   a_column_naming_an_unknown_colour_warns_with_its_path
@@ -10681,7 +10952,7 @@ run_mutation "load_views: an unknown colour in the overlay warns with its path" 
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
                 };
-                if colours.get(name).is_none() {' \
+                if colors.get(name).is_none() {' \
   '            for (col, cp) in &p.columns {
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
@@ -10854,7 +11125,7 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
 # 2c §6.2: a colours change reaches the tiles like a views change.
 run_mutation "hot_reload: a colours change fires ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed("colours");' \
+  '                || changed(geode_core::config::COLORS_DOC);' \
   '                || changed("views");' \
   geode-shell \
   a_colours_change_fires_config_reloaded
@@ -15588,14 +15859,16 @@ run_mutation "grouping: the readout click opens the picker" \
 
 # `open_shell_dialog_with_key`'s `prevent_default`: without it the shell
 # root's bubble-phase focus grab takes the field's focus back on the same
-# mouse-down and typing after any chip click goes nowhere.
+# mouse-down and typing after any chip click goes nowhere. The detector
+# is an expression term chip's click: the `+` menu's rows stop
+# propagation themselves, so the `+` path no longer depends on this.
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
     // Dialog state is installed before this call so synchronization can choose its' \
   '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
-  the_pick_chip_is_always_present_and_opens_the_picker
+  a_terms_body_edits_that_term_alone
 
 # ---- tile picker (2026-09-19): a placeholder's double-click and
 # `tile::add` / `mod+n` over the same choice dialog ----------------------
@@ -20029,14 +20302,14 @@ run_mutation "timeseries colour picker: the pick context survives the close" \
 # The Colours dialog refuses a `#` name up front...
 run_mutation "colours dialog: a name starting with '#' is reserved" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   '            || false' \
   geode-shell reserved_names_are_taken
 
 # ...and only the Colours dialog.
 run_mutation "colours dialog: the '#' reservation is the colours domain's alone" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   '            || (true && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   geode-shell reserved_names_are_taken
 
@@ -20072,8 +20345,8 @@ run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            "pick_colour" => self.open_colour_picker(window, cx),' \
-  '            "pick_colour" => false,' \
+  '            "pick_color" => self.open_colour_picker(window, cx),' \
+  '            "pick_color" => false,' \
   geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
@@ -20218,6 +20491,127 @@ run_mutation "pricer editor: in-grid fields paint no chrome" \
   '        .appearance(false)' \
   '        .appearance(true)' \
   geode-pricer the_cell_editor_paints_no_chrome_and_its_text_sits_where_the_cells_did
+# An old-named colours.toml loads under the current doc name. Mutated, the
+# layer keeps a doc named `colours` that nothing reads, and the colors vanish.
+run_mutation "color rename: an old colours.toml loads as the colors doc" \
+  crates/geode-core/src/config/load.rs \
+  '            docs[i].name = (*new).to_string();' \
+  '            let _ = new;' \
+  geode-core an_old_colours_file_alone_loads_as_colors_with_a_warning
+
+# Both names in one layer: the old file is dropped, never merged.
+run_mutation "color rename: colors.toml wins over colours.toml in one layer" \
+  crates/geode-core/src/config/load.rs \
+  '            let legacy = docs.remove(i);' \
+  '            let legacy = docs[i].clone();' \
+  geode-core colors_wins_over_colours_in_the_same_layer_with_a_warning
+
+# The old `colour` column key is still read when `color` is absent.
+run_mutation "color rename: the old colour key is still read" \
+  crates/geode-core/src/view.rs \
+  '        let color = match (table.get("color"), table.get(LEGACY_COLOR_KEY)) {' \
+  '        let color = match (table.get("color"), None::<&toml::Value>) {' \
+  geode-core the_old_colour_key_is_read_with_a_warning_naming_color
+
+# Beside `color`, the old key loses.
+run_mutation "color rename: color wins over the old colour key" \
+  crates/geode-core/src/view.rs \
+  '            (Some(v), Some(_)) => {' \
+  '            (Some(_), Some(v)) => {' \
+  geode-core color_wins_over_the_old_colour_key
+
+# The first colors edit starts from an old user colours.toml. Mutated, it
+# creates a one-entry colors.toml that hides every old definition.
+run_mutation "color rename: a colors edit carries an old colours.toml across" \
+  crates/geode-shell/src/config_write.rs \
+  '    let legacy = legacy_source(user_dir, doc, &path);' \
+  '    let legacy: Option<PathBuf> = None;' \
+  geode-shell an_edit_to_colors_carries_an_old_colours_file_across
+
+# ...and only when colors.toml is absent: beside it, the old file is stale.
+run_mutation "color rename: an existing colors.toml is edited, not the old file" \
+  crates/geode-shell/src/config_write.rs \
+  '    (!path.exists() && old.exists()).then_some(old)' \
+  '    old.exists().then_some(old)' \
+  geode-shell an_edit_to_colors_ignores_the_old_file_beside_the_current_one
+
+# A keymap binding naming a retired action id binds its successor.
+run_mutation "action rename: the keymap builder follows a rename" \
+  crates/geode-shell/src/keymap/build.rs \
+  '                if let Some(current) = registry.renamed(&action) {' \
+  '                if let Some(current) = None::<&ActionId> {' \
+  geode-shell a_binding_naming_a_renamed_action_binds_the_current_id_with_a_warning
+
+# A rename resolves only to a registered successor.
+run_mutation "action rename: a rename needs a registered successor" \
+  crates/geode-shell/src/actions.rs \
+  '        self.renames.get(old).filter(|new| self.contains(new))' \
+  '        self.renames.get(old)' \
+  geode-shell a_rename_resolves_to_a_registered_successor
+
+# The shell registers config::colours as retired.
+run_mutation "action rename: config::colours still binds config::colors" \
+  crates/geode-shell/src/defaults.rs \
+  '    reg.register_rename("config::colours", "config::colors")' \
+  '    Ok::<(), String>(())' \
+  geode-shell a_user_binding_to_the_old_colours_action_binds_config_colors
+
+# The timeseries factory registers its two retired color ids.
+run_mutation "action rename: timeseries registers its retired color ids" \
+  crates/geode-timeseries/src/content.rs \
+  '            let _ = registry.register_rename(old, new);' \
+  '            let _ = (old, new);' \
+  geode-timeseries a_user_binding_naming_an_old_color_action_binds_the_new_id
+
+# A timeseries session saved under the old `colour` slot key restores.
+run_mutation "color rename: a session slot saved as colour restores" \
+  crates/geode-timeseries/src/core/session.rs \
+  '    match r.get("color").or_else(|| r.get("colour")) {' \
+  '    match r.get("color") {' \
+  geode-timeseries the_old_colour_key_is_read_and_rewritten_as_color
+
+# An overrides entry recorded as colours.<name> names the colors object.
+run_mutation "color rename: an old colours override key still measures drift" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            geode_core::config::renamed_doc(doc).map(|new| override_key(new, object))' \
+  '            None::<String>' \
+  geode-shell an_override_recorded_under_the_old_colours_key_still_counts
+
+# Beside a current-spelled entry the old-spelled one is stale and pruned.
+run_mutation "color rename: a duplicate old override key is stale" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if key != **raw && raws.contains(&key) {' \
+  '            if false {' \
+  geode-shell an_override_recorded_under_the_old_colours_key_still_counts
+
+# A colors.toml that exists but fails to load still shadows colours.toml.
+# Mutated to ask which docs LOADED, the stale file stands in for it.
+run_mutation "color rename: a broken colors.toml still shadows colours.toml" \
+  crates/geode-core/src/config/load.rs \
+  '        if stems.iter().any(|s| s == new) {' \
+  '        if docs.iter().any(|d| d.name == *new) {' \
+  geode-core a_broken_colors_file_still_shadows_the_old_colours_file
+
+# A Views dialog save writes a format's old colour key as color.
+run_mutation "color rename: a saved view rewrites the old colour key" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            out.push(super::toml_table_to_edit(&with_current_color_key(column)));' \
+  '            out.push(super::toml_table_to_edit(column));' \
+  geode-shell a_saved_view_rewrites_the_old_colour_key_as_color
+
+# Beside color, the old key is dropped rather than kept or promoted.
+run_mutation "color rename: a saved view drops colour beside color" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        && !format.contains_key("color")' \
+  '        && true' \
+  geode-shell a_saved_view_rewrites_the_old_colour_key_as_color
+
+# A retired action id cannot be registered again.
+run_mutation "action rename: register refuses a retired id" \
+  crates/geode-shell/src/actions.rs \
+  '        if let Some(new) = self.renames.get(&def.id) {' \
+  '        if let Some(new) = None::<&ActionId> {' \
+  geode-shell a_retired_id_cannot_be_registered
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
