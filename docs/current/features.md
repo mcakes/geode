@@ -95,6 +95,10 @@ cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
 
+A panel opened through an add (palette, tile picker, `open_with`, duplicate)
+with no underlying opens the underlying picker at once; a restored panel does
+not. Every panel kind accepts an underlying launch context.
+
 `[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
 label when shown, otherwise the first value column. The column widens for the
 gutter while cursor borders, draft fills, and deletion marks stay on the data

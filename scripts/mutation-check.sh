@@ -21429,6 +21429,12 @@ run_mutation "launch: a pick reads the context at commit" \
   '                .and_then(|f| f.launch_state(&geode_core::launch::LaunchContext { underlying: Some("NDX".into()) }));' \
   geode-shell the_context_is_captured_when_the_dialog_opens
 
+run_mutation "launch: a panel with a key is prompted anyway" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.key.is_none() && self.popup.is_none() {' \
+  '        if self.popup.is_none() {' \
+  geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

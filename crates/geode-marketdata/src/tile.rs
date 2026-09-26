@@ -3228,6 +3228,16 @@ impl MarketDataTile {
 
     // ---- the underlying picker -----------------------------------
 
+    /// The shell created this panel through `add_tile` and it is focused: a
+    /// panel with no underlying is useless, so ask for one at once. A
+    /// launched panel that already has a key (a context launch, a
+    /// duplicate) does nothing. Escape leaves the empty panel, as `u` does.
+    pub(crate) fn launched(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.key.is_none() && self.popup.is_none() {
+            self.open_picker(window, cx);
+        }
+    }
+
     /// Open the underlying picker with ranked catalog keys and prepared parked-draft
     /// marks. Dirty drafts do not block it: selecting a key parks the current work.
     /// Request a fresh catalog on entry and incorporate later catalog changes through
@@ -5054,6 +5064,11 @@ mod tests {
         }
         fn visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
             vcx.update(|_window, cx| self.content.set_visible(visible, cx));
+        }
+        /// The shell's `launched` call, through the trait door.
+        fn launched(&self, vcx: &mut gpui::VisualTestContext) {
+            vcx.update(|window, cx| self.content.launched(window, cx));
+            vcx.run_until_parked();
         }
         fn dispatch(&self, vcx: &mut gpui::VisualTestContext, verb: &str, count: Option<u32>) {
             let id = ActionId(format!("marketdata::{verb}"));
@@ -10777,6 +10792,58 @@ edits = [["2099-01-01", "-1", 1.0]]
     }
 
     // ---- Underlying picker -------------------------------------------
+
+    /// A panel launched with no underlying opens its picker at once, the
+    /// field holding the keyboard, and keeps it through the next frame (the
+    /// shell's deferred focus restore spares an insert-mode input).
+    #[gpui::test]
+    fn a_launched_panel_with_no_underlying_opens_the_picker(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        h.launched(&mut vcx);
+        assert_eq!(h.mode(&vcx), "insert");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| matches!(t.popup, Some(Popup::Picker(_)))),
+            "the picker is open"
+        );
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "its field holds the keyboard"
+        );
+    }
+
+    /// A panel launched on an underlying shows it and opens no picker.
+    #[gpui::test]
+    fn a_launched_panel_on_an_underlying_opens_no_picker(cx: &mut gpui::TestAppContext) {
+        let mut state = toml::Table::new();
+        state.insert(
+            "underlying".into(),
+            toml::Value::Array(vec![toml::Value::String("SPX.Z".into())]),
+        );
+        let (h, mut vcx) = open_with(cx, Some(state));
+        h.visible(&mut vcx, true);
+        h.launched(&mut vcx);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(h.tile.read_with(&vcx, |t, _| t.popup.is_none()));
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.header_texts())
+                .contains(&"SPX.Z".to_string())
+        );
+    }
+
+    /// Without `launched` (a restore), an empty panel opens no picker.
+    #[gpui::test]
+    fn an_empty_panel_that_was_not_launched_opens_no_picker(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        assert_eq!(h.mode(&vcx), "normal");
+        assert!(h.tile.read_with(&vcx, |t, _| t.popup.is_none()));
+    }
 
     /// `u` opens the picker (`mode == insert`, its field holds the
     /// keyboard); typing filters `ranked` over the catalog's own keys;
