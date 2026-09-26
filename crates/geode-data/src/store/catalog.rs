@@ -166,8 +166,12 @@ impl<'a> Catalog<'a> {
 
     /// The newest generation recorded, or 0 when nothing has loaded.
     ///
-    /// Read-only: freshness reporting asks this on every query, and must
-    /// not burn an id to answer.
+    /// Read-only, and read once: `ensure_gen_id_sequence` asks
+    /// it at `ensure_tables` to place the ID sequence above recorded
+    /// history, which must not consume an id to do. It aggregates the whole
+    /// catalog and names no dataset or partition, so it is not an answer to
+    /// what a read was as of or which generation served it — those are
+    /// [`Catalog::live_generation`] and [`Catalog::dataset_generation`].
     pub fn latest_gen_id(&self) -> Result<i64, StoreError> {
         let sql = "select coalesce(max(gen_id), 0) from file_generations";
         self.conn

@@ -8816,8 +8816,9 @@ deleted = true
         h.set_editor(&mut vcx, "0.5");
         h.dispatch(&mut vcx, "commit", None);
 
-        // The SAME source time, a new generation, and a document whose
-        // columns have moved: one term dropped, so every axis column shifts.
+        // The SAME source time, a new generation, and a document whose ROWS
+        // have moved: the first term is gone, so the edited cell's row index
+        // now belongs to the term below it.
         h.deliver(
             &mut vcx,
             tag,

@@ -1963,6 +1963,10 @@ mod tests {
         );
 
         let err = parse_cell("0.5", ColumnType::I64).expect_err("a whole number only");
+        assert!(
+            err.contains("0.5"),
+            "the refusal must name what it refused: {err}"
+        );
         assert!(err.contains("whole number"), "{err}");
         let err = parse_cell("abc", ColumnType::F64).expect_err("not a number");
         assert!(err.contains("abc"), "{err}");

@@ -807,13 +807,23 @@ impl Snapshot {
 
     /// The same builder with a provenance of the caller's choosing.
     ///
-    /// A document panel reads its generation's source time off
-    /// `Provenance.datasets[0].as_of` (market-data spec §8.4 — the source
-    /// time, not a `gen_id`, is the identity a draft compares), so a
-    /// fixture with the default empty provenance cannot exercise
-    /// anything that depends on it: the freshness line, the draft's
-    /// `base`, or `Behind`. `for_tests` keeps its two-argument spelling
-    /// because most fixtures do not care.
+    /// `Provenance::default()` carries no datasets, so a `for_tests`
+    /// fixture says nothing about where its rows came from: every reader
+    /// that asks what the read was as of, or which generation answered it,
+    /// gets nothing, and no behaviour that decides anything from either can
+    /// be exercised on such a fixture — it will report "unknown" rather
+    /// than fail, which is the trap.
+    ///
+    /// A fixture that means to exercise those readers supplies one
+    /// [`Freshness`] per dataset the snapshot claims to come from, filled
+    /// as the real read would have filled it. Leaving a field `None` is not
+    /// a shortcut to "unchanged": it says the read did not learn that fact,
+    /// and a consumer is entitled to treat the two differently, so a
+    /// fixture that omits what a real read would have named tests a
+    /// different path than the one it was written for.
+    ///
+    /// `for_tests` keeps its two-argument spelling because most fixtures do
+    /// not care.
     pub fn for_tests_with_provenance(
         columns: Vec<(ColumnMeta, TestColumn)>,
         grouping_len: usize,
