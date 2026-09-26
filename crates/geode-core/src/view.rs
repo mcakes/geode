@@ -384,10 +384,14 @@ impl ViewSpec {
         self.presentation.get(column).cloned().unwrap_or_default()
     }
 
-    /// Check dataset, join-dataset, selected-column, and grouping references.
-    /// Derived dimensions resolve through their source column in the primary
-    /// dataset. This does not validate derived SQL, sort keys, join keys, or
-    /// column roles; query compilation performs further checks.
+    /// Check that every reference the compiler will resolve can be resolved:
+    /// the dataset and each join's dataset exist, each join's keys are carried
+    /// by some grain of the dataset it joins, each selected column exists, a
+    /// column declared a measure is a measure of the primary dataset, a column
+    /// declared a dimension is reachable through the grouping or a join, and
+    /// each grouping column exists. Derived dimensions resolve through their
+    /// source column in the primary dataset. Derived SQL and sort keys are
+    /// still left to the compiler.
     pub fn validate(&self, schema: &SchemaSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         let bad = |m: String| Diagnostic {
@@ -397,6 +401,28 @@ impl ViewSpec {
             message: format!("view '{}': {m}", self.name),
             path: None,
         };
+        let dropped = |m: String| Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: None,
+            message: format!(
+                "view '{}': {m}; dropped because it is declared optional",
+                self.name
+            ),
+            path: None,
+        };
+        // A required declaration that cannot be honoured refuses the view; an
+        // optional one is dropped and said so. The author chose which, so
+        // nothing here guesses per kind, and neither case is silent: an
+        // optional drop the trader never hears about is the blank column this
+        // check exists to remove.
+        let report = |required: bool, message: String| {
+            if required {
+                bad(message)
+            } else {
+                dropped(message)
+            }
+        };
 
         let Some(ds) = schema.dataset(&self.dataset) else {
             diags.push(bad(format!("unknown dataset '{}'", self.dataset)));
@@ -404,8 +430,32 @@ impl ViewSpec {
         };
 
         for j in &self.joins {
-            if schema.dataset(&j.dataset).is_none() {
+            let Some(joined) = schema.dataset(&j.dataset) else {
+                // No second diagnostic about the same line: the keys of a
+                // dataset that does not exist cannot be judged.
                 diags.push(bad(format!("join names unknown dataset '{}'", j.dataset)));
+                continue;
+            };
+            // The compiler joins at the first grain of the joined dataset
+            // that carries every key. With no such grain there is no table to
+            // read, so it drops the join silently and every column the join
+            // was to supply is absent from the row rather than NULL.
+            let keys =
+                j.on.iter()
+                    .map(|k| dims.base_column(k))
+                    .collect::<Vec<&str>>();
+            if !joined
+                .grains()
+                .into_iter()
+                .any(|g| keys.iter().all(|k| joined.carries(g, k)))
+            {
+                diags.push(report(
+                    j.required,
+                    format!(
+                        "join on dataset '{}' names keys {:?} that no declared grain of it carries",
+                        j.dataset, j.on
+                    ),
+                ));
             }
         }
 
@@ -433,7 +483,51 @@ impl ViewSpec {
                                 .is_some_and(|d| d.column(name).is_some())
                         })
                     {
+                        // One diagnostic per column: the role and reachability
+                        // rules below have nothing to say about a name that
+                        // exists nowhere.
                         diags.push(bad(format!("unknown column '{name}'")));
+                        continue;
+                    }
+                    // A measure is read from the primary dataset alone, and
+                    // aggregated by its declared role. A column with any other
+                    // role reaches `sum` by default, and an attribute repeats
+                    // across the rows of its grain, so the total looks right
+                    // and is not.
+                    if let ViewColumn::Measure { required, .. } = other
+                        && !ds
+                            .column(name)
+                            .is_some_and(|c| matches!(c.role, ColumnRole::Measure { .. }))
+                    {
+                        diags.push(report(
+                            *required,
+                            format!(
+                                "column '{name}' is declared a measure, but dataset '{}' \
+                                 declares no measure '{name}'",
+                                self.dataset
+                            ),
+                        ));
+                    }
+                    // A dimension reaches the row only by being grouped or by
+                    // coming off a join; the spine selects nothing else. Judged
+                    // against the view's own grouping, not a query's bounded
+                    // depth: a grouping column below `max_depth` is legitimately
+                    // absent at that depth and is not a configuration error.
+                    if let ViewColumn::Dimension { required, .. } = other
+                        && !self.grouping.iter().any(|g| g == name)
+                        && !self.joins.iter().any(|j| {
+                            schema
+                                .dataset(&j.dataset)
+                                .is_some_and(|d| d.column(name).is_some())
+                        })
+                    {
+                        diags.push(report(
+                            *required,
+                            format!(
+                                "column '{name}' is declared a dimension, but it is neither \
+                                 in the grouping nor carried by a join, so no row supplies it"
+                            ),
+                        ));
                     }
                 }
             }
@@ -1225,6 +1319,10 @@ grain = "underlying"
 type = "f64"
 role = "measure"
 grain = "underlying"
+[risk_snapshot.columns.desk_name]
+type = "utf8"
+role = "attribute"
+grain = "underlying"
 [instrument_ref.columns.instrument_ref]
 type = "utf8"
 role = "key"
@@ -1402,6 +1500,153 @@ dataset = "risk_snapshot"
         assert!(
             diags.iter().any(|d| d.message.contains("nosuch")),
             "{diags:?}"
+        );
+    }
+
+    /// A join key no grain of the joined dataset carries cannot be honoured:
+    /// the compiler finds no grain to read and drops the whole join, so every
+    /// column it was to supply paints blank.
+    #[test]
+    fn a_join_whose_keys_no_grain_carries_refuses_the_view() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.joins]]
+dataset = "instrument_ref"
+on = ["strike"]
+
+[[v.columns]]
+name = "book"
+kind = "dimension"
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        let errors: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags:?}");
+        assert!(
+            errors[0].message.contains("strike") && errors[0].message.contains("instrument_ref"),
+            "the diagnostic must name the key and the dataset: {}",
+            errors[0].message
+        );
+    }
+
+    /// The same join declared optional is dropped and said so, never refused.
+    #[test]
+    fn an_optional_join_whose_keys_no_grain_carries_is_dropped_with_an_info() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.joins]]
+dataset = "instrument_ref"
+on = ["strike"]
+required = false
+
+[[v.columns]]
+name = "book"
+kind = "dimension"
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        assert!(
+            !diags.iter().any(|d| d.severity == Severity::Error),
+            "an optional join must not refuse the view: {diags:?}"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains("strike")
+                && diags[0].message.contains("instrument_ref")
+                && diags[0].message.contains("dropped"),
+            "the diagnostic must name the join and say it was dropped: {}",
+            diags[0].message
+        );
+    }
+
+    /// An attribute repeats across every row of its grain, so summing it
+    /// yields a total that looks right and is not. This is the reason the
+    /// `kind` default of "measure" is the dangerous one.
+    #[test]
+    fn a_measure_column_over_an_attribute_refuses_the_view() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.columns]]
+name = "desk_name"
+kind = "measure"
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        let errors: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags:?}");
+        assert!(
+            errors[0].message.contains("desk_name"),
+            "the diagnostic must name the column: {}",
+            errors[0].message
+        );
+    }
+
+    /// Selected nowhere: the spine carries only grouping columns, aggregates,
+    /// joins and derived expressions, so this column is absent, not NULL.
+    #[test]
+    fn a_dimension_column_neither_grouped_nor_joined_refuses_the_view() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.columns]]
+name = "counterparty"
+kind = "dimension"
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        let errors: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags:?}");
+        assert!(
+            errors[0].message.contains("counterparty"),
+            "the diagnostic must name the column: {}",
+            errors[0].message
+        );
+    }
+
+    /// The opt-out on a column, with the drop named.
+    #[test]
+    fn an_optional_unreachable_column_is_dropped_with_an_info_naming_it() {
+        let text = r#"
+[v]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[v.columns]]
+name = "counterparty"
+kind = "dimension"
+required = false
+"#;
+        let (views, _) = ViewSpec::from_doc(&doc(text));
+        let diags = views[0].validate(&schema(), &dimensions(""));
+        assert!(
+            !diags.iter().any(|d| d.severity == Severity::Error),
+            "an optional column must not refuse the view: {diags:?}"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(
+            diags[0].message.contains("counterparty") && diags[0].message.contains("dropped"),
+            "the diagnostic must name the column and say it was dropped: {}",
+            diags[0].message
         );
     }
 
