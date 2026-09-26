@@ -19274,6 +19274,21 @@ run_mutation "pricer entry: o below a leg lands before it" \
   '            leg: if below { leg } else { leg },' \
   geode-pricer o_lands_after_the_cursor_row_and_shift_o_before_it
 
+# With no cursor row a typed line lands at the end, where the bar's
+# label says `at end`. Mutated, it lands at the top.
+run_mutation "pricer entry: no cursor row lands at the start" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        return Place::Root { at: sheet.len() };' \
+  '        return Place::Root { at: 0 };' \
+  geode-pricer with_no_cursor_row_a_line_lands_at_the_end
+
+# A root after a package is named by the package, not its last leg.
+run_mutation "pricer entry: the label names a leg for a root place" \
+  crates/geode-pricer/src/core/entry.rs \
+  '            let root = sheet.parent(before).unwrap_or(before);' \
+  '            let root = before;' \
+  geode-pricer the_label_names_where_enter_lands
+
 run_mutation "pricer cell: an empty shift commits zero" \
   crates/geode-pricer/src/core/cell.rs \
   '    if t.is_empty() {
