@@ -4349,13 +4349,19 @@ fn badge_slot(
         cx,
     ));
     let badge = badge.map(|(name, selector)| {
-        div().absolute().top_0().right_0().child(dialog::badge(
-            name,
-            theme.muted_foreground,
-            theme.border,
-            Some(selector),
-            cx,
-        ))
+        // Out of flow, the badge would otherwise wrap to the slot's width.
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .whitespace_nowrap()
+            .child(dialog::badge(
+                name,
+                theme.muted_foreground,
+                theme.border,
+                Some(selector),
+                cx,
+            ))
     });
     div()
         .relative()
