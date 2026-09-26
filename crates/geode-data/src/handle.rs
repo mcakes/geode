@@ -1086,10 +1086,10 @@ mod tests {
                 as_of: AsOf::Live,
             }));
             let rows = loop {
-                if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
-                    if o.tag == tag as u64 {
-                        break o.snapshot.unwrap().rows();
-                    }
+                if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap()
+                    && o.tag == tag as u64
+                {
+                    break o.snapshot.unwrap().rows();
                 }
             };
             let expected = if sheet == "s0" { 0 } else { 2 };
