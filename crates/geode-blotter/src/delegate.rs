@@ -2591,7 +2591,11 @@ mod tests {
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
                     [[t.columns]]\nname = \"delta01\"\nformat = { color = \"sign\" }\n";
         let mut d = summary_fixture(text, NamedColours::default());
-        let theme = Theme::default();
+        // Distinct poles: the default theme's bullish and bearish can
+        // coincide, which would let a crossed pair pass.
+        let mut theme = Theme::default();
+        theme.chart_bullish = gpui::green();
+        theme.chart_bearish = gpui::red();
         d.ensure_summary_paint(&theme);
         let paint = d.summary_paint[0];
         assert_eq!(paint.label, None);
