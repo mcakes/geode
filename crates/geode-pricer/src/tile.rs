@@ -651,6 +651,18 @@ impl PricerTile {
         self.title.clone()
     }
 
+    /// The sheet as this tile holds it, read-only: a host observes what a
+    /// load installed without reaching into the tile's state.
+    pub fn sheet(&self) -> &Sheet {
+        &self.sheet
+    }
+
+    /// Whether the tile is waiting for its sheet's load (painted
+    /// `loading…`), including a load deferred behind a queued save.
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
     pub fn serialize(&self) -> toml::Table {
         Record {
             sheet: Some(self.sheet.name.clone()),

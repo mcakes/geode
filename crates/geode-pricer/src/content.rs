@@ -19,7 +19,7 @@ use geode_shell::module::{
 };
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
-use gpui::{App, Entity, SharedString, Subscription, WeakEntity, Window};
+use gpui::{App, Entity, SharedString, WeakEntity, Window};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -354,10 +354,10 @@ fn catalog_sheets(d: &Diagnostics) -> Vec<String> {
 pub struct PricerFactory {
     data: DataHandle,
     shared: Rc<Shared>,
-    /// The diagnostics observer seeding the store's known names (planning
-    /// decision 12), made by the first `create` — every tile is handed
-    /// the one app-wide `Diagnostics`.
-    catalog_watch: RefCell<Option<Subscription>>,
+    /// Whether the diagnostics observer seeding the store's known names
+    /// (planning decision 12) exists; the first `create` makes it — every
+    /// tile is handed the one app-wide `Diagnostics`.
+    catalog_watched: Cell<bool>,
 }
 
 impl PricerFactory {
@@ -379,7 +379,7 @@ impl PricerFactory {
                 retiring: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
             }),
-            catalog_watch: RefCell::new(None),
+            catalog_watched: Cell::new(false),
         }
     }
 
@@ -390,14 +390,17 @@ impl PricerFactory {
     /// landed must not drop that save's name. The observer fires on every
     /// diagnostics notification, so it compares the data version first.
     fn watch_catalog(&self, diagnostics: &Entity<Diagnostics>, cx: &mut App) {
-        if self.catalog_watch.borrow().is_some() {
+        if self.catalog_watched.replace(true) {
             return;
         }
         let seen = Rc::new(Cell::new(None::<u64>));
         let seed = {
-            let shared = self.shared.clone();
+            let shared = Rc::downgrade(&self.shared);
             let seen = seen.clone();
             move |d: &Diagnostics| {
+                let Some(shared) = shared.upgrade() else {
+                    return;
+                };
                 let version = d.versions().data;
                 if seen.get() == Some(version) {
                     return;
@@ -418,8 +421,14 @@ impl PricerFactory {
                 cx.notify();
             });
         }
-        let watch = cx.observe(diagnostics, move |d, cx| seed(d.read(cx)));
-        *self.catalog_watch.borrow_mut() = Some(watch);
+        // Detached, holding the factory's state weakly: the factory is
+        // itself owned by app-held callbacks (the bridge's drain and reload
+        // observer), so a `Subscription` stored on it would tie the
+        // diagnostics entity's observer list to those callbacks, and the
+        // entities they capture would outlive the app's teardown. After the
+        // factory is gone the observer does nothing.
+        cx.observe(diagnostics, move |d, cx| seed(d.read(cx)))
+            .detach();
     }
 
     /// A reload (planning decision 20): the new views and the live pricing
