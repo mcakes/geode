@@ -361,7 +361,11 @@ notification ordering, and restart requirements.
 
 Shared builders own repeated shell presentation: semantic chips, list rows,
 control interaction states, colors, and the rem-based geometry scale. Use
-stable domain-derived element IDs. Stateful inputs, lists, and tables are
+stable domain-derived element IDs. A list row paints its highlight and
+hover through `listrow::paint_row`, which takes only an identified
+element: gpui repaints on a hover transition only for an element with an
+id, so an id-less row's hover fill lags the pointer until an unrelated
+repaint. Stateful inputs, lists, and tables are
 created once and retained rather than rebuilt during render.
 
 Theme values provide colors and radii. Chrome geometry is authored against
