@@ -267,14 +267,14 @@ impl Draft {
         }
     }
 
-    /// Read an existing numeric edit as `f64`; absent, date, and text edits
-    /// return `None`. Callers use this before the painted document value so
-    /// successive bumps compose. The caller also filters eligible numeric
-    /// columns; this method only reads the stored value.
-    pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<f64> {
+    /// Read an existing numeric edit; absent, date, and text edits return
+    /// `None`. Callers use this before the painted document value so
+    /// successive bumps compose, and the value keeps its type so an integer
+    /// column's holding is never widened on the way through. The caller also
+    /// filters eligible numeric columns; this method only reads.
+    pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<&Value> {
         match self.edits.get(&cell)? {
-            Value::F64(v) => Some(*v),
-            Value::I64(v) => Some(*v as f64),
+            value @ (Value::F64(_) | Value::I64(_)) => Some(value),
             Value::Utf8(_) | Value::Date(_) => None,
         }
     }
@@ -495,7 +495,7 @@ impl Draft {
     /// the result's type and refuses fractional deltas for integer columns.
     pub fn bump(
         &mut self,
-        cells: impl Iterator<Item = ((usize, usize), (String, String), f64, ColumnType)>,
+        cells: impl Iterator<Item = ((usize, usize), (String, String), Value, ColumnType)>,
         delta: f64,
         base: &DocumentBase,
     ) -> Result<usize, String> {
@@ -503,7 +503,7 @@ impl Draft {
         // partway through must leave the whole draft unchanged.
         let mut writes = Vec::new();
         for (cell, labels, current, ty) in cells {
-            let value = bumped(current, delta, ty, &labels.1)?;
+            let value = bumped(&current, delta, ty, &labels.1)?;
             writes.push((cell, labels, value));
         }
         let n = writes.len();
@@ -1064,17 +1064,43 @@ pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> Stri
     }
 }
 
-/// `:bump`'s one typing rule: the result lands the column's declared type.
-/// An `I64` column takes whole-number deltas only; anything else is refused
-/// rather than rounded, since a rounded bump is a value the trader did not
-/// ask for. `column` is the label the caller's cell came from, named in the
-/// refusal because a ROW bump's own notice would otherwise say nothing
-/// about which node in the ladder objected.
-pub fn bumped(current: f64, delta: f64, ty: ColumnType, column: &str) -> Result<Value, String> {
+/// Add `delta` to `current` at the column's declared type.
+///
+/// An integer column does integer arithmetic: neither the value nor the
+/// result passes through an `f64`, so a holding above 2^53 survives a bump.
+/// A fractional delta, a fractional value already sitting in an integer
+/// column, a non-numeric value, and an overflowing result are all refused
+/// by name — a plausible wrong quantity is worse than a refusal.
+pub fn bumped(current: &Value, delta: f64, ty: ColumnType, column: &str) -> Result<Value, String> {
     match ty {
-        ColumnType::F64 => Ok(Value::F64(current + delta)),
-        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),
-        ColumnType::I64 => Err(format!("bump: {column} takes whole numbers")),
+        ColumnType::F64 => match current {
+            Value::F64(v) => Ok(Value::F64(v + delta)),
+            Value::I64(v) => Ok(Value::F64(*v as f64 + delta)),
+            other => Err(format!("bump: {column} holds {other:?}, not a number")),
+        },
+        ColumnType::I64 if delta.fract() != 0.0 => {
+            Err(format!("bump: {column} takes whole numbers"))
+        }
+        ColumnType::I64 => {
+            let current = match current {
+                Value::I64(v) => *v,
+                // A whole-valued double in an integer column is the same
+                // number; anything else would have to be truncated, and
+                // `:bump` does not silently change a holding.
+                Value::F64(v) if v.fract() == 0.0 && v.is_finite() => *v as i64,
+                Value::F64(v) => {
+                    return Err(format!("bump: {column} holds a fractional value ({v})"));
+                }
+                other => return Err(format!("bump: {column} holds {other:?}, not a number")),
+            };
+            // `delta as i64` is exact for every whole delta a trader can
+            // type that an f64 represents exactly; beyond that the delta
+            // was already imprecise when it was parsed.
+            current
+                .checked_add(delta as i64)
+                .map(Value::I64)
+                .ok_or_else(|| format!("bump: {column} would be too large"))
+        }
         other => Err(format!("bump: {column} is not numeric ({other:?})")),
     }
 }
@@ -1102,11 +1128,12 @@ pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
     sizes
 }
 
-/// Parse a numeric cell according to its declared type, refusing nonnumeric
-/// types and nonfinite floating values. Integer text must parse as `i64`,
-/// then is widened to this function's `f64` result. Callers dispatch text,
-/// choice, and date cells separately. Errors retain the refused input.
-pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
+/// Parse a numeric cell at its declared type, refusing nonnumeric types and
+/// nonfinite floating values. An integer column parses as `i64` and STAYS
+/// one: a round trip through a double loses every integer above 2^53,
+/// silently. Callers dispatch text, choice, and date cells separately.
+/// Errors retain the refused input.
+pub fn parse_cell(text: &str, ty: ColumnType) -> Result<Value, String> {
     let trimmed = text.trim();
     match ty {
         ColumnType::F64 => {
@@ -1116,11 +1143,11 @@ pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
             if !value.is_finite() {
                 return Err(format!("'{text}' is not a finite number"));
             }
-            Ok(value)
+            Ok(Value::F64(value))
         }
         ColumnType::I64 => trimmed
             .parse::<i64>()
-            .map(|v| v as f64)
+            .map(Value::I64)
             .map_err(|_| format!("'{text}' is not a whole number")),
         ColumnType::Utf8 | ColumnType::Date | ColumnType::Timestamp | ColumnType::Bool => Err(
             format!("'{text}' cannot be entered here — not a numeric cell"),
@@ -1136,14 +1163,7 @@ pub fn parse_attr(text: &str, ty: ColumnType) -> Result<Value, String> {
         ColumnType::Date => chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
             .map(Value::Date)
             .map_err(|_| format!("'{text}' is not a date (YYYY-MM-DD)")),
-        ColumnType::F64 => parse_cell(text, ColumnType::F64).map(Value::F64),
-        // Parse directly as `i64`: passing through `f64` would lose precision
-        // for integers above 2^53. Keep the same whole-number error wording as
-        // numeric cell parsing.
-        ColumnType::I64 => trimmed
-            .parse::<i64>()
-            .map(Value::I64)
-            .map_err(|_| format!("'{text}' is not a whole number")),
+        ColumnType::F64 | ColumnType::I64 => parse_cell(text, ty),
         ColumnType::Utf8 if trimmed.is_empty() => Err("a value is required".to_string()),
         ColumnType::Utf8 => Ok(Value::Utf8(trimmed.to_string())),
         other => Err(format!("a {other:?} attribute is not editable")),
@@ -1573,8 +1593,8 @@ mod tests {
     fn bump_adds_the_delta_to_each_cells_current_value() {
         let mut draft = Draft::default();
         let cells = vec![
-            ((0, 0), pair("T1", "-20"), 1.0, ColumnType::F64),
-            ((0, 1), pair("T1", "-1"), 2.5, ColumnType::F64),
+            ((0, 0), pair("T1", "-20"), Value::F64(1.0), ColumnType::F64),
+            ((0, 1), pair("T1", "-1"), Value::F64(2.5), ColumnType::F64),
         ];
         assert_eq!(draft.bump(cells.into_iter(), 0.5, &at(BASE)), Ok(2));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
@@ -1582,7 +1602,7 @@ mod tests {
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
-        let again = vec![((0, 0), pair("T1", "-20"), 1.5, ColumnType::F64)];
+        let again = vec![((0, 0), pair("T1", "-20"), Value::F64(1.5), ColumnType::F64)];
         assert_eq!(draft.bump(again.into_iter(), 0.5, &at(BASE)), Ok(1));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
     }
@@ -1593,8 +1613,18 @@ mod tests {
         let n = draft
             .bump(
                 [
-                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
-                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                    (
+                        (0, 0),
+                        ("a".into(), "x".into()),
+                        Value::F64(1.5),
+                        ColumnType::F64,
+                    ),
+                    (
+                        (0, 1),
+                        ("a".into(), "y".into()),
+                        Value::I64(3),
+                        ColumnType::I64,
+                    ),
                 ]
                 .into_iter(),
                 2.0,
@@ -1612,8 +1642,18 @@ mod tests {
         let err = draft
             .bump(
                 [
-                    ((0, 0), ("a".into(), "x".into()), 1.5, ColumnType::F64),
-                    ((0, 1), ("a".into(), "y".into()), 3.0, ColumnType::I64),
+                    (
+                        (0, 0),
+                        ("a".into(), "x".into()),
+                        Value::F64(1.5),
+                        ColumnType::F64,
+                    ),
+                    (
+                        (0, 1),
+                        ("a".into(), "y".into()),
+                        Value::I64(3),
+                        ColumnType::I64,
+                    ),
                 ]
                 .into_iter(),
                 0.5,
@@ -1638,17 +1678,17 @@ mod tests {
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
     /// through `MatrixModel::kind_of`, before it ever builds the iterator
     /// `bump` takes — and `numeric_edit` is the door `MarketDataTile::bump`
-    /// reads an existing edit's CURRENT value through: `F64`/`I64` widen
-    /// to `f64`, a `Date`/`Utf8` edit (or no edit at all) answers `None`
-    /// rather than being coerced.
+    /// reads an existing edit's CURRENT value through: `F64`/`I64` keep
+    /// their own type, a `Date`/`Utf8` edit (or no edit at all) answers
+    /// `None` rather than being coerced.
     #[test]
     fn numeric_edit_reads_f64_and_i64_and_ignores_other_kinds() {
         let mut draft = Draft::default();
         draft.set((0, 0), pair("T1", "-20"), Value::F64(1.5), &at(BASE));
         draft.set((0, 1), pair("T1", "-1"), Value::I64(7), &at(BASE));
         draft.set((0, 2), pair("T1", "0"), Value::Utf8("x".into()), &at(BASE));
-        assert_eq!(draft.numeric_edit((0, 0)), Some(1.5));
-        assert_eq!(draft.numeric_edit((0, 1)), Some(7.0));
+        assert_eq!(draft.numeric_edit((0, 0)), Some(&Value::F64(1.5)));
+        assert_eq!(draft.numeric_edit((0, 1)), Some(&Value::I64(7)));
         assert_eq!(
             draft.numeric_edit((0, 2)),
             None,
@@ -1912,12 +1952,18 @@ mod tests {
 
     #[test]
     fn parse_cell_reads_f64_and_i64_and_names_the_text_it_refused() {
-        assert_eq!(parse_cell(" 0.25 ", ColumnType::F64), Ok(0.25));
-        assert_eq!(parse_cell("-3", ColumnType::F64), Ok(-3.0));
-        assert_eq!(parse_cell("7", ColumnType::I64), Ok(7.0));
+        assert_eq!(parse_cell(" 0.25 ", ColumnType::F64), Ok(Value::F64(0.25)));
+        assert_eq!(parse_cell("-3", ColumnType::F64), Ok(Value::F64(-3.0)));
+        assert_eq!(parse_cell("7", ColumnType::I64), Ok(Value::I64(7)));
+        // 2^53 + 1. Through an f64 this is 9007199254740992 — the whole
+        // reason `parse_attr` parses integers directly.
+        assert_eq!(
+            parse_cell("9007199254740993", ColumnType::I64),
+            Ok(Value::I64(9007199254740993))
+        );
 
         let err = parse_cell("0.5", ColumnType::I64).expect_err("a whole number only");
-        assert!(err.contains("0.5"), "{err}");
+        assert!(err.contains("whole number"), "{err}");
         let err = parse_cell("abc", ColumnType::F64).expect_err("not a number");
         assert!(err.contains("abc"), "{err}");
         let err = parse_cell("", ColumnType::F64).expect_err("nothing is not a number");
@@ -1927,6 +1973,37 @@ mod tests {
         let err = parse_cell("2026-10-16", ColumnType::Date)
             .expect_err("the belt behind the kind dispatch refuses a non-numeric type");
         assert!(err.contains("2026-10-16"), "{err}");
+    }
+
+    #[test]
+    fn a_bump_of_an_integer_column_stays_an_integer_above_2_pow_53() {
+        // The f64 path turned 9007199254740993 + 1 into ...92, losing both
+        // the bump and the original value.
+        assert_eq!(
+            bumped(&Value::I64(9007199254740993), 1.0, ColumnType::I64, "lots"),
+            Ok(Value::I64(9007199254740994))
+        );
+        assert_eq!(
+            bumped(&Value::F64(0.25), 0.5, ColumnType::F64, "vol"),
+            Ok(Value::F64(0.75))
+        );
+        // A fractional delta on an integer column is still refused.
+        let err =
+            bumped(&Value::I64(3), 0.5, ColumnType::I64, "lots").expect_err("a fractional delta");
+        assert!(err.contains("whole numbers"), "{err}");
+        // A fractional value already sitting in an integer column is
+        // refused rather than truncated into one.
+        let err = bumped(&Value::F64(1.5), 1.0, ColumnType::I64, "lots")
+            .expect_err("a fractional current value");
+        assert!(err.contains("fractional"), "{err}");
+        // Overflow refuses rather than wrapping or saturating.
+        let err = bumped(&Value::I64(i64::MAX), 1.0, ColumnType::I64, "lots")
+            .expect_err("an overflowing bump");
+        assert!(err.contains("too large"), "{err}");
+        // A text value in a numeric column is not bumpable.
+        let err = bumped(&Value::Utf8("x".into()), 1.0, ColumnType::F64, "note")
+            .expect_err("not a number");
+        assert!(!err.is_empty());
     }
 
     #[test]

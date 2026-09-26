@@ -277,7 +277,7 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 /// One cell a `:bump` writes: where it is, the labels that make the edit
 /// portable across generations, and the value being added to — the shape
 /// [`Draft::bump`] consumes.
-type BumpCell = ((usize, usize), (String, String), f64, ColumnType);
+type BumpCell = ((usize, usize), (String, String), Value, ColumnType);
 
 /// Open cell or attribute editor, including its input and original target.
 struct Editing {
@@ -2733,10 +2733,7 @@ impl MarketDataTile {
                     return true;
                 };
                 match parse_cell(text, ty) {
-                    Ok(parsed) => match ty {
-                        ColumnType::I64 => Value::I64(parsed as i64),
-                        _ => Value::F64(parsed),
-                    },
+                    Ok(parsed) => parsed,
                     Err(e) => {
                         // Stay in insert mode, with the text as typed.
                         self.notice = Some(e.into());
@@ -3533,14 +3530,15 @@ impl MarketDataTile {
         // a document one, so `Draft::edits` is never asked about it: its
         // painted value IS the draft's own (`RowEdit.cells`, which is all
         // the model ever paints there).
-        let numeric_value = |state: RowState, cell: &Cell| {
+        let numeric_value = |state: RowState, cell: &Cell| -> Option<Value> {
             let edit = match state {
                 RowState::Inserted => None,
-                RowState::Document | RowState::Deleted => self.draft.numeric_edit(cell.cell_ref),
+                RowState::Document | RowState::Deleted => {
+                    self.draft.numeric_edit(cell.cell_ref).cloned()
+                }
             };
             edit.or(match &cell.value {
-                Some(Value::F64(v)) => Some(*v),
-                Some(Value::I64(v)) => Some(*v as f64),
+                Some(value @ (Value::F64(_) | Value::I64(_))) => Some(value.clone()),
                 Some(Value::Utf8(_) | Value::Date(_)) | None => None,
             })
         };
@@ -3560,7 +3558,7 @@ impl MarketDataTile {
         };
         let mut skipped = 0usize;
         // Each cell to bump as (model cell, its current value, its declared type).
-        let values: Vec<((usize, usize), f64, ColumnType)> = match axis {
+        let values: Vec<((usize, usize), Value, ColumnType)> = match axis {
             // A row bump walks the LADDER: the leading `slice_columns`
             // cells are the term's own forward/atm/skew, and bumping a
             // term's vols must not move its forward with them. A column
@@ -3616,7 +3614,7 @@ impl MarketDataTile {
         // an inserted row's goes to its `RowEdit.cells` by label instead,
         // with the same arithmetic.
         let mut document: Vec<BumpCell> = Vec::with_capacity(values.len());
-        let mut inserted: Vec<((String, String), f64, ColumnType)> = Vec::new();
+        let mut inserted: Vec<((String, String), Value, ColumnType)> = Vec::new();
         for (cell, value, ty) in values {
             let labels = self.model.label_of(cell);
             let labels = (labels.0.to_string(), labels.1.to_string());
@@ -3632,14 +3630,14 @@ impl MarketDataTile {
         // fractional delta rejected by an I64 cell must not leave earlier F64 changes
         // applied. The write pass recomputes the same pure bumped results.
         for (_, labels, value, ty) in &document {
-            bumped(*value, delta, *ty, &labels.1)?;
+            bumped(value, delta, *ty, &labels.1)?;
         }
         for (labels, value, ty) in &inserted {
-            bumped(*value, delta, *ty, &labels.1)?;
+            bumped(value, delta, *ty, &labels.1)?;
         }
         self.draft.bump(document.into_iter(), delta, &base)?;
         for ((row_label, col_label), value, ty) in inserted {
-            let value = bumped(value, delta, ty, &col_label)?;
+            let value = bumped(&value, delta, ty, &col_label)?;
             self.draft.set_row_cell(&row_label, &col_label, value);
         }
         self.rebuild_model(cx);
@@ -7349,6 +7347,43 @@ edits = [["2026-11-20", "-1", 9.5]]
             "amt must NOT have been bumped ahead of n's refusal"
         );
         assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
+    }
+
+    /// An integer cell commits the exact integer that was typed. Through the
+    /// old `parse_cell` → f64 → `as i64` path the value below silently became
+    /// 9007199254740992, while the same text in an ATTRIBUTE was exact.
+    #[gpui::test]
+    fn a_typed_integer_above_2_pow_53_reaches_the_draft_exactly(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
+        h.command(&mut vcx, "key SPX.Z").expect("a valid key");
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(test_fixtures::mixed_snapshot(&[("M1", 1.0, 2)])),
+        );
+
+        h.tile.update(&mut vcx, |t, cx| t.cursor_to(0, Some(1), cx));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "9007199254740993");
+        h.dispatch(&mut vcx, "commit", None);
+
+        let values: Vec<Value> = h
+            .tile
+            .read_with(&vcx, |t, _| t.draft().edits.values().cloned().collect());
+        assert_eq!(
+            values,
+            vec![Value::I64(9007199254740993)],
+            "the typed integer, not its f64 rounding"
+        );
+
+        // And a whole-number bump of it stays exact.
+        h.command(&mut vcx, "bump 1 col").expect("a whole delta");
+        let values: Vec<Value> = h
+            .tile
+            .read_with(&vcx, |t, _| t.draft().edits.values().cloned().collect());
+        assert_eq!(values, vec![Value::I64(9007199254740994)]);
     }
 
     /// Restore resolves labels against the clean document grid before splicing draft
