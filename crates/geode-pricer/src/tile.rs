@@ -4600,6 +4600,27 @@ pub(crate) mod tests {
         assert_eq!(h.entry_text(&vcx).as_deref(), Some(""));
     }
 
+    /// A refused insert puts the place back even when the refused spec
+    /// would have advanced it. `place_for` answers no such place today
+    /// (its one reachable refusal, a package at a leg place, never
+    /// advances), so the place is planted: a root boundary inside a
+    /// package's leg run, which `apply` refuses.
+    #[gpui::test]
+    fn a_refused_line_puts_the_place_back(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        h.tile.update(&mut vcx, |t, _| {
+            t.entry.as_mut().unwrap().place = Place::Root { at: 2 };
+        });
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.entry_error(&vcx).is_some(), "refused");
+        let place = h
+            .tile
+            .read_with(&vcx, |t, _| t.entry.as_ref().unwrap().place);
+        assert_eq!(place, Place::Root { at: 2 });
+    }
+
     #[gpui::test]
     fn up_and_down_walk_the_sheets_own_lines_newest_first(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);

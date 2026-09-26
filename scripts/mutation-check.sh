@@ -19304,7 +19304,7 @@ run_mutation "pricer entry bar: a refusal keeps the advanced place" \
   '                    entry.place = at;
                     entry.error = Some(e.to_string().into());' \
   '                    entry.error = Some(e.to_string().into());' \
-  geode-pricer a_package_typed_at_a_leg_place_is_refused_under_the_field
+  geode-pricer a_refused_line_puts_the_place_back
 
 # The label follows the place after each enter.
 run_mutation "pricer entry bar: the label stays on the first place" \
