@@ -131,9 +131,9 @@ pub fn gutter_digits(len: usize) -> usize {
     digits.max(2)
 }
 
-/// One digit cell of a line-number gutter, in px: the mono face's advance
-/// at the default UI size, rounded up so a gutter never wraps. Absolute
-/// px, as the grids' own column widths are.
+/// Fixed width of a gutter digit cell in pixels, shared by grids alongside their
+/// fixed-pixel column widths. This estimate is based on the mono face at the default UI
+/// size.
 pub const GUTTER_DIGIT_PX: f32 = 8.0;
 /// The gap between a gutter's last digit and the cell text after it.
 pub const GUTTER_GAP_PX: f32 = 6.0;

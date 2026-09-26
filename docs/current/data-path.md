@@ -52,7 +52,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
-| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; a refused upload answers `Err("queue full")` at once. |
+| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
 
 For queued files, resubmission can promote priority without adding another
@@ -73,13 +73,21 @@ growing at 256 paths per source; further unremembered paths can warn repeatedly.
 Shutdown stops producers before the ingest writer. Fetch workers drain their
 accepted requests and join. Subscription workers unsubscribe, set a stop flag,
 and join without flushing documents still held by their coalescers. Discovery
-stops polling; the ingest runner finishes its current operation and exits
-without draining queued jobs. Submission to the runner itself has no shutdown
-refusal, so producer ordering is required. Egress workers close their queue
+stops polling; the ingest runner finishes its current operation, then runs
+the queued local writes (`local`-source publishes and forgets) in queue order,
+each answering its writer as usual, and exits. Every other queued job — feed
+documents, series, files — is dropped; its source resends it after a restart.
+The local writes are the user's last edits (the pricer saves every unsaved
+sheet at quit, before the data service is told to stop), which nothing would
+resend. Submission to the runner itself has no shutdown refusal, so producer
+ordering is required. Egress workers close their queue
 first (refusing further submissions), then join; jobs already queued still
 run and answer, so shutdown can wait on a slow or stuck transport — see
 [egress and uploads](#egress-and-uploads) below. Shutdown is not a flush
-guarantee. Blocking adapter, parser, or filesystem calls can delay joins;
+guarantee: the app's quit hook runs the shutdown on the background executor,
+and gpui waits for quit hooks only up to its `SHUTDOWN_TIMEOUT` (200 ms). A
+local write still running or queued when the process exits is lost; DuckDB's
+write-ahead log keeps the database consistent, at the previous generation. Blocking adapter, parser, or filesystem calls can delay joins;
 panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
@@ -127,6 +135,32 @@ misfile values silently. Rebuild an affected demo database after changing its
 schema; production migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
 [`geode-data README`](../../crates/geode-data/README.md).
+
+## Document validation and storage
+
+Document kinds expose a column vocabulary and parse/write functions through
+[`DocumentKind`](../../crates/geode-core/src/document.rs). Source startup
+checks that kind and dataset have the same column names and types in both
+directions. That check does not compare order or validate payload values.
+The [document kinds](../../crates/geode-documents/README.md) apply their own
+wire-format rules, including required fields and finite numeric values.
+
+Before staging, `DocumentRows::validate` checks key arity and the reserved key
+separator, nonempty rows, axis order and types, unique axis tuples, required
+values and attributes, and equal column lengths. Values and attributes match
+by name. This shared validator does not reject duplicate value or attribute
+names or enforce each kind's numeric rules. A parser or caller remains
+responsible for producing an unambiguous document. Empty documents are
+refused: replacing a live document with no payload rows would leave its new
+generation indistinguishable from a missing document.
+
+[`publish_document`](../../crates/geode-data/src/store/document.rs) stages in
+the dataset's column order, repeating keys and document-level attributes on
+each row. Key parts join with a reserved separator to form the batch; book is
+NULL. The single ingest writer owns the shared staging table. Publication
+commits rows, categorical dictionaries, and provenance together, using the
+same backfill and source-time rules as file publication. Explicit appender
+flush errors abort publication rather than silently storing a shorter document.
 
 ## Source discovery and adapters
 
@@ -187,49 +221,54 @@ callbacks must return promptly without panicking. See
 
 ## Egress and uploads
 
-An upload writes a document back out through a configured target's adapter —
-the mirror of a subscribed source's inbound path. `egress.toml` (see
-[configuration](configuration.md#egress-configuration)) resolves at startup
-against the adapter registry; `DataService::open` then spawns one worker
-thread per surviving target (`geode-egress-<name>`), each owning that
-adapter's own `Egress` handle. `Adapter::egress()` returns a fresh handle on
-every call: `egress::resolve` calls it once just to probe availability at
-startup, and spawning the worker calls it again to build the handle the
-worker keeps, so an adapter whose transport is not safely shared across
-owners (`ChannelAdapter` upgrades its own weak reference into a fresh handle
-holding a strong sender clone) never has to serve two callers from one
-instance.
+An upload serializes a whole document and sends it through a configured
+adapter. Targets resolve at startup from
+[`egress.toml`](configuration.md#egress-configuration). Each usable target has
+one worker thread and its own `Egress` handle. Adapter resolution probes
+`Adapter::egress()` once, then worker creation obtains another handle;
+adapters must support repeated capability requests. A worker-start failure
+leaves the target unavailable and later requests receive a named refusal.
 
-A worker drains its target's queue strictly in submission order, one upload
-at a time: a slow or stuck transport blocks only that target's own uploads,
-never the request loop or another target's worker. The queue holds up to
-`EGRESS_QUEUE_BOUND` (8) jobs waiting behind the one in flight; past that a
-submission answers `Err("egress '<target>': queue full")` at once rather
-than waiting.
+There are two admission boundaries. `DataHandle::upload` uses the bounded
+service channel: `false` means nothing was admitted and no outcome is owed.
+Once dispatched, the service validates the target and accepted document name,
+looks up its `DocumentKind`, and calls `write` before submitting bytes to the
+target worker. Serialization runs on the service thread and can delay other
+requests. Transport calls run separately, one at a time in each target's FIFO
+queue, with up to eight waiting jobs behind the running call. A full or stopped
+worker queue is refused without waiting for transport capacity.
 
-Every submitted upload answers exactly one `DataEvent::Upload(UploadOutcome)`,
-echoing the requester's key and tag. A refusal decided on the service thread
-— an unknown target, a target whose `documents` does not accept the
-requested document, an unregistered document kind, a `DocumentKind::write`
-failure, or a full or stopped queue — answers synchronously, before anything
-reaches a worker thread. An accepted job answers from its target's worker
-once the transport call returns; if the transport panics, the worker
-contains it and answers `Err("egress '<target>': transport panicked: …")`
-instead of dying, so the next queued job for that target is still served.
-Every `Err` is prefixed `egress '<target>': ` and names the specific reason,
-so the requesting tile can report a failure without knowing the target's
-configuration.
+Ordinary refusal paths and completed transport calls each emit one
+`DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
+the target, including unknown targets, unsupported documents, missing writers,
+write errors, unavailable workers, queue refusal, and transport errors.
+A transport panic becomes `egress '<target>': transport panicked: …`; the
+worker then continues with the next queued job using the same transport handle.
 
-The document's key selects the write address: `EgressSpec::address`
-substitutes the document key's parts, joined by `/`, for `{key}` in the
-target's configured template; a template with no `{key}` is one fixed
-address for every key of that document.
+Completion still has limits: service startup can fail after channel admission,
+serialization has no panic boundary, and serializer or transport calls can
+block indefinitely. Event-sink refusal has no retry. Uploads have no timeout,
+automatic retry, or keyed cancellation.
 
-Shutdown closes every target's queue, refusing further submissions, then
-joins every worker thread — jobs already queued still run and answer before
-their worker exits, so shutdown can wait on a slow or stuck transport; run
-it off the UI thread, as every other `DataService` shutdown. See
-[`egress.rs`](../../crates/geode-data/src/egress.rs).
+A successful outcome means the adapter's `upload` call returned successfully;
+the adapter defines what that acknowledges. It does not establish that a
+subscriber received, parsed, or stored the document. `ChannelAdapter`, for
+example, acknowledges admission to its bus queue; downstream subscription
+queues can still refuse delivery. Market-data panels compare later document
+generations separately to confirm a sent draft. The app mailbox retains upload
+outcomes by `(tile key, upload tag)`, so different uploads do not supersede
+one another before UI delivery.
+
+`EgressSpec::address` substitutes key parts joined by `/` for every `{key}` in
+the configured address. It performs literal replacement, without escaping key
+parts. A template with no `{key}` sends all keys of that document to one address.
+
+Shutdown closes every target queue and joins its worker, allowing already
+queued jobs to finish if the transport returns normally. Egress stops before
+subscription workers, but this does not guarantee that an echoed document
+reaches storage: subscriptions and ingest do not flush all pending work.
+Joining can wait indefinitely on transport I/O and belongs off the UI thread.
+See [`egress.rs`](../../crates/geode-data/src/egress.rs).
 
 ## Queries and time travel
 
@@ -296,8 +335,40 @@ the call. Checkpointing is a separate operation that can also stall writes.
 `SweepReport::oldest_remaining` covers only the swept archive tables; it does
 not promise complete history across all grains and partitions.
 
-The application does not schedule live/archive sweeps automatically; the API
-is currently called by tests. This applies to measure and document archives.
+The application does not schedule live/archive sweeps for measure datasets or
+feed-published documents; the API is called only by tests for those. Local
+documents (`local = true`) are the exception: they keep 200 archived
+generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
+201), with no age limit. After each successful local publish the ingest writer
+counts the saved document's generation summary rows; only when that document
+has crossed the bound does it sweep the whole dataset, then delete, in a
+separate transaction, the dataset's `file_books`/`file_generations` rows whose
+generation the summary no longer holds. An ordinary autosave therefore costs
+one summary count. The sweep runs after the publish committed and its outcome
+was sent, so a failure is logged and never turns a stored save into a failed
+one; that document's next save retries, since it is still past the bound.
+Sweeps of other datasets (tests only) leave evicted generations' provenance
+rows in place.
+
+A local save is always published live. Local saves are stamped with the wall
+clock, which can step back; the writer moves a save stamped at or before the
+document's live source time to one microsecond past it, so the backfill guard
+never archives the app's latest save while still answering `LocalPublished`.
+
+**Forgetting a local document.** `DataHandle::forget(LocalForget)` deletes one
+document's whole history: its live and archived rows, its generation summary
+rows, and its `file_generations`/`file_books` provenance, in one writer
+transaction, then rebuilds the dataset's categorical dictionaries. The service
+refuses a dataset that is not `local` or a key of the wrong arity with an error
+diagnostic and queues nothing; the runner refuses a non-local dataset again,
+since `ForgetJob` is a public door onto the writer. An accepted forget joins
+the documents FIFO, so it runs after every publish queued before it,
+including a save of the same key. It answers `DataEvent::Forgotten`, also
+for a key that held nothing, or `DataEvent::ForgetFailed` beside an error
+diagnostic; a forget the service refused answers `ForgetFailed` too, so
+every forget a caller submitted answers exactly once. A forget has no
+progress or health lane.
+
 Series retention is separate and runs for the affected `(source, identity)`
 pair inside each append transaction. See
 [`retention.rs`](../../crates/geode-data/src/store/retention.rs) and
@@ -332,7 +403,13 @@ load lane: document keys for parsed documents, raw topics for parse failures,
 and `identity@source` for fetches. A message that parses, validates, and stamps
 successfully clears an earlier failure under its raw topic; publication then
 reports under the document key. Local document writes have no configured
-source-health lane. Load entries have no eviction policy, and unresolved
+source-health lane. Instead, a local publish also answers its writer by
+dataset and document key: `DataEvent::LocalPublished` with the generation ID
+beside `Published`, or `DataEvent::LocalPublishFailed` with the reason beside
+the error diagnostic. A publish the service refuses before queuing it (the
+dataset is not `local`, or not declared) answers `LocalPublishFailed` too, so
+every admitted local publish answers exactly once — the pricer counts its
+queued saves on that. Load entries have no eviction policy, and unresolved
 raw-topic failures have no fixed cap; memory can grow with distinct names.
 
 At startup, persisted unhealthy file generations seed the load lane. An
@@ -368,8 +445,9 @@ to the report time if adding the interval overflows.
 ## Limits and verification
 
 - The demo database is not automatically migrated after schema changes.
-- Historical as-of depends on retained generations. Measure and document
-  archives currently have no automatic retention sweep.
+- Historical as-of depends on retained generations. Measure and feed-published
+  document archives currently have no automatic retention sweep; local
+  documents keep 200 archived generations each.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.

@@ -18,9 +18,11 @@
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
+use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::StackHandle;
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates};
+use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
@@ -45,14 +47,13 @@ pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 
 /// What a tile with no slots paints in place of the chart. Names the two
 /// keys that end the state, per the design guide's empty-state rule.
-pub(crate) const EMPTY_HINT: &str = "no series — a adds one, x composes";
+/// Backtick-quoted runs are keys, painted as chips by `kbd::marked`.
+pub(crate) const EMPTY_HINT: &str = "no series — `a` adds one, `x` composes";
 
 /// The swatch beside a chip's label, in pixels at the design rem.
 const SWATCH: f32 = 8.0;
-/// The swatch's click target (mouse pass, 2026-09-24): the dot sits
-/// centred in a square this wide, which is what takes the hover fill —
-/// a hover painted on the dot itself would replace the one colour the
-/// dot exists to show.
+/// Square pointer target around the swatch. Hover fills the surrounding
+/// control so the dot continues to show the series color.
 const SWATCH_TARGET: f32 = 16.0;
 
 /// The empty state's two doors, as the button labels and the actions
@@ -170,35 +171,44 @@ pub(crate) fn cursor_is_source(model: &Model) -> Option<u8> {
 }
 
 /// The footer's hint row: each verb's live chord where the keymap has
-/// one, the shipped key otherwise. Resolved on a `Chords` change, never
-/// per frame.
+/// one, the shipped binding otherwise. Resolved on a `Chords` change,
+/// never per frame.
 const FOOTER_HINTS: &[(&str, &str, &str)] = &[
     ("timeseries::add", "a", "add"),
     ("timeseries::expr", "x", "expr"),
-    ("timeseries::list", "L", "series"),
+    ("timeseries::list", "shift+l", "series"),
     ("timeseries::range", "r", "range"),
     ("timeseries::freq", "f", "freq"),
-    ("timeseries::density", "D", "density"),
+    ("timeseries::density", "shift+d", "density"),
     ("timeseries::percentiles", "p", "percentiles"),
 ];
 
-pub(crate) fn footer_text(cx: &App) -> SharedString {
+/// One footer hint: the verb's keys, then its word — every word but the
+/// last already carries its ` ·` separator, so paint formats nothing.
+pub(crate) type FooterHint = (Vec<Keystroke>, SharedString);
+
+pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
     let empty = Vec::new();
     let bindings = cx
         .try_global::<Chords>()
         .map(|c| c.0.as_slice())
         .unwrap_or(&empty);
+    let last = FOOTER_HINTS.len() - 1;
     FOOTER_HINTS
         .iter()
-        .map(|(action, shipped, word)| {
-            let key = chord_for(bindings, action)
-                .map(|ks| geode_shell::palette::render_binding(&ks))
-                .unwrap_or_else(|| (*shipped).to_string());
-            format!("{key} {word}")
+        .enumerate()
+        .map(|(i, (action, shipped, word))| {
+            let keys = chord_for(bindings, action).unwrap_or_else(|| {
+                parse_binding(shipped, Modifiers::NONE).expect("shipped footer keys are valid")
+            });
+            let word = if i == last {
+                SharedString::new_static(word)
+            } else {
+                format!("{word} ·").into()
+            };
+            (keys, word)
         })
-        .collect::<Vec<_>>()
-        .join(" · ")
-        .into()
+        .collect()
 }
 
 /// What the header draws beside its prepared text: which of its
@@ -321,13 +331,10 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // 2. The range and frequency triggers, in the data face — bare
-    //    controls, each the mouse door onto its own menu (`r` and `f`
-    //    are the keys), through `dispatch` on the verb's own id.
-    // One bare-control derivation for the triggers, every swatch target
-    // and the `⋯` button: all are muted text (or no text) on the tile
-    // surface, and `control::paint` can run an OKLab bisection — not a
-    // per-chip-per-frame cost.
+    // 2. Range and frequency triggers, each the mouse door onto its own menu
+    //    (`r` and `f` are the keys), through `dispatch` on the verb's own id.
+    // Derive shared bare-control pointer states once for the triggers, the swatch
+    // targets, and the menu button, avoiding repeated contrast calculations.
     let bare_states = control::paint(
         theme,
         control::Rest::Bare,
@@ -382,10 +389,8 @@ pub(crate) fn render_header(
         }
         let states = control::for_chip(theme, &paint, theme.background);
         let number = chip.number;
-        // The picker's trigger is `Size::XSmall`'s square — the swatch
-        // target's own size — so the strip keeps its geometry while it
-        // stands in for the swatch. The trigger stops its own press, so
-        // neither the chip's click nor the swatch's toggle runs under it.
+        // Replace only the target slot's swatch with an equally sized component
+        // trigger. It consumes its press so visibility and chip selection do not also run.
         let picker = colour_picker
             .take_if(|(target, _)| *target == number)
             .map(|(_, el)| el);
@@ -442,12 +447,8 @@ pub(crate) fn render_header(
             // A hidden series stays in the strip — `v` is a toggle, and a
             // chip that vanished would leave nothing to press again.
             .when(chip.hidden, |d| d.opacity(0.5).line_through())
-            // The swatch is the show/hide toggle (mouse pass,
-            // 2026-09-24): a square target round the dot with the bare
-            // control's hover, and a click that takes `v`'s own path.
-            // No propagation stop, for the chip's reason below — the
-            // chip's own handler also runs and moves the cursor onto
-            // the slot just toggled, which is the slot `v` would act on.
+            // Use the visibility target normally, or the component's trigger while a
+            // colour picker is open for this slot. The component owns its trigger press.
             .child(swatch)
             .child(chip.label.clone())
             .child(
@@ -477,8 +478,7 @@ pub(crate) fn render_header(
                     tile.update(cx, |t, cx| t.chip_clicked(index, cx));
                 }
             })
-            // The context menu (mouse pass, 2026-09-24): a right-click
-            // selects the slot and opens the action list on it.
+            // Right-click selects this slot and opens its action menu.
             .on_mouse_down(MouseButton::Right, {
                 let tile = tile.clone();
                 move |_: &MouseDownEvent, window, cx| {
@@ -496,16 +496,9 @@ pub(crate) fn render_header(
         row = row.child(el);
     }
 
-    // 4. `⋯` — the mouse door onto the action list (mouse pass,
-    //    2026-09-24), the click's own form of `.`, at the strip's right
-    //    edge behind a spacer. The market-data `⋯` button's shape
-    //    exactly, including the two things that are easy to get wrong:
-    //    it toggles in the CAPTURE phase (ahead of an open menu's own
-    //    `on_mouse_down_out`, which would otherwise close the menu one
-    //    beat before this handler asked whether it was open, so a
-    //    second click reopened it) and it does NOT stop propagation
-    //    (the shell's click-to-focus must still run, or the menu's keys
-    //    drive whichever tile the shell still had focused).
+    // 4. Action-menu toggle. Handle the press in capture phase before the open
+    // popup's outside-press listener can close it; otherwise a second click would
+    // reopen it. Keep propagation so the shell focuses the tile receiving the click.
     let muted = theme.muted_foreground;
     row = row.child(div().flex_1()).child(
         div()
@@ -517,9 +510,7 @@ pub(crate) fn render_header(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
-            // Open, the button keeps its persistent fill and answers the
-            // pointer with nothing, as the guide asks of a button that
-            // owns a popup.
+            // While open, retain the popup-owner fill without additional hover feedback.
             .when(!menu_open, |d| d.pointer_states(bare_states))
             .child("⋯")
             .tooltip(tips::tip(
@@ -573,24 +564,27 @@ pub(crate) fn render_expr_field(f: &ExprField, theme: &Theme) -> impl IntoElemen
         })
 }
 
-pub(crate) fn render_footer(text: SharedString, theme: &Theme) -> impl IntoElement {
+pub(crate) fn render_footer(hints: &[FooterHint], theme: &Theme) -> impl IntoElement {
     h_flex()
         .w_full()
         .h(scale::design(FOOTER_HEIGHT))
         .items_center()
+        .gap_1()
         .px_2()
         .text_xs()
         .text_color(theme.muted_foreground)
         .border_t_1()
         .border_color(theme.border)
-        .child(text)
+        .overflow_hidden()
+        .children(
+            hints
+                .iter()
+                .map(|(keys, word)| kbd::hint(keys, word.clone())),
+        )
 }
 
-/// The chart's place while the tile holds no slot: the hint naming
-/// the two keys, and (mouse pass, 2026-09-24) the same two verbs as
-/// ghost buttons under it — the design guide's "useful empty state
-/// that explains the next action", reachable by either hand. Each
-/// button dispatches its action id, the key's own path.
+/// Empty-chart guidance with Add and Compose buttons. Each button dispatches
+/// the same action as its keyboard equivalent.
 pub(crate) fn render_empty(
     theme: &Theme,
     tile: &Entity<TimeseriesTile>,
@@ -625,7 +619,7 @@ pub(crate) fn render_empty(
         .justify_center()
         .gap_2()
         .text_color(theme.muted_foreground)
-        .child(EMPTY_HINT)
+        .child(kbd::marked(EMPTY_HINT))
         .child(buttons)
 }
 

@@ -248,12 +248,9 @@ mod tests {
         assert!(!stack.can_redo(), "nor does the earlier redo");
     }
 
-    /// The redo side's error path: three edits, the last two undone,
-    /// leave one entry on each side besides the redo about to fail. That
-    /// redo re-inserts a line the sheet already holds (restored behind
-    /// the stack's back), so it is refused — and the redo still waiting
-    /// and the undo still done must both go, not replay against rows the
-    /// refusal left unaccounted for.
+    /// A refused redo clears both history stacks. This fixture duplicates the next
+    /// Restore target outside the history stack, making that replay invalid while other
+    /// undo and redo entries still exist.
     #[test]
     fn a_refused_redo_drops_the_rest_of_both_sides() {
         let mut s = Sheet::new("t");
@@ -272,8 +269,7 @@ mod tests {
         assert_eq!(stack.undo(&mut s), Ok(true));
         assert_eq!(s.len(), 1);
         assert!(stack.can_undo(), "fixture: the first insert is still done");
-        // Behind the stack's back: replay the next redo's own restore, so
-        // the line it re-inserts is already in the sheet.
+        // Restore the next redo's target directly so replay must refuse the duplicate.
         let next = stack.peek(true).expect("two redos wait").inverse[0].clone();
         s.apply(next).unwrap();
         assert!(

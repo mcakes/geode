@@ -1,10 +1,6 @@
-//! The date-time field's painter (spec §4.3): the segments in the data
-//! face with the three states — rest, active, typing — separators
-//! between, an optional suffix after. Every colour is the host's, handed
-//! in as a [`SegmentPaint`]: the painter never reads `cx.theme()`, so it
-//! can be called from a closure that cannot borrow it (the `key_chip`
-//! precedent), and a host derives its colours once (the panel's
-//! `FlooredTones`, the shell's chip/control doors) rather than per paint.
+//! Date-time segments with rest, active, and typing states, separators, and an optional
+//! suffix. The host supplies prepared SegmentPaint colours and padding policy; the
+//! painter does not read the theme. The caller also supplies the font family.
 
 use gpui::prelude::*;
 use gpui::{App, Div, Hsla, MouseButton, Pixels, SharedString, Window, div};
@@ -25,10 +21,9 @@ pub struct SegmentPaint {
     pub separator: Hsla,
     pub suffix: Hsla,
     pub radius: Pixels,
-    /// Segments paint with no horizontal padding, so the field is exactly
-    /// as wide as the date as plain text — for a host painting it in
-    /// place of that text (a grid cell), where padded segments spread
-    /// the digits apart and widen the field past its slot.
+    /// Remove horizontal segment padding for a field replacing plain date text in a
+    /// grid cell. Separators, font metrics, and any suffix still determine the rendered
+    /// width.
     pub flush: bool,
 }
 

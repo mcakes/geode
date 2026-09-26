@@ -1,7 +1,7 @@
 //! The tile's `:` vocabulary (line-pricer spec §8.6), pure: parse and
-//! completion. Every verb changes only this tile. `:e`, `:name`, `:new`
-//! and `:rm` are Part 4's; they parse to a refusal that names them
-//! (Part 3 planning decision 9) rather than "unknown command".
+//! completion. Every verb changes only this tile: `:e`, `:new`, `:name`
+//! and `:rm` (spec §7.4) move this tile's own sheet or, for `:rm`, a
+//! sheet no tile holds — never another tile's.
 
 use crate::core::sheet::Refresh;
 use geode_core::source_config::parse_duration;
@@ -30,16 +30,35 @@ pub enum Command {
     Refresh(Refresh),
     Group(Option<usize>),
     Ungroup,
+    /// `:e <sheet>`: open another sheet in this tile.
+    Edit(String),
+    /// `:new`: the next `untitled-N`, empty.
+    New,
+    /// `:name <sheet>`: rename this tile's sheet.
+    Name(String),
+    /// `:rm <sheet>`: remove a sheet no tile holds (asks first).
+    Remove(String),
 }
 
-pub const VERBS: [&str; 7] = [
-    "view", "shift", "spot", "price", "refresh", "group", "ungroup",
+pub const VERBS: [&str; 11] = [
+    "view", "shift", "spot", "price", "refresh", "group", "ungroup", "e", "new", "name", "rm",
 ];
-pub const NOT_BUILT: [&str; 4] = ["e", "name", "new", "rm"];
 
 const SHIFT_USAGE: &str = "usage: shift spot|vol <n>|clear";
 const SPOT_USAGE: &str = "usage: spot <underlying> <level>|clear";
 const REFRESH_USAGE: &str = "usage: refresh <duration>|off|default";
+
+/// A sheet name is one word (the line splits on whitespace) with no
+/// control character: the document key joins on `U+001F`, so a name
+/// holding it would address a different document than the one named.
+fn sheet_name(verb: &str, name: &str) -> Result<String, String> {
+    if name.chars().any(char::is_control) {
+        return Err(format!(
+            ":{verb}: a sheet name cannot hold a control character"
+        ));
+    }
+    Ok(name.to_string())
+}
 
 pub fn parse(line: &str) -> Result<Command, String> {
     let words: Vec<&str> = line.split_whitespace().collect();
@@ -104,18 +123,28 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["group", ..] => Err("usage: group [count]".into()),
         ["ungroup"] => Ok(Command::Ungroup),
         ["ungroup", ..] => Err("usage: ungroup".into()),
-        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),
+        ["e", name] => sheet_name("e", name).map(Command::Edit),
+        ["e", ..] => Err("usage: e <sheet>".into()),
+        ["new"] => Ok(Command::New),
+        ["new", ..] => Err("usage: new".into()),
+        ["name", name] => sheet_name("name", name).map(Command::Name),
+        ["name", ..] => Err("usage: name <sheet>".into()),
+        ["rm", name] => sheet_name("rm", name).map(Command::Remove),
+        ["rm", ..] => Err("usage: rm <sheet>".into()),
         [other, ..] => Err(format!("unknown command '{other}'")),
     }
 }
 
 /// The bare words valid at `cursor` — the position's whole vocabulary,
-/// unfiltered; the shell ranks (`TileContent::completions`).
+/// unfiltered; the shell ranks (`TileContent::completions`). `sheets`
+/// is the known sheet names, for `:e` and `:rm`; `:name` takes a new
+/// name, so it offers none.
 pub fn completions(
     line: &str,
     cursor: usize,
     views: &[String],
     underlyings: &[String],
+    sheets: &[String],
 ) -> Vec<String> {
     let mut end = cursor.min(line.len());
     while !line.is_char_boundary(end) {
@@ -137,6 +166,7 @@ pub fn completions(
             .collect(),
         ["spot", _] => strs(&["clear"]),
         ["refresh"] => strs(&["off", "default"]),
+        ["e"] | ["rm"] => sheets.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -204,10 +234,14 @@ mod tests {
         assert_eq!(parse("group"), Ok(Command::Group(None)));
         assert_eq!(parse("group 3"), Ok(Command::Group(Some(3))));
         assert_eq!(parse("ungroup"), Ok(Command::Ungroup));
+        assert_eq!(parse("e book"), Ok(Command::Edit("book".into())));
+        assert_eq!(parse("new"), Ok(Command::New));
+        assert_eq!(parse("name fresh"), Ok(Command::Name("fresh".into())));
+        assert_eq!(parse("rm old"), Ok(Command::Remove("old".into())));
     }
 
     #[test]
-    fn bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name() {
+    fn bad_arguments_answer_the_usage() {
         assert_eq!(parse(""), Err("empty command".into()));
         assert_eq!(parse("view"), Err("usage: view <name>".into()));
         assert_eq!(
@@ -236,9 +270,15 @@ mod tests {
         );
         assert_eq!(parse("group 0"), Err("usage: group [count]".into()));
         assert_eq!(parse("price now"), Err("usage: price".into()));
-        for verb in NOT_BUILT {
-            assert_eq!(parse(verb), Err(format!(":{verb} is not built yet")));
-        }
+        assert_eq!(parse("e"), Err("usage: e <sheet>".into()));
+        assert_eq!(parse("e a b"), Err("usage: e <sheet>".into()));
+        assert_eq!(parse("new x"), Err("usage: new".into()));
+        assert_eq!(parse("name"), Err("usage: name <sheet>".into()));
+        assert_eq!(parse("rm"), Err("usage: rm <sheet>".into()));
+        assert_eq!(
+            parse("e a\u{1f}b"),
+            Err(":e: a sheet name cannot hold a control character".into())
+        );
         assert_eq!(parse("bogus"), Err("unknown command 'bogus'".into()));
     }
 
@@ -246,6 +286,10 @@ mod tests {
     fn completions_offer_each_positions_vocabulary_unfiltered() {
         let views = vec!["vanilla".to_string(), "barrier".to_string()];
         let unds = vec!["NDX".to_string(), "SPX".to_string()];
+        let sheets = vec!["alpha".to_string(), "book".to_string()];
+        let completions = |line: &str, cursor, views: &[String], unds: &[String]| {
+            completions(line, cursor, views, unds, &sheets)
+        };
         assert_eq!(
             completions("", 0, &views, &unds),
             VERBS.map(String::from).to_vec()
@@ -268,11 +312,15 @@ mod tests {
             vec!["off", "default"]
         );
         assert!(completions("price ", 6, &views, &unds).is_empty());
+        assert_eq!(completions("e ", 2, &views, &unds), sheets);
+        assert_eq!(completions("rm ", 3, &views, &unds), sheets);
+        assert!(completions("name ", 5, &views, &unds).is_empty());
+        assert!(completions("new ", 4, &views, &unds).is_empty());
     }
 
     #[test]
     fn a_cursor_off_a_char_boundary_does_not_panic() {
-        let _ = completions("spot é", 6, &[], &[]);
-        let _ = completions("spot é", 99, &[], &[]);
+        let _ = completions("spot é", 6, &[], &[], &[]);
+        let _ = completions("spot é", 99, &[], &[], &[]);
     }
 }

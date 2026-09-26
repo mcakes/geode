@@ -1,10 +1,6 @@
-//! The CVI kind's parse and write costs at two grid shapes: 20 terms ×
-//! 30 nodes (600 rows — a single underlying's surface, the shape a panel
-//! shows) and 200 × 300 (60,000 rows — well past anything the desk sends,
-//! so the walk's per-element cost is visible rather than swamped by
-//! fixed overhead). Both are one document, which is the unit the
-//! receiver thread pays per message (spec §6.3): nothing here is
-//! per-row beyond the parsed columns themselves.
+//! Parse and write benchmarks for 20 × 30 (600-row) and 200 × 300 (60,000-row)
+//! CVI grids. Each iteration processes one document. The larger fixture exposes
+//! per-element scaling relative to fixed document overhead.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::document::{Column, DocumentKind, DocumentRows, Value};

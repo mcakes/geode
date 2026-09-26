@@ -1,23 +1,11 @@
-//! The CVI kind (spec §6.3): `marketData/underlying`, `cviParams/
-//! anchorDate`, `cviParams/spotRef`, `cviParams/nodes/node*` and
-//! `cviParams/slices/slice*`, each slice carrying a `term`, one
-//! `forward`/`atm`/`skew` for the whole slice (2026-09-17), and one
-//! `param` per node, positionally aligned.
+//! CVI XML parsing and writing. `marketData/underlying` identifies the document;
+//! `cviParams` contains `anchorDate`, `spotRef`, nodes, and term slices. Each
+//! slice has one `forward`, `atm`, and `skew`, plus one `param` per node in order.
 //!
-//! Hand-written as a `quick_xml::Reader` event walk rather than a serde
-//! derive, for three reasons the spec's §6.3 wording turns on. The
-//! ragged-slice rule ("both counts in the error") is a cross-element
-//! invariant serde has no place to state; the unknown-element rule
-//! ("skipped and logged once per (source, path)") needs the *path* of
-//! the element that was skipped, which a deserializer's
-//! `deny_unknown_fields` does not hand back and its default silence
-//! hides; and the whole point of the parse is to land in
-//! struct-of-arrays (`DocumentRows`) with nothing allocated per row
-//! beyond the columns themselves (PHILOSOPHY §6), where a derive would
-//! build a `Vec<Slice>` of row objects first. This file is expected to
-//! be *regenerated* from the desk's XSD later, behind these same two
-//! functions (roadmap ruling 8) — the shape of the seam is what matters,
-//! not that a human typed the walk.
+//! The event reader fills columnar `DocumentRows`, checks slice lengths against
+//! the node count, and records paths of skipped unknown elements. Ragged-slice
+//! errors include both counts. The subscription receiver owns log deduplication.
+//! Wire tag names remain unverified against the desk's XSD.
 
 use chrono::NaiveDate;
 use geode_core::document::{
@@ -27,20 +15,14 @@ use geode_core::schema::ColumnType;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 
-/// The dataset name this kind feeds, and the name a `[sources.<name>]`
-/// spells as its `kind` (spec §6.4).
+/// Built-in dataset name and source configuration `kind` value.
 pub const NAME: &str = "cvi_params";
 
-/// The date form on the wire, both directions. One constant so the
-/// writer cannot drift from the parser — the round-trip property (§11)
-/// would catch that, but only by failing, and a reader of either half
-/// should be able to see the other's format without leaving the line.
+/// Wire date format shared by the parser and writer.
 const DATE_FORMAT: &str = "%Y-%m-%d";
 
-/// The nine columns of spec §6.3's CVI document, in `document_columns()`
-/// order (key, axes, values, document-level attributes) — the order
-/// `check_kind_against` compares against the dataset at source-open
-/// time and the order the staging path expects.
+/// Column vocabulary exposed to source-startup schema validation. The check
+/// compares names and types; publication chooses the dataset's column order.
 const COLUMNS: &[(&str, ColumnType)] = &[
     ("underlying_ref", ColumnType::Utf8),
     ("term", ColumnType::Date),
@@ -59,15 +41,9 @@ const AXES: [&str; 2] = ["term", "node"];
 const VALUES: [&str; 4] = ["param", "forward", "atm", "skew"];
 const ATTRIBUTES: [&str; 2] = ["anchor_date", "spot_ref"];
 
-/// The per-slice values (2026-09-17): one `(wire tag, column)` per
-/// value a `<slice>` carries once, beside its `<term>` and ahead of its
-/// `<param>`s. Stored in the long form exactly as `param` is — repeated
-/// on every node row of the slice, "a value constant within a slice",
-/// the sibling of an attribute's "constant within a document" — so no
-/// storage or document-family change carries them. One table for both
-/// directions, so the parser's leaf and the writer's emission cannot
-/// drift. **The tag names are an assumption until the desk's XSD
-/// arrives**; the column names are the dataset's and stay.
+/// Per-slice wire tags paired with column names. Each value repeats on every
+/// node row of its slice. Both parser and writer use this table so they agree
+/// on the vocabulary. The tag names remain unverified against the desk's XSD.
 const SLICE_VALUES: [(&str, &str); 3] = [("forward", "forward"), ("atm", "atm"), ("skew", "skew")];
 
 /// The CVI document kind. A unit struct: a kind carries no state, and
@@ -190,12 +166,9 @@ fn classify(path: &[String]) -> Shape {
 }
 
 fn number(what: &str, text: &str) -> Result<f64, ParseError> {
-    // `str::parse::<f64>` is the exact inverse of `{}` (shortest
-    // round-trip) formatting for every finite f64 — the pair the §11
-    // property test rests on. `parse` also accepts `inf`/`NaN`, which
-    // `write` refuses to emit; a feed that sends one is refused here
-    // too, because a NaN param compares unequal to itself and would
-    // make every downstream comparison lie.
+    // Parsing inverts the writer's shortest round-trip formatting for finite
+    // values. Reject NaN and infinities on input as well as output so stored
+    // parameters support meaningful equality and echo comparisons.
     let v: f64 = text
         .parse()
         .map_err(|_| parse_err(format!("{what} '{text}' is not a number")))?;
@@ -210,13 +183,9 @@ fn date(what: &str, text: &str) -> Result<NaiveDate, ParseError> {
         .map_err(|_| parse_err(format!("{what} '{text}' is not a date (YYYY-MM-DD)")))
 }
 
-/// The open element path, holding each depth's name in a `String` it
-/// reuses across siblings rather than allocating one per element. That is
-/// not micro-optimisation: in this document a `<param>` element *is* a
-/// row, so an allocation per element name would be an allocation per row
-/// on the receiver thread, which the market-data constraint on
-/// per-message work forbids (PHILOSOPHY §6). `names` therefore grows to
-/// the deepest path ever seen — five for this model — and never again.
+/// Element path with reusable name buffers at each depth. Sibling elements
+/// reuse capacity instead of allocating a name for every parameter row.
+/// The depth buffer grows only when a deeper path is encountered.
 #[derive(Default)]
 struct PathStack {
     names: Vec<String>,
@@ -253,8 +222,8 @@ impl PathStack {
         &self.names[..self.depth]
     }
 
-    /// The one place the whole path is materialised: reporting an unknown
-    /// element (spec §6.3). Classification never needs it.
+    /// Materialize a path only when reporting an unknown element;
+    /// classification reads the existing segments.
     fn joined(&self) -> String {
         self.path().join("/")
     }
@@ -363,10 +332,8 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                     Shape::Leaf(_) => {}
                     Shape::Slice => slice.restart(),
                     Shape::Unknown => {
-                        // Reported by path, once per occurrence — the
-                        // receiver dedupes per (source, path), so the
-                        // parser's job is to say where, not how often
-                        // (spec §6.3).
+                        // Record each skipped path here; the receiver deduplicates
+                        // logging by source and path.
                         unknown_paths.push(stack.joined());
                         reader
                             .read_to_end(e.name())
@@ -669,17 +636,9 @@ fn grid_of<'a>(terms: &[NaiveDate], nodes: &'a [f64]) -> Result<Grid<'a>, WriteE
     })
 }
 
-/// A finite number in its shortest round-tripping form, rendered into a
-/// buffer the caller reuses. `{}` is not a convenience here: it is the
-/// half of the round-trip contract that makes `str::parse::<f64>` exact,
-/// and a `{:.6}` "tidier" form would break §11's property for most
-/// doubles. Non-finite is refused rather than emitted: no XSD accepts
-/// `NaN`/`inf`, and a `NaN` written out compares unequal to itself, so
-/// the round trip could not verify it even in principle.
-///
-/// The shared buffer is why this takes `&mut String` instead of
-/// returning one: a `<param>` is a row, so a `String` per number would be
-/// an allocation per row (PHILOSOPHY §6).
+/// Write a finite number in its shortest round-trip form. Fixed decimal
+/// precision would lose values when parsed back; NaN and infinities are refused.
+/// The caller reuses the buffer to avoid a String allocation for every row.
 fn num_into(buf: &mut String, what: &str, v: f64) -> Result<(), WriteError> {
     if !v.is_finite() {
         return Err(write_err(format!("{what} {v} is not finite")));
@@ -933,13 +892,9 @@ mod tests {
         assert_eq!(&VALUES[1..], slice_columns.as_slice());
     }
 
-    /// The §6.4 load-time contract, against the dataset the desk really
-    /// declares rather than against a hand-written column list: both
-    /// directions of `check_kind_against` agree, so a source pairing this
-    /// kind with this dataset opens. If a later task changes either
-    /// side's column set, this is the test that says so — the six-column
-    /// assertion above only pins what the kind claims, not that anything
-    /// declares it.
+    /// The kind's column names and types must match a parsed CVI dataset in both
+    /// directions. This exercises source-startup validation against a schema,
+    /// not only the kind's own column list.
     #[test]
     fn the_kind_matches_the_cvi_dataset_it_feeds() {
         use geode_core::config::{LayerDoc, merge_docs};

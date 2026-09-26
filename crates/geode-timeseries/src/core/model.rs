@@ -733,11 +733,9 @@ impl Model {
         self.view.reset(self.full);
         self.view_changed()
     }
-    /// The pointer's zoom (mouse pass, 2026-09-24): `factor > 1` zooms
-    /// in, `< 1` out, keeping the point `about` (0 = the visible left
-    /// edge, 1 = the right) where it is — the thing under the wheel
-    /// stays under the wheel. A non-finite or non-positive factor is a
-    /// no-op, as `View::zoom` already makes it.
+    /// Zoom about a fraction of the visible range: zero anchors the left edge,
+    /// one the right. Factors above one zoom in, below one zoom out. Nonpositive
+    /// or nonfinite factors leave the view unchanged.
     pub fn zoom_at(&mut self, factor: f64, about: f64) -> Changed {
         self.view.zoom(factor, about, self.full);
         self.view_changed()

@@ -22,7 +22,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and its `pricer_sheets` dataset) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `%APPDATA%\geode` on Windows, else `$HOME/.config/geode` |
 
@@ -38,9 +38,9 @@ demo series walk; nothing migrates an existing database.
 |---|---|
 | `main` | Startup order: logging, config, registry and keymap, roster, service, window. `parse_args` and `config_dirs` are pure and tested. |
 | `bridge` | Service setup and module factories, window event routing, catalog refresh/retry, and forwarding view reloads to the data service. |
-| `events` | Coalesced pending outcomes and state with a one-slot wakeup channel. Retains publication book unions and highest-tagged results. |
+| `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write outcomes never coalesce. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |
-| `demo_bus` | Demo mode's producer for the market-data path: a thread generating CVI documents and publishing them onto a `ChannelAdapter` through the same wire format a real subscribed source's receiver parses. Registered only under `--demo`. |
+| `demo_bus` | Demo-only CVI and dividend producers publishing through `ChannelAdapter` and the normal document writers/parsers. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |
 | `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
 | `crash` | Log-file trimming at startup and the process panic hook that tells a contained panic from a fatal one and writes a crash file. |
 | `assets` | The asset source: gpui-kit's component icons plus the catalogue icons Geode's own surfaces name. |
@@ -80,7 +80,27 @@ cargo check -p geode-app --features profiling
   displayed time is the trader's local clock.
 - `NamedColours::from_doc` diagnostics are reported only by the bridge's
   `data_setup` and `ConfigReloaded` arms.
+- Every local-write outcome for `pricer_sheets` reaches the pricer factory
+  (`save_answered`/`forget_answered`), in the writer's order: a pricer tile
+  can wait on one exact outcome with no timeout. `pin_pricer_sheets` keeps
+  the builtin declaration against a differing layer redeclaration, at
+  startup and on reload, with an error diagnostic.
+- At quit, `stop_at_quit` flushes every pricer tile's unsaved sheet, then
+  spawns the data service's shutdown, in one hook, so the saves are admitted
+  ahead of `Shutdown` and stored by the writer's shutdown drain (within
+  gpui's 200 ms quit wait).
+- Test fixtures hosting a pricer tile install `geode_pricer::init` after
+  `gpui_component::init`, as `main` does: gpui gives the later binding
+  precedence, and the reverse order lets `DataTable`'s own keys beat the
+  tile's.
 - The pricer hears every config reload through the frame's `config` counter
   but reloads only when `pricer_config_key` changed from the last applied key
   (seeded with the startup key `start` carries on `Bridge`), so an unrelated reload
   neither restarts its tiles' refresh timers nor repeats a bad value's warning.
+
+Upload targets resolve against registered adapters at startup. The bridge passes
+target/document lists to market-data factories and routes outcomes to the
+submitting tile, including hidden occupants. Each upload tag retains its own
+mailbox entry. A closed tile cannot receive its outcome; data-tier logging
+still records completed transport calls and normal refusals. Egress edits mark
+restart required and do not replace running transports or panel target lists.

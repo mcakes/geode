@@ -409,10 +409,8 @@ fn open_tree_edit_stage(
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir, "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // The stage opens ON the `Columns` list's first item: the two rows above it — the
-    // display-only `Dataset` and the `Columns` header — answer to nothing, and the
-    // cursor no longer rests on such a row (user ruling 2026-09-23). This helper used
-    // to press `j j` to get here.
+    // The stage opens on its first column item, skipping the inert Dataset choice and
+    // Columns header.
     (shell, cx)
 }
 
@@ -968,12 +966,8 @@ fn an_edit_with_only_warnings_still_joins_the_batch(cx: &mut gpui::TestAppContex
         "and nothing about it may be an error"
     );
 
-    // Past `Dataset` and onto the `Columns` list's first item, then hide it — a real,
-    // ordinary presentation edit. Two `j`s here where most Views tests need none: this
-    // fixture configures a second dataset, so its `Dataset` row is a `Choice` with
-    // something to step and IS a cursor stop; with one dataset it steps nowhere and the
-    // cursor passes over it. The `Columns` header between them is never a stop, so one
-    // `j` clears both (user ruling 2026-09-23).
+    // This fixture has multiple dataset choices, making Dataset a cursor stop. One j
+    // skips the Columns header to the first member; space hides that column.
     cx.simulate_keystrokes("j space");
     cx.run_until_parked();
     assert!(
@@ -1326,8 +1320,8 @@ fn an_edit_applies_even_when_another_config_file_is_broken(cx: &mut gpui::TestAp
     );
 
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
-    // `enter` alone: the edit stage opens on the first column item, since the two
-    // rows above it answer to nothing (user ruling 2026-09-23).
+    // Enter opens editing on the first column item, skipping the two inert rows above
+    // it.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("space");
@@ -1978,11 +1972,8 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
         "a configured slot does"
     );
 
-    // Row 1 is selected on open. Opening it lands past the read-only `Slot` field AND
-    // the `Dimensions` header row — `rows()` still emits one for every field,
-    // `OrderedList` included, but neither answers to anything and neither is a cursor
-    // stop (user ruling 2026-09-23) — so `space` ticks the first dimension straight
-    // away.
+    // Slot 1 is initially selected. Its edit stage skips Slot and Dimensions, so space
+    // immediately ticks the first dimension.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("space");
@@ -2068,9 +2059,7 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
-    // The stage opens ON `book` — the chain's first item — because `Slot` and the
-    // `Dimensions` header above it answer to nothing and are no longer cursor stops
-    // (user ruling 2026-09-23). Swap it past `lhu`.
+    // The slot opens on book, skipping Slot and Dimensions. Reorder it past lhu.
     cx.simulate_keystrokes("shift-j");
     cx.run_until_parked();
 
@@ -2143,8 +2132,7 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // The slot's edit stage opens on its first dimension — `Slot` and the `Dimensions`
-    // header are not cursor stops — so `shift+j` reorders straight away.
+    // The slot opens on its first dimension, so Shift-J reorders immediately.
     cx.simulate_keystrokes("shift-j");
     cx.run_until_parked();
     flush_config_write(&mut cx);
@@ -2191,10 +2179,8 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     let services = services_with_slot_3(&["book"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
-    // Row 1 is selected on open (§18.4 — all nine slots list); navigate down to slot 3
-    // and into its edit stage, which opens ON `book` — the chain's only ticked item —
-    // since `Slot` and the `Dimensions` header answer to nothing (user ruling
-    // 2026-09-23).
+    // All nine slots are listed, with slot 1 selected. Open slot 3 on book, its only
+    // member; Slot and Dimensions are not cursor stops.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -2573,8 +2559,7 @@ fn an_edit_with_nowhere_to_write_leaves_the_draft_dirty(cx: &mut gpui::TestAppCo
     // `dialog_test_shell_with`, not `..._in_dir`: this one's `user_dir` is
     // `None`.
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_a_desk_view(), "config::views");
-    // The stage opens on the first column item: the `Dataset` row and the `Columns`
-    // header above it answer to nothing (user ruling 2026-09-23).
+    // The first column item is selected on entry; Dataset and Columns are inert.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
@@ -3288,8 +3273,7 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
         "config::scopes",
     );
     cx.simulate_keystrokes("enter"); // open `mine`
-    // The stage opens ON `book`: the `Dimensions` header above it answers to nothing
-    // and is no longer a cursor stop (user ruling 2026-09-23).
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage (Task 4's door)
     cx.run_until_parked();
     let tag = dialog_state(&shell, &cx, |s| s.values_tag);
@@ -3362,8 +3346,7 @@ fn the_values_stage_paints_its_rows(cx: &mut gpui::TestAppContext) {
         "config::scopes",
     );
     cx.simulate_keystrokes("enter"); // open `mine`
-    // The stage opens ON `book`: the `Dimensions` header above it answers to nothing
-    // and is no longer a cursor stop (user ruling 2026-09-23).
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage
     cx.run_until_parked();
     let tag = dialog_state(&shell, &cx, |s| s.values_tag);
@@ -3426,8 +3409,7 @@ fn entering_the_values_stage_requests_the_columns_distinct_values(cx: &mut gpui:
         })
         .detach();
     });
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop —
-    // so one `enter` more opens its Values stage.
+    // The stage opens on book; another Enter opens its Values stage.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -3478,8 +3460,7 @@ fn ticking_a_value_writes_the_selection_and_unticking_all_removes_it(
         dir.path(),
         "config::scopes",
     );
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop —
-    // so one `enter` more opens its Values stage.
+    // The stage opens on book; another Enter opens its Values stage.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -3496,8 +3477,7 @@ fn ticking_a_value_writes_the_selection_and_unticking_all_removes_it(
         )
     });
     cx.run_until_parked();
-    // The delivered values land under the cursor: the `Values` header above them
-    // answers to nothing and is not a cursor stop (user ruling 2026-09-23).
+    // Delivery selects the first value, skipping the inert Values header.
     cx.simulate_keystrokes("space"); // tick BK000
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(400));
@@ -3532,8 +3512,7 @@ fn ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused(cx: &mut gpui::TestAp
         dir.path(),
         "config::scopes",
     );
-    // The stage opens ON `book`: the `Dimensions` header above it answers to nothing
-    // and is no longer a cursor stop (user ruling 2026-09-23).
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("shift-j");
     cx.run_until_parked();
@@ -3604,8 +3583,7 @@ fn a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them(
         "config::scopes",
     );
     cx.simulate_keystrokes("enter"); // open `mine`
-    // The stage opens ON `book`: the `Dimensions` header above it answers to nothing
-    // and is no longer a cursor stop (user ruling 2026-09-23).
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("enter"); // Values stage
     cx.run_until_parked();
     let tag = dialog_state(&shell, &cx, |s| s.values_tag);
@@ -3723,8 +3701,7 @@ fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
         dir.path(),
         "config::scopes",
     );
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop —
-    // so one `enter` more opens its Values stage.
+    // The stage opens on book; another Enter opens its Values stage.
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -3787,7 +3764,7 @@ fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::Tes
         .detach();
     });
     cx.simulate_keystrokes("enter");
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop.
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert_eq!(
@@ -3819,7 +3796,7 @@ fn x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note(cx: &mut gpui
         "config::scopes",
     );
     cx.simulate_keystrokes("enter");
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop.
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.simulate_keystrokes("x");
     cx.executor()
         .advance_clock(std::time::Duration::from_millis(400));
@@ -3852,7 +3829,7 @@ fn x_on_an_available_scopes_row_is_refused(cx: &mut gpui::TestAppContext) {
         "config::scopes",
     );
     cx.simulate_keystrokes("enter");
-    // The stage opens ON `book` — see the note at the other Scopes tests.
+    // The stage opens on book, skipping the Dimensions header.
     cx.simulate_keystrokes("j"); // `lhu`, the available row
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
@@ -4007,10 +3984,8 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
         dir.path(),
         "config::groupings",
     );
-    // Slot 1 is empty: ticking `book` queues a user-layer write with no
-    // fork to confirm.
-    // `1` opens slot 1's edit stage on its first dimension row (the two rows above
-    // answer to nothing), so `space` ticks `book` straight away.
+    // Slot 1 is empty, so ticking book queues a user-layer write without fork
+    // confirmation. Opening selects its first dimension candidate, ready for space.
     cx.simulate_keystrokes("1 space");
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
@@ -4039,9 +4014,8 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
         "the queued tick is on screen, not a debounce behind"
     );
 
-    // And the stale-draft overwrite that followed: ticking `lhu` from the re-entered
-    // stage must keep `book`. One `j` from the stage's opening row — the ticked `book`
-    // — since the two rows above it are not cursor stops.
+    // After accepting the stale-draft overwrite, ticking lhu must retain book. The
+    // reopened stage selects book; one j reaches lhu.
     cx.simulate_keystrokes("j space");
     cx.run_until_parked();
     assert_eq!(
@@ -4452,23 +4426,11 @@ fn escape_reverts_the_edit_stages_own_query(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The mouse's half of §18.3's one switch. Clicking a row while the
-/// edit stage is filtering must not silently take the keyboard back:
-/// before §18.3 the edit stage could not be in `Filter` at all, so its
-/// click handler focused the shell unconditionally, which after this
-/// task left the pill reading `filter` and the caret painted while the
-/// `Input` was blurred — every following keystroke went nowhere until
-/// `escape`. Browse's own `on_row_clicked` already reads the mode; this
-/// asserts the edit stage's does too.
-///
-/// The row clicked is an AVAILABLE candidate. It has to be a row the click
-/// actually lands on — a dropped click returns before the sync this test is
-/// about (2026-09-23: a row that answers to nothing is not a cursor stop and
-/// its click is dropped, which `a_click_on_the_slot_row_is_dropped` covers) —
-/// and one that opens nothing, since a member row opens its column stage (see
-/// `clicking_a_member_row_opens_its_column_stage`) and that sets normal mode
-/// by design. A catalogue row is both: `space` adds it, so the cursor may rest
-/// there, and neither stage target accepts it.
+/// Clicking an available Views candidate while filtering preserves Filter mode and
+/// input focus. The row must accept selection without opening a nested stage: space can
+/// add it, but it has neither a column nor a Values-stage target. An inert row's
+/// rejected click would not exercise focus synchronization, and a member row would
+/// deliberately enter a new stage in Normal mode.
 #[gpui::test]
 fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4778,10 +4740,8 @@ fn cursor_item_name(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> 
     })
 }
 
-/// User ruling 2026-09-23, reported from the Groupings dialog: `Slot` and `Dimensions`
-/// are navigable but nothing there is interactable. The cursor now opens past them and
-/// motion passes over them in both directions, so a slot's edit stage is its chain and
-/// its catalogue and nothing else.
+/// Groupings opens on a dimension row and navigation skips the inert Slot and
+/// Dimensions fields in either direction. The rows remain visible.
 #[gpui::test]
 fn the_slot_and_dimensions_rows_are_not_cursor_stops(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4804,8 +4764,8 @@ fn the_slot_and_dimensions_rows_are_not_cursor_stops(cx: &mut gpui::TestAppConte
         "the Slot row still PAINTS — it is the slot's number, just not a cursor stop"
     );
 
-    // `k` at the top of what the cursor can reach wraps past both field rows to the
-    // last row it can reach, never onto `Dimensions` or `Slot`.
+    // Backward motion from the first stop wraps to the last dimension, skipping both
+    // inert field rows.
     cx.simulate_keystrokes("k");
     cx.run_until_parked();
     assert!(
@@ -4820,7 +4780,7 @@ fn the_slot_and_dimensions_rows_are_not_cursor_stops(cx: &mut gpui::TestAppConte
         "and j comes back round to the first dimension"
     );
 
-    // The whole walk: every row the cursor can reach is a dimension row.
+    // Every cursor stop in this fixture is a dimension row.
     for _ in 0..8 {
         cx.simulate_keystrokes("j");
         cx.run_until_parked();
@@ -4831,8 +4791,7 @@ fn the_slot_and_dimensions_rows_are_not_cursor_stops(cx: &mut gpui::TestAppConte
     }
 }
 
-/// The mouse cannot reach what the keyboard cannot: a click on the `Slot` row does not
-/// move the cursor there (§17.1's parity rule, under the 2026-09-23 ruling).
+/// Clicking the inert Slot row leaves selection unchanged.
 #[gpui::test]
 fn a_click_on_the_slot_row_is_dropped(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4862,13 +4821,9 @@ fn a_click_on_the_slot_row_is_dropped(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// A filter keystroke re-ranks the rows under the cursor, and the mirror parks it on
-/// the top match — which can be a row that answers to nothing. The query mirror settles
-/// it (user ruling 2026-09-23), so the trader never types their way onto a dead row.
-///
-/// `l` matches the `Columns` header and the catalogue's `delta01` and nothing else, and
-/// the header ranks first — so the mirror's own reset to the top match lands on a row
-/// that answers to nothing, and the cursor has to come out the other side on `delta01`.
+/// Query mirroring resets selection to the first ranked match, then settles onto a stop
+/// when one exists. Here l ranks the inert Columns header before the available delta01
+/// row, so selection must advance to delta01.
 #[gpui::test]
 fn a_filter_keystroke_never_leaves_the_cursor_on_a_header(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4972,9 +4927,8 @@ fn cursor_to_last_visible_available_row(
         last < 39,
         "the fixture must be taller than the viewport for the test to mean anything"
     );
-    // rows: Dataset=0, Columns=1, book=2, npv=3, m0=4 … and the stage OPENS on `book`
-    // (the two rows above it answer to nothing and are not cursor stops since the
-    // 2026-09-23 ruling), so `m{last}` is `last + 2` presses of `j` from there.
+    // Rows are Dataset=0, Columns=1, book=2, npv=3, m0=4, and so on. Opening selects
+    // book, so m{last} is last + 2 downward steps away.
     let presses = vec!["j"; last + 2].join(" ");
     cx.simulate_keystrokes(&presses);
     cx.run_until_parked();
@@ -5049,9 +5003,7 @@ fn x_leaves_the_cursor_on_the_next_row_still_in_view(cx: &mut gpui::TestAppConte
     );
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // The stage opens on `book`, the view's first member: `Dataset` and the `Columns`
-    // header above it answer to nothing and are not cursor stops (user ruling
-    // 2026-09-23).
+    // The stage opens on book, skipping the inert Dataset choice and Columns header.
     assert_eq!(cursor_item_name(&shell, &cx).as_deref(), Some("book"));
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
@@ -6946,9 +6898,7 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // The stage opens on `book` (Dataset and the Columns header answer to nothing and
-    // are not cursor stops), so one `j` reaches `npv` — the column the dataset overlay
-    // above speaks for.
+    // Opening selects book; one j reaches npv, the column with the dataset overlay.
     cx.simulate_keystrokes("j enter");
     cx.run_until_parked();
     assert_eq!(
@@ -7700,8 +7650,8 @@ fn tab_completes_and_escape_cancels_a_choice_field(cx: &mut gpui::TestAppContext
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
-    // Every Colours row answers to something (a number, two choices and a bool), so
-    // the cursor walks them all: `j j` onto `Token`, whose `i` opens the typeahead.
+    // All Colours rows are stops in this fixture. Two j presses reach Token, whose i
+    // command opens its choice typeahead.
     cx.simulate_keystrokes("enter j j i");
     cx.run_until_parked();
     // A click on a row OTHER than the currently lit one is `tab` on
@@ -7917,19 +7867,9 @@ fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext
     );
 }
 
-/// Harness follow-up (2026-09-19): the test above no longer discriminates
-/// "`i` is offered per row" from "`i` is offered on every row" — Task 2
-/// made a multi-option `Choice` `StepsAndTypes`, so every row that test
-/// looks at (a `Number`, then a `Choice`) is one the button legitimately
-/// paints on. The row that needs checking is one the cursor can rest on
-/// which still offers no `i`, so that `objectdialog: the i button is
-/// offered per row, not per domain`'s mutation (`types` forced to
-/// `true`) paints a button where there should be none.
-///
-/// That row is a LIST ITEM — a Scopes dimension — since the 2026-09-23
-/// ruling: a read-only `Text` row (Scopes' own summaries, which this
-/// test used to sit on) answers to nothing at all, so the cursor no
-/// longer stops there and no button block is painted for it.
+/// The i button follows the selected row's typing vocabulary. A Scopes dimension is a
+/// cursor stop for ticking and opening Values, but offers no typed-entry command. This
+/// distinguishes row-based availability from a domain-wide i button.
 #[gpui::test]
 fn the_i_button_is_withheld_on_a_list_item_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7939,8 +7879,7 @@ fn the_i_button_is_withheld_on_a_list_item_row(cx: &mut gpui::TestAppContext) {
         dir.path(),
         "config::scopes",
     );
-    // Into `mine`'s edit stage — the only saved scope, so already selected — cursor on
-    // the `book` dimension, the first row that answers to anything.
+    // Open mine, the only saved scope, on its first dimension, book.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
@@ -7972,9 +7911,8 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
         dir.path(),
         "config::views",
     );
-    // `mine` opens on `book`, its first column — the rows above answer to nothing and
-    // are not cursor stops (user ruling 2026-09-23) — and `j` steps onto `npv`, so the
-    // click below is a real move away from the cursor when it is allowed to land.
+    // Opening selects book; j selects npv. Clicking book would move selection and open
+    // its column stage if no confirmation were armed.
     cx.simulate_keystrokes("enter j");
     cx.run_until_parked();
     let before = edit_draft(&shell, &cx, |d| d.selected);
@@ -7983,8 +7921,7 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-confirm").is_some());
 
-    // Another member row — one the click would move onto and open, were the question
-    // not standing. The cursor stays where it was.
+    // Confirmation blocks a member click that would otherwise select and open it.
     let row = cx
         .debug_bounds("objectdialog-item-book")
         .expect("a row paints");
@@ -8338,10 +8275,8 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
         cx.debug_bounds("objectdialog-hint-reorder").is_some(),
         "a member row can be reordered"
     );
-    // Down past the members onto an available candidate. It is a cursor stop — `space`
-    // adds it — but it is not yet one of the view's own columns, so there is nothing to
-    // reorder. (The rows that answer to nothing at all, the Dataset row and the Columns
-    // header, cannot be reached at all since the 2026-09-23 ruling.)
+    // An available candidate is a stop because space adds it, but it has no member
+    // position to reorder. The inert Dataset choice and Columns header are skipped.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     assert!(
@@ -8427,7 +8362,7 @@ fn the_scopes_dimensions_list_offers_no_reorder_chip(cx: &mut gpui::TestAppConte
         "config::scopes",
     );
     cx.simulate_keystrokes("enter");
-    // The stage opens ON `book` — the `Dimensions` header is no longer a cursor stop.
+    // The stage opens on book, skipping the inert Dimensions header.
     cx.run_until_parked();
     assert!(
         cx.debug_bounds("objectdialog-hint-reorder").is_none(),
@@ -9355,28 +9290,11 @@ fn the_help_line_is_blank_under_an_armed_confirm(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// User report 2026-09-19: moving the cursor from an editable row to a
-/// read-only one dropped the footer's edit row, so the dialog shrank by a
-/// line and everything below it shifted. Every hint row is now laid out
-/// every time — an empty one painted blank at the same height — so the
-/// go row sits at one y whichever row is selected.
-///
-/// Final review, Important 2: this used to also catch a second,
-/// unrelated collapse — `action_bar` (§20.3's button row, ABOVE the
-/// footer) shrinks to 0 px on a row `actions()` offers nothing for,
-/// since an `h_flex` with no children has no height of its own. A
-/// read-only `Text` with no verb is that row, so the bar's own height
-/// used to move the footer with it — the exact "everything below it
-/// shifted" bug this test guards, one level up. `action_bar` now
-/// reserves a small button's height whether or not it has any buttons.
-///
-/// Since the 2026-09-23 ruling the cursor cannot rest on such a row
-/// unless it is the only one left, so both halves narrow the list to
-/// exactly one row — `priority`, which has verbs, then `adapter`, which
-/// has none. The list above the footer is then the same height in each,
-/// which is what keeps `go`'s y comparable; the half-pixel tolerance is
-/// the two rows rounding their own heights differently, against a defect
-/// that moves the footer by a whole hint row.
+/// Empty footer rows and an action bar with no buttons retain their height. Compare a
+/// typed choice row with an inert text row, each isolated by a filter so both lists
+/// have one row. With no stops remaining, the inert row can stay selected. The Go row
+/// must remain within one pixel of its previous position; a missing footer row or
+/// collapsed action bar would shift it substantially.
 #[gpui::test]
 fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     cx: &mut gpui::TestAppContext,
@@ -9386,9 +9304,8 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
         dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // Both halves of this test filter to ONE row, so the list above the footer is the
-    // same height in each and `go`'s y can be compared absolutely. First `priority`, a
-    // `Choice`: the edit row names the step keys.
+    // Filter to one row in each comparison so list height is comparable. Priority is a
+    // Choice whose footer teaches value stepping.
     cx.simulate_keystrokes("/");
     cx.simulate_input("priority");
     cx.run_until_parked();
@@ -9403,11 +9320,9 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
     let go_before = cx.debug_bounds("hint-row-go").unwrap();
     let edit_before = cx.debug_bounds("hint-row-edit").unwrap();
 
-    // Now `adapter` alone, a read-only `Text` with no verb: nothing to edit, so the
-    // edit row is empty — but still there, same height. A filter is how the cursor
-    // reaches such a row at all since the 2026-09-23 ruling (it is not a cursor stop,
-    // and a list with no stop left leaves the cursor where it is); `enter` keeps the
-    // filter and hands the keys back, so the footer paints the row's own vocabulary.
+    // Filter to adapter alone. With no cursor stops left it remains selected, and its
+    // empty edit-hint row must retain its height. Enter accepts the filter and returns
+    // to Normal to expose that row's vocabulary.
     cx.simulate_keystrokes("/");
     cx.simulate_keystrokes("backspace backspace backspace backspace");
     cx.simulate_keystrokes("backspace backspace backspace backspace");
@@ -9432,11 +9347,8 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
         "an empty row keeps a full row's height"
     );
     let go = cx.debug_bounds("hint-row-go").unwrap();
-    // Within half a pixel rather than exactly equal: the two halves sit on different
-    // rows now (the ruling of 2026-09-23 put the verbless row behind a filter, so the
-    // comparison row had to become another filtered one), and a row that paints a
-    // value chip rounds its own height half a pixel differently from one that paints
-    // plain text. The defect this guards moves the footer by a whole hint row, ~20px.
+    // Allow subpixel layout differences between value-chip and plain-text rows. A
+    // collapsed hint row or action bar would move the footer by much more.
     assert!(
         (go.origin.y - go_before.origin.y).abs() < gpui::px(1.0),
         "so nothing below it moves: {} vs {}",

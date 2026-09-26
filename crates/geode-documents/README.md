@@ -13,15 +13,15 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `cvi` | `CviKind`: the CVI parameter document (`marketData/underlying`, `cviParams/anchorDate`, `spotRef`, `nodes/node*`, `slices/slice*` with a `term`, one `forward`/`atm`/`skew` per slice and one `param` per node). |
-| `dividend` | `DividendKind`: the dividend-schedule document (`marketData/underlying`, `dividends/currency`, `scheduleDate`, one `dividend` per row with `exDate`, `announcedDate`, `payDate`, `amount`, `status`). The wire carries no row id; `mint_ids` mints the `dividend_id` axis from each row's `exDate` at parse (`#n` for the `n`th row sharing a date, feed order), so a row's identity never depends on an upstream id that arrives late, repeats, or is absent. An inbound `<id>` is simply an unrecognised element. |
+| `dividend` | `DividendKind`: currency, schedule date, and dividend rows carrying ex date, announced date, pay date, amount, and status. `mint_ids` derives row labels from ex date and same-date order; ids are not carried on the wire. |
 
-The parser is a hand-written `quick_xml` event walk rather than a serde
-derive for three reasons: the ragged-slice rule needs
-both counts in the error, the unknown-element rule needs the path of the
-element that was skipped, and the parse lands straight in struct-of-arrays
-`DocumentRows` with nothing allocated per row. The file is expected to be
-regenerated from the desk's XSD later, behind the same two functions
-(roadmap ruling 8). The shape of the seam is what matters.
+The parsers walk `quick_xml` events and return columnar `DocumentRows`.
+They report ragged CVI slices with both counts and collect paths for skipped
+unknown elements. Writers validate the supplied vocabulary and column shapes
+before emitting the supported wire format. Parsing and writing preserve
+supported document values, not original XML bytes or unknown extensions.
+Source-startup compatibility and publication validation have separate
+responsibilities; see [document validation and storage](../../docs/current/data-path.md#document-validation-and-storage).
 
 ## Commands
 
@@ -32,12 +32,14 @@ cargo bench -p geode-documents     # document parse and write
 
 ## Rules this crate pins
 
-- CVI wire tag names are an assumption until the desk's XSD arrives.
-  `SLICE_VALUES` in `src/cvi.rs` is the one place to change them.
-- A parse failure is reported per `(source, path)` and never panics.
-- A kind produces `DocumentRows` and writes them back byte for byte
-  through the same trait, which is what lets the demo bus in `geode-app`
-  exercise the real subscribed-source path with no broker.
+- CVI and dividend wire tag names remain unverified against the desk's XSD.
+  `SLICE_VALUES` in `src/cvi.rs` and `TAGS` in `src/dividend.rs` pair wire
+  tags with column names for both parser and writer.
+- Parse and write failures return typed errors; the data service owns source
+  health and diagnostic routing.
+- The same kind writes demo and uploaded documents and parses subscribed
+  documents, so the in-process bus exercises the normal wire path. XML
+  formatting and unknown elements are not retained.
 - `mint_ids` is the one door that assigns a dividend its `dividend_id`; a
   minted id is stable only while its ex date and its ordinal among that
   date's rows are unchanged, and never begins `new-` so it cannot collide

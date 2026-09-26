@@ -11,7 +11,8 @@ reload acceptance gate, which does not run every typed reader.
 ## Dataset families and validation
 
 [`SchemaSpec::from_doc`](../../crates/geode-core/src/schema/mod.rs) reads
-`datasets.toml`. An omitted family defaults to `measures`.
+`datasets.toml`. Its reserved `config_version` entry is skipped rather than
+parsed as a dataset. An omitted family defaults to `measures`.
 
 | Family | Shape and validation |
 |---|---|

@@ -4,11 +4,12 @@
 //! request loop. One worker per target runs its uploads one at a time, in
 //! submission order, behind a queue of [`EGRESS_QUEUE_BOUND`] waiting jobs.
 //!
-//! Every upload answers exactly one `DataEvent::Upload`. A refusal decided on
-//! the service thread (unknown target, unaccepted document, missing kind,
-//! write error, full queue) answers at once; a transport result answers from
-//! the worker. Each `Err` names the target, so the asking tile can report it
-//! without knowing the configuration.
+//! A serviced upload normally emits one `DataEvent::Upload`. Validation,
+//! serialization, and queue refusals answer on the service thread; transport
+//! results answer from the worker. Transport panics become errors naming the
+//! target, and the worker continues with queued jobs. Serialization has no panic
+//! boundary, neither call has a timeout, and the event sink can refuse an outcome.
+//! There is no automatic retry.
 //!
 //! Shutdown drops the job senders and joins the workers. A worker finishes
 //! the jobs already queued first, so shutdown can wait on a slow transport;
@@ -107,8 +108,8 @@ pub(crate) struct EgressWorkers {
     sink: EventSink,
 }
 
-/// Log and deliver one upload result. The only door an outcome leaves by,
-/// so every path logs and answers exactly once.
+/// Log one result and offer its outcome to the event sink. Sink refusal is
+/// ignored here; logging does not establish that the tile received the outcome.
 fn answer(
     sink: &EventSink,
     target: &str,
@@ -138,10 +139,9 @@ fn answer(
 
 fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: EventSink) {
     while let Ok(job) = jobs.recv() {
-        // A transport is foreign code, so a panic here is a failure of this
-        // upload rather than of the worker. Uncontained it would unwind past
-        // `answer`, breaking the one-answer-per-upload contract, drop the
-        // receiver, and strand every queued job unanswered.
+        // Convert transport panics into this upload's error and keep servicing the
+        // queue. Mark the catch boundary so the app logs a contained panic without
+        // creating a crash report.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
         })) {
@@ -164,10 +164,10 @@ fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: Ev
 }
 
 impl EgressWorkers {
-    /// One worker per spec, owning that adapter's egress. A spec whose
-    /// adapter is missing or has no egress side (only reachable from a
-    /// config built in code; `resolve` drops them from files) keeps its
-    /// name, so uploads to it answer why rather than "unknown target".
+    /// Start one transport worker per target. Missing adapters, unavailable
+    /// egress handles, and thread-start failures retain the target's name and
+    /// reason so subsequent uploads can report the startup failure. The earlier
+    /// `resolve` check obtains a separate handle and cannot guarantee this succeeds.
     pub(crate) fn spawn(specs: &[EgressSpec], adapters: &AdapterRegistry, sink: EventSink) -> Self {
         let mut targets = HashMap::new();
         for spec in specs {
@@ -209,8 +209,10 @@ impl EgressWorkers {
         EgressWorkers { targets, sink }
     }
 
-    /// Resolve, write and queue one upload. Every refusal here answers its
-    /// own `DataEvent::Upload`; an accepted job answers from the worker.
+    /// Resolve, serialize, and queue an upload. Validation and queue refusals
+    /// offer an error outcome on the service thread. The worker offers the
+    /// transport result if it completes; panic and blocked-call limits are
+    /// described in the module documentation.
     pub(crate) fn upload(&self, p: UploadParams, documents: &DocumentRegistry) {
         let document_key = p.rows.key.join("/");
         let refuse = |message: String| {
@@ -636,10 +638,8 @@ mod tests {
     /// the assertion and the panic that produced it cannot drift apart.
     const UPLOAD_PANIC: &str = "the transport fell over";
 
-    /// An egress whose `upload` PANICS rather than answering `Err` — the
-    /// failure a real transport has that a `Result` does not describe. The
-    /// boundary is only observable through the panic it contains, so the
-    /// fixture has to be the thing that panics.
+    /// Panic for the configured number of calls, then succeed. The fixture
+    /// exercises both the error outcome and continued use of the same worker.
     struct PanickingEgress {
         panics_left: usize,
     }

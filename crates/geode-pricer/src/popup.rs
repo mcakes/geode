@@ -1,11 +1,10 @@
-//! The tile's popups (spec §8.4–§8.5): the choice typeahead under an
-//! editing cell, and the action menu. Rows are prepared when
-//! the list changes, never formatted in render.
+//! Cell choice typeahead and the tile's action menu. Prepared rows are refreshed when
+//! list state changes; rendering consumes those rows.
 
 use crate::paint::Paints;
 use crate::tile::PricerTile;
 use geode_shell::choice::ChoiceList;
-use geode_shell::shell::scale;
+use geode_shell::shell::{kbd, scale};
 use gpui::prelude::*;
 use gpui::{
     Anchor, AnchoredPositionMode, App, Div, Entity, Hsla, MouseButton, SharedString, anchored,
@@ -15,8 +14,7 @@ use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
 
 const ROW_HEIGHT: f32 = 26.0;
 const ROW_INSET: f32 = 8.0;
-/// The market-data action list's width, so the two menus a trader moves
-/// between share one geometry (and the trailing key lane has room).
+/// Minimum popup width, including space for action titles and trailing key hints.
 const MIN_WIDTH: f32 = 240.0;
 /// The leading tick slot on a `View` row: the same width ticked or not,
 /// so the view names share one leading edge.
@@ -103,9 +101,7 @@ pub(crate) fn render_choice(
                         tile.update(cx, |t, cx| t.choice_pick(i, window, cx))
                     }
                 })
-                // The highlight follows the pointer (market-data's
-                // `choice_hover`), so a hovered row and the highlighted
-                // one are never two different rows.
+                // Keep pointer and keyboard selection on the same typeahead highlight.
                 .on_mouse_move({
                     let tile = tile.clone();
                     move |_, _, cx| tile.update(cx, |t, cx| t.choice_hover(i, cx))
@@ -123,17 +119,15 @@ pub(crate) fn render_choice(
     .with_priority(1)
 }
 
-/// One row of the action menu (spec §8.5's `.`; planning decision 22).
-/// Only `Action` and `View` rows take the highlight; a `Separator` or
-/// `Section` is structure the highlight steps over.
+/// Prepared action-menu row. Action and View rows accept the highlight; separators and
+/// section headings are structural only.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum MenuItem {
     Action {
         id: &'static str,
         title: &'static str,
-        /// The default key, painted muted in the trailing lane (the
-        /// market-data list's convention); a disabled row paints its
-        /// reason there instead.
+        /// Default key hint in the trailing lane, replaced by the refusal reason when
+        /// the action is disabled. User rebinding does not change this hint.
         hint: &'static str,
         enabled: Result<(), &'static str>,
     },
@@ -152,8 +146,8 @@ impl MenuItem {
         matches!(self, MenuItem::Action { .. } | MenuItem::View { .. })
     }
 
-    /// Where the keyboard highlight may land: a pickable row that is not
-    /// disabled.
+    /// Whether keyboard stepping may select this row: enabled actions and view choices
+    /// qualify.
     fn lands(&self) -> bool {
         matches!(
             self,
@@ -171,11 +165,9 @@ pub(crate) struct Menu {
     pub highlighted: usize,
 }
 
-/// Move `delta` enabled rows from `from`, clamped at either end — a
-/// disabled row, a separator and a section header are all stepped over
-/// (user report 2026-09-25: `j` onto a greyed row cost an extra key). A
-/// highlight the pointer left on a disabled row steps from where it
-/// stands; with no enabled row further that way it stays put.
+/// Starting at `from`, move `delta` enabled rows, skipping disabled actions, separators,
+/// and section headers. Clamp at either end. If the current highlight is disabled, search
+/// from that position; with no enabled row in the requested direction, retain it.
 pub(crate) fn step(items: &[MenuItem], from: usize, delta: isize) -> usize {
     let mut at = from;
     for _ in 0..delta.unsigned_abs() {
@@ -192,8 +184,9 @@ pub(crate) fn step(items: &[MenuItem], from: usize, delta: isize) -> usize {
     at
 }
 
-/// `at`, or the nearest pickable row before it (after it, if none
-/// precedes it) — where a highlight lands when the list changes under it.
+/// Keep at or find the nearest pickable row before it, then after it, when rebuilding
+/// the list. Disabled actions remain pickable here; keyboard stepping separately
+/// requires enabled rows.
 pub(crate) fn snap(items: &[MenuItem], at: usize) -> usize {
     let at = at.min(items.len().saturating_sub(1));
     (0..=at)
@@ -212,13 +205,9 @@ pub(crate) struct MenuRowPaint {
     pub lane: Hsla,
 }
 
-/// The market-data list's rule (`MenuItemElement`'s): the `accent` fill
-/// only on a highlighted ENABLED row. A disabled row never answers the
-/// pointer or the keyboard with a fill — the design guide's "no
-/// misleading hover/pressed response" — so a highlight the POINTER leaves
-/// on it (`enter` there answers with the reason, which its trailing lane
-/// already shows) paints muted on the bare popover. The keyboard never
-/// lands there: [`step`] skips disabled rows.
+/// Only highlighted, enabled rows receive accent fill. Disabled actions can hold the
+/// logical highlight and report their reason when picked, but remain muted on the
+/// popover background. Keyboard stepping skips disabled rows.
 pub(crate) fn menu_row_paint(
     highlighted: bool,
     enabled: bool,
@@ -244,19 +233,12 @@ pub(crate) fn menu_row_paint(
     }
 }
 
-/// The `.` action menu (planning decision 22), anchored under the
-/// header's right edge by the caller. The pricer's own row door
-/// (`render_choice`'s shape) rather than the market-data popup, which
-/// this crate may not import (CLAUDE.md); `deferred`/`anchored` escapes
-/// the table's clip and paints above it, the same as `render_choice`
-/// (review finding: a bare surface here was occluded by the `DataTable`,
-/// a later sibling).
+/// Render the action menu below the header's right edge. Deferred anchored painting
+/// escapes table clipping and places the menu above later siblings.
 ///
-/// The menu family's highlight (`shell::listrow`'s doc: menus wear
-/// `accent`, lists the list pair), moved by the pointer as by `j`/`k`,
-/// so there is no separate hover fill to disagree with it. See
-/// [`menu_row_paint`] for a disabled row. Every text colour here is
-/// floored against the ground it paints on (`Paints`'s menu colours).
+/// Pointer movement and keyboard navigation share one highlight. Enabled rows use
+/// accent fill; [`menu_row_paint`] keeps disabled rows unfilled. Prepared menu text
+/// colours are adjusted against their actual backgrounds.
 pub(crate) fn render_menu(
     m: &Menu,
     paints: &Paints,
@@ -275,7 +257,7 @@ pub(crate) fn render_menu(
         let (title, lane, enabled, tick): (SharedString, &'static str, bool, Option<bool>) =
             match item {
                 MenuItem::Separator => {
-                    // `PopupMenu`'s own separator (the market-data list's).
+                    // Separate action groups with the standard popup divider.
                     list = list.child(
                         div()
                             .my_0p5()
@@ -326,9 +308,8 @@ pub(crate) fn render_menu(
                     tile.update(cx, |t, cx| t.menu_pick(i, window, cx))
                 }
             })
-            // The mouse form of `j`/`k` (market-data's `menu_hover`): the
-            // highlight follows the pointer, disabled rows included — a
-            // hover is a hover, and `enter` there answers with the reason.
+            // Pointer movement updates the logical highlight, including disabled
+            // actions; picking a disabled action reports its reason.
             .on_mouse_move({
                 let tile = tile.clone();
                 move |_, _, cx| tile.update(cx, |t, cx| t.menu_hover(i, cx))
@@ -350,7 +331,13 @@ pub(crate) fn render_menu(
                 div()
                     .text_color(paint.lane)
                     .debug_selector(move || format!("pricer-menu-lane-{i}"))
-                    .child(lane),
+                    // An enabled row's key (or `:` verb) as menu chips; a
+                    // disabled row's reason as text.
+                    .child(if enabled {
+                        kbd::menu_spec(lane, paint.lane)
+                    } else {
+                        lane.into_any_element()
+                    }),
             );
         list = list.child(row);
     }

@@ -1,39 +1,20 @@
-//! The tile's one overlay (spec §9.5–§9.8): the series list
-//! ([`Popup::Series`], §9.5), the add picker ([`Popup::Picker`], §9.6),
-//! the expression field ([`Popup::Expr`], §9.7), the custom dates editor
-//! ([`Popup::Range`], §9.8), the three menus ([`Popup::Menu`] — the
-//! action list, the range menu and the frequency menu, one painter) and
-//! the colour picker ([`Popup::Colour`] — gpui-component's own, which
-//! this module does not paint).
+//! State and painting for six mutually exclusive transient surfaces: series
+//! list, add picker, expression field, custom dates editor, the menus (action
+//! list, range menu and frequency menu, one painter), and colour picker.
 //!
-//! **Four of the six hold the keyboard.** The add picker's and the
-//! expression field's `InputState`s are tile-owned and focused, the
-//! dates editor owns a bare [`gpui::FocusHandle`] with its two date
-//! fields' keys on it, and the colour picker's popover and hex field
-//! sit under the component state's handle; all four put the tile's key
-//! context into `insert` mode — and all four are why
-//! `TimeseriesTile::close_popup_with_window` is the ONE closer: a
-//! focused handle dropped without a blur leaves `Window::focused`
-//! pointing at nothing for the rest of the session (CLAUDE.md). The
-//! series list and the menus hold no field and keep the tile's own
-//! keyboard.
+//! Add/expression inputs, the dates editor's container, and the component
+//! colour picker use insert-mode routing. Series and the menus retain normal
+//! mode with popup-specific context. The shared closer blurs only a popup that
+//! owns focus. Colour-picker ownership includes focused descendants such as its
+//! hex field.
 //!
-//! **One popup at a time, and it is prepared, never formatted.** The
-//! list's rows are built in the tile's `rebuild_chrome` — the same door
-//! the header's chips go through, on the same changes — so a row's
-//! label, its `source · rule`, its axis letter, its state word and its
-//! already-resolved swatch are `SharedString`s and `Hsla`s the painter
-//! clones. Resolving a slot's colour costs a `Palette::from_theme` plus
-//! the named-colour wheel; doing that per frame for an open list would
-//! pay it for a value that moves only when the model or the theme does
-//! (the header module's own rule).
+//! Series labels, state text, and swatches are prepared alongside header chips.
+//! Picker labels, menu rows, and date segments are also prepared outside render.
+//! Series/picker rows share row_shell; menu rows add disabled reasons and toggles.
 //!
-//! The surface is the market-data popup's, deliberately: gpui-
-//! component's `popover_style` with `PopupMenu`'s row geometry on
-//! Geode's rem scale, `deferred(anchored(..))` so it escapes the tile's
-//! clip and paints above its neighbours, `occlude()` so the chart below
-//! stops hit-testing under it, and an `on_mouse_down_out` into the ONE
-//! closer. No animation, no gpui-component `Dialog`.
+//! The lists, add picker, and range editor use deferred anchored popovers above
+//! the chart. Expressions paint inline below the header. The component colour
+//! picker replaces its target chip's swatch and owns its own popup surface.
 
 use std::rc::Rc;
 
@@ -54,16 +35,13 @@ use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
-use crate::core::menu::{MenuKind, MenuRow};
+use crate::core::menu::{MenuKind, MenuRow, Trailing};
 use crate::core::model::{Colour, Model, SlotState};
 use crate::tile::TimeseriesTile;
 
-/// A row's height, in pixels at the design rem — gpui-component's own
-/// `PopupMenu` item height, so this popup keeps the menu family's
-/// geometry (design guide: "preserve the component family's geometry")
-/// while following Geode's rem.
+/// Menu-row height in pixels at the design rem, scaled with Geode's UI.
 const ROW_HEIGHT: f32 = 26.0;
-/// A row's horizontal inset — `PopupMenu`'s `INNER_PADDING`.
+/// Horizontal row inset at the design rem.
 const ROW_INSET: f32 = 8.0;
 /// The popup's minimum width at the design rem.
 const MIN_WIDTH: f32 = 240.0;
@@ -72,45 +50,35 @@ const SWATCH: f32 = 8.0;
 /// The `from`/`to` label column in the dates editor, at the design rem.
 const LABEL_WIDTH: f32 = 32.0;
 
-/// The gpui key context the dates editor's container carries — the
-/// scope `crate::init`'s `tab`/`shift+tab` reclaim is bound in, and the
-/// only place in this crate that needs one (every other key the tile
-/// resolves goes through the shell's matcher, not gpui's).
+/// Dates-editor key context. `crate::init` unbinds GPUI's focus-cycling
+/// Tab actions here so the container can switch its two date fields.
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 
-/// The dates editor's one hint line: `tab` and `escape` do things a
-/// trader cannot see from the two fields alone.
-const RANGE_HINT: &str = "tab switches · enter applies · escape goes back";
+/// The dates editor's hint: `tab` and `escape` do things a trader cannot see
+/// from the two fields alone. Backtick-quoted runs are keys, painted as chips
+/// by `kbd::marked`.
+const RANGE_HINT: &str = "`tab` switches · `enter` applies · `escape` goes back";
 
-/// What the tile currently has open. `Series` is the series list (spec
-/// §9.5) — it holds no field, so it is NOT an insert-mode popup: the key
-/// context stays `normal` and gains a `popup == series` pair, which is
-/// what its three keys bind against. `Picker` (§9.6) and `Expr` (§9.7)
-/// each own a focused field and `Range` (the custom dates editor, §9.8)
-/// its own focus handle, so all three report `insert` and none takes a
-/// `popup` pair: their keys are the shared `mode == insert` layer's
-/// (`enter`/`escape`/`up`/`down`) plus, for `Range`, its own container
-/// listener — the market-data panel's own split.
+/// Mutually exclusive transient state. Series and Menu add their popup pair
+/// to normal-mode context (a menu also its `menu` kind pair). Picker, Expr,
+/// Range (the custom dates editor), and Colour use insert routing; Range and
+/// the component colour picker also own their focused key handlers.
 pub(crate) enum Popup {
     Series(SeriesPopup),
     Picker(PickerState),
     Expr(ExprField),
     Range(RangePopup),
-    /// A menu — the action list, the range menu or the frequency menu
-    /// ([`MenuKind`]): fieldless like the series list, keyed by
-    /// `popup == menu` plus a `menu` pair naming the kind.
+    /// Fieldless menu — the action list, the range menu or the frequency menu
+    /// ([`MenuKind`]) — routed through `popup == menu` and a `menu` kind pair.
     Menu(MenuState),
-    /// gpui-component's colour picker, open over one slot's chip. Not
-    /// an overlay this module paints: the header draws the
-    /// `ColorPicker` element in place of the target chip's swatch, and
-    /// the component's popover owns its own surface and keys.
+    /// Component colour picker anchored at one slot's chip. The header renders
+    /// its trigger in place of that chip's swatch; the component owns the popover.
     Colour(ColourPick),
 }
 
-/// Which popup is up, without its state: what a painted popup's
-/// `on_mouse_down_out` hands the tile, so the press closes that popup
-/// only if it is STILL the one up. A menu carries its kind — two menus
-/// are different popups.
+/// Which popup is up, without its state: what a painted popup's outside-press
+/// listener hands the tile, so the press closes that popup only if it is still
+/// the one up. A menu carries its kind; two menus are different popups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PopupKind {
     Series,
@@ -121,39 +89,31 @@ pub(crate) enum PopupKind {
     Colour,
 }
 
-/// The colour picker, open for slot `target` — what the header needs
-/// to draw it: the chip it stands in, the featured row
-/// ([`PickContext::featured`]'s colours, prepared once for
-/// `ColorPicker::featured_colors`) and the component state.
+/// Header paint state for a colour picker: target slot number, featured swatches
+/// resolved at open, and the reusable component state.
 pub(crate) struct ColourPick {
     pub target: u8,
     pub swatches: Vec<Hsla>,
     pub picker: Entity<ColorPickerState>,
 }
 
-/// What a colour the picker commits is written against, captured at
-/// open and kept by the tile PAST the popup's close: the hex field's
-/// `enter` closes the popover (the action propagates to it) in the same
-/// keystroke whose `Change` arrives a beat later, so a context that
-/// died with the popup would drop that commit.
+/// Commit context captured at open and retained after popup closure. Hex Enter
+/// can close before its Change event arrives; dropping this context on close
+/// would lose that commit.
 ///
-/// `target` is the slot NUMBER, not the cursor: the cursor may move
-/// while the picker is up (a `:` line, a chip click behind it), and a
-/// pick still lands on the slot it was opened for — a number is never
-/// reused while any slot lives. `featured` is the five palette colours
-/// then every `[colours]` name, each resolved against the theme as it
-/// stood, so an exact `Hsla` match maps a pick back to the
-/// theme-following colour it came from (`core::colour_from_pick`).
+/// Target is a slot number, independent of cursor movement. Featured entries are
+/// the palette followed by configured names, resolved with the opening theme.
+/// Their snapshot maps near-equal picked RGB bytes back to theme-following choices;
+/// the current painted target color is checked separately for no-op commits.
 #[derive(Clone)]
 pub(crate) struct PickContext {
     pub target: u8,
     pub featured: Vec<(Hsla, Colour)>,
 }
 
-/// A menu's state: which menu it is, its prepared rows (`core::menu`,
-/// hints and the frequency rows' cap refusals resolved at open, never in
-/// `render`) and the highlighted index the keyboard and the pointer
-/// share.
+/// A menu's kind, prepared rows and the highlighted index shared by keyboard
+/// and pointer. Rows, including binding hints and the frequency rows' cap
+/// refusals, refresh at open, on chrome rebuilds and on frame changes.
 pub(crate) struct MenuState {
     pub kind: MenuKind,
     pub rows: Vec<MenuRow>,
@@ -161,40 +121,29 @@ pub(crate) struct MenuState {
 }
 
 impl Popup {
-    /// Whether this popup holds the keyboard as a text field — what puts
-    /// the tile's key context into `insert` mode.
+    /// Whether this popup requires insert-mode routing. Actual keyboard ownership
+    /// is checked separately by [`Self::holds_focus`].
     pub(crate) fn is_insert(&self) -> bool {
         match self {
             Popup::Series(_) | Popup::Menu(_) => false,
-            // The dates editor holds no `InputState`, but it DOES hold
-            // the keyboard — its own focus handle, with the two date
-            // fields' keys on it — so it is an insert popup in every
-            // sense the shell and the `popup_survives` gate care about.
-            // The picker's popover takes the keyboard (its hex field,
-            // its swatches): typing there must never reach the tile's
-            // bare-key verbs, which is what `insert` routes away.
+            // The dates editor owns a focus handle and Colour owns a component
+            // focus subtree; both require insert routing just as focused text
+            // inputs do.
             Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => true,
         }
     }
 
-    /// Whether one of this popup's own inputs holds WINDOW focus right
-    /// now (`TileContent::holds_focus`'s ownership half) — answered off
-    /// the focus handle, never off the mode: a tile-focus move can leave
-    /// a field open without the keyboard (the market-data panel's I-3).
+    /// Check actual window focus, independently of insert mode. A popup may
+    /// remain open after focus has moved to another surface.
     pub(crate) fn holds_focus(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
         match self {
-            // No field: the tile itself keeps the keyboard, which is
-            // what lets `j`/`k` reach the matcher at all.
+            // Fieldless popups use the shell matcher rather than an input handle.
             Popup::Series(_) | Popup::Menu(_) => false,
             Popup::Picker(p) => p.input.read(cx).focus_handle(cx).is_focused(window),
             Popup::Expr(f) => f.input.read(cx).focus_handle(cx).is_focused(window),
-            // Its own handle, not an `InputState`'s: the segmented
-            // fields are pure state and the CONTAINER is what is
-            // focused (the market-data date field's shape).
+            // The container owns focus; date fields are pure state.
             Popup::Range(r) => r.focus.is_focused(window),
-            // The component's root tracks the state's handle, and its
-            // popover surface and hex field sit beneath it in the
-            // dispatch tree — so "contains", not "is".
+            // Include descendants: the popover and hex input focus beneath the state handle.
             Popup::Colour(c) => c
                 .picker
                 .read(cx)
@@ -237,9 +186,7 @@ impl Popup {
     }
 }
 
-/// Which of the dates editor's two date fields the keyboard is on
-/// (spec §9.8). `tab`/`shift+tab` move between them; everything else a
-/// keystroke does, it does to this one.
+/// The date field receiving range edits. Tab and Shift-Tab switch fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Which {
     From,
@@ -262,12 +209,8 @@ impl Which {
     }
 }
 
-/// One date field's painted segments plus its selector — prepared
-/// whenever the field changes, never in `render` (the market-data
-/// panel's `DateFieldPaint`, spelled the same way so the two cannot
-/// drift). `segments` is an `Rc<[SegmentText]>`: the painter takes it
-/// straight through, so a frame costs a refcount bump rather than a
-/// `Vec` of six `SegmentText`s.
+/// Prepared date segments and a tile/field-specific selector. Rebuilt when
+/// field state changes; rendering shares the Rc slice without rebuilding segments.
 pub(crate) struct DateFieldPaint {
     pub segments: Rc<[SegmentText]>,
     pub selector: SharedString,
@@ -282,18 +225,11 @@ impl DateFieldPaint {
     }
 }
 
-/// The custom dates editor (spec §9.8): two segmented date fields and
-/// the inline refusal a bad commit leaves behind. It opens on `from`'s
-/// day segment and a digit types into the date at once; the presets
-/// are the range menu's, one `escape` away.
-///
-/// It holds no `InputState` — the fields are `geode-widgets`' pure
-/// state — so the KEYBOARD is its own [`FocusHandle`], tracked on the
-/// popup's container with an `on_key_down` listener over it. That is the
-/// market-data date field's shape, and the reason
-/// `TimeseriesTile::close_popup_with_window` is still the one closer: a
-/// focused handle dropped without a blur leaves `Window::focused`
-/// pointing at nothing for the rest of the session (CLAUDE.md).
+/// The custom dates editor: two segmented dates and inline commit errors. It
+/// opens on `from`'s day segment and digits type into the date at once; the
+/// presets are the range menu's, one `escape` away. The container owns one focus
+/// handle and routes keys to the active pure field; closing must blur that
+/// handle before dropping it if it still owns focus.
 pub(crate) struct RangePopup {
     pub from: DateTimeField,
     pub to: DateTimeField,
@@ -301,10 +237,7 @@ pub(crate) struct RangePopup {
     pub focus: FocusHandle,
     pub from_paint: DateFieldPaint,
     pub to_paint: DateFieldPaint,
-    /// A backwards range, an unfinished segment or the point cap —
-    /// painted UNDER the fields, like the expression field's parse
-    /// error, because the popup stays open and the reason belongs
-    /// beside what caused it.
+    /// Commit refusal displayed below the fields while the popup remains open.
     pub error: Option<SharedString>,
 }
 
@@ -324,14 +257,13 @@ impl RangePopup {
         }
     }
 
-    /// `tab`/`shift+tab`: with two fields both directions are the same
-    /// move.
+    /// Switch active fields. With two fields, Tab and Shift-Tab perform the
+    /// same switch.
     pub(crate) fn switch(&mut self) {
         self.active = self.active.other();
     }
 
-    /// Apply one key to the active field, re-preparing that field's
-    /// segments.
+    /// Apply a key and refresh the active field's prepared segments.
     pub(crate) fn apply(&mut self, key: geode_widgets::datefield::FieldKey, tile_id: u64) {
         let which = self.active;
         self.active_field_mut().apply(key);
@@ -357,39 +289,30 @@ impl RangePopup {
     }
 }
 
-/// Which of the picker's two lists is up (spec §9.6). `Sources` carries
-/// the identity the trader typed — it is not in any catalogue, so the
-/// second step is the only place it can be paired with a source.
+/// Catalogue identities or source choices for a typed identity. Sources
+/// retains the identity while the user chooses where to fetch it.
 pub(crate) enum PickerStage {
     Identities,
     Sources { identity: String },
 }
 
-/// The add picker's state (spec §9.6): a tile-owned field that holds the
-/// keyboard, one [`ChoiceList`] beneath it (the 2026-09-19 choice core —
-/// one ranking, one identity-across-a-re-rank rule, one twelve-row
-/// painted window), and the two things this surface adds to a plain
-/// choice field.
-///
-/// `loaded` and `labels` run PARALLEL to `list.options()` and are both
-/// prepared here, never in `render`: a row paints `identity` and
-/// `@source` as two columns, and splitting the option string per painted
-/// row per frame is the allocation the market-data picker's own review
-/// took out (IMPORTANT-3 there).
+/// Tile-owned input and a ranked choice list with a twelve-row moving window.
+/// `loaded` and `labels` are indexed by declared option position, alongside
+/// `list.options()`, and must be replaced together. Prepared columns avoid
+/// splitting identity/source strings during render.
 pub(crate) struct PickerState {
     pub input: Entity<InputState>,
     pub list: ChoiceList,
     pub stage: PickerStage,
-    /// `model.holds_pair(source, identity)` per option — a marked row is
-    /// still pickable (a second slot over the same pair with another
-    /// rule is legitimate, spec §9.6).
+    /// Whether the model holds this option's source/identity pair. Marked rows
+    /// remain pickable, allowing another slot with a different bucket rule.
     pub loaded: Vec<bool>,
     /// The prepared `(identity, @source)` pair per option; the second
     /// half is empty in the `Sources` stage, whose options are bare
     /// source names.
     pub labels: Vec<(SharedString, SharedString)>,
-    /// `add "<text>"…` while the typed text matches nothing — the door
-    /// to the `Sources` stage, recomputed on every keystroke.
+    /// Offer to add unmatched, nonempty identity text. Committing may use an
+    /// explicit @source or open the source stage; see `commit_picker`.
     pub add_row: Option<String>,
 }
 
@@ -431,14 +354,9 @@ impl PickerState {
         self.add_row = None;
     }
 
-    /// `add "<text>"…` exactly while the ranked list is empty and the
-    /// query names something — the identities stage only: a source that
-    /// matches nothing cannot be invented here.
-    ///
-    /// The text is TRIMMED, and the trimmed
-    /// form is what the row shows, because it is what the commit stores
-    /// as the identity: a query of nothing but spaces ranks nothing and
-    /// would otherwise offer an `add "   "…` row that can only be inert.
+    /// Offer an add row only in the identities stage, with no ranked matches
+    /// and nonempty trimmed query text. Its label uses the trimmed text that commit
+    /// resolves; whitespace alone never offers an identity, even in an empty catalogue.
     pub(crate) fn refresh_add_row(&mut self) {
         let text = self.list.query().trim().to_string();
         self.add_row = (matches!(self.stage, PickerStage::Identities)
@@ -471,11 +389,9 @@ impl PickerState {
     }
 }
 
-/// The expression field (spec §9.7): a one-line tile-owned `Input` on
-/// the strip below the header, its parse error painted under it. `error`
-/// is the inline half — a bad expression keeps the field open, exactly
-/// as a cell parse error keeps the market-data editor open; it is the
-/// tile's `notice` that a REFUSED model write goes to instead.
+/// Tile-owned expression input painted below the header. Parse and reference
+/// errors keep it open with an inline error. A resolved expression closes the
+/// field before the model write; a model refusal appears in the tile's notice.
 pub(crate) struct ExprField {
     pub input: Entity<InputState>,
     /// The slot being replaced (`e`), or `None` for a fresh one (`x`) —
@@ -499,10 +415,8 @@ fn labels_for(options: &[String]) -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
-/// The series list, prepared (spec §9.5): one row per slot, in slot
-/// order, highlighted at the CHIPS' cursor — the list and the strip show
-/// one cursor between them, which is why a row click and a chip click
-/// are the same door.
+/// Prepared rows in model slot order. The list and header chips share the
+/// model cursor, and clicking either selects through `chip_clicked`.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SeriesPopup {
     pub rows: Vec<SeriesRow>,
@@ -522,21 +436,15 @@ pub(crate) struct SeriesRow {
     /// `fetching`, `failed: <reason>` (the slot's own fetch, or the
     /// delivered load lane's), `degraded`, or empty.
     pub state: SharedString,
-    /// Resolved against the theme here, like the chip's (see the module
-    /// doc).
+    /// Theme-resolved swatch prepared with the header's color resolver.
     pub swatch: Hsla,
     pub hidden: bool,
 }
 
 impl SeriesPopup {
-    /// Build every row from the model and the last good result. Called
-    /// from the tile's `rebuild_chrome` while the list is open, and
-    /// nowhere else.
-    ///
-    /// Takes the colour resolver the header's own `prepare` takes, and
-    /// for the same reason: the tile derives the wheel ONCE per chrome
-    /// rebuild and hands it to both, so a row's swatch and its chip's
-    /// agree by construction rather than by two call sites keeping step.
+    /// Prepare rows from the model and retained result during `rebuild_chrome`.
+    /// The tile shares one color resolver with the header so swatches agree without
+    /// rebuilding palette and named-color data for each row or paint.
     pub(crate) fn prepare(
         model: &Model,
         result: Option<&SeriesResult>,
@@ -568,10 +476,9 @@ impl SeriesPopup {
     }
 }
 
-/// A slot's state word. The SLOT's own state outranks the delivered
-/// provenance: a fetch that is out or that failed is news about this
-/// tile's own request, while health is news about the source behind the
-/// answer it already has.
+/// A slot's own fetch state takes precedence over delivered source health.
+/// Fetching/failure describes the current request; provenance describes the
+/// retained answer and is shown only while the slot is idle.
 fn state_text(number: u8, state: &SlotState, result: Option<&SeriesResult>) -> SharedString {
     match state {
         SlotState::Fetching => return "fetching".into(),
@@ -584,24 +491,15 @@ fn state_text(number: u8, state: &SlotState, result: Option<&SeriesResult>) -> S
         .and_then(|r| r.slots.iter().find(|s| s.slot == number))
         .and_then(|s| s.provenance.health.as_ref());
     match health {
-        // The reason rides along on a FAILURE, spelled the way the
-        // slot's own failure above spells it (review round 1): a load
-        // lane that failed under an answer this tile is still painting
-        // is the one health state a trader has to act on, and "failed"
-        // alone says nothing about what to do. `Degraded` stays the bare
-        // word — the answer on screen is usable, and its reason belongs
-        // to the diagnostics tile rather than a row in a popup.
+        // Retain a failed load's reason in the row. Degraded health uses a compact
+        // state word; its detailed reason remains available in diagnostics.
         Some(Health::Degraded { .. }) => "degraded".into(),
         Some(Health::Failed { reason }) => format!("failed: {reason}").into(),
         _ => SharedString::default(),
     }
 }
 
-/// The popup surface: gpui-component's own popover treatment
-/// (`popover_style` — the popover background and foreground, the
-/// ring-in-shadow edge, `theme.radius`), then the item container's `p_1`
-/// inset. The market-data popup's own surface, spelled the same way, so
-/// the two cannot drift apart.
+/// Popover treatment with a scaled minimum width and shared content spacing.
 fn popover_surface(cx: &App) -> Div {
     v_flex()
         .min_w(scale::design(MIN_WIDTH))
@@ -624,8 +522,7 @@ pub(crate) fn render_series_popup(
     let hover = row_paint(theme).hover;
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("ts-list-{tile_id}"))
-        // Without this gpui keeps hit-testing the chart painted beneath
-        // the popup (market-data's own user report, 2026-09-17).
+        // Keep the chart below from receiving pointer hits through the popup.
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
@@ -634,8 +531,7 @@ pub(crate) fn render_series_popup(
             }
         });
     if p.rows.is_empty() {
-        // "Asked and answered" rather than a blank rectangle — and it
-        // names the keys that end the state, per the empty-state rule.
+        // Keep the empty list informative and show its available actions.
         return anchor_popup(
             list.child(empty_row(theme, crate::header::EMPTY_HINT)),
             Anchor::TopRight,
@@ -651,8 +547,7 @@ pub(crate) fn render_series_popup(
                 highlighted,
                 move || format!("ts-list-row-{tile_id}-{i}"),
                 {
-                    // The mouse form of `j`/`k`, and the chip click's own
-                    // door: one cursor between the strip and the list.
+                    // Select the same model cursor used by the header chips.
                     let tile = tile.clone();
                     move |_window, cx| tile.update(cx, |t, cx| t.chip_clicked(i, cx))
                 },
@@ -684,19 +579,12 @@ pub(crate) fn render_series_popup(
     anchor_popup(list, Anchor::TopRight)
 }
 
-/// The one row every popup list paints: fixed height and inset, the
-/// cursor's fill when `highlighted`, the shell's list-row hover fill
-/// under the pointer otherwise (`listrow::row_paint` — the design
-/// guide's "subtle pointer feedback, never the only cue"; the
-/// highlight stays the state, the hover only says the row is
-/// clickable), and a left press that stops propagation — the chart
-/// beneath must not also take it — before running `on_down`.
+/// Shared series/picker row geometry, selection colors, and left-press handling.
+/// Unselected rows show the supplied hover fill without moving the model cursor.
+/// Consume the press before invoking the callback so the chart cannot also act.
 ///
-/// `id` is the row's stable identity, needed for the hover state:
-/// `(kind, index)` per popup, and a popup never shares a frame with
-/// another. `hover` is `row_paint(theme).hover`, derived ONCE per
-/// popup paint by the caller: `row_paint` floors its accent with a
-/// possible OKLab bisection, which is not a per-row cost.
+/// The caller supplies a per-popup row ID and derives the hover color once per
+/// popup paint, avoiding repeated contrast calculations for each row.
 fn row_shell(
     theme: &Theme,
     hover: Hsla,
@@ -726,8 +614,7 @@ fn row_shell(
         })
 }
 
-/// A popup list's "asked and answered" line: a muted row naming why it
-/// is empty, never a blank rectangle.
+/// Muted empty-list message with the same row height and horizontal inset.
 fn empty_row(theme: &Theme, text: &'static str) -> Div {
     div()
         .h(scale::design(ROW_HEIGHT))
@@ -735,15 +622,14 @@ fn empty_row(theme: &Theme, text: &'static str) -> Div {
         .flex()
         .items_center()
         .text_color(theme.muted_foreground)
-        .child(text)
+        .child(geode_shell::shell::kbd::marked(text))
 }
 
-/// The anchored, deferred wrapper every one of this tile's popups
-/// takes: `Local` position mode against the zero-size point its caller
-/// paints it at, snapped inside the window. `corner` is the popup's own
-/// corner that sits on that point — `TopRight` for the popups hung off
-/// the header's right edge, `TopLeft` for the range and frequency
-/// popups hung under their triggers.
+/// Anchor a popup at the zero-size point its caller paints it at; paint deferred
+/// above neighboring content and keep the panel inside the window. `corner` is
+/// the popup's own corner on that point: `TopRight` for popups hung off the
+/// header's right edge, `TopLeft` for the range and frequency popups hung under
+/// their triggers.
 fn anchor_popup(list: Div, corner: Anchor) -> Deferred {
     deferred(
         anchored()
@@ -755,14 +641,12 @@ fn anchor_popup(list: Div, corner: Anchor) -> Deferred {
     .with_priority(1)
 }
 
-/// Paint the add picker (spec §9.6) on the series list's own surface:
-/// the field on top, one row per PAINTED option below — `identity` in
-/// the first column, `@source` muted in the second, a `•` where this
-/// tile already holds the pair — and, where the typed text matches
-/// nothing, the single `add "<text>"…` row that opens the source stage.
+/// Paint Input above the picker's moving option window. Prepared columns show
+/// identity, source, and an already-loaded marker. The unmatched add offer stays
+/// highlighted because it is the only available commit.
 ///
-/// Every row is a click door into the same `picker_pick` `enter` takes,
-/// by the same WINDOW-relative index [`ChoiceList::highlighted`] is in.
+/// Option clicks pass a window-relative index, matching [`ChoiceList::highlighted`],
+/// to `picker_pick`; the add offer invokes `commit_picker` directly.
 pub(crate) fn render_picker(
     p: &PickerState,
     tile: &Entity<TimeseriesTile>,
@@ -773,7 +657,7 @@ pub(crate) fn render_picker(
     let hover = row_paint(theme).hover;
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("ts-picker-{tile_id}"))
-        // The series list's reasons, exactly (see `render_series_popup`).
+        // Keep the chart below from receiving pointer hits through the popup.
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
@@ -844,23 +728,15 @@ pub(crate) fn render_picker(
             .child(add.clone()),
         );
     } else if p.list.painted_len() == 0 {
-        // "Asked and answered", never a blank rectangle — the series
-        // list's own empty-state rule.
+        // An empty source-stage match list uses this same fallback text.
         list = list.child(empty_row(theme, "no identities known"));
     }
     anchor_popup(list, Anchor::TopRight)
 }
 
-/// One date field's colours, derived from the theme per paint (nine
-/// `Hsla` reads — the "cheap enough for `render`" half of the
-/// prepare/paint split; what is NOT cheap, the segments themselves, is
-/// prepared in the key handler).
-///
-/// `live` is the field the keyboard is on: its active segment wears the
-/// theme's own `primary`/`primary_foreground` pair (gpui-component's,
-/// like the market-data field's), and the other field is painted muted
-/// throughout so the strip shows at a glance which date a digit lands
-/// in.
+/// Read date-field colors from the current theme; segment strings are already
+/// prepared. The active field uses primary selection colors, while the other
+/// field uses secondary selection colors and muted surrounding text.
 fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
     let muted = theme.muted_foreground;
     SegmentPaint {
@@ -870,13 +746,8 @@ fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
             muted
         },
         rest_fill: None,
-        // The dimmed field's own active segment still wears a fill
-        // (`secondary`), so its text is that fill's own pair —
-        // `secondary_foreground`, which is exactly `Tone::Neutral`
-        // (`shell::chip::chip_paint`) and is swept on every bundled theme
-        // by `every_chip_tone_is_readable_on_every_bundled_theme`.
-        // `muted_foreground` is the colour of text on the SURFACE and is
-        // not floored against `secondary` anywhere.
+        // Pair secondary fill with secondary_foreground. Surface-muted text is not
+        // contrast-adjusted for that selection background.
         active_text: if live {
             theme.primary_foreground
         } else {
@@ -943,13 +814,8 @@ fn range_row(
         )
 }
 
-/// Paint the custom dates editor (spec §9.8) on the series list's own
-/// surface, hung under the range trigger: a `from` row, a `to` row, the
-/// hint and the inline refusal.
-///
-/// The CONTAINER carries the focus handle and the key listener — one
-/// keyboard for both fields, the market-data date field's shape — which
-/// is why the fields themselves are plain painted state.
+/// Paint the custom dates editor under the range trigger: both dates, the hint,
+/// and any refusal. One focused container routes keys for both pure date fields.
 pub(crate) fn render_range(
     p: &RangePopup,
     tile: &Entity<TimeseriesTile>,
@@ -964,7 +830,7 @@ pub(crate) fn render_range(
         // it in THIS context so the listener below is reached.
         .key_context(RANGE_CONTEXT)
         .debug_selector(move || format!("ts-range-{tile_id}"))
-        // The series list's reasons, exactly (see `render_series_popup`).
+        // Keep the chart below from receiving pointer hits through the popup.
         .occlude()
         // Only while THIS editor is still up: a press on a trigger
         // runs first (capture phase) and may already have replaced it.
@@ -977,10 +843,8 @@ pub(crate) fn render_range(
         .on_key_down({
             let tile = tile.clone();
             move |event: &gpui::KeyDownEvent, window, cx| {
-                // The listener sits on the FOCUSED element, so it runs
-                // before the shell's own: a key this editor owns stops
-                // here, and a chord (`route` answers `None`) falls
-                // through to the shell untouched.
+                // Consume keys handled by the focused range container before the shell
+                // routes them. Unhandled chords continue to the shell.
                 if tile.update(cx, |t, cx| t.range_key(event, window, cx)) {
                     cx.stop_propagation();
                 }
@@ -993,7 +857,7 @@ pub(crate) fn render_range(
                 .px(scale::design(ROW_INSET))
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(RANGE_HINT),
+                .child(geode_shell::shell::kbd::marked(RANGE_HINT)),
         );
     if let Some(error) = &p.error {
         panel = panel.child(
@@ -1007,14 +871,14 @@ pub(crate) fn render_range(
     anchor_popup(panel, Anchor::TopLeft)
 }
 
-/// Paint a menu on the series list's surface — the action list, the
-/// range menu or the frequency menu, one painter: one row per
-/// `MenuRow`, the highlighted one lit, a disabled one muted with its
-/// reason where its hint would be, a tick column ahead of a toggle's or
-/// a choice's title. A hover moves the highlight (the mouse form of
-/// `j`/`k`), a click picks (`menu_pick`, `enter`'s own path). The action
-/// list hangs from the header's right edge, the other two under their
-/// triggers.
+/// Paint a menu — the action list, the range menu or the frequency menu — from
+/// prepared rows: actions, headings, separators, and toggle or choice ticks.
+/// Keys in the trailing lane paint as `Kbd`; non-key text (a short label, a
+/// disabled row's reason) paints as text, and a disabled row never paints
+/// selected. Pointer movement updates the highlighted index, including on
+/// disabled rows; pressing a row invokes the same `menu_pick` path as Enter.
+/// The action list hangs from the header's right edge, the other two under
+/// their triggers.
 pub(crate) fn render_menu(
     m: &MenuState,
     tile: &Entity<TimeseriesTile>,
@@ -1062,9 +926,22 @@ pub(crate) fn render_menu(
                 ..
             } => {
                 let disabled = enabled.is_err();
-                let trailing = row.trailing().unwrap_or_default();
                 let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
                 let lit = i == m.highlighted && !disabled;
+                let lane = if lit {
+                    theme.accent_foreground
+                } else {
+                    theme.muted_foreground
+                };
+                // Keys paint as `Kbd`; a short label or a disabled row's
+                // reason is not a key and paints as text.
+                let trailing = match row.trailing() {
+                    Some(Trailing::Keys(keys)) => {
+                        geode_shell::shell::kbd::menu_binding(keys, lane).into_any_element()
+                    }
+                    Some(Trailing::Text(text)) => div().child(text).into_any_element(),
+                    None => div().into_any_element(),
+                };
                 h_flex()
                     .id(ElementId::NamedInteger(
                         SharedString::new_static("ts-menu-row"),
@@ -1110,13 +987,7 @@ pub(crate) fn render_menu(
                             })
                             .child(title.clone()),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .when(lit, |d| d.text_color(theme.accent_foreground))
-                            .when(!lit, |d| d.text_color(theme.muted_foreground))
-                            .child(trailing),
-                    )
+                    .child(div().text_xs().text_color(lane).child(trailing))
                     .into_any_element()
             }
         });
@@ -1136,9 +1007,7 @@ mod tests {
     use geode_core::series::expr::Expr;
     use geode_core::series::{BucketRule, SlotProvenance, SlotResult};
 
-    /// The header tests' resolver: the palette index straight into the
-    /// hue, so one row's swatch can be told from another's without a
-    /// window.
+    /// Map palette indices to distinct hues for window-free swatch assertions.
     fn stub(colour: &Colour) -> Hsla {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),

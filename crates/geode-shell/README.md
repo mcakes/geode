@@ -40,7 +40,7 @@ surfaces that consume them.
 
 | Module | Holds |
 |---|---|
-| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the choice dialog, the stack member list, which-key, hot reload, session I/O, and the colour doors (`chip`, `listrow`, `control`, `colours`, `scale`). Its tests live in `shell/tests/`. |
+| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the choice dialog, the stack member list, which-key, hot reload, session I/O, the colour doors (`chip`, `listrow`, `control`, `colours`, `scale`), and `kbd`, the one door every on-screen key paints through (gpui-component's `Kbd`). Its tests live in `shell/tests/`. |
 | `module` | The module-hosting contract: `TileContent`, `ModuleFactory`, `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced application/persistence. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
@@ -85,12 +85,11 @@ change most often hits:
   `prevent_default` inside that door.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
   the only thing that moves focus or writes the shared `Input`.
-- An edit-stage cursor rests only on a row that answers to something
-  (`Draft::is_cursor_stop`): motion goes through `Draft::move_selection`,
-  every other selection reset through `Draft::settle_selection`, and a click
-  on a row that answers to nothing is dropped. `effective_query`,
-  `effective_query_mut`, `effective_selected`, `effective_selected_mut` and
-  `set_query` must all name the same stages.
+- Object edit stages select rows with row commands or nested editors through
+  `Draft::is_cursor_stop`. Motion uses `move_selection`; resets use
+  `settle_selection`. Lists with no eligible row retain the keyboard selection,
+  while clicks on ineligible rows are ignored. Query and selection accessors
+  must agree on which stages use the draft. See [cursor rules](../../docs/current/configuration-dialogs.md#stages-and-ownership).
 - Every tile mouse-down path and every keyboard verb that moves tile focus
   re-arms `pending_focus_restore`. A module that drops a focused
   `InputState` must `window.blur(cx)` first, or every chord dies for the

@@ -1,6 +1,7 @@
 //! Pure conversion from gpui's platform keystroke representation into the
 //! shell's own [`crate::keymap::Keystroke`]. This is the only place the
-//! shell touches `gpui::Keystroke`'s fields directly — everything downstream
+//! shell touches `gpui::Keystroke`'s fields directly, in both directions
+//! ([`to_gpui_keystroke`] feeds `Kbd`) — everything downstream
 //! (the matcher, the keymap) works in shell-native terms and stays testable
 //! without a window.
 
@@ -31,6 +32,25 @@ pub fn convert_keystroke(keystroke: &gpui::Keystroke) -> Option<Keystroke> {
         },
         key: keystroke.key.clone(),
     })
+}
+
+/// The inverse of [`convert_keystroke`], for display: the shell's
+/// keystroke as the `gpui::Keystroke` gpui-component's `Kbd` formats.
+/// `key` passes through unchanged (the keymap stores gpui's own key
+/// names) and `cmd` maps back onto `platform`. `key_char` stays `None`:
+/// `Kbd` formats from `key` and the modifiers alone.
+pub fn to_gpui_keystroke(keystroke: &Keystroke) -> gpui::Keystroke {
+    gpui::Keystroke {
+        modifiers: gpui::Modifiers {
+            control: keystroke.mods.ctrl,
+            alt: keystroke.mods.alt,
+            shift: keystroke.mods.shift,
+            platform: keystroke.mods.cmd,
+            function: false,
+        },
+        key: keystroke.key.clone(),
+        key_char: None,
+    }
 }
 
 /// Key names a platform might (defensively) report for a bare modifier
@@ -65,6 +85,34 @@ mod tests {
             },
             key: key.to_string(),
             key_char: None,
+        }
+    }
+
+    #[test]
+    fn to_gpui_keystroke_round_trips_every_modifier() {
+        let all = Modifiers {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            cmd: true,
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::NONE
+        };
+        for mods in [
+            Modifiers::NONE,
+            Modifiers::CTRL,
+            Modifiers::ALT,
+            Modifiers::CMD,
+            shift,
+            all,
+        ] {
+            let ks = Keystroke {
+                mods,
+                key: "pageup".into(),
+            };
+            assert_eq!(convert_keystroke(&to_gpui_keystroke(&ks)), Some(ks));
         }
     }
 

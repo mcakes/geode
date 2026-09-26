@@ -1,5 +1,5 @@
-//! Where the panel's cursor is (spec 2026-09-14 §5.1): a grid cell, or an
-//! attribute in the header strip. Pure; the tile applies the result.
+//! Cursor movement between grid cells and the header attribute strip.
+//! The tile applies these pure transitions to its retained cursor.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cursor {
@@ -55,12 +55,10 @@ pub fn step(cursor: Cursor, last_grid_col: &mut usize, motion: Motion, grid: Gri
             *last_grid_col = col;
             Cursor::Attr(col.min(grid.attrs - 1))
         }
-        // The grid's row axis follows the rule every list and tile shares
-        // (verb-consistency spec §20.5, `vimnav::apply`): a bare `j`/`k`
-        // WRAPS, anything larger clamps. The strip sits above that cycle
-        // rather than inside it — `k` on row 0 enters it (the arm above)
-        // when there are attributes to enter, and only wraps to the last
-        // row when there are none.
+        // Single row steps wrap; larger steps clamp through `vimnav::apply`.
+        // The strip is outside that cycle: upward motion from row 0 enters
+        // it when attributes exist, while downward motion from the last row
+        // wraps to row 0.
         (Cursor::Cell { row, col }, Motion::Rows(n)) => Cursor::Cell {
             row: vimnav::apply(row, grid.rows, NavCommand::Move(n as i64)),
             col,
@@ -130,10 +128,8 @@ mod tests {
         );
     }
 
-    /// Without a strip to enter, the grid is the whole cycle: a bare `k`
-    /// on row 0 wraps to the last row (verb-consistency spec §20.5), and
-    /// a bare `j` on the last row wraps to row 0 whether or not there is
-    /// a strip — the strip sits above the cycle, not inside it.
+    /// Without attributes, a single upward step from row 0 wraps. A single
+    /// downward step from the last row wraps regardless of the strip.
     #[test]
     fn a_bare_step_wraps_the_grid_and_the_strip_stays_outside_the_cycle() {
         let mut last = 0;

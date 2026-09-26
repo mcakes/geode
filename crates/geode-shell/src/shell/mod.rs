@@ -19,6 +19,7 @@ pub mod dialog;
 mod drag;
 mod hot_reload;
 mod input;
+pub mod kbd;
 pub mod keybindings_view;
 pub mod keys;
 pub mod listrow;

@@ -1,13 +1,11 @@
-//! Typed `egress.toml` configuration, with one top-level table per egress
-//! target, keyed by name. Layer merging replaces a target's whole table by
-//! name, matching `sources.toml`. Parsing returns usable targets and
-//! field-addressed diagnostics; an invalid target is skipped entirely.
+//! Typed `egress.toml` configuration, with one top-level table per upload target.
+//! Layer merging replaces a target's whole table by name. Parsing returns usable
+//! targets and field-addressed diagnostics; an invalid target is skipped.
 //!
-//! `egress.toml` is restart-required like `sources.toml`: nothing reloads a
-//! resolved target's transport live, so a hot reload of this document keeps
-//! the last valid set without applying it. This reader performs no I/O and
-//! depends only on shared configuration and schema types, mirroring
-//! `source_config`. See `docs/current/configuration.md`.
+//! This reader performs no I/O. The app resolves adapter capabilities at startup.
+//! Hot reload can update the layered document and mark restart required, but
+//! running workers and panel target lists retain their startup configuration.
+//! See `docs/current/configuration.md`.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::schema::SchemaSpec;
@@ -23,8 +21,9 @@ pub struct EgressSpec {
 }
 
 impl EgressSpec {
-    /// The address for one document key: `{key}` replaced by the parts
-    /// joined with `/`. `None` if `document` names no target of this egress.
+    /// Look up a document's address template and replace every `{key}` literally
+    /// with key parts joined by `/`. No escaping or other placeholder validation
+    /// is performed. Return `None` if this target does not accept the document.
     pub fn address(&self, document: &str, key: &[String]) -> Option<String> {
         self.documents
             .iter()

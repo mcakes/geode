@@ -1,12 +1,9 @@
-//! The tile-owned anchored popup (market-data spec 2026-09-14 §6.1): the
-//! panel's own overlay, painted with gpui's `deferred(anchored(..))` so
-//! it escapes the tile's own clip and paints above neighbouring tiles —
-//! instant, no animation, Geode's own chrome rather than a gpui-component
-//! `Dialog` or `Popover`. `Popup::Menu` is Task 6's variant; `Popup::Picker`
-//! (Task 7, spec §7) is the underlying picker `u` and the menu row open;
-//! `Popup::Choice` (dividend spec §4.4) is a `Choice` cell's typeahead,
-//! the picker's shape hung under the cell it edits.
-//! [`PickerRows`] is the picker's pure half, tested below without a window.
+//! Tile-owned menu, underlying picker, and cell-choice popups. Deferred
+//! anchoring lets them escape tile/table clips, and occlusion prevents pointer
+//! hits reaching the grid beneath. Menu and underlying picker anchor at the
+//! header; Choice anchors at its target cell. Picker and Choice own focused
+//! inputs and use insert routing. The tile owns opening, commits, and closing;
+//! these painters consume row presses and forward picks and hover selection.
 
 use crate::core::menu::MenuRow;
 use crate::tile::MarketDataTile;
@@ -21,22 +18,14 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
 use std::rc::Rc;
 
-/// A menu row's height, in pixels at the design rem — gpui-component's
-/// own `PopupMenu` item height at its default size, so this popup keeps
-/// the menu family's geometry (design guide: "preserve the component
-/// family's geometry… do not imitate one menu with a custom popup whose
-/// spacing only approximates the system") while following Geode's rem.
+/// Popup-row height in design pixels, scaled with the shell's rem size.
 const ROW_HEIGHT: f32 = 26.0;
-/// A menu row's horizontal inset — `PopupMenu`'s `INNER_PADDING`.
+/// Horizontal row inset in design pixels.
 const ROW_INSET: f32 = 8.0;
 /// The popup's minimum width at the design rem.
 const MIN_WIDTH: f32 = 240.0;
 
-/// The popup surface both the menu and the picker paint on: gpui-
-/// component's own popover treatment (`popover_style` — `popover`
-/// background and foreground, the ring-in-shadow edge, `theme.radius`),
-/// so this surface and the crate's own `PopupMenu`/`Select`/`DatePicker`
-/// popovers cannot drift apart; then the item container's `p_1` inset.
+/// Shared popover treatment, minimum width, and content spacing for all variants.
 fn popover_surface(cx: &App) -> Div {
     v_flex()
         .min_w(scale::design(MIN_WIDTH))
@@ -47,40 +36,21 @@ fn popover_surface(cx: &App) -> Div {
 }
 use std::collections::BTreeMap;
 
-/// What the tile currently has open. `Menu` is the action list (spec
-/// §6.1); `Picker` is the underlying picker (spec §7) — its `input`
-/// HOLDS the keyboard, which is what makes `key_context()` report
-/// `mode == insert` while it is open rather than a third mode of its
-/// own; `Choice` is a `Choice` cell's typeahead (dividend spec §4.4),
-/// whose field holds the keyboard exactly as the picker's does.
+/// The tile's mutually exclusive popup state. Menu uses menu-mode routing;
+/// Picker and Choice own focused inputs and use insert-mode routing.
 pub(crate) enum Popup {
     Menu(MenuState),
     Picker(PickerState),
     Choice(ChoicePopup),
 }
 
-/// A `Choice` cell's typeahead (dividend spec §4.4): the picker's shape —
-/// a field that HOLDS the keyboard over a ranked list — opened by
-/// `i`/`enter`/a double-click on a cell whose column declares a fixed
-/// vocabulary, placed on the cell's current value, and hung UNDER that
-/// cell rather than off the header (spec §3.4: "anchored at the cell").
+/// Choice-cell typeahead anchored below the edited cell. Declared options use
+/// static labels; ChoiceList owns ranking, selection, and the moving window.
 ///
-/// The list is [`geode_shell::choice::ChoiceList`] directly rather than
-/// [`PickerRows`]: the options are a column's `&'static [&'static str]`,
-/// so every row label is a static `SharedString` (no marks, no catalog
-/// to swap) and the picker's label preparation has nothing to do here.
-///
-/// `cell`/`labels` are the cell it opened on and that cell's labels at
-/// the time — `EditTarget::Cell`'s own identity pair, checked by
-/// `commit_cell_value` at the pick so a document that moved under the
-/// popup refuses rather than writing to whatever cell now sits there.
-///
-/// `paint` is the delegate's paint-time COPY of the rows (the cursor
-/// and editor mirrors' own rule): the popup is painted from
-/// `MatrixDelegate::render_td`, inside the cell it hangs under, and the
-/// delegate never reads the tile — so [`Self::prepare`] re-prepares this
-/// `Rc` on every change to the list (a keystroke, an arrow, a hover) and
-/// the tile mirrors the `Rc` across. Never in `render`.
+/// The target stores both coordinates and row/column labels captured at open.
+/// Commit checks these identities before writing so a changed document cannot
+/// redirect the edit. prepare() snapshots painted rows into an Rc shared with
+/// the table delegate after each query, selection, or hover change.
 pub(crate) struct ChoicePopup {
     pub input: Entity<InputState>,
     pub list: ChoiceList,
@@ -171,58 +141,22 @@ pub(crate) struct MenuState {
     pub highlighted: usize,
 }
 
-/// How many ranked rows the picker PAINTS at once (final review, A3;
-/// window semantics, 2026-09-19): a cap rather than a bounded scroll
-/// container, because a cap needs no scroll state and the picker is a
-/// type-to-narrow surface, never a browse-by-scrolling one. This IS
-/// [`geode_shell::choice::DEFAULT_CAP`]'s own value — one cap for every
-/// choice surface, spec 2026-09-19 §3.1 — and the assert below is what
-/// keeps the two from drifting apart. The painted rows are a WINDOW that
-/// follows the highlight (`ChoiceList::follow`), not a truncation of the
-/// ranked list, so `enter` can never load a row the trader cannot see
-/// even when the current value ranks past row `PICKER_ROWS`.
+/// Maximum painted picker rows. The shared ChoiceList moves this window to
+/// keep selection visible while retaining every ranked result. The constant is
+/// checked against DEFAULT_CAP; no separate scrolling state is stored here.
 pub(crate) const PICKER_ROWS: usize = 12;
 const _: () = assert!(PICKER_ROWS == geode_shell::choice::DEFAULT_CAP);
 
-/// The underlying picker's PURE half (spec §7; split out by the final
-/// review, A1, so it is testable without a window): a thin wrapper over
-/// [`geode_shell::choice::ChoiceList`] (spec 2026-09-19 §3.1), which owns
-/// the ranking, the highlight, the identity-by-key-string rule across a
-/// re-rank and the painted-window cap — one core shared with the object
-/// and settings dialogs' own `Choice` fields, so those rules are spelled
-/// once. This struct adds only what the picker needs beyond a plain
-/// choice field.
+/// Underlying-picker state over ChoiceList. Selection survives reranking and
+/// catalogue replacement by bare key text, not positional index. Prepared labels
+/// are parallel to declared options and avoid string decoration during render.
 ///
-/// `labels` is the separate, PREPARED `SharedString` for each catalog key
-/// (review fix round 1, IMPORTANT-3) — [`Self::with_marks`] and
-/// [`Self::replace_all`] both fill it off the render thread, so
-/// [`render_picker`] only ever clones a prepared `SharedString` per row
-/// (an inline copy or an `Arc` bump, never an allocation); at the pinned
-/// release `SharedString` wraps `smol_str::SmolStr`
-/// (`gpui-pre-shared-string-0.3.5/gpui_shared_string.rs`), which stores
-/// up to 23 bytes inline, so `SharedString::from(&str)` heap-allocates
-/// only for a longer string — it had no inline form at the old git rev —
-/// but an underlying key can exceed that, and the charter's "nothing
-/// allocates in render" is about the rule, not the byte count, so the
-/// conversion still happens once per row when the catalog changes, never
-/// per frame (as the first build did on every repaint while a picker was
-/// open).
-///
-/// `marks` (2026-09-19, per-underlying drafts): the underlyings that
-/// carry PARKED edits, keyed by `display_key` and valued with the
-/// draft's own `count_phrase` ("1 cell, spot_ref"), taken once at open
-/// from the tile's parked map. A marked row's label reads `NKY.Z · 1
-/// cell, spot_ref`; ranking still runs over the bare key, never the
-/// decorated label, so typing `sp` cannot match a phrase's own letters.
-/// Kept here so [`Self::replace_all`] can re-decorate a fresh catalog
-/// without asking the tile again — the parked map only changes through
-/// `set_key`, and both of its callers (`picker_pick`, the `:` line)
-/// close this popup before calling it, so the marks can never go stale
-/// while the picker is open; a third caller would owe the same.
+/// Marks snapshot parked-draft count phrases at open, producing labels such as
+/// `NKY.Z · 1 cell, spot_ref`. Matching uses bare keys only. Replacing the catalogue
+/// reuses those marks; callers that change parked drafts must close or refresh
+/// the picker rather than leave its decorations stale.
 pub(crate) struct PickerRows {
-    /// The ranking and the highlight (spec 2026-09-19 §3.1): one core
-    /// with the dialogs' choice fields, so the cap, the identity rule
-    /// and the re-rank guard are spelled once.
+    /// Ranking, selection identity, and the moving window are owned by ChoiceList.
     list: geode_shell::choice::ChoiceList,
     pub labels: Vec<SharedString>,
     pub marks: BTreeMap<String, String>,
@@ -310,71 +244,37 @@ impl PickerRows {
         self.list.set_highlighted(row)
     }
 
-    /// Re-rank against `new_query`, a no-op when it is unchanged from the
-    /// query the ranking was last built against — so a defensive re-rank
-    /// at commit time (the field's current text may never have reached
-    /// this struct through a real `Change` event) costs nothing when
-    /// nothing changed, and never resets the highlight out from under a
-    /// trader who typed nothing at all
-    /// ([`geode_shell::choice::ChoiceList::set_query`]'s own doc comment
-    /// has the full story, including the keep-by-text rule review fix
-    /// round 1, CRITICAL, established).
+    /// Rerank a changed query while preserving selection by key text. An unchanged
+    /// query is a no-op, allowing commit to reread Input without resetting selection.
     pub(crate) fn refilter(&mut self, new_query: &str) {
         self.list.set_query(new_query);
     }
 
-    /// Swap in a fresh catalog (the diagnostics observer's door), keeping
-    /// the highlighted KEY across it —
-    /// [`geode_shell::choice::ChoiceList::replace_options`]'s own
-    /// identity-by-string rule (review fix round 2: the key is captured
-    /// BEFORE the option list is overwritten, and by string rather than
-    /// by index — `catalog_keys()` returns a freshly SORTED list, so a
-    /// new underlying that sorts ahead of the highlighted one shifts
-    /// every later index, and re-placing by the OLD index once the
-    /// catalog has already changed would silently highlight a different
-    /// row).
+    /// Replace catalogue options and prepared labels. ChoiceList captures selected
+    /// key text before replacement so insertions or reordering do not change identity.
     pub(crate) fn replace_all(&mut self, all: Vec<String>) {
         self.labels = Self::labels_for(&all, &self.marks);
         self.list.replace_options(all);
     }
 
-    /// Rebuild the ranking against the CURRENT catalog/query, then put
-    /// the highlight on `key` — falling back to row 0 when `key` is
-    /// `None` or no longer present in the catalog at all. Unlike the old
-    /// truncating cap, a `key` that ranks past `PICKER_ROWS` is still
-    /// found and lit, with the window dragged along so it is actually
-    /// visible ([`geode_shell::choice::ChoiceList::place`]'s own doc
-    /// comment).
-    ///
-    /// **Identity is the KEY STRING, never a positional index** (review
-    /// fix round 2, the bug the first fix's own `rerank` reintroduced by
-    /// capturing `was_highlighted` as an ALL-index and looking that same
-    /// number up in the NEW catalog): see [`Self::replace_all`]. A
-    /// test-only door directly onto [`geode_shell::choice::ChoiceList::place`] —
-    /// [`Self::refilter`] and [`Self::replace_all`] go straight to the
-    /// list's own `set_query`/`replace_options` in production, which
-    /// call it internally.
+    /// Test helper: rank the current catalogue/query and place a matching key,
+    /// falling back to the first ranked row when absent. The moving window follows
+    /// the selection even when it lies beyond the initial twelve rows.
     #[cfg(test)]
     pub(crate) fn place(&mut self, key: Option<&str>) {
         self.list.place(key);
     }
 
-    /// Move the highlight `delta` steps over the WHOLE ranked list,
-    /// clamped at either end (never wrapping — `core::menu::step`'s own
-    /// rule, spec §7's `up`/`down`;
-    /// [`geode_shell::choice::ChoiceList::nav_clamped`]). The window
-    /// follows, so the highlight is always painted even when it steps
-    /// past the old cap.
+    /// Move through the full ranked list with both ends clamped. The painted
+    /// window follows selection; it does not limit the navigable result set.
     pub(crate) fn step_highlighted(&mut self, delta: isize) {
         self.list
             .nav_clamped(geode_shell::vimnav::NavCommand::Move(delta as i64));
     }
 }
 
-/// Paint the action list, anchored at the header's own right edge (spec
-/// §6.1). `tile`/`tile_id` are this popup's own mouse door — a row click
-/// picks it, exactly as `enter` on the highlighted row would — and a
-/// click anywhere outside closes it.
+/// Paint the header-anchored action list. Hover updates selection; a row
+/// press uses the same pick path as Enter. Outside presses close the popup.
 pub(crate) fn render_menu(
     m: &MenuState,
     tile: &Entity<MarketDataTile>,
@@ -384,10 +284,7 @@ pub(crate) fn render_menu(
     let theme = cx.theme();
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
-        // keeps hit-testing the grid painted beneath it, so hovering a
-        // menu row lit up the table row under the pointer instead. The
-        // shell's own modal (`dialog.rs`) makes the same call.
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
@@ -418,9 +315,18 @@ pub(crate) fn render_menu(
                 ..
             } => {
                 let disabled = enabled.is_err();
-                let reason: SharedString = match enabled {
-                    Err(r) => (*r).into(),
-                    Ok(()) => hint.clone(),
+                // The trailing lane follows the row's highlight, as the
+                // title does, so its keys never sit muted on the accent.
+                let lane = if i == m.highlighted && !disabled {
+                    theme.accent_foreground
+                } else {
+                    theme.muted_foreground
+                };
+                // A disabled row says why; an enabled one shows its key
+                // (or its `:` verb).
+                let reason = match enabled {
+                    Err(r) => div().child(*r).into_any_element(),
+                    Ok(()) => geode_shell::shell::kbd::menu_spec(hint, lane),
                 };
                 // A choice row carries a tick or a same-width blank
                 // ahead of its title, so the group's titles align
@@ -434,12 +340,8 @@ pub(crate) fn render_menu(
                     .items_center()
                     .justify_between()
                     .gap_4()
-                    // The family's selected treatment (`MenuItemElement`):
-                    // `accent` under `accent_foreground`, never a second
-                    // list token — and, as there, never on a disabled
-                    // row: the highlight still LANDS on one (`step` does
-                    // not skip them, so `enter` can answer with the
-                    // reason), but it paints muted, not enabled.
+                    // Selected enabled rows use accent colors. Navigation can land on a
+                    // disabled row, but it remains muted and picking it reports the refusal.
                     .when(i == m.highlighted && !disabled, |d| {
                         d.bg(theme.accent).text_color(theme.accent_foreground)
                     })
@@ -451,33 +353,9 @@ pub(crate) fn render_menu(
                         })
                     })
                     .debug_selector(move || format!("marketdata-menu-row-{tile_id}-{i}"))
-                    // `stop_propagation` here is NOT load-bearing for
-                    // focus any more (it was, per the final review's B5,
-                    // until the 2026-09-17 insert-focus rule): "Load
-                    // underlying…" opens the picker and focuses its field
-                    // inside this very handler, and even were the click
-                    // to bubble on, `render`'s `pending_focus_restore`
-                    // consumption now SKIPS the restore whenever the
-                    // focused tile's occupant holds its own input in
-                    // insert mode (`occupant_holds_insert_focus`) — the
-                    // field keeps the keyboard either way.
-                    //
-                    // The stop is kept for a different reason: a click
-                    // that means "pick a row" must not ALSO run the
-                    // shell's ordinary tile-level click handling (drag
-                    // arming, dock focus) for the tile underneath the
-                    // popup — the same reason the popup occludes what is
-                    // painted beneath it. Contrast the `⋯` button
-                    // (`header.rs`), which must NOT stop propagation: no
-                    // field is focused after it, so the shell's
-                    // click-to-focus is exactly what should run. Do not
-                    // be fooled by the grid case: the pinned
-                    // `TableState::set_selected_row` (run by `sync_cursor`
-                    // at the end of every `dispatch`) stops propagation
-                    // of its own, so with the cursor in the grid this
-                    // stop looks redundant — with the cursor in the
-                    // strip (`clear_selection`, which stops nothing) it
-                    // is the only one there is.
+                    // Consume row presses so a pick cannot also trigger the shell's tile-level
+                    // handling for the surface beneath this popup. The header toggle deliberately
+                    // allows that propagation because it must also focus its tile.
                     .on_mouse_down(MouseButton::Left, {
                         let tile = tile.clone();
                         move |_, window, cx| {
@@ -502,7 +380,7 @@ pub(crate) fn render_menu(
                             })
                             .child(title.clone()),
                     )
-                    .child(div().text_color(theme.muted_foreground).child(reason))
+                    .child(div().text_color(lane).child(reason))
                     .into_any_element()
             }
         });
@@ -517,12 +395,9 @@ pub(crate) fn render_menu(
     .with_priority(1)
 }
 
-/// Paint the underlying picker (spec §7): the same anchored shell
-/// [`render_menu`] uses, a filter `Input` on top and one row per ranked
-/// catalog key below (a click loads it, the way a menu row click picks
-/// it). An empty ranked list paints one muted row rather than nothing,
-/// so an unconfigured dataset or a catalog that has not arrived yet
-/// still reads as "asked and answered" instead of a blank rectangle.
+/// Paint the underlying picker's focused input and moving window of prepared
+/// catalogue labels. Click commits; hover changes selection. An empty match list
+/// shows the same fallback message as an empty or unavailable catalogue.
 pub(crate) fn render_picker(
     p: &PickerState,
     tile: &Entity<MarketDataTile>,
@@ -545,10 +420,7 @@ pub(crate) fn render_picker(
                 .mb_1()
                 .border_b_1()
                 .border_color(theme.border)
-                // The placeholder itself ("underlying" — the trader's own
-                // word, spec §7) is set once, on the `InputState`, at
-                // `open_picker` — an `Input` element has no such builder
-                // of its own.
+                // open_picker configures the InputState placeholder once.
                 .child(Input::new(&p.input).appearance(false).w_full()),
         );
     let rows = &p.rows;
@@ -567,9 +439,7 @@ pub(crate) fn render_picker(
         // comment): the query narrows the ranked list, and stepping past
         // the cap slides the window rather than adding rows.
         for (row_i, i) in rows.painted().enumerate() {
-            // `labels[i]` is prepared off-render (`PickerRows`'s own
-            // doc comment, review fix round 1, IMPORTANT-3) — this is a
-            // refcount clone, never a conversion.
+            // Clone the prepared label; avoid constructing decorated text during paint.
             let text = rows.labels[i].clone();
             list = list.child(
                 h_flex()
@@ -611,18 +481,10 @@ pub(crate) fn render_picker(
     .with_priority(1)
 }
 
-/// Paint a `Choice` cell's typeahead (dividend spec §4.4): the picker's
-/// own surface — the field on top, one row per painted option below, the
-/// lit one in `accent`, a row click picks it, a hover lights it, a click
-/// anywhere outside closes it — anchored by its TOP-LEFT corner at the
-/// point it is painted from, which `MatrixDelegate::render_td` places at
-/// the edited cell's bottom-left, so the list hangs under the cell like
-/// a `Select`'s. `deferred` escapes the table's own clip exactly as the
-/// header popups escape the tile's, and `snap_to_window_with_margin`
-/// keeps a bottom-row popup on screen.
-///
-/// Reads only the prepared [`ChoicePaint`] (a static-string clone per
-/// row): nothing here formats or ranks.
+/// Paint a Choice cell's prepared input and option window. Click picks, hover
+/// selects, and an outside press closes. The delegate supplies a bottom-left cell
+/// anchor; this TopLeft deferred panel escapes the table clip and snaps inside
+/// the window. Rendering performs no ranking or option-label formatting.
 pub(crate) fn render_choice(
     p: &ChoicePaint,
     tile: &Entity<MarketDataTile>,
@@ -724,10 +586,8 @@ mod tests {
         assert_eq!(p.labels.len(), 3);
     }
 
-    /// Per-underlying drafts (2026-09-19): a parked key's label carries
-    /// its count phrase, every other label is bare, ranking runs over the
-    /// bare key alone, and a fresh catalog is re-decorated from the same
-    /// marks.
+    /// Parked-draft phrases decorate labels without becoming searchable. Catalogue
+    /// replacement keeps those marks while reranking the bare keys.
     #[test]
     fn a_parked_key_is_marked_in_its_label_but_ranked_by_the_bare_key() {
         let marks: BTreeMap<String, String> =
@@ -755,9 +615,7 @@ mod tests {
         assert_eq!(p.labels[0].as_ref(), "NDX.Z");
     }
 
-    /// The round-1 CRITICAL: an unchanged query is a no-op, so the
-    /// defensive re-rank `commit` always makes never resets a highlight
-    /// the trader moved.
+    /// An unchanged query leaves a manually moved highlight intact.
     #[test]
     fn an_unchanged_query_keeps_the_highlight() {
         let mut p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
@@ -800,8 +658,7 @@ mod tests {
         assert_eq!(p.highlighted_key(), Some("CCC.Z"));
     }
 
-    /// The round-2 fix, pure: a re-sorted catalog keeps the KEY, and a
-    /// genuine removal falls back to row 0.
+    /// Reordering preserves the selected key; removing it selects the first match.
     #[test]
     fn replace_all_keeps_the_key_across_a_resort_and_falls_back_on_removal() {
         let mut p = rows(&["BBB.Z", "CCC.Z"]);
@@ -854,11 +711,8 @@ mod tests {
         assert_eq!(p.highlighted_key(), None);
     }
 
-    /// Spec §20.5's own rule, on the picker: a bare ±1 step is CLAMPED
-    /// here, never wrapping — `step_highlighted` goes through
-    /// [`geode_shell::choice::ChoiceList::nav_clamped`], not `nav`, which
-    /// is the one thing distinguishing the picker from a dialog's
-    /// `Choice` field (whose bare step wraps).
+    /// Picker navigation clamps even a one-row step, unlike ChoiceList's wrapping
+    /// nav method. The wrapper uses nav_clamped for every delta.
     #[test]
     fn step_clamps_at_both_ends() {
         let mut p = rows(&["AAA.Z", "BBB.Z", "CCC.Z"]);
@@ -876,12 +730,8 @@ mod tests {
         );
     }
 
-    /// A3, amended for the window-following cap (2026-09-19 ruling): the
-    /// ranked list is unbounded, but a step that lands the highlight past
-    /// the cap drags the WINDOW along rather than clamping the highlight
-    /// to whatever the window last showed — `enter` can never load a row
-    /// the trader cannot see, even when the current value ranks past row
-    /// `PICKER_ROWS`.
+    /// Navigation beyond the initial cap moves the painted window to keep the
+    /// selected result visible. The underlying ranked list retains all matches.
     #[test]
     fn the_highlight_never_leaves_the_painted_rows() {
         let keys: Vec<String> = (0..20).map(|i| format!("K{i:02}.Z")).collect();
@@ -900,10 +750,8 @@ mod tests {
         );
         assert_eq!(p.painted_len(), PICKER_ROWS, "still a full window");
 
-        // A catalog with a key that sorts ahead of the highlighted one
-        // shifts its declared index — the window follows it into view
-        // rather than dropping it to row 0 the way the old truncating cap
-        // once did.
+        // A new key before the selected one changes its index; the window follows
+        // the preserved key into view.
         let mut all = keys.clone();
         all.insert(0, "A00.Z".into());
         p.replace_all(all);

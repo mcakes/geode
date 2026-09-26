@@ -1,5 +1,6 @@
-//! One date range per tile (spec ruling 4, §9.8): a preset kept
-//! RELATIVE so a restored `1y` tile is a year to today, or two dates.
+//! One query range per tile: a relative preset or two inclusive UTC dates.
+//! Sessions retain presets as labels, so restoration resolves them against
+//! the current time and frame as-of instead of freezing their original span.
 
 use chrono::{DateTime, Days, Months, NaiveDate, Utc};
 use geode_core::query::AsOf;
@@ -53,9 +54,8 @@ impl Preset {
             Preset::Y5 => "5 years",
         }
     }
-    /// The start of the span that ends at `to`. Months and years are
-    /// calendar months (a `1m` on 31 March starts on 28/29 February);
-    /// a week is seven days.
+    /// Subtract UTC calendar months (clamping month-end dates) or seven days.
+    /// Date arithmetic overflow leaves the start at `to`.
     fn start_before(self, to: DateTime<Utc>) -> DateTime<Utc> {
         let months = |n: u32| to.checked_sub_months(Months::new(n)).unwrap_or(to);
         match self {
@@ -88,7 +88,7 @@ impl Default for Range {
 }
 
 impl Range {
-    /// `:range 1y` or `:range <from> <to>` (§9.9).
+    /// Parse one exact preset label or two ordered YYYY-MM-DD dates.
     pub fn parse(words: &[&str]) -> Result<Range, String> {
         match words {
             [one] => Preset::parse(one).map(Range::Relative).ok_or_else(|| {
@@ -115,10 +115,11 @@ impl Range {
         }
     }
 
-    /// The half-open span to fetch and query. `to` is `now`, clipped to
-    /// the frame's as-of (ruling 4); a relative range measures its width
-    /// back from the CLIPPED end, so a `1y` under an as-of is still a
-    /// year of data.
+    /// Resolve a half-open UTC span for fetches and queries. Relative presets
+    /// measure backward from now clipped to the frame's as-of; calendar months
+    /// retain their width relative to that clipped endpoint.
+    /// Absolute dates span UTC midnights through the day after `to`, clipped
+    /// only by as-of, not by now. An as-of before `from` yields an empty span.
     pub fn resolve(&self, now: DateTime<Utc>, as_of: &AsOf) -> (DateTime<Utc>, DateTime<Utc>) {
         let clip = |t: DateTime<Utc>| match as_of {
             AsOf::Live => t,

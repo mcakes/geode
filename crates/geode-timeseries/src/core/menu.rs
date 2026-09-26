@@ -1,22 +1,15 @@
-//! The tile's menus' pure core: the action list (`.` and `⋯`), the
-//! range menu (`r`) and the frequency menu (`f`), each an ordered list
-//! of rows naming what a pick does, whether it is pickable and why not,
-//! and — for a toggle or a choice — whether it is in force. No gpui, no
-//! entity: `popup.rs` paints every kind with one painter, the tile
-//! decides when one opens, and `TimeseriesTile::menu_pick` is the one
-//! door a row's `enter` and its click take.
-//!
-//! An action row ends in `TimeseriesTile::dispatch` on its own action
-//! id, so a menu row, a key and the palette take one path (the coding
-//! guide's "model one logical command once"). A range or frequency row
-//! writes its value through the model's own setter, the one `:range`
-//! and `:freq` use.
-//!
-//! The market-data panel's `core::menu` is the shape; this one adds the
-//! cursor-slot section, whose rows read the slot under the cursor.
+//! Prepared menu rows derived from the model: the action list (`.`/`⋯`), the
+//! range menu (`r`) and the frequency menu (`f`). Each row names what a pick
+//! does, its enablement reason, and toggle or choice state. The tile adds
+//! binding hints and routes every pick through `TimeseriesTile::menu_pick`:
+//! action rows dispatch their action id, range and frequency rows write through
+//! the model's own setters (the ones `:range` and `:freq` use). The action list
+//! includes selected slot operations and common tile controls; it is not the
+//! full action registry.
 
 use geode_core::series::{Frequency, SlotKind};
 use geode_shell::actions::ActionId;
+use geode_shell::keymap::{Keystroke, Modifiers};
 use gpui::SharedString;
 
 use super::model::Model;
@@ -65,17 +58,20 @@ pub enum MenuRow {
     Action {
         pick: Pick,
         title: SharedString,
-        /// The trailing column: an action's live chord (resolved by the
-        /// tile at open; empty when the keymap has none), or a preset's
-        /// or a frequency's short label.
-        hint: SharedString,
+        /// Keys for the trailing lane, painted as `Kbd`: an action's binding
+        /// filled by the tile when rows are prepared (empty if absent), or
+        /// `Custom dates…`'s `c`.
+        hint: Vec<Keystroke>,
+        /// Trailing text that is NOT a key — a preset's or a frequency's
+        /// short label (`1w`, `1d`). Painted as text in place of `hint`.
+        label: Option<SharedString>,
         /// `Err` names why the row cannot be picked; a pick makes it the
-        /// notice, and the painter shows it in the trailing column unless
-        /// `short_reason` stands in for it there.
+        /// notice, and the trailing lane shows it unless `short_reason`
+        /// stands in for it there.
         enabled: Result<(), SharedString>,
-        /// A disabled row's trailing text when its full reason is a
-        /// sentence too long for the column (the point cap's): the row
-        /// stays narrow and a pick still gives the whole reason.
+        /// A disabled row's trailing text when its full reason is a sentence
+        /// too long for the lane (the point cap's): the row stays narrow and
+        /// a pick still gives the whole reason.
         short_reason: Option<SharedString>,
         /// `None` for a verb; `Some(on)` for a toggle or a choice, which
         /// paints a tick (or a same-width blank) ahead of its title.
@@ -86,29 +82,40 @@ pub enum MenuRow {
     Section(SharedString),
 }
 
+/// What a row's trailing lane paints.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Trailing<'a> {
+    /// Keys, painted as `Kbd` (empty when the action has no binding).
+    Keys(&'a [Keystroke]),
+    /// Text that is not a key: a short label or a disabled row's reason.
+    Text(SharedString),
+}
+
 impl MenuRow {
-    /// What the trailing column paints: a disabled row's short reason
-    /// (or its reason, when that is short already), else its hint.
-    /// `None` for a separator or a heading.
-    pub fn trailing(&self) -> Option<SharedString> {
+    /// A disabled row's short reason (or its reason, when that is short
+    /// already); else its non-key label; else its keys. `None` for a
+    /// separator or a heading.
+    pub fn trailing(&self) -> Option<Trailing<'_>> {
         match self {
             MenuRow::Action {
                 enabled,
                 hint,
+                label,
                 short_reason,
                 ..
-            } => Some(match enabled {
-                Err(reason) => short_reason.clone().unwrap_or_else(|| reason.clone()),
-                Ok(()) => hint.clone(),
+            } => Some(match (enabled, label) {
+                (Err(reason), _) => {
+                    Trailing::Text(short_reason.clone().unwrap_or_else(|| reason.clone()))
+                }
+                (Ok(()), Some(label)) => Trailing::Text(label.clone()),
+                (Ok(()), None) => Trailing::Keys(hint),
             }),
             _ => None,
         }
     }
 }
 
-/// What a row reads off the tile beyond the model: nothing yet, but
-/// spelled as a struct so the next input is a field, not a signature
-/// change at every call site.
+/// Inputs used to prepare menu rows without accessing a retained tile entity.
 pub struct MenuInputs<'a> {
     pub model: &'a Model,
 }
@@ -121,7 +128,8 @@ fn action(
     MenuRow::Action {
         pick: Pick::Action(ActionId(id.to_string())),
         title: title.into(),
-        hint: SharedString::default(),
+        hint: Vec::new(),
+        label: None,
         enabled: enabled.map_err(SharedString::new_static),
         short_reason: None,
         checked: None,
@@ -132,23 +140,19 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
     MenuRow::Action {
         pick: Pick::Action(ActionId(id.to_string())),
         title: SharedString::new_static(title),
-        hint: SharedString::default(),
+        hint: Vec::new(),
+        label: None,
         enabled: Ok(()),
         short_reason: None,
         checked: Some(on),
     }
 }
 
-/// The action list, in order: the four openers; then, under a heading
-/// naming the cursor's slot, the seven slot verbs (all disabled with
-/// `no series` while the tile holds none — the section stays so the
-/// list keeps one shape); then `Frequency…` (the frequency menu's
-/// opener), the two toggles (ticked when on) and the view reset.
-///
-/// A row's enablement is the same refusal its key would give: `Edit
-/// expression…` on a source slot says what `e` says, and `Cycle bucket
-/// rule` on an expression is disabled rather than silently inert as
-/// `b` is.
+/// Build openers, cursor-slot operations, `Frequency…` (the frequency menu's
+/// opener), display toggles, and view reset in fixed order. Empty tiles keep
+/// their slot section disabled. Bucket rules require a source and expression
+/// editing requires an expression; Colour opens a picker while Cycle colour
+/// advances through the palette.
 pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     let m = i.model;
     let mut out = vec![
@@ -228,7 +232,8 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
         .map(|p| MenuRow::Action {
             pick: Pick::Range(p),
             title: SharedString::new_static(p.title()),
-            hint: SharedString::new_static(p.as_str()),
+            hint: Vec::new(),
+            label: Some(SharedString::new_static(p.as_str())),
             enabled: Ok(()),
             short_reason: None,
             checked: Some(*current == Range::Relative(p)),
@@ -238,7 +243,11 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
     out.push(MenuRow::Action {
         pick: Pick::CustomRange,
         title: SharedString::new_static("Custom dates…"),
-        hint: SharedString::new_static("c"),
+        hint: vec![Keystroke {
+            mods: Modifiers::NONE,
+            key: "c".to_string(),
+        }],
+        label: None,
         enabled: Ok(()),
         short_reason: None,
         checked: Some(matches!(current, Range::Absolute { .. })),
@@ -261,7 +270,8 @@ pub fn frequency_rows(
         .map(|f| MenuRow::Action {
             pick: Pick::Frequency(f),
             title: SharedString::new_static(frequency_title(f)),
-            hint: SharedString::new_static(f.as_str()),
+            hint: Vec::new(),
+            label: Some(SharedString::new_static(f.as_str())),
             enabled: refusal(f).map_err(SharedString::from),
             short_reason: Some(SharedString::new_static(OVER_CAP)),
             checked: Some(f == current),
@@ -336,14 +346,10 @@ fn lands(r: &MenuRow) -> bool {
     )
 }
 
-/// Move `delta` ENABLED `Action` rows from `from` — a disabled row, a
-/// `Separator` and a `Section` are all stepped over — clamped at either
-/// end rather than wrapping (the market-data menu's rule: a list read
-/// top-down does not jump to its far end). `delta == 0` is the refresh
-/// case: the highlight stays on its row while that row is still an
-/// `Action` (the pointer may have left it on a disabled one), else lands
-/// on the first enabled row. A highlight on a non-enabled row steps from
-/// where it stands; with no enabled row further that way it stays put.
+/// Move delta enabled actions, skipping disabled rows, headings, and separators.
+/// Clamp at either end. Zero retains any Action row, including a disabled row
+/// selected by the pointer. From a non-action, return first_enabled. From a
+/// disabled action with no enabled row in the requested direction, stay put.
 pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
     if !matches!(rows.get(from), Some(MenuRow::Action { .. })) {
         return first_enabled(rows);
@@ -503,9 +509,8 @@ mod tests {
         assert_eq!(step(&rows, 4, 1), 0, "from a non-row: the first enabled");
     }
 
-    /// A disabled row is stepped over like a separator (user report
-    /// 2026-09-25): on an empty tile the whole slot section is greyed, so
-    /// `j` from `Range…` lands on `Frequency…`.
+    /// Disabled slot actions are skipped, so an empty tile moves directly from
+    /// Range to Frequency….
     #[test]
     fn stepping_skips_disabled_rows() {
         let m = Model::new();
@@ -534,11 +539,18 @@ mod tests {
         }
     }
 
-    fn hint_of(rows: &[MenuRow], i: usize) -> String {
-        match &rows[i] {
-            MenuRow::Action { hint, .. } => hint.to_string(),
-            _ => String::new(),
+    /// The trailing lane as a test reads it: text as itself, keys by their
+    /// keymap spelling (`[c]`).
+    fn trail(row: &MenuRow) -> String {
+        match row.trailing() {
+            Some(Trailing::Text(t)) => t.to_string(),
+            Some(Trailing::Keys(keys)) => keys.iter().map(|k| format!("[{}]", k.key)).collect(),
+            None => String::new(),
         }
+    }
+
+    fn hint_of(rows: &[MenuRow], i: usize) -> String {
+        trail(&rows[i])
     }
 
     #[test]
@@ -561,7 +573,7 @@ mod tests {
         let hints: Vec<String> = (0..rows.len()).map(|i| hint_of(&rows, i)).collect();
         assert_eq!(
             hints,
-            vec!["1w", "1m", "3m", "6m", "1y", "2y", "5y", "", "c"]
+            vec!["1w", "1m", "3m", "6m", "1y", "2y", "5y", "", "[c]"]
         );
         assert_eq!(pick_of(&rows, 2), &Pick::Range(Preset::M3));
         assert_eq!(pick_of(&rows, 8), &Pick::CustomRange);
@@ -616,7 +628,7 @@ mod tests {
             ]
         );
         let hints: Vec<String> = (0..rows.len()).map(|i| hint_of(&rows, i)).collect();
-        assert_eq!(hints, vec!["1m", "5m", "15m", "1h", "1d", "1w"]);
+        assert_eq!(hints, vec!["over cap", "5m", "15m", "1h", "1d", "1w"]);
         assert_eq!(pick_of(&rows, 0), &Pick::Frequency(Frequency::M1));
         assert_eq!(
             match &rows[0] {
@@ -629,11 +641,11 @@ mod tests {
             "a capped frequency is disabled with the cap's own reason"
         );
         assert_eq!(
-            rows[0].trailing().as_deref(),
-            Some("over cap"),
+            trail(&rows[0]),
+            "over cap",
             "the trailing column carries a short reason; a pick's notice the full one"
         );
-        assert_eq!(rows[3].trailing().as_deref(), Some("1h"));
+        assert_eq!(trail(&rows[3]), "1h");
         assert_eq!(checked_of(&rows, 3), Some(true));
         assert_eq!(checked_of(&rows, 4), Some(false));
         assert_eq!(

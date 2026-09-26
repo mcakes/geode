@@ -1,11 +1,9 @@
-//! `[timeseries] default_source` (timeseries spec §9.12) and the fetch
-//! sources a tile may name, published as the workspace's THIRD gpui
-//! global — admitted under CLAUDE.md's exception for the same reason
-//! `linenumbers::UiSettings` was: a module has no path to `ShellView`,
-//! the settings row must reach an open tile, and neither
-//! `ConfigReloaded` (views and dimensions only) nor the factory (create
-//! time only) can carry it. Written by the shell alone: startup, the
-//! settings row, hot reload.
+//! Timeseries defaults and configured fetch sources shared with hosted modules.
+//!
+//! The shell publishes `SeriesSettings` at startup, after settings changes, and
+//! on accepted reloads. Both the default-source settings row and timeseries tiles
+//! read this global, so their source lists use the same configuration. It does
+//! not report adapter startup success or live data availability.
 
 use std::path::Path;
 
@@ -27,9 +25,9 @@ pub struct FetchSource {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SeriesSettings {
     /// `[timeseries] default_source`: the source `:add SPX.close` means
-    /// when the identity carries no `@source`. `None` (absent, or naming
-    /// nothing configured — see [`default_source_diagnostic`]) means a
-    /// tile must be told one explicitly.
+    /// when the identity carries no `@source`. Missing or non-string values
+    /// become `None`; an unknown name remains here and is diagnosed separately
+    /// by [`default_source_diagnostic`]. Consumers validate source membership.
     pub default_source: Option<String>,
     /// Every configured fetch source, in `sources` doc order — config
     /// truth, not engine truth: one the engine could not start answers
@@ -43,9 +41,9 @@ impl SeriesSettings {
     /// Resolve both halves from the layered config: the fetch sources
     /// from `sources` × `datasets` (`SourceSpec::shape`, the one door
     /// that tells a fetch source from a subscribed or directory one),
-    /// the default from `app`. Lenient throughout — a `default_source`
-    /// that is not a string, or names nothing, reads as `None` here and
-    /// is diagnosed by [`default_source_diagnostic`].
+    /// the default from `app`. Non-string defaults become `None`; string values
+    /// are retained even if they name no source. [`default_source_diagnostic`]
+    /// reports invalid types and unknown names without rejecting the config.
     pub fn from_config(config: &Config) -> SeriesSettings {
         let schema = config
             .doc("datasets")

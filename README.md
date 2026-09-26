@@ -124,7 +124,9 @@ cargo bench --workspace --no-run
 cargo check -p geode-shell --features test-support --all-targets
 ```
 
-CI runs those five on macOS and Windows; keep both building.
+CI runs those five on macOS and Windows. The macOS job also runs
+`zsh scripts/mutation-check.sh --anchors-only` to validate mutation anchors
+and test-name filters.
 
 A green suite can miss wrong-data behavior when its fixture cannot reach the
 relevant branch. `scripts/mutation-check.sh` breaks one load-bearing behavior

@@ -54,7 +54,8 @@ use super::super::{SCOPES_KEY, ShellEvent, ShellView};
 use super::super::colours as colour_theme;
 use super::super::control::{self, PointerStates as _};
 use super::super::dialog;
-use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
+use super::super::kbd;
+use super::super::keybindings_view::{highlighted_text, split_label_indices};
 use super::super::scale;
 
 /// Browse row height estimate used to size its capped viewport. Scroll following uses
@@ -869,9 +870,8 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         draft.column_ctx = None;
         return;
     }
-    // The installed fields open with the cursor on the first row that answers to
-    // something — `enter_edit`'s rule, applied at the stage's own door because a click
-    // reaches this function without passing through the key handler's settle.
+    // Settle selection at stage entry because pointer activation bypasses the keyboard
+    // handler's final settle.
     draft.settle_selection(domain);
     state.stage = Stage::Column {
         object,
@@ -968,9 +968,8 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     if !draft.enter_values(column, scopes::loading_field()) {
         return;
     }
-    // `enter_column_stage`'s rule at this stage's own door. The loading field is the
-    // only row here and answers to nothing, so the cursor stays on it until the values
-    // arrive — a list with no stop at all leaves the cursor where it is.
+    // The loading placeholder has no cursor stop, so settling leaves it selected.
+    // Delivery settles again after installing the value rows.
     let domain = state.domain;
     draft.settle_selection(domain);
     state.stage = Stage::Values {
@@ -1057,21 +1056,17 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// revalidation because current reorderable domains have no order-sensitive draft
 /// diagnostic; adding one would require revalidation at that branch.
 fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
-    // One settle for every arm below (user ruling 2026-09-23: the cursor rests only on
-    // rows that answer to something). A wrapper rather than a call in each arm because
-    // this handler returns from a dozen places, and the rows under the cursor change
-    // from more than the motion keys: a tick that adds a row, an `x` that removes one,
-    // a filter keystroke that re-ranks the list. The motion keys settle on their own,
-    // in the direction of travel (`Draft::move_selection`); this is what catches every
-    // other way the list can move underneath the cursor.
+    // Settle after every return path, including mutations that add, remove, or re-rank
+    // rows. Motion already snaps in its direction through move_selection; this final
+    // settle preserves that stop and covers other selection changes.
     let claimed = handle_edit_key_inner(shell, ks, cx);
     settle_edit_cursor(shell);
     claimed
 }
 
-/// Put the edit stage's cursor back on a row that answers to something, if the last
-/// change left it on one that does not. A no-op on every other stage, and while a value
-/// field is open (its rows are the field's completions, not the object's rows).
+/// Settle the retained draft's cursor after keyboard handling, including Column and
+/// Values projections. Skip while text entry owns selection, and do nothing when no
+/// draft remains.
 fn settle_edit_cursor(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
@@ -2730,9 +2725,6 @@ fn build(
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
 
     // the merged `colours.toml` AND the theme's own anchors/tokens, read once for the
     // whole list rather than once per row — every browse row's swatch resolves its own
@@ -3008,7 +3000,7 @@ fn build(
             ],
         }
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line = dialog::hint_rows(&hints);
     let footer = v_flex()
         .w(scale::design(WIDTH))
         .gap_1()
@@ -3072,7 +3064,7 @@ fn build(
             let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, entity, cx)
         }
-        None => browse_action_bar(state, &rows, &visible, entity, cx),
+        None => browse_action_bar(state, &rows, &visible, entity),
     };
 
     v_flex()
@@ -3122,13 +3114,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // by a button's height and `escape` would shift it back.
         (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (false, None) => action_bar(shell, entity, cx),
+        (false, None) => action_bar(shell, entity),
     };
     let theme = cx.theme();
     let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     // Pointer states for the two controls a row carries besides itself:
     // the steppable value chip (a filled chip) and the tick (a bare glyph).
     // Both sit on `popover`, the modal panel's fill. The tick hands in
@@ -3449,7 +3440,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // already reads by.
                         let (text, suffix) = if draft.values().is_some() {
                             (
-                                "VALUES — space ticks · ctrl+a all shown · ctrl+x none",
+                                "VALUES — `space` ticks · `ctrl+a` all shown · `ctrl+x` none",
                                 "members",
                             )
                         } else {
@@ -3466,7 +3457,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 .debug_selector(move || {
                                     format!("objectdialog-section-{suffix}-{field_key}")
                                 })
-                                .child(text)
+                                .child(kbd::marked(text))
                                 .into_any_element(),
                         );
                     }
@@ -3926,7 +3917,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints.extend(leave(back));
         hints
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line = dialog::hint_rows(&hints);
     // One fixed-height line shows the latest notice, otherwise selected-field help.
     // Keep it blank during confirmation, but retain grammar help during text entry.
     // Fixed line height and truncation prevent footer movement.
@@ -4024,22 +4015,23 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 }
 
 /// The small-caps text and selector suffix for the section header that opens an ordered
-/// list's own items or its available catalogue. `own` distinguishes Views' own columns
+/// list's own items or its available catalogue. Backtick-quoted runs are keys, painted
+/// as `Kbd` chips by `kbd::marked`. `own` distinguishes Views' own columns
 /// from the rest of its dataset's; Groupings' `dimensions` has no catalogue at all
 /// (`groupings.rs`'s own module doc), so only the first arm there is ever reached.
 fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
     match (domain, own) {
         (Domain::Views, true) => (
-            "COLUMNS — space hides · shift+j / shift+k reorder · x removes",
+            "COLUMNS — `space` hides · `shift+j` / `shift+k` reorder · `x` removes",
             "members",
         ),
-        (Domain::Views, false) => ("AVAILABLE — space adds", "available"),
+        (Domain::Views, false) => ("AVAILABLE — `space` adds", "available"),
         (Domain::Groupings, _) => (
-            "DIMENSIONS — space includes · shift+j / shift+k reorder",
+            "DIMENSIONS — `space` includes · `shift+j` / `shift+k` reorder",
             "members",
         ),
-        (Domain::Scopes, true) => ("DIMENSIONS — enter opens values · x drops", "members"),
-        (Domain::Scopes, false) => ("AVAILABLE — enter picks values", "available"),
+        (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
+        (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
         // None of Schema, Sources or Colours has an `OrderedList` field
         // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
         // module docs — every field on any of the three is a plain
@@ -4085,11 +4077,7 @@ fn field_value(field: &super::Field) -> String {
 /// other verb in Geode's dialogs has one; an `outline` button is the mock's own
 /// local-command-bar look, and the destructive ones are `danger` rather than merely
 /// worded strongly.
-fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> AnyElement {
-    let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
+fn action_bar(shell: &ShellView, entity: &Entity<ShellView>) -> AnyElement {
     let mut bar = h_flex()
         .w(scale::design(WIDTH))
         .gap_2()
@@ -4114,7 +4102,7 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                    .child(kbd::chip(&ks))
                     .child(action.label.clone()),
             )
             .on_click(move |_event, window, cx| {
@@ -4139,7 +4127,6 @@ fn browse_action_bar(
     rows: &[ObjectRow],
     visible: &[crate::listfilter::Ranked],
     entity: &Entity<ShellView>,
-    cx: &mut App,
 ) -> AnyElement {
     let naming = matches!(state.stage, Stage::Naming);
     let writable = state.domain.writable(&state.stage);
@@ -4156,10 +4143,6 @@ fn browse_action_bar(
     if !offers_n && !offers_c && !offers_d && !offers_r {
         return div().into_any_element();
     }
-    let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     let mut bar = h_flex().w(scale::design(WIDTH)).gap_2().items_center();
     if offers_n {
         let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
@@ -4176,7 +4159,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                                .child(kbd::chip(&ks))
                                 .child(label),
                         )
                         .on_click(move |_event, window, cx| {
@@ -4218,7 +4201,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                                .child(kbd::chip(&ks))
                                 .child("Copy this scope"),
                         )
                         .on_click(move |_event, window, cx| {
@@ -4264,7 +4247,7 @@ fn browse_action_bar(
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                            .child(kbd::chip(&ks))
                             .child(label),
                     )
                     .on_click(move |_event, window, cx| {
@@ -4405,10 +4388,9 @@ fn on_edit_row_clicked(
         if position >= draft.visible_rows().len() {
             return;
         }
-        // A click on a row the cursor cannot rest on does nothing at all (user ruling
-        // 2026-09-23) — not even move the cursor there. The mouse cannot reach a state
-        // the keyboard is not allowed to reach, which is the parity rule §17.1 states
-        // for every other row.
+        // Ignore non-stop rows without moving selection or opening a stage. This also
+        // applies when a filter leaves no stops and keyboard motion can traverse inert
+        // rows.
         let rows = draft.rows();
         let clicked = draft
             .visible_rows()
@@ -4742,13 +4724,10 @@ pub(in crate::shell) fn deliver_values(
     };
     draft.reseed_fields(fields);
     draft.selected = 0;
-    // The delivered values replace the loading row wholesale, so the cursor lands on
-    // the first of them rather than on the `Values` header above (user ruling
-    // 2026-09-23). A delivery arrives outside the key handler, so it settles here.
+    // Delivery replaces the loading row outside keyboard handling. Settle onto the
+    // first available stop, skipping the Values header when there are value rows.
     draft.settle_selection(Domain::Scopes);
-    // The viewport follows the cursor the settle chose, not row 0 — the two would
-    // disagree the moment a Values list ever opened with something above its first
-    // value.
+    // Scroll to the settled cursor, which can differ from the initial index zero.
     let selected = draft.selected;
     shell.object_dialog_scroll.scroll_to_item(selected);
     cx.notify();

@@ -1,6 +1,6 @@
-//! The tile's data half: deliveries from the data tier, the fetch of
-//! every pair still waiting, the query over the range, and the flip
-//! barrier's staging and promotion (see the parent module's doc).
+//! Fetch tracking, tagged series requests and deliveries, and flip-barrier
+//! staging for the timeseries tile. Successful fetches trigger series queries;
+//! failed series queries retain the last installed result.
 
 use super::*;
 
@@ -10,23 +10,15 @@ impl TimeseriesTile {
     /// A series answer for this tile's key.
     pub fn deliver(&mut self, outcome: SeriesOutcome, cx: &mut Context<Self>) {
         if outcome.tag != self.tag {
-            // Stale: a newer request is out — and deliberately NOT an
-            // arrival. A barrier waits for the versions this tile last
-            // ACTED under, which is the newer request's; arriving here
-            // would answer for a question still in flight, and that
-            // outcome's own delivery is what answers it.
+            // An old tag cannot answer the newer request or its barrier arrival.
             return;
         }
         self.query_in_flight = false;
         let acted = self.acted;
         match outcome.result {
             Ok(result) => {
-                // Phase 4a §3.10: while a barrier still wants this key,
-                // STAGE rather than paint. A chart's own answer may land
-                // well before every blotter's, and a chart painting the
-                // new as-of beside a blotter still on the old one is
-                // exactly the half-updated screen the barrier exists to
-                // prevent.
+                // Stage while the barrier wants this request's key and frame identity.
+                // Its release coordinates promotion with the other waiting tiles.
                 let wants = acted.is_some_and(|acted| {
                     self.frame
                         .read(cx)
@@ -59,12 +51,10 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// A fetch finished for one `(source, identity)` pair. Keyed by the
-    /// pair, so a tile that holds it marks every slot over it and a tile
-    /// that does not is left alone by `set_pair_state`'s own `NONE`.
-    ///
-    /// Any `Ok` requeries — `Ok(0)` included, which means the span was
-    /// already covered rather than that nothing is there.
+    /// Complete fetch tracking and update every slot over this pair.
+    /// A successful completion requeries while visible, including zero rows
+    /// appended: the cache may already cover the requested span. Failure
+    /// marks matching slots failed while retaining the chart's last result.
     pub fn on_fetched(
         &mut self,
         source: &str,
@@ -72,11 +62,8 @@ impl TimeseriesTile {
         result: Result<u64, String>,
         cx: &mut Context<Self>,
     ) {
-        // ABOVE the early return (review round 1, I-2): a pair this tile
-        // no longer holds answers `NONE`, and leaving its entry behind
-        // would make the set claim a fetch is still out for a pair that
-        // could be re-added a moment later — which `fetch_pending` would
-        // then skip, leaving a `Fetching` chip with nothing coming.
+        // Clear tracking even when no slot holds this pair anymore. Otherwise
+        // re-adding it could suppress a needed fetch indefinitely.
         self.in_flight
             .remove(&(source.to_string(), identity.to_string()));
         let state = match &result {
@@ -96,14 +83,9 @@ impl TimeseriesTile {
 
     // ---- the data flow -----------------------------------------------
 
-    /// Ask for every source slot that is waiting for data and has no
-    /// fetch out already (see [`Self::in_flight`]), one request per
-    /// PAIR: two slots over the same `identity@source` are one span.
-    ///
-    /// The whole visible range is asked for every time; the data tier
-    /// subtracts what a pair already covers and queues one span per gap,
-    /// so re-asking costs a round trip to `DataService` and nothing
-    /// upstream.
+    /// Fetch each waiting `(source, identity)` once per tracked span, even
+    /// when several slots share the pair. Request the full resolved range;
+    /// the data tier subtracts existing coverage before scheduling gaps.
     pub(super) fn fetch_pending(&mut self, cx: &mut Context<Self>) {
         if self.in_flight_range.as_ref() != Some(self.model.range()) {
             self.in_flight.clear();
@@ -150,23 +132,19 @@ impl TimeseriesTile {
         }
     }
 
-    /// Submit this tile's series request, keyed by the tile so two
-    /// charts never supersede each other. The stats ride over the
-    /// VISIBLE window and the points over the whole range, which is what
-    /// `request::params` builds from the current result's buckets.
-    /// Drop every in-flight entry for a pair the model no longer holds
-    /// (review round 1, I-2). Called wherever slots LEAVE — `remove`
-    /// (which takes an operand's dependants with it) and `:clear` —
-    /// because an answer for a pair the tile has dropped never clears
-    /// its own entry through the model, and a stale entry is
-    /// indistinguishable from a live fetch: the same pair, re-added,
-    /// would be skipped for the tile's whole life.
+    /// Forget fetch tracking for pairs removed from the model, including
+    /// removal of dependent expressions and clearing every slot. Re-adding a
+    /// pair must be able to submit its fetch again.
     pub(super) fn prune_in_flight(&mut self) {
         let model = &self.model;
         self.in_flight
             .retain(|(source, identity)| model.holds_pair(source, identity));
     }
 
+    /// Submit with this tile's key and a fresh tag, superseding any staged result.
+    /// Points cover the resolved range; statistics use the visible window from
+    /// retained buckets, falling back to the range before the first result.
+    /// Refusal answers an open barrier and clears acted versions for retry.
     pub(super) fn requery(&mut self, cx: &mut Context<Self>) {
         // A fresh question supersedes whatever was staged for the old
         // one, whether or not `promote`'s own version check would have
@@ -203,11 +181,8 @@ impl TimeseriesTile {
         };
         self.query_in_flight = submitted;
         if !submitted {
-            // Nothing is coming: arrive, or an open barrier holds every
-            // other tile to the 250 ms deadline waiting for an outcome
-            // that will never exist — then clear `acted`, so the next
-            // frame change retries rather than deciding this tile is
-            // already up to date. In that order: `arrive` reads `acted`.
+            // No outcome will arrive, so answer the barrier before clearing `acted`.
+            // Leaving acted unset makes a later frame notification eligible to retry.
             self.arrive(cx);
             self.acted = None;
             self.query_in_flight = false;
@@ -224,22 +199,16 @@ impl TimeseriesTile {
         Self::differs_on_followed(acted, now)
     }
 
-    /// `as_of` and nothing else (spec §6.5). The one comparison
-    /// [`Self::follows_changed`] and [`Self::promote`]'s own gate both go
-    /// through, so "what this tile requeries for" and "what invalidates
-    /// something it has already staged" cannot drift apart.
+    /// Only as-of invalidates an established series request or staged result.
+    /// Share this comparison between requery decisions and promotion.
     pub(super) fn differs_on_followed(versions: FrameVersions, now: FrameVersions) -> bool {
         versions.as_of != now.as_of
     }
 
-    /// Answer an open flip barrier for a change this tile is NOT going to
-    /// requery for (a scope or grouping bump, or no slot to ask about).
-    ///
-    /// `ShellView::visible_tile_keys` cannot know which tiles follow
-    /// which counters, so every visible occupant is in the barrier's key
-    /// set. Left unanswered, this tile would hold every blotter on
-    /// screen open until `FLIP_DEADLINE` — 250 ms — on every scope
-    /// keystroke, with nothing of its own coming.
+    /// Answer a barrier when this tile needs no query for its current identity.
+    /// All visible occupants are enrolled, including tiles that ignore scope or
+    /// grouping. An outstanding query for that same identity must answer through
+    /// its own delivery instead of being released by an unrelated notification.
     pub(super) fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
         // An unrelated notification is not an answer to the query this
         // barrier is already waiting for.
@@ -306,9 +275,8 @@ impl TimeseriesTile {
         if std::mem::take(&mut self.reset_view) {
             self.model.reset_view();
         }
-        // Assigned OVER the old `Arc`, never through a `None` first: a
-        // tile that dropped its only result mid-update would paint an
-        // empty chart on any frame drawn in between.
+        // Replace the retained result directly, keeping the last good data until
+        // its successor is installed.
         self.result_seq += 1;
         self.result = Some(Arc::new(result));
         self.notice = None;
