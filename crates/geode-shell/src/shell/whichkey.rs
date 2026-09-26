@@ -50,7 +50,10 @@ pub fn continuations(
         .filter(|(_, (_, action))| action.0 != UNBOUND_ACTION)
         .map(|(key, (_, action))| (key, action))
         .collect();
-    result.sort_by_key(|(key, _)| render_keystroke(key));
+    // Cached: `render_keystroke` returns an owned `String`, and `sort_by_key`
+    // calls its key function O(n log n) times — on every frame a chord prefix
+    // is held.
+    result.sort_by_cached_key(|(key, _)| render_keystroke(key));
     result
 }
 

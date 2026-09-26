@@ -110,12 +110,6 @@ pub fn status_bar(
 ) -> impl IntoElement {
     let theme = cx.theme();
 
-    let pending_text = pending
-        .iter()
-        .map(format_keystroke)
-        .collect::<Vec<_>>()
-        .join(" ");
-
     // `h_full`, not a height of its own: the wrapper below is the one
     // owner of the bar's height (the design guide's "fix the common
     // owner" — two declarations of one length drift, and a window test
@@ -129,12 +123,22 @@ pub fn status_bar(
                 .child(format!("{count}")),
         );
     }
-    bar = bar.left(
-        div()
-            .font_family(fonts::MONO)
-            .text_color(theme.muted_foreground)
-            .child(pending_text),
-    );
+    // Built only when there is something to show: `format_keystroke`
+    // allocates a `Vec` and a `String` per keystroke, and this ran on every
+    // frame the app ever painted, pending or not.
+    if !pending.is_empty() {
+        let pending_text = pending
+            .iter()
+            .map(format_keystroke)
+            .collect::<Vec<_>>()
+            .join(" ");
+        bar = bar.left(
+            div()
+                .font_family(fonts::MONO)
+                .text_color(theme.muted_foreground)
+                .child(pending_text),
+        );
+    }
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
     }
