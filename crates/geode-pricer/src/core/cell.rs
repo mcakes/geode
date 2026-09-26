@@ -142,10 +142,35 @@ fn shift(text: &str, what: &str) -> Result<Option<f64>, String> {
         .ok_or_else(|| format!("{what} '{t}' is not a number"))
 }
 
-/// The one `Edit` a committed cell means (spec §8.4), or the footer's
-/// refusal. The tile re-checks that the cell has not moved before it
-/// applies this (spec §8.4, "a commit whose cell moved is refused").
-pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result<Edit, String> {
+/// The one `Edit` a committed cell means (spec §8.4), `Ok(None)` when it
+/// parses to the value the line already holds, or the footer's refusal.
+/// The tile re-checks that the cell has not moved before it applies this
+/// (spec §8.4, "a commit whose cell moved is refused").
+pub fn commit(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Option<Edit>, String> {
+    edit_for(sheet, row, kind, text).map(|edit| changed(sheet, row, edit))
+}
+
+/// `edit` unless it would leave the line exactly as it is. Values are
+/// compared, never text: `5000` and `5000.0` are one strike, and an empty
+/// shift on an inherited one stays inherited — while an explicit value is
+/// a change from inherited to own even when it equals what was inherited.
+/// An unchanged commit is no edit: no undo entry, no reprice, no save.
+fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
+    let same = match &edit {
+        Edit::SetQty { qty, .. } => *qty == sheet.qty(row),
+        Edit::SetShift { shift, .. } => *shift == sheet.shift(row),
+        Edit::SetInstrument { instrument, .. } => sheet.instrument(row) == Some(instrument),
+        _ => false,
+    };
+    (!same).then_some(edit)
+}
+
+fn edit_for(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result<Edit, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
     let t = text.trim();
     match kind {
@@ -241,11 +266,8 @@ pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result
 /// changes — committing turns it into a date expiry.
 pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<Edit>, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
-    let expiry = Expiry::Date(date);
-    if *i.expiry() == expiry {
-        return Ok(None);
-    }
-    Ok(Some(set(row, with_vanilla(i, |v| v.expiry = expiry))))
+    let edit = set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date)));
+    Ok(changed(sheet, row, edit))
 }
 
 /// `up`/`down` in an open numeric editor (spec §8.4): `steps` units of the
@@ -395,25 +417,26 @@ mod tests {
         let s = one_line();
         assert_eq!(
             commit(&s, 0, ColumnKind::Qty, " 10 "),
-            Ok(Edit::SetQty { row: 0, qty: 10 })
+            Ok(Some(Edit::SetQty { row: 0, qty: 10 }))
         );
-        let Ok(Edit::SetInstrument { row: 0, instrument }) =
+        let Ok(Some(Edit::SetInstrument { row: 0, instrument })) =
             commit(&s, 0, ColumnKind::Strike, "95%")
         else {
             panic!("a strike commit is SetInstrument")
         };
         assert_eq!(instrument.strike(), Strike::Percent(95.0));
-        let Ok(Edit::SetInstrument { instrument, .. }) = commit(&s, 0, ColumnKind::Expiry, "3m")
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) =
+            commit(&s, 0, ColumnKind::Expiry, "3m")
         else {
             panic!()
         };
         assert_eq!(instrument.expiry(), &Expiry::Tenor("3m".into()));
-        let Ok(Edit::SetInstrument { instrument, .. }) = commit(&s, 0, ColumnKind::Type, "p")
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) = commit(&s, 0, ColumnKind::Type, "p")
         else {
             panic!()
         };
         assert_eq!(instrument.kind(), OptionKind::Put);
-        let Ok(Edit::SetInstrument { instrument, .. }) =
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) =
             commit(&s, 0, ColumnKind::Underlying, "ndx")
         else {
             panic!()
@@ -426,20 +449,20 @@ mod tests {
         let s = one_line();
         assert_eq!(
             commit(&s, 0, ColumnKind::SpotShift, "+2"),
-            Ok(Edit::SetShift {
+            Ok(Some(Edit::SetShift {
                 row: 0,
                 shift: OwnShifts {
                     spot_pct: Some(2.0),
                     vol_pts: None
                 }
-            })
+            }))
         );
         assert_eq!(
-            commit(&s, 0, ColumnKind::VolShift, "  "),
-            Ok(Edit::SetShift {
+            commit(&owned_spot(), 0, ColumnKind::SpotShift, "  "),
+            Ok(Some(Edit::SetShift {
                 row: 0,
                 shift: OwnShifts::default()
-            }),
+            })),
             "empty means inherit, not zero"
         );
     }
@@ -565,6 +588,57 @@ mod tests {
         assert_eq!(
             commit_date(&s, 0, ymd(2026, 9, 26)),
             Err(READ_ONLY.to_string())
+        );
+    }
+
+    /// One line with its own spot shift of 2%.
+    fn owned_spot() -> Sheet {
+        let mut s = one_line();
+        s.apply(Edit::SetShift {
+            row: 0,
+            shift: OwnShifts {
+                spot_pct: Some(2.0),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        s
+    }
+
+    /// A commit that parses to the value the line already holds is no
+    /// edit, in every editable cell: values are compared, not text.
+    #[test]
+    fn an_unchanged_commit_is_no_edit_in_every_cell() {
+        let s = one_line();
+        for (kind, text) in [
+            (ColumnKind::Qty, "-5"),
+            (ColumnKind::Qty, " -5 "),
+            (ColumnKind::Strike, "5000"),
+            (ColumnKind::Strike, "5000.0"),
+            (ColumnKind::Expiry, "Z26"),
+            (ColumnKind::Type, "c"),
+            (ColumnKind::Underlying, "spx"),
+            (ColumnKind::SpotShift, ""),
+            (ColumnKind::VolShift, "  "),
+        ] {
+            assert_eq!(commit(&s, 0, kind, text), Ok(None), "{kind:?} '{text}'");
+        }
+        let b = barrier_line();
+        assert_eq!(commit(&b, 0, ColumnKind::Barrier, "4200.0"), Ok(None));
+        assert_eq!(commit(&b, 0, ColumnKind::BarrierType, "do"), Ok(None));
+        let own = owned_spot();
+        assert_eq!(commit(&own, 0, ColumnKind::SpotShift, "2.0"), Ok(None));
+        assert!(
+            matches!(commit(&own, 0, ColumnKind::SpotShift, ""), Ok(Some(_))),
+            "own → inherited is a change"
+        );
+        assert!(
+            matches!(commit(&s, 0, ColumnKind::SpotShift, "0"), Ok(Some(_))),
+            "inherited → an explicit own value is a change, whatever it equals"
+        );
+        assert!(
+            matches!(commit(&s, 0, ColumnKind::Strike, "5000%"), Ok(Some(_))),
+            "a percent strike is not the absolute one"
         );
     }
 }

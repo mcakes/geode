@@ -190,6 +190,11 @@ pub(crate) enum Editor {
         field: DateTimeField,
         focus: FocusHandle,
         paint: DateFieldPaint,
+        /// The footer's standing note while the field is open — a
+        /// tenor's "opened on today" — restored after any key or refusal
+        /// and dropped only when the field commits or cancels, so the
+        /// trader still sees that `enter` replaces the tenor.
+        note: Option<SharedString>,
     },
 }
 
@@ -1023,17 +1028,16 @@ impl PricerTile {
                 // it, never the pricer): the field opens on today by the
                 // app clock, and the footer says so — a commit replaces
                 // the tenor with that date.
-                let date = date.unwrap_or_else(|| {
+                let note: Option<SharedString> = date.is_none().then(|| {
                     let tenor = self
                         .sheet
                         .instrument(row)
                         .map(|i| render_expiry(i.expiry()))
                         .unwrap_or_default();
-                    self.footer = Some(
-                        format!("{tenor} is a tenor: opened on today; enter sets a date").into(),
-                    );
-                    app_clock(cx).today(Utc::now())
+                    format!("{tenor} is a tenor: opened on today; enter sets a date").into()
                 });
+                self.footer = note.clone();
+                let date = date.unwrap_or_else(|| app_clock(cx).today(Utc::now()));
                 let field = DateTimeField::open(
                     date.and_hms_opt(0, 0, 0).expect("midnight exists"),
                     Precision::Date,
@@ -1047,6 +1051,7 @@ impl PricerTile {
                     field,
                     focus: cx.focus_handle(),
                     paint,
+                    note,
                 }
             }
             Ok(CellEditor::Text(text)) => {
@@ -1135,30 +1140,30 @@ impl PricerTile {
             };
             let text = input.read(cx).value().to_string();
             let target = editor.target();
-            let value = match editor {
-                Editor::Text { .. } | Editor::Date { .. } => Choice::Value(text),
-                Editor::Choice {
-                    list, free, moved, ..
-                } => {
-                    list.set_query(&text);
-                    let highlighted = list.pick().map(|i| list.options()[i].clone());
-                    let typed = text.trim();
-                    if !*free {
-                        highlighted.map_or(Choice::NoMatch, Choice::Value)
-                    } else {
-                        // The highlight is only a subsequence guess until
-                        // the trader moves it or types it out in full.
-                        let take_highlight = *moved
-                            || highlighted
-                                .as_deref()
-                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));
-                        match highlighted {
-                            Some(o) if take_highlight => Choice::Value(o),
-                            _ if typed.is_empty() => Choice::Keep,
-                            _ => Choice::Value(typed.to_ascii_uppercase()),
-                        }
+            let value = if let Editor::Choice {
+                list, free, moved, ..
+            } = editor
+            {
+                list.set_query(&text);
+                let highlighted = list.pick().map(|i| list.options()[i].clone());
+                let typed = text.trim();
+                if !*free {
+                    highlighted.map_or(Choice::NoMatch, Choice::Value)
+                } else {
+                    // The highlight is only a subsequence guess until
+                    // the trader moves it or types it out in full.
+                    let take_highlight = *moved
+                        || highlighted
+                            .as_deref()
+                            .is_some_and(|o| o.eq_ignore_ascii_case(typed));
+                    match highlighted {
+                        Some(o) if take_highlight => Choice::Value(o),
+                        _ if typed.is_empty() => Choice::Keep,
+                        _ => Choice::Value(typed.to_ascii_uppercase()),
                     }
                 }
+            } else {
+                Choice::Value(text)
             };
             (value, target)
         };
@@ -1184,13 +1189,33 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        match cell::commit(&self.sheet, row, kind, &value) {
+        let answer = cell::commit(&self.sheet, row, kind, &value);
+        self.finish_commit(answer, window, cx);
+    }
+
+    /// Settle an editor's parsed commit: a refusal keeps the editor open
+    /// with the reason; `Ok(None)` — the value the line already holds —
+    /// closes it with no edit (no undo entry, no reprice, no save); an
+    /// edit closes it (blur first, so the rebuild never paints a dead
+    /// field) and then applies through `apply_edit`.
+    fn finish_commit(
+        &mut self,
+        answer: Result<Option<Edit>, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match answer {
             Err(why) => {
                 self.footer = Some(why.into());
                 self.rebuild_chrome();
                 cx.notify();
             }
-            Ok(edit) => {
+            Ok(None) => {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(Some(edit)) => {
                 self.close_editor(window, cx);
                 if let Err(e) = self.apply_edit(edit, cx) {
                     self.footer = Some(e.to_string().into());
@@ -1259,26 +1284,8 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        match cell::commit_date(&self.sheet, row, date) {
-            Err(why) => {
-                self.footer = Some(why.into());
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            Ok(None) => {
-                self.close_editor(window, cx);
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            Ok(Some(edit)) => {
-                self.close_editor(window, cx);
-                if let Err(e) = self.apply_edit(edit, cx) {
-                    self.footer = Some(e.to_string().into());
-                    self.rebuild_chrome();
-                    cx.notify();
-                }
-            }
-        }
+        let answer = cell::commit_date(&self.sheet, row, date);
+        self.finish_commit(answer, window, cx);
     }
 
     /// A key on the focused date field, before it bubbles to the shell.
@@ -1299,7 +1306,10 @@ impl PricerTile {
             return false;
         };
         let id = self.id.0;
-        let Some(Editor::Date { field, paint, .. }) = self.editor.as_mut() else {
+        let Some(Editor::Date {
+            field, paint, note, ..
+        }) = self.editor.as_mut()
+        else {
             return false;
         };
         match key {
@@ -1316,9 +1326,12 @@ impl PricerTile {
             other => {
                 if field.apply(other) {
                     *paint = DateFieldPaint::of(field, id);
-                    self.sync_editor(cx);
                 }
-                if self.footer.take().is_some() {
+                // A standing refusal retires; the field's own note stays.
+                let note = note.clone();
+                self.sync_editor(cx);
+                if self.footer != note {
+                    self.footer = note;
                     self.rebuild_chrome();
                 }
                 cx.notify();
@@ -1414,9 +1427,13 @@ impl PricerTile {
         let refused = match &mut self.editor {
             // The date field steps its active segment — the same step its
             // own `up`/`down` take.
-            Some(Editor::Date { field, paint, .. }) => {
+            Some(Editor::Date {
+                field, paint, note, ..
+            }) => {
                 field.step(steps);
                 *paint = DateFieldPaint::of(field, id);
+                // `dispatch` cleared the footer: the field's note stands.
+                self.footer = note.clone();
                 None
             }
             Some(Editor::Text { kind, input, .. }) => {
@@ -5170,6 +5187,108 @@ pub(crate) mod tests {
             !vcx.update(|window, cx| h.content.holds_focus(window, cx)),
             "the field no longer holds focus"
         );
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+    }
+
+    /// A text commit that parses to the value the cell already holds is
+    /// no edit — `5000.0` is the strike `5000` — so no undo entry and no
+    /// reprice; the editor closes as after any commit.
+    #[gpui::test]
+    fn an_unchanged_text_commit_is_no_edit(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let _ = h.prices();
+        h.dispatch(&mut vcx, "right", Some(3)); // strike
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5000.0");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&mut vcx), "normal", "the editor closed");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert!(!can_undo(&h, &vcx), "an unchanged commit records no undo");
+        assert!(h.prices().is_empty(), "and asks for no price");
+        h.dispatch(&mut vcx, "edit", None);
+        set_editor(&h, &mut vcx, "5100");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(
+            can_undo(&h, &vcx),
+            "fixture: a changed commit still records"
+        );
+    }
+
+    /// The tenor note stands while the field is open — through a stepped
+    /// segment and a refused commit — and goes when the field closes.
+    #[gpui::test]
+    fn the_tenor_note_stands_until_the_field_closes(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 1);
+        let note = h.footer(&vcx).expect("the tenor note");
+        keys(&h, &mut vcx, "up");
+        assert_eq!(h.footer(&vcx), Some(note.clone()), "a key keeps the note");
+        h.dispatch(&mut vcx, "insert_down", None);
+        assert_eq!(
+            h.footer(&vcx),
+            Some(note.clone()),
+            "so does the fragment's step"
+        );
+        keys(&h, &mut vcx, "0 enter");
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("finish the day or backspace")
+        );
+        keys(&h, &mut vcx, "backspace");
+        assert_eq!(
+            h.footer(&vcx),
+            Some(note),
+            "the refusal retires to the note"
+        );
+        keys(&h, &mut vcx, "escape");
+        assert_eq!(h.footer(&vcx), None, "cancel drops it");
+        assert_eq!(expiry_of(&h, &vcx, 1), Expiry::Tenor("3m".into()));
+    }
+
+    /// A reload that moves the expiry column carries the open date field
+    /// with it; its commit writes the expiry.
+    #[gpui::test]
+    fn an_open_date_field_follows_its_column_through_a_view_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 0);
+        assert_eq!(editor_paint_col(&h, &vcx), Some(2), "fixture");
+        let views = slim_views("\"expiry\", \"qty\"");
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, None, std::time::Duration::from_secs(60), cx)
+        });
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
+        assert_eq!(editor_paint_col(&h, &vcx), Some(0), "expiry's new column");
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor.col), 0);
+        assert!(
+            vcx.debug_bounds("pricer-date-seg-5-0").is_some(),
+            "painted in its new cell"
+        );
+        keys(&h, &mut vcx, "up enter");
+        assert_eq!(h.footer(&vcx), None, "the commit was not refused");
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 19)));
+    }
+
+    /// A reload without the expiry column closes the open date field with
+    /// MOVED; its focus handle is released (the deferred blur).
+    #[gpui::test]
+    fn a_view_reload_without_the_expiry_closes_the_date_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 0);
+        assert!(focused(&mut vcx), "fixture: the field owns focus");
+        let views = slim_views("\"qty\", \"price\"");
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, None, std::time::Duration::from_secs(60), cx)
+        });
+        vcx.run_until_parked();
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(editor_paint_col(&h, &vcx), None, "nothing paints");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert_eq!(h.footer(&vcx).as_deref(), Some(MOVED));
         assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
     }
 

@@ -436,11 +436,16 @@ segments, `up`/`down` (`shift`: ten) step the active one, digits type into it,
 click on a segment selects it. A date expiry opens on its own date. A tenor
 has no date in the pricer (the library's calendar resolves it), so the field
 opens on today by the app clock and the footer says so; committing replaces the
-tenor with that date, and `escape` leaves the tenor untouched. A half-typed
-segment refuses the commit and names itself (`finish the day or backspace`).
-A commit is one undoable edit; committing the line's own date applies nothing
-(no undo entry, no reprice). Text cells still record an edit when their value
-is committed unchanged.
+tenor with that date, and `escape` leaves the tenor untouched. The footer's
+tenor note stays until the field commits or cancels. A half-typed segment
+refuses the commit and names itself (`finish the day or backspace`).
+
+A cell commit is one undoable edit. A commit that parses to the value the
+cell already holds applies nothing in any cell (no undo entry, no reprice, no
+save): values are compared, not text, so `5000.0` on a `5000` strike is no
+edit, and an empty shift on an inherited shift stays inherited. An explicit
+shift is a change from inherited to own even when it equals the inherited
+value.
 
 Open editors and the entry field paint no field chrome: no background, border,
 radius, or horizontal padding. Their text sits where the cell's text sat

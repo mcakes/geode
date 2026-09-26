@@ -102,8 +102,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `date_field_key` before they bubble to the shell. The painter and key
   routing are a local copy of market-data's grid pattern (a module may not
   depend on a sibling). A tenor seeds from the app clock's today, never
-  `chrono::Local`; `cell::commit_date` answers `Ok(None)` for the line's own
-  date, so an unchanged commit records no undo entry.
+  `chrono::Local`. The tenor note is kept on the editor and restored after
+  any key or refusal until the field commits or cancels.
+- `cell::commit` and `cell::commit_date` answer `Ok(None)` when the parsed
+  value equals what the line holds (`cell::changed` compares values: qty,
+  own shifts, instrument). The tile's `finish_commit` closes the editor
+  without an edit, so an unchanged commit in any cell records no undo entry,
+  reprices nothing and saves nothing.
 - In-grid fields (`delegate::cell_input`) are `Input::appearance(false)` with
   no horizontal padding, at the row's height, in the cell's alignment: the
   cell's cursor border is the only frame. `:` and `/` close
