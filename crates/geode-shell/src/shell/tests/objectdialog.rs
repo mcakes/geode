@@ -5941,13 +5941,18 @@ fn schema_values_line_up_whatever_layer_each_row_names(cx: &mut gpui::TestAppCon
         derived.right(),
         "a builtin row's value lines up with a user row's"
     );
-    let badge = cx
-        .debug_bounds("objectdialog-field-layer-derived.desk")
-        .unwrap();
-    assert!(
-        badge.left() >= derived.right(),
-        "the badge sits in its own slot beside the value, not over it"
-    );
+    // The builtin row carries the widest name, so a slot sized for anything
+    // narrower would spill its badge over its value.
+    for (value, badge) in [
+        (column, "objectdialog-field-layer-columns.book"),
+        (derived, "objectdialog-field-layer-derived.desk"),
+    ] {
+        let badge_bounds = cx.debug_bounds(badge).unwrap();
+        assert!(
+            badge_bounds.left() >= value.right(),
+            "{badge} sits in its own slot beside the value, not over it"
+        );
+    }
 }
 
 /// §19.4: the inspector lists datasets, opens one to its column rows —
