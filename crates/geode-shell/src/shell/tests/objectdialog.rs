@@ -6948,6 +6948,13 @@ fn the_column_stage_badges_the_layer_in_one_aligned_slot(cx: &mut gpui::TestAppC
         width.right(),
         "a badged row's value lines up with an unbadged row's"
     );
+    let badge = cx
+        .debug_bounds("objectdialog-field-provenance-scale")
+        .expect("scale names its layer");
+    assert!(
+        badge.left() >= scale.right(),
+        "the badge sits in its own slot beside the value, not over it"
+    );
 }
 
 /// Dataset-presentation spec §5: the Views column stage with a layer
