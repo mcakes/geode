@@ -1,7 +1,7 @@
 //! TableDelegate over a prepared Rc<GridModel> installed by the tile. Cursor, loading
 //! state, and cell editor are read-only mirrors of tile state. Column zero
-//! is a pinned tree column with indentation, a fixed chevron slot, and shorthand; the
-//! cell cursor does not enter it.
+//! is a pinned tree column with indentation, a fixed chevron slot, and a
+//! package's template tag; the cell cursor does not enter it.
 //!
 //! Package backgrounds belong to render_tr. The table replaces row
 //! backgrounds for hover and selection; per-cell fills would obscure those states.
@@ -25,9 +25,10 @@ use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
 
-/// The tree column: pixels, like every width here (the vocabulary's own
-/// known gap); not resizable, since a dragged width has nowhere to live.
-const TREE_WIDTH: f32 = 260.0;
+/// The tree column: a leg's indent, the chevron slot and the widest
+/// template token at the largest font size (checked below), in pixels
+/// like every width here; not resizable.
+const TREE_WIDTH: f32 = 88.0;
 /// One depth step, and the chevron slot every row reserves
 /// (empty on a line or leg), both on the rem scale: roots share one
 /// leading edge whether or not they carry a chevron, and a leg sits
@@ -316,7 +317,7 @@ impl TableDelegate for SheetDelegate {
         let Some(c) = Self::plan_col(col_ix).and_then(|i| self.model.columns.get(i)) else {
             return Column {
                 key: SharedString::from("__tree"),
-                name: SharedString::from("line"),
+                name: SharedString::from(""),
                 align: TextAlign::Left,
                 sort: None,
                 width: px(TREE_WIDTH + self.gutter_px()),
@@ -480,7 +481,7 @@ impl SheetDelegate {
         let Some(plan_col) = Self::plan_col(col_ix) else {
             // The tree column: indent by depth, then the fixed chevron
             // slot (a chevron on a package, empty otherwise), then the
-            // row's shorthand.
+            // row's tag (a package's template token).
             let slot = div()
                 .w(scale::design(CHEVRON_SLOT))
                 .h_full()
@@ -526,7 +527,7 @@ impl SheetDelegate {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(row.tree.clone()),
+                        .child(row.tag.clone()),
                 )
                 .into_any_element();
         };
@@ -710,5 +711,32 @@ mod width_tests {
             );
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Column 0 holds a leg's indent, the chevron slot and the widest tag
+    /// at the largest font size. Indent and slot are on the rem scale;
+    /// the column is fixed pixels.
+    #[test]
+    fn the_tree_column_fits_the_widest_tag() {
+        use super::{CHEVRON_SLOT, INDENT, TREE_WIDTH};
+        use crate::core::template::Template;
+        let rem = FontSize::Large.rem_px();
+        let advance = rem * TABLE_TEXT_REM * MONO_ADVANCE_EM;
+        let pad = Size::XSmall.table_cell_padding();
+        let padding = f32::from(pad.left) + f32::from(pad.right);
+        let widest = Template::ALL
+            .iter()
+            .map(|t| t.token().chars().count())
+            .max()
+            .unwrap();
+        let need = (INDENT + CHEVRON_SLOT) * rem / geode_shell::shell::scale::DESIGN_REM
+            + widest as f32 * advance
+            + padding;
+        assert!(need <= TREE_WIDTH, "needs {need:.1}px in {TREE_WIDTH}px");
+        assert!(
+            TREE_WIDTH - need < 16.0,
+            "{TREE_WIDTH}px wastes {:.1}px",
+            TREE_WIDTH - need
+        );
     }
 }

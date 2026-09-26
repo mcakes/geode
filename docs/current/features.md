@@ -405,8 +405,11 @@ largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
-row, so roots share one leading edge and legs sit one step in. A long tree
-label or text cell ends in `…`; a number never truncates. Cell text is
+row, so roots share one leading edge and legs sit one step in. Column 0
+carries structure only: the depth indent, the chevron slot and a package's
+template token (`CS`, `CUSTOM`); a line or leg has no tag. Find (`/`, `n`,
+`N`) still matches each row's full shorthand, which no column paints. A long
+text cell ends in `…`; a number never truncates. Cell text is
 floored to the readable ratio on the row's own ground and on the table's
 hover and selected-row grounds.
 

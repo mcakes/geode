@@ -20593,6 +20593,20 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
 
+# Column 0 paints only a package's template token.
+run_mutation "pricer grid: a package's tag is its search text" \
+  crates/geode-pricer/src/grid.rs \
+  '                    SharedString::new_static(template.token()),' \
+  '                    package_search(sheet, r).into(),' \
+  geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
+
+# Find reads the unpainted search key, not the painted tag.
+run_mutation "pricer tile: find reads the painted tag" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.model.rows.iter().map(|r| r.search.to_string()).collect()' \
+  '        self.model.rows.iter().map(|r| r.tag.to_string()).collect()' \
+  geode-pricer find_matches_shorthand_that_no_column_shows
+
 # The pricer's gutter follows `[ui] line_numbers` through the observed
 # `UiSettings` global. Mutated, the mirror never takes the new mode and
 # no gutter paints.

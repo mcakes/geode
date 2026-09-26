@@ -2545,7 +2545,11 @@ impl PricerTile {
     }
 
     fn row_labels(&self) -> Vec<String> {
-        self.model.rows.iter().map(|r| r.tree.to_string()).collect()
+        self.model
+            .rows
+            .iter()
+            .map(|r| r.search.to_string())
+            .collect()
     }
 
     fn repeat_find(&mut self, dir: FindDirection, count: usize) {
@@ -3539,10 +3543,16 @@ pub(crate) mod tests {
         pub fn serialize(&self, vcx: &mut VisualTestContext) -> toml::Table {
             vcx.update(|_, cx| self.content.serialize(cx))
         }
-        /// Column 0's text per grid row — the tree the table paints.
+        /// Every painted row's search key (its shorthand).
         pub fn tree(&self, vcx: &VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| {
-                t.model.rows.iter().map(|r| r.tree.to_string()).collect()
+                t.model.rows.iter().map(|r| r.search.to_string()).collect()
+            })
+        }
+        /// Every painted row's column-0 tag.
+        pub fn tags(&self, vcx: &VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.model.rows.iter().map(|r| r.tag.to_string()).collect()
             })
         }
         /// The planned columns' vocabulary names, in order.
@@ -4182,6 +4192,19 @@ pub(crate) mod tests {
             Some(0),
             "escape returns to where `/` opened"
         );
+    }
+
+    /// Find matches the shorthand even though column 0 no longer paints
+    /// it: a package's strikes show in no package-row cell.
+    #[gpui::test]
+    fn find_matches_shorthand_that_no_column_shows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.tags(&vcx), ["", "CS", ""]);
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("4800/5200".into()), window, cx)
+        });
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
     }
 
     // ---- repricing ----

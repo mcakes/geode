@@ -33,7 +33,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells, tree column, editor, expiry date field. |
+| `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead and the `.` action menu. |
 | `session` | The tile's session record. |
@@ -63,7 +63,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
-- Shorthand rendering uses a template only while the legs still match it.
+- Shorthand rendering uses a template only while the legs still match it; the
+  grid keeps it as the row's find key and paints only a package's template
+  token.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - The `pricer_sheets` declaration is frozen: tables are created with

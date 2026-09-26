@@ -4,6 +4,8 @@
 //! frame (`cell_text` allocates a `String` per cell). The paint is NOT
 //! here: `Paints` resolves a state to a colour at render from a per-theme
 //! memo (planning decision 14), so a theme switch rebuilds nothing.
+//! Column 0 carries structure only: the row's tag; the shorthand is kept
+//! as a search key.
 
 use crate::core::columns::{CellState, ColumnKind, cell_text};
 use crate::core::sheet::{LineId, RowKind, Sheet};
@@ -47,8 +49,12 @@ pub struct GridRow {
     pub row: Option<usize>,
     pub id: Option<LineId>,
     pub depth: usize,
-    /// Column 0's label: the row's shorthand (spec §8.2).
-    pub tree: SharedString,
+    /// Column 0's painted tag: a package's template token (`CS`,
+    /// `CUSTOM`), empty on a line or leg (entry-bar spec §2).
+    pub tag: SharedString,
+    /// What find matches: the row's shorthand, never painted, so `/`
+    /// finds a row by text no visible column shows (entry-bar spec §3).
+    pub search: SharedString,
     pub cells: Vec<GridCell>,
 }
 
@@ -70,10 +76,10 @@ fn right_aligned(kind: ColumnKind) -> bool {
     )
 }
 
-/// A package's column-0 label: its template form while the legs still
-/// match the table (the grammar round-trips it), else its template token
-/// with its legs' distinct underlyings and expiries (spec §8.2).
-fn package_label(sheet: &Sheet, row: usize) -> String {
+/// A package's search key: its template form while the legs still match
+/// the table (the grammar round-trips it), else its template token with
+/// its legs' distinct underlyings and expiries.
+fn package_search(sheet: &Sheet, row: usize) -> String {
     let text = sheet.shorthand(row);
     if !text.is_empty() && !text.contains('\n') {
         return text;
@@ -136,17 +142,20 @@ impl GridModel {
                 }
                 RowKind::Line | RowKind::Underlying => GridRowKind::Line,
             };
-            let tree = if sheet.is_package(r) {
-                package_label(sheet, r)
-            } else {
-                sheet.shorthand(r)
+            let (tag, search) = match sheet.kind(r) {
+                RowKind::Package { template } => (
+                    SharedString::new_static(template.token()),
+                    package_search(sheet, r),
+                ),
+                _ => (SharedString::default(), sheet.shorthand(r)),
             };
             rows.push(GridRow {
                 kind,
                 row: Some(r),
                 id: Some(sheet.id(r)),
                 depth: sheet.depth(r),
-                tree: tree.into(),
+                tag,
+                search: search.into(),
                 cells: plan
                     .columns
                     .iter()
@@ -194,12 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn rows_follow_the_expansion_and_carry_depth_ids_and_the_tree_label() {
+    fn rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys() {
         let s = sheet();
         let closed = build(&s, &Expansion::default());
         assert_eq!(closed.rows.len(), 3);
         assert_eq!(closed.rows[1].kind, GridRowKind::Package { open: false });
-        assert_eq!(closed.rows[1].tree.as_ref(), "SPX Z26 4800/5200 CS");
+        assert_eq!(closed.rows[1].search.as_ref(), "SPX Z26 4800/5200 CS");
+        assert_eq!(
+            closed.rows[1].tag.as_ref(),
+            "CS",
+            "a package: its template token"
+        );
+        assert_eq!(closed.rows[0].tag.as_ref(), "", "a line: no tag");
         let mut e = Expansion::default();
         e.set(s.id(1), true);
         let open = build(&s, &e);
@@ -207,7 +222,8 @@ mod tests {
         assert_eq!(open.rows[1].kind, GridRowKind::Package { open: true });
         assert_eq!(open.rows[2].kind, GridRowKind::Leg);
         assert_eq!(open.rows[2].depth, 1);
-        assert_eq!(open.rows[4].tree.as_ref(), "SPX Z26 4000 P");
+        assert_eq!(open.rows[2].tag.as_ref(), "", "a leg: no tag");
+        assert_eq!(open.rows[4].search.as_ref(), "SPX Z26 4000 P");
         assert_eq!(open.grid_row_of(s.id(4)), Some(4));
         assert_eq!(
             open.columns.len(),
@@ -249,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn a_custom_package_labels_by_template_underlyings_and_expiries() {
+    fn a_custom_package_is_tagged_by_its_token_and_searched_by_its_legs() {
         let mut s = Sheet::new("t");
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
         push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
@@ -261,6 +277,7 @@ mod tests {
         })
         .unwrap();
         let m = build(&s, &Expansion::default());
-        assert_eq!(m.rows[0].tree.as_ref(), "CUSTOM SPX Z26");
+        assert_eq!(m.rows[0].tag.as_ref(), "CUSTOM");
+        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26");
     }
 }
