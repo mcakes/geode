@@ -16700,6 +16700,14 @@ run_mutation "pricer templates: a reserved name loads" \
   '    if false {' \
   geode-pricer each_rule_drops_only_its_own_entry_with_a_path
 
+# A builtin `RR` and a desk/user `rr` must not both survive: the later
+# spelling replaces the earlier one in place.
+run_mutation "pricer templates: a case-insensitive repeat is kept as two entries" \
+  crates/geode-pricer/src/core/template.rs \
+  '            if let Some((idx, earlier)) = seen.get(&upper) {' \
+  '            if let Some((idx, earlier)) = None::<&(usize, String)> {' \
+  geode-pricer a_case_insensitive_repeat_replaces_the_earlier_entry_in_place
+
 run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   crates/geode-pricer/src/core/storage.rs \
   '    if sheet.is_empty() {

@@ -198,10 +198,19 @@ impl TemplateSet {
     /// Each entry is checked alone: a bad one is dropped with an error
     /// naming its path, the rest load. Unknown keys warn and are ignored,
     /// so a later key (strike arithmetic) does not make an older binary
-    /// refuse the template.
+    /// refuse the template. A name that repeats an earlier one case-
+    /// insensitively (the merge matches document keys case-sensitively, so
+    /// `RR` and `rr` both reach here) replaces the earlier entry in place,
+    /// keeping its doc-order position, with a warning naming both spellings;
+    /// this is layer-override semantics for names TOML itself cannot fold
+    /// together.
     pub fn from_doc(doc: &MergedDoc) -> (TemplateSet, Vec<Diagnostic>) {
         let mut out = TemplateSet::default();
         let mut diags = Vec::new();
+        // Upper-cased name -> (its position in `out.defs`, the spelling on
+        // record), so a later case-insensitive repeat can replace in place.
+        let mut seen: std::collections::HashMap<String, (usize, String)> =
+            std::collections::HashMap::new();
         for (name, value) in &doc.value {
             if name == "config_version" {
                 continue;
@@ -249,7 +258,7 @@ impl TemplateSet {
             let mut legs = Vec::with_capacity(raw.len());
             let mut bad = false;
             for (i, leg) in raw.iter().enumerate() {
-                match read_leg(leg) {
+                match read_leg(leg, raw.len()) {
                     Ok((spec, unknown)) => {
                         for key in unknown {
                             diags.push(report(
@@ -295,12 +304,28 @@ impl TemplateSet {
                 ));
                 continue;
             }
-            out.defs.push(TemplateDef {
-                name: upper,
+            let def = TemplateDef {
+                name: upper.clone(),
                 legs,
                 strikes,
                 expiries,
-            });
+            };
+            if let Some((idx, earlier)) = seen.get(&upper) {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!(
+                        "'{name}' replaces '{earlier}' (template names are case-insensitive)"
+                    ),
+                    path: Some(path("")),
+                });
+                out.defs[*idx] = def;
+                seen.insert(upper, (*idx, name.clone()));
+            } else {
+                seen.insert(upper, (out.defs.len(), name.clone()));
+                out.defs.push(def);
+            }
         }
         (out, diags)
     }
@@ -332,8 +357,11 @@ impl TemplateSet {
 type LegError = (Option<&'static str>, String);
 
 /// One leg: the spec with 0-based indices and the unknown keys, or the
-/// offending key (`None`: the leg itself) and why.
-fn read_leg(v: &toml::Value) -> Result<(LegSpec, Vec<String>), LegError> {
+/// offending key (`None`: the leg itself) and why. `leg_count` bounds a
+/// strike or expiry number: covering `1..=n` with no gap needs at least `n`
+/// legs, so a number above the entry's own leg count can never be valid and
+/// is rejected here rather than walking the gap-check loop up to it.
+fn read_leg(v: &toml::Value, leg_count: usize) -> Result<(LegSpec, Vec<String>), LegError> {
     let t = v
         .as_table()
         .ok_or((None, "a leg must be a table".to_string()))?;
@@ -353,6 +381,9 @@ fn read_leg(v: &toml::Value) -> Result<(LegSpec, Vec<String>), LegError> {
         };
         if n < 1 {
             return Err((Some(key), "must be 1 or more".into()));
+        }
+        if n as usize > leg_count {
+            return Err((Some(key), "above the number of legs".into()));
         }
         Ok((n - 1) as usize)
     };
@@ -460,7 +491,7 @@ legs = [ { weight = 1, strike = 1, kind = "C" } ]
 [ZERO]
 legs = [ { weight = 0, strike = 1, kind = "C" }, { weight = 1, strike = 2, kind = "C" } ]
 [GAP]
-legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 3, kind = "C" } ]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 1, kind = "C" }, { weight = 1, strike = 3, kind = "C" } ]
 [EGAP]
 legs = [ { weight = 1, strike = 1, expiry = 2, kind = "C" }, { weight = -1, strike = 1, expiry = 2, kind = "C" } ]
 [KIND]
@@ -469,6 +500,8 @@ legs = [ { weight = 1, strike = 1, kind = "X" }, { weight = -1, strike = 2, kind
 legs = 3
 [LEGBAD]
 legs = [ 1, 2 ]
+[BIG]
+legs = [ { weight = 1, strike = 100000000, kind = "C" }, { weight = -1, strike = 2, kind = "C" } ]
 "#);
         let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["OK"]);
@@ -483,6 +516,7 @@ legs = [ 1, 2 ]
             "pricer_templates.KIND.legs.0.kind",
             "pricer_templates.NOTTABLE.legs",
             "pricer_templates.LEGBAD.legs.0",
+            "pricer_templates.BIG.legs.0.strike",
         ] {
             assert!(paths.iter().any(|p| p == want), "{want} in {paths:?}");
         }
@@ -491,6 +525,42 @@ legs = [ 1, 2 ]
                 .iter()
                 .all(|d| d.severity == geode_core::config::Severity::Error)
         );
+    }
+
+    #[test]
+    fn a_case_insensitive_repeat_replaces_the_earlier_entry_in_place() {
+        // The merge matches document keys case-sensitively, so a builtin
+        // `[RR]` and a user `[rr]` both reach `from_doc`; the later one must
+        // win, in the earlier one's doc-order slot, with a warning.
+        let builtin = geode_core::config::LayerDoc::builtin(
+            PRICER_TEMPLATES_DOC,
+            "[RR]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+        )
+        .unwrap();
+        let mut user = geode_core::config::LayerDoc::builtin(
+            PRICER_TEMPLATES_DOC,
+            "[rr]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = -1, strike = 2, kind = \"C\" } ]\n",
+        )
+        .unwrap();
+        user.layer = geode_core::config::Layer::User;
+        let merged = geode_core::config::merge_docs(PRICER_TEMPLATES_DOC, &[builtin, user]);
+        let (s, diags) = TemplateSet::from_doc(&merged);
+        let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["RR"], "one entry, in the earlier slot");
+        let d = s.resolve("RR").unwrap();
+        assert_eq!(
+            d.legs[0],
+            LegSpec {
+                weight: 1,
+                strike: 0,
+                expiry: 0,
+                kind: OptionKind::Put
+            },
+            "the later (user) legs win"
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, geode_core::config::Severity::Warning);
+        assert_eq!(diags[0].path.as_deref(), Some("pricer_templates.rr"));
     }
 
     #[test]
