@@ -57,10 +57,14 @@ row selection copies every column with its header row, and a cell block
 copies only its own columns, still with their header.
 
 The anchor is a tree path plus a column name, not a display index, so a
-re-sort, a column move, or a live redelivery keeps the same data selected. If
-the anchor's row is no longer shown — collapsed, filtered out, narrowed away
-— the selection clears and the tile reports "selection cleared: its first row
-is no longer shown".
+re-sort, a column move, or a live redelivery keeps the same data selected.
+The anchor is the end the selection started from, which may be the range's
+last row. If the anchor's row is no longer shown — collapsed, filtered out,
+narrowed away — the selection clears and the tile reports "selection cleared:
+anchor row no longer shown"; if a block's anchor column is hidden or removed
+from the view, it reports "selection cleared: anchor column no longer shown".
+No neighbouring row or column is guessed. A row selection never depends on a
+column, so hiding one leaves it in place.
 
 While a selection is live, the footer shows one aggregate per selected
 measure column, computed over the selection's top-most rows only: a group row

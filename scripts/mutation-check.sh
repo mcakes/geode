@@ -20813,12 +20813,19 @@ run_mutation "grid selection: an unsummable column never totals" \
   geode-core \
   an_unsummable_column_never_totals_and_always_shows_extremes
 
-run_mutation "grid selection: a lost anchor row resolves to None" \
+run_mutation "grid selection: a lost anchor row resolves to Lost::Row" \
   crates/geode-core/src/grid/selection.rs \
-  '        let row = find_row(&self.anchor_row)?;' \
+  '        let row = find_row(&self.anchor_row).ok_or(Lost::Row)?;' \
   '        let row = find_row(&self.anchor_row).unwrap_or(0);' \
   geode-core \
-  resolution_goes_through_identity_and_a_lost_anchor_is_none
+  resolution_goes_through_identity_and_names_the_lost_anchor
+
+run_mutation "grid selection: a lost anchor column is named as the column" \
+  crates/geode-core/src/grid/selection.rs \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Column)?,' \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Row)?,' \
+  geode-core \
+  resolution_goes_through_identity_and_names_the_lost_anchor
 
 # ---- blotter selection (grid selection spec) -------------------------------
 
@@ -20831,10 +20838,17 @@ run_mutation "blotter selection: escape clears the selection before find" \
 
 run_mutation "blotter selection: a lost anchor clears and raises the notice" \
   crates/geode-blotter/src/delegate.rs \
-  '            self.selection_lost = true;' \
-  '            self.selection_lost = false;' \
+  '                self.selection_lost = Some(lost);' \
+  '                self.selection_lost = None;' \
   geode-blotter \
   a_selection_whose_anchor_row_vanishes_clears_with_a_notice
+
+run_mutation "blotter selection: a lost anchor column says column" \
+  crates/geode-blotter/src/tile.rs \
+  '                Lost::Column => "selection cleared: anchor column no longer shown",' \
+  '                Lost::Column => "selection cleared: anchor row no longer shown",' \
+  geode-blotter \
+  a_block_whose_anchor_column_is_hidden_clears_with_a_column_notice
 
 run_mutation "blotter selection: summarize goes through top_most" \
   crates/geode-blotter/src/core/select.rs \

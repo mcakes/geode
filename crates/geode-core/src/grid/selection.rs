@@ -62,9 +62,19 @@ pub fn resolve(
     Resolved { kind, rows, cols }
 }
 
+/// Which half of a selection's anchor re-resolution could not find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lost {
+    /// The anchor row is no longer displayed.
+    Row,
+    /// A block's anchor column is no longer displayed.
+    Column,
+}
+
 impl<R, C> Selection<R, C> {
-    /// `None` when the anchor row — or, for a block, the anchor column —
-    /// is not displayed. A `Rows` selection never looks its column up: a
+    /// `Err` naming which lookup failed when the anchor row — or, for a
+    /// block, the anchor column — is not displayed, so the caller can say
+    /// which one it lost. A `Rows` selection never looks its column up: a
     /// hidden anchor column must not drop a row selection.
     pub fn resolve_with(
         &self,
@@ -72,13 +82,13 @@ impl<R, C> Selection<R, C> {
         col_count: usize,
         find_row: impl FnOnce(&R) -> Option<usize>,
         find_col: impl FnOnce(&C) -> Option<usize>,
-    ) -> Option<Resolved> {
-        let row = find_row(&self.anchor_row)?;
+    ) -> Result<Resolved, Lost> {
+        let row = find_row(&self.anchor_row).ok_or(Lost::Row)?;
         let col = match self.kind {
             SelectKind::Rows => 0,
-            SelectKind::Block => find_col(&self.anchor_col)?,
+            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Column)?,
         };
-        Some(resolve(self.kind, (row, col), cursor, col_count))
+        Ok(resolve(self.kind, (row, col), cursor, col_count))
     }
 }
 
@@ -245,7 +255,7 @@ mod tests {
     }
 
     #[test]
-    fn resolution_goes_through_identity_and_a_lost_anchor_is_none() {
+    fn resolution_goes_through_identity_and_names_the_lost_anchor() {
         let s = Selection {
             kind: SelectKind::Block,
             anchor_row: "b",
@@ -267,9 +277,23 @@ mod tests {
             anchor_row: "z",
             anchor_col: "x",
         };
-        assert!(
-            gone.resolve_with((0, 0), 2, |r| rows.iter().position(|k| k == r), |_| Some(0))
-                .is_none()
+        assert_eq!(
+            gone.resolve_with((0, 0), 2, |r| rows.iter().position(|k| k == r), |_| Some(0)),
+            Err(Lost::Row)
+        );
+        let hidden = Selection {
+            kind: SelectKind::Block,
+            anchor_row: "b",
+            anchor_col: "gone",
+        };
+        assert_eq!(
+            hidden.resolve_with(
+                (0, 0),
+                2,
+                |r| rows.iter().position(|k| k == r),
+                |c| cols.iter().position(|k| k == c),
+            ),
+            Err(Lost::Column)
         );
     }
 

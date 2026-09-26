@@ -10,7 +10,7 @@ use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::grid::selection::{SelectKind, UNSUMMABLE_LEGEND, UNSUMMABLE_MARK};
+use geode_core::grid::selection::{Lost, SelectKind, UNSUMMABLE_LEGEND, UNSUMMABLE_MARK};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
@@ -1249,14 +1249,17 @@ impl BlotterTile {
     }
 
     /// The tile's one-shot notice for `refresh_selection` clearing a
-    /// selection whose anchor row is no longer shown — `selection_lost`
-    /// is taken, not read, so the same loss is never reported twice.
+    /// selection whose anchor row, or block anchor column, is no longer
+    /// shown — `selection_lost` is taken, not read, so the same loss is
+    /// never reported twice. The anchor is whichever end the selection
+    /// started from, not necessarily the range's first row.
     fn take_selection_notice(&mut self, cx: &mut Context<Self>) {
-        if self.with_delegate(cx, |d| std::mem::take(&mut d.selection_lost)) {
-            self.error = Some((
-                "selection cleared: its first row is no longer shown".into(),
-                Tone::WarningText,
-            ));
+        if let Some(lost) = self.with_delegate(cx, |d| d.selection_lost.take()) {
+            let text = match lost {
+                Lost::Row => "selection cleared: anchor row no longer shown",
+                Lost::Column => "selection cleared: anchor column no longer shown",
+            };
+            self.error = Some((text.into(), Tone::WarningText));
         }
     }
 
@@ -3046,9 +3049,95 @@ mod tests {
             )
         });
         assert!(!sel);
+        // The anchor here is the LAST row of the range (L2, with the
+        // cursor moved up): the notice names the anchor, not "its first
+        // row".
         assert_eq!(
             err.as_deref(),
-            Some("selection cleared: its first row is no longer shown")
+            Some("selection cleared: anchor row no longer shown")
+        );
+    }
+
+    /// A block whose anchor COLUMN is hidden by a view edit clears with a
+    /// notice naming the column — its anchor row is still shown, so a
+    /// row-worded notice would send the trader looking for the wrong
+    /// thing.
+    #[gpui::test]
+    fn a_block_whose_anchor_column_is_hidden_clears_with_a_column_notice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                     [[tree.columns]]\nname = \"model_code\"\nkind = \"dimension\"\n\
+                     [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let views = ViewSpec::from_doc(&doc).0;
+        let (h, mut cx) = open_with_views(cx, None, views);
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+        };
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("model_code"),
+                    TestColumn::Dict(vec![None, Some("A".into()), Some("B".into())]),
+                ),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snap.clone()));
+
+        // Anchor the block on model_code, then extend right onto delta01.
+        let model_ix = h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.plan.as_ref().unwrap().position_of("model_code").unwrap()
+            })
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| d.cursor.col = model_ix);
+        });
+        act(&h, &mut cx, "blotter::visual_block");
+        act(&h, &mut cx, "blotter::right");
+
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "model_code");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snap));
+
+        let (sel, err) = h.tile.read_with(&cx, |t, cx| {
+            (
+                t.table().read(cx).delegate().selection.is_some(),
+                t.error_text(),
+            )
+        });
+        assert!(!sel, "a block that lost its anchor column clears");
+        assert_eq!(
+            err.as_deref(),
+            Some("selection cleared: anchor column no longer shown")
         );
     }
 

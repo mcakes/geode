@@ -14,7 +14,7 @@ use crate::core::plan::{ColumnKind, ColumnPlan};
 use crate::core::select::summarize;
 use geode_core::attribution::Attribution;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
-use geode_core::grid::selection::{Resolved, SelectKind, Selection};
+use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
@@ -98,10 +98,11 @@ pub struct BlotterDelegate {
     /// The footer's per-column aggregates over `resolved`, rebuilt
     /// alongside it.
     pub summary: Vec<AggregateCell>,
-    /// Set by `refresh_selection` when a live selection's anchor row is
-    /// no longer displayed and the selection was cleared as a result;
-    /// taken by the tile to raise its one-shot notice.
-    pub selection_lost: bool,
+    /// Set by `refresh_selection` when a live selection's anchor row —
+    /// or a block's anchor column — is no longer displayed and the
+    /// selection was cleared as a result, naming which one; taken by the
+    /// tile to raise its one-shot notice.
+    pub selection_lost: Option<Lost>,
     /// The last resolved anchor row index, kept as `find_by_path`'s
     /// `near` so a redelivery's re-resolution starts its search where
     /// the anchor was last seen rather than from row 0.
@@ -245,7 +246,7 @@ impl BlotterDelegate {
             selection: None,
             resolved: None,
             summary: Vec::new(),
-            selection_lost: false,
+            selection_lost: None,
             anchor_hint: 0,
             sort: None,
             dropped_sort: None,
@@ -490,26 +491,34 @@ impl BlotterDelegate {
     /// Re-resolve the selection against the current rows and columns and
     /// rebuild the summary — every change point calls this, so render
     /// only ever looks `resolved` and `summary` up. An anchor no longer
-    /// shown clears the selection and raises `selection_lost` for the
-    /// tile's notice; no neighbouring row is guessed.
+    /// shown clears the selection and records which lookup failed in
+    /// `selection_lost` for the tile's notice; no neighbouring row is
+    /// guessed.
     pub fn refresh_selection(&mut self) {
-        let resolved = match (&self.selection, &self.snapshot, &self.plan) {
+        let outcome = match (&self.selection, &self.snapshot, &self.plan) {
             (Some(sel), Some(snapshot), Some(plan)) => {
                 let hint = self.anchor_hint;
                 let shown = &self.shown;
-                sel.resolve_with(
+                Some(sel.resolve_with(
                     (self.cursor.row, self.cursor.col),
                     plan.columns.len(),
                     |path| find_by_path(shown, snapshot, plan, path, hint),
                     |name| plan.position_of(name),
-                )
+                ))
             }
-            _ => None,
+            // No rows to resolve against: the anchor row is not shown.
+            (Some(_), _, _) => Some(Err(Lost::Row)),
+            (None, _, _) => None,
         };
-        if self.selection.is_some() && resolved.is_none() {
-            self.selection = None;
-            self.selection_lost = true;
-        }
+        let resolved = match outcome {
+            Some(Ok(r)) => Some(r),
+            Some(Err(lost)) => {
+                self.selection = None;
+                self.selection_lost = Some(lost);
+                None
+            }
+            None => None,
+        };
         if let Some(r) = &resolved {
             // `resolve` orders the range, so the anchor is whichever end
             // the cursor is not on.
