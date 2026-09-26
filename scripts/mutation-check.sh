@@ -6881,6 +6881,16 @@ run_mutation "fullscreen segment: a click restores the layout" \
   '                    let _ = (&on_fullscreen_click, window, cx);' \
   geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
 
+run_mutation "fullscreen segment: sits in the right-hand view-state section" \
+  crates/geode-shell/src/shell/status.rs \
+  '        bar = bar.right(
+            h_flex()
+                .id("status-fullscreen")' \
+  '        bar = bar.left(
+            h_flex()
+                .id("status-fullscreen")' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
 # Final review, Important 1: the cross-workspace restore pass must heal
 # only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
 # OR empty") drags focus back to `Main` and prints a launch-time warning

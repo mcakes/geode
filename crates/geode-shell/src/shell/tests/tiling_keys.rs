@@ -35,6 +35,13 @@ fn the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores(
     let seg = cx
         .debug_bounds("status-fullscreen")
         .expect("a maximised lone tile shows the segment");
+    let bar = cx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar painted");
+    assert!(
+        seg.left() > bar.center().x,
+        "the segment sits in the bar's right-hand view-state section"
+    );
 
     cx.simulate_mouse_move(
         seg.center(),

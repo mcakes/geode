@@ -51,8 +51,10 @@ focus cannot point at a hidden member. The shell sends each occupant a
 to open the shell-owned member list.
 
 A fullscreen tile paints with the same chrome as a workspace's only tile,
-so the status bar marks it instead. While a main-tree tile is
-fullscreen, a muted segment reads `fullscreen · N hidden` (just
+so the status bar marks it instead. The bar's right region is its
+view-state section: how the window is being shown, then the active
+theme's name. While a main-tree tile is fullscreen, a muted segment there
+reads `fullscreen · N hidden` (just
 `fullscreen` when it hides nothing). N comes from
 `Workspace::fullscreen_hidden`. The segment's tooltip names the
 `workspace::fullscreen_tile` key, resolved on hover. Clicking the segment
