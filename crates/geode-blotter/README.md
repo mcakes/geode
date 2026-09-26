@@ -45,8 +45,12 @@ cargo bench -p geode-blotter   # the pure core
   a plain click too. The table's `SelectRow` never touches the selection:
   it arrives on mouse-up after the press already moved the cursor, and the
   keyboard's echo carries the cursor's own row.
-- Summary strings, the `× selected` extent, and the `†`/`‡` legend flags
-  are prepared in `refresh_selection`; render only reads them.
+- Summary parts, the `rows × cols` extent, and the `†`/`‡` legend flags
+  are prepared in `refresh_selection`; render only reads them. The strip's
+  per-column colors (header color for the label, the cells' sign colors
+  for totals) are memoized by `ensure_summary_paint` per summary
+  generation and theme; the tile's render calls it, and a steady frame
+  costs one compare.
 - `apply_snapshot` rebuilds the column plan on every delivery and swaps on
   inequality. Do not reinstate a cheaper gate.
 - Sorts store column names. `SortSpec.column` is resolved against the fresh

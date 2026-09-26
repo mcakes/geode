@@ -305,6 +305,9 @@ impl BlotterDelegate {
         if !Arc::ptr_eq(&self.colours, &colours) {
             self.colours = colours;
             self.colour_cache.invalidate();
+            // The footer's memoized group colors came from the old
+            // definitions too.
+            self.summary_paint_stamp = None;
         }
     }
 
@@ -2581,6 +2584,41 @@ mod tests {
         assert_eq!(paint.positive, resolved.positive);
         assert_eq!(paint.negative, resolved.negative);
         assert_eq!(paint.zero, resolved.base);
+    }
+
+    /// A colors.toml reload (a new definitions `Arc`) repaints the footer
+    /// even when the summary and the theme are unchanged.
+    #[test]
+    fn a_colors_reload_repaints_the_footer() {
+        let colours = |token| {
+            let mut c = NamedColours::default();
+            c.insert("delta".into(), Definition::token(token));
+            c
+        };
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
+        let mut d = summary_fixture(text, colours(Token::Info));
+        // Distinct tokens: the default theme's colors can coincide, which
+        // would let a stale paint pass.
+        let theme = Theme {
+            colors: gpui_component::ThemeColor {
+                info: gpui::green(),
+                danger: gpui::red(),
+                ..Theme::default().colors
+            },
+            ..Theme::default()
+        };
+        d.ensure_summary_paint(&theme);
+        let before = d.summary_paint[0].label;
+        d.set_colours(Arc::new(colours(Token::Danger)));
+        d.ensure_summary_paint(&theme);
+        let now = d.themed_cell_colour(1, &theme).expect("a named column");
+        assert_ne!(before, Some(now.base), "the fixture needs two colors");
+        assert_eq!(
+            d.summary_paint[0].label,
+            Some(now.base),
+            "the reloaded color"
+        );
     }
 
     /// A `sign` column's totals take the cells' bullish/bearish; its label

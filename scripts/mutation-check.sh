@@ -21310,6 +21310,23 @@ run_mutation "blotter selection: a steady footer resolves no colors" \
   geode-blotter \
   a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary
 
+# The tile's render is the only caller of the footer paint memo; drop it
+# and every group paints plain whatever its column's color.
+run_mutation "blotter selection: the tile's render resolves the footer colors" \
+  crates/geode-blotter/src/tile.rs \
+  '            t.delegate_mut().ensure_summary_paint(cx.theme());' \
+  '            let _ = t;' \
+  geode-blotter \
+  painting_the_tile_resolves_the_footer_colors
+
+# A colors.toml reload repaints the footer's named groups too.
+run_mutation "blotter selection: a colors reload invalidates the footer paint" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.summary_paint_stamp = None;' \
+  '            let _ = ();' \
+  geode-blotter \
+  a_colors_reload_repaints_the_footer
+
 # A refusal mark is muted; only a signed total takes a sign color.
 run_mutation "aggregates: a refusal mark paints muted" \
   crates/geode-shell/src/shell/aggregates.rs \

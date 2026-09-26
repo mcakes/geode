@@ -69,14 +69,14 @@ column, so hiding one leaves it in place.
 While a selection is live, the footer leads with its extent (`12 rows × 3
 cols`) and then shows one group per selected measure column, parted by
 hairlines. A group's label takes the column's own color, as its header does;
-its sum and mean are painted the way that column's cells paint the same
-number (bullish or bearish for a `sign` column, the sign variant of a
-sign-tinted named color); counts and extremes stay in the foreground, and
-statistic names and refusal marks are muted. Values use the grid's monospace
-face. Each aggregate is computed over the selection's top-most rows only: a group row
-already carries its children's total, so counting a child as well would
-double it. Each column reports sum, mean, and count, plus min and max when
-the selection spans a single measure column. A column carrying a
+its sum and mean are painted the way that column's cells paint the same number
+(bullish or bearish for a `sign` column, the sign variant of a sign-tinted
+named color); counts and extremes stay in the foreground, and statistic names
+and refusal marks are muted. Values use the grid's monospace face. Each
+aggregate is computed over the selection's top-most rows only: a group row
+already carries its children's total, so counting a child as well would double
+it. Each column reports sum, mean, and count, plus min and max when the
+selection spans a single measure column. A column carrying a
 `DeterminedNonAdditive` value anywhere in the selection shows `Σ —†` instead
 of a sum or mean — an explicit refusal rather than a plausible but wrong
 total.

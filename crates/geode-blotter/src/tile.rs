@@ -2864,6 +2864,22 @@ mod tests {
         );
     }
 
+    /// The tile's own paint resolves the footer's per-column colors: a
+    /// selection over a measure, once drawn, has one paint per group.
+    #[gpui::test]
+    fn painting_the_tile_resolves_the_footer_colors(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        cx.run_until_parked();
+        let (groups, paints) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.summary.len(), d.summary_paint.len())
+        });
+        assert!(groups > 0, "the selection covers a measure");
+        assert_eq!(paints, groups, "render memoized one paint per group");
+    }
+
     /// Every live selection leads the footer with its extent — with or
     /// without a measure to summarise — prepared when the selection
     /// changes (render only reads it) and gone when the selection clears.
