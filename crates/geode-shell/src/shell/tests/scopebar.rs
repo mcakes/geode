@@ -818,3 +818,79 @@ fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui:
         "only the text layer went"
     );
 }
+
+/// Press at `at` and drag a few pixels with the left button held, the
+/// gesture `TitleBar` turns into a window move: its bubble-phase
+/// mouse-down arms a move and its next mouse move calls
+/// `start_window_move`, which the test platform leaves `unimplemented!`
+/// — so a press the title bar still sees panics here.
+fn press_and_drag(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::default());
+    vcx.simulate_mouse_move(
+        at + gpui::point(gpui::px(6.), gpui::px(0.)),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_up(
+        at + gpui::point(gpui::px(6.), gpui::px(0.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.run_until_parked();
+}
+
+/// A point on bare title-bar space: left of the grouping readout, level
+/// with the scope field.
+fn bare_title_bar(vcx: &mut gpui::VisualTestContext) -> gpui::Point<gpui::Pixels> {
+    let field = vcx.debug_bounds("scope-field").expect("field painted");
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    gpui::point(readout.left() - gpui::px(24.), field.center().y)
+}
+
+/// A drag that starts on a title-bar control belongs to the control —
+/// text selection in the field, nothing on a chip or verb — never to the
+/// window: each control occludes the title bar's drag surface. Nor may
+/// the press leave the title bar's move armed: a control whose press
+/// opens an occluding popup hides the drag and the release from the
+/// title bar, and an armed move then fires on the next plain hover over
+/// bare title-bar space.
+#[gpui::test]
+fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(book_scope("BK000"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    for selector in [
+        "scope-field",
+        "scope-chip-book",
+        "scope-pick-chip",
+        "scope-grouping",
+    ] {
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} painted"));
+        press_and_drag(&mut vcx, bounds.center());
+        // Close whatever the press opened before the next control.
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        let bare = bare_title_bar(&mut vcx);
+        vcx.simulate_mouse_move(bare, None, gpui::Modifiers::default());
+        vcx.run_until_parked();
+    }
+}
+
+/// The probe above is live: the same drag from bare title-bar space
+/// does reach `start_window_move`.
+#[gpui::test]
+#[should_panic(expected = "not implemented")]
+fn dragging_from_bare_title_bar_space_moves_the_window(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx) = open_shell(cx, test_services());
+    vcx.run_until_parked();
+    let bare = bare_title_bar(&mut vcx);
+    press_and_drag(&mut vcx, bare);
+}

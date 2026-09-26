@@ -12,13 +12,13 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), the expression field's series-name completion (`core::complete`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries, delivery filtering, and flip-barrier staging and promotion. |
 | `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component color picker, the menus, and the range and frequency trigger doors. |
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
-| `popup` | State and rendering for the series list, add picker, custom dates editor, and the menus (one painter for the action list, range menu and frequency menu), plus expression-editor state. Series and picker rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own color picker. |
+| `popup` | State and rendering for the series list, add picker, custom dates editor, the menus (one painter for the action list, range menu and frequency menu), and the expression field's completion list, plus expression-editor state. Series, picker and completion rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own color picker. |
 | `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, color-picker trigger, and empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
@@ -107,6 +107,27 @@ to the range menu with `Custom dates…` highlighted. Relative presets use UTC
 calendar arithmetic and remain relative in sessions. Absolute ranges store
 inclusive UTC dates; reopening them retains their stored dates despite as-of
 clipping of queries.
+
+The expression field completes loaded series names (`Model::series_names`).
+`core::complete::name_at` finds the name at the caret with the expression
+tokenizer's own character classes (`geode_core::series::expr`), so the word
+boundary cannot drift from what the parser reads; a caret at a name's start
+is in it, and a caret in a number offers nothing. The `Completion` list is
+rebuilt on open, on the input's Change event, after Enter's expansion, and
+on a `SeriesSettings` change, never in render. Tab and Shift+Tab reach the
+field's own listener: the shell root reclaims them in `GeodeShell`, and
+`crate::init` also binds them to `NoAction` in `EXPR_CONTEXT` for hosts
+without that root. Each write is a `Write` applied as one range replace
+(`set_selected_range` then `replace`), so it keeps the input's undo history;
+its Change event is recorded as an echo and skipped, so the cached range
+stays over the written name and repeated Tab cycles the same list. A Tab
+whose caret is not where the last write left it re-ranks at the live caret
+first. A cached range that does not fit the live text (bounds or a char
+boundary at either end) writes nothing rather than panicking. Enter expands a
+unique inexact name, then re-ranks, before resolving. A row press writes the
+same way, stops propagation,
+and the list surface occludes, so the shell root (which focuses only a hovered
+hitbox) never takes the keyboard from the field.
 
 ## Color and menu contracts
 

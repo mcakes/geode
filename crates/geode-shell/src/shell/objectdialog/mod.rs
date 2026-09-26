@@ -764,7 +764,7 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Provenance::Desk => "desk",
             Provenance::Dataset => "dataset",

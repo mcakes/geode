@@ -3925,6 +3925,40 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
   '                    cell = fresh.or(cont).map(|s| s + base);' \
   geode-shell indices_are_contiguous_for_a_prefix_match
 
+# Multi-word queries match word by word in any order: `scope clear`
+# finds "Clear scope". Dropping the per-word path leaves only the literal
+# whole-query subsequence, which requires the typed order.
+run_mutation "palette: query words match in any order" \
+  crates/geode-shell/src/palette.rs \
+  '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
+  '        { let _ = alone; None };' \
+  geode-shell words_typed_out_of_order_still_match
+
+# When the words' best alignments collide, each is placed again on the
+# characters earlier words left free. Ignoring the claimed set re-places
+# `til` on the prefix `tile` already holds, and `til tile` stops matching.
+run_mutation "palette: colliding words are placed on free characters" \
+  crates/geode-shell/src/palette.rs \
+  '        let (s, ix) = align(words[w], candidate, title_len, Some(&claimed))?;' \
+  '        let (s, ix) = align(words[w], candidate, title_len, None)?;' \
+  geode-shell colliding_words_are_placed_again_on_free_characters
+
+# Words in the typed order rank above the same words reversed; with no
+# literal space between them only the per-word order bonus separates them.
+run_mutation "palette: words in the typed order earn the order bonus" \
+  crates/geode-shell/src/palette.rs \
+  '        score += ORDER_BONUS;' \
+  '        score += 0;' \
+  geode-shell words_in_order_without_a_literal_space_between_them_earn_the_order_bonus
+
+# One candidate letter cannot stand for two typed ones: `scope scope`
+# must not match a candidate holding "scope" once.
+run_mutation "palette: out-of-order words claim distinct characters" \
+  crates/geode-shell/src/palette.rs \
+  '    if indices.windows(2).any(|w| w[0] == w[1]) {' \
+  '    if false {' \
+  geode-shell words_claim_distinct_characters
+
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
   '                    if let Ok(true) = f.load_scope(&name) {' \
@@ -4090,6 +4124,40 @@ run_mutation "picker: an empty tick set drops the chip" \
   '        if !values.is_empty() {' \
   '        if true {' \
   geode-shell apply_replaces_the_columns_selection_and_an_empty_tick_set_drops_it
+
+# A member row drags from its grip. The grip's left press must stop before
+# the row's own mouse-down, which opens a Views column's stage and would
+# leave the list before the drag could start.
+run_mutation "objectdialog: a grip press does not open the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {' \
+  '                                .on_mouse_down(MouseButton::Right, |_event, _window, cx| {' \
+  geode-shell pressing_a_member_rows_grip_does_not_open_its_column_stage
+
+# A layer badge's slot is sized by the widest name it can hold, so an
+# unbadged row's value lines up with a badged row's.
+run_mutation "objectdialog: the layer slot keeps the values aligned" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .child(sizer)' \
+  '        .child(div())' \
+  geode-shell the_column_stage_badges_the_layer_in_one_aligned_slot
+
+# Schema's layer names differ in width; the slot is sized by the widest of
+# them, so a `builtin` row's value lines up with a `user` row's.
+run_mutation "objectdialog: schema layer names share one slot width" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                    &LAYER_NAMES,' \
+  '                                    &["user"],' \
+  geode-shell schema_values_line_up_whatever_layer_each_row_names
+
+# The column filter must not survive into Values: `set_value` emits no
+# change event, so without this reset the typed column query hides every
+# value of the chosen column.
+run_mutation "picker: the column filter carries into the values stage" \
+  crates/geode-shell/src/shell/picker.rs \
+  $'otherwise hide every value.\n        p.query.clear();' \
+  'otherwise hide every value.' \
+  geode-shell a_column_filter_does_not_carry_into_the_values_stage
 
 # The single-value flow. Collapse the untouched branch so an empty tick
 # set always means "select nothing" again — the exact defect this fixed:
@@ -6880,6 +6948,60 @@ run_mutation "fullscreen segment: a click restores the layout" \
   '                    on_fullscreen_click(window, cx);' \
   '                    let _ = (&on_fullscreen_click, window, cx);' \
   geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+run_mutation "fullscreen segment: sits in the right-hand view-state section" \
+  crates/geode-shell/src/shell/status.rs \
+  '        bar = bar.right(
+            h_flex()
+                .id("status-fullscreen")' \
+  '        bar = bar.left(
+            h_flex()
+                .id("status-fullscreen")' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+# A press on a title-bar control must not reach `TitleBar`'s drag surface:
+# each pressable element occludes it, so a drag there selects text (the
+# field) or does nothing, instead of moving the window.
+run_mutation "title bar: chips occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .px_2()' \
+  '        .items_center()
+        .gap_1()
+        .px_2()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: verbs occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()' \
+  '        .flex()
+        .items_center()
+        .justify_center()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the grouping readout occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  '        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the scope field occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()
+                    .debug_selector(|| "scope-field".to_string())' \
+  '                    .debug_selector(|| "scope-field".to_string())' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
 
 # Final review, Important 1: the cross-workspace restore pass must heal
 # only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
@@ -18211,7 +18333,7 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
     }
 }' \
   geode-timeseries \
-  a_reloaded_colours_doc_reaches_an_open_tile
+  a_reloaded_colors_doc_reaches_an_open_tile
 
 # One entry for the PAIR of defences behind a removed pair leaving no
 # ghost (Task 7, review round 1, I-2): `prune_in_flight` is the
@@ -20533,7 +20655,7 @@ run_mutation "timeseries colour picker: a pick of the painted colour is a no-op"
   crates/geode-timeseries/src/tile/popups.rs \
   '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
   '        if false {' \
-  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+  geode-timeseries a_pick_of_the_color_already_painted_is_a_no_op
 
 # The pick context outlives the popup: the hex field's `enter` closes the
 # popover before its commit arrives.
@@ -20541,7 +20663,7 @@ run_mutation "timeseries colour picker: the pick context survives the close" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
-  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+  geode-timeseries a_typed_hex_commits_an_absolute_color_and_hands_focus_back
 
 # The Colours dialog refuses a `#` name up front...
 run_mutation "colours dialog: a name starting with '#' is reserved" \
@@ -20584,14 +20706,14 @@ run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
   crates/geode-timeseries/src/tile/mod.rs \
   '        Color::Custom(c) => c.to_hsla(),' \
   '        Color::Custom(_) => palette.colour(0),' \
-  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+  geode-timeseries a_featured_pick_keeps_the_theme_following_color_and_anything_else_is_absolute
 
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            "pick_color" => self.open_color_picker(window, cx),' \
   '            "pick_color" => false,' \
-  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+  geode-timeseries the_color_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
 run_mutation "timeseries colour picker: a Change applies to the target slot" \
@@ -20875,6 +20997,204 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = self.renames.get(&def.id) {' \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
+
+# ---- timeseries expression field: series-name completion ----
+# The name at the caret follows the expression tokenizer. Dropped, the
+# `@source` part is not part of the name, and a Tab would complete only
+# the identity and leave the typed source dangling after it.
+run_mutation "timeseries completion: a source suffix is part of the name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '                i = run(i + 1, is_source_char);' \
+  '                i += 1;' \
+  geode-timeseries the_name_at_the_caret_follows_the_tokenizer
+
+# A caret in a number takes no name: otherwise `VIX * 2` offers `V2X`
+# for the `2`, and Enter would expand the number into a series.
+run_mutation "timeseries completion: a number takes no name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            if start <= caret && caret <= i {
+                return None;' \
+  '            if false {
+                return None;' \
+  geode-timeseries the_name_at_the_caret_follows_the_tokenizer
+
+# A caret at a name start is in that name; otherwise Tab glues a second
+# name in front of it (`SPX.close/SPX.closeVIX`).
+run_mutation "timeseries completion: a caret at a name start is in that name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            if start <= caret && caret <= i {
+                return Some(start..i);' \
+  '            if start < caret && caret <= i {
+                return Some(start..i);' \
+  geode-timeseries tab_at_the_start_of_a_name_completes_that_name
+
+# The list ranks against the name at the caret, not the whole field.
+run_mutation "timeseries completion: the list ranks the name at the caret" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.token = name_at(line, caret);' \
+  '        self.token = Some(0..0);' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# An empty name (an empty field, after an operator) offers every name.
+run_mutation "timeseries completion: an empty name offers every loaded name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            Some(token) => rank_candidates(&names, &line[token.clone()]),' \
+  '            Some(token) if !token.is_empty() => rank_candidates(&names, &line[token.clone()]),
+            Some(_) => Vec::new(),' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# Typing re-ranks: the input Change event refreshes the list.
+run_mutation "timeseries completion: typing re-ranks the list" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            f.error = None;
+            this.refresh_expr_completion(cx);' \
+  '            f.error = None;' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# The echo of a completion write is skipped; treated as typing, it clears
+# the refusal an Enter expansion just put up.
+run_mutation "timeseries completion: a write echo is not typing" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if f.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if f.echo.take().is_some_and(|_| false) {' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
+
+# A seeded `e` edit emits no Change, so the list ranks at open.
+run_mutation "timeseries completion: the list ranks on open" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        // ranked here for the text it opens with.
+        self.refresh_expr_completion(cx);' \
+  '        // ranked here for the text it opens with.' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# A default-source change relabels an open list.
+run_mutation "timeseries completion: a default-source change relabels the list" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            // offering a name that no longer resolves.
+            this.refresh_expr_completion(cx);' \
+  '            // offering a name that no longer resolves.' \
+  geode-timeseries a_default_source_change_relabels_the_open_list
+
+# The painted window scrolls with the lit row past the eighth.
+run_mutation "timeseries completion: the painted window follows the lit row" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        let first = (self.highlighted + 1).saturating_sub(MAX_ROWS);' \
+  '        let first = 0;' \
+  geode-timeseries the_painted_window_holds_eight_and_follows_the_lit_row
+
+# Tab writes the lit candidate through the field listener.
+run_mutation "timeseries completion: tab writes the candidate" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if let Some(write) = f.completion.cycle(&text, forward) {' \
+  '        if let Some(write) = f.completion.cycle(&text, forward).filter(|_| false) {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# gpui-component Root binds tab to focus cycling window-wide; without the
+# EXPR_CONTEXT reclaim the field listener never sees the key (in a host
+# without the shell root reclaim, as the tile tests are).
+run_mutation "timeseries completion: tab is reclaimed in the expression context" \
+  crates/geode-timeseries/src/lib.rs \
+  '    for context in [popup::RANGE_CONTEXT, popup::EXPR_CONTEXT] {' \
+  '    for context in [popup::RANGE_CONTEXT] {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# Repeated Tab replaces the name just written, not the typed prefix.
+run_mutation "timeseries completion: the cached range moves over the written name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.token = Some(write.range.start..write.caret());' \
+  '        self.token = Some(write.range.clone());' \
+  geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
+
+# Repeated Tab cycles the cached list rather than re-ranking the written name.
+run_mutation "timeseries completion: repeated tab cycles without rebuilding" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if f.completion.stale_at(f.input.read(cx).cursor()) {' \
+  '        if true {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# The first Tab after a caret move ranks at the live caret.
+run_mutation "timeseries completion: a first tab re-ranks at the live caret" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            self.refresh_expr_completion(cx);
+        }
+        let Some(Popup::Expr(f)) = &mut self.popup else {' \
+  '        }
+        let Some(Popup::Expr(f)) = &mut self.popup else {' \
+  geode-timeseries tab_after_a_caret_move_completes_the_name_at_the_caret
+
+# ...and after a write, a moved caret makes the cycle stale too.
+run_mutation "timeseries completion: a moved caret ends the cycle" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.written.is_none() || self.caret != Some(caret)' \
+  '        self.written.is_none()' \
+  geode-timeseries tab_after_a_completion_and_a_caret_move_completes_at_the_caret
+
+# Shift+Tab steps back through the cached list.
+run_mutation "timeseries completion: shift-tab steps back" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            (Some(w), false) => (w + n - 1) % n,' \
+  '            (Some(w), false) => (w + 1) % n,' \
+  geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
+
+# A write is one range replace, kept in the input undo history.
+run_mutation "timeseries completion: a completion is undoable" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            s.replace(write.name.clone(), window, cx);' \
+  '            let line = write.apply(&s.value());
+            s.set_value(line.0, window, cx);' \
+  geode-timeseries undo_takes_back_a_completion
+
+# A cached range must fit the live text at both ends, never panic.
+run_mutation "timeseries completion: a range ending inside a char is refused" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        && line.is_char_boundary(range.end)' \
+  '' \
+  geode-timeseries a_range_that_does_not_fit_the_line_writes_nothing
+
+# Enter writes in a unique inexact name before resolving.
+run_mutation "timeseries completion: enter expands a unique name" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)) {' \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)).filter(|_| false) {' \
+  geode-timeseries enter_expands_a_unique_name_then_commits
+
+# ...and re-ranks against the expanded text before a refusal leaves it open.
+run_mutation "timeseries completion: an expansion re-ranks the list" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                self.write_expr(write, window, cx);
+                self.refresh_expr_completion(cx);' \
+  '                self.write_expr(write, window, cx);' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
+
+# ...and only a unique one: several matches commit as typed.
+run_mutation "timeseries completion: enter never picks among several" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        [one] => Some(Write {' \
+  '        [one, ..] => Some(Write {' \
+  geode-timeseries enter_expands_a_unique_inexact_name_only
+
+# A row press writes the candidate at the caret.
+run_mutation "timeseries completion: a row click inserts the candidate" \
+  crates/geode-timeseries/src/popup.rs \
+  '                    move |window, cx| tile.update(cx, |t, cx| t.expr_pick(i, window, cx))' \
+  '                    move |_window, _cx| {}' \
+  geode-timeseries clicking_a_candidate_inserts_it_and_typing_continues
+
+# A press on the list surface must not let the shell root take focus.
+run_mutation "timeseries completion: a list press keeps the keyboard in the field" \
+  crates/geode-timeseries/src/popup.rs \
+  '        // popup, and the shell root from taking focus on a press here.
+        .occlude();' \
+  '        // popup, and the shell root from taking focus on a press here.
+        ;' \
+  geode-timeseries clicking_a_candidate_inserts_it_and_typing_continues
+
+# Nothing loaded: the one muted line naming `a`.
+run_mutation "timeseries completion: nothing loaded says so" \
+  crates/geode-timeseries/src/popup.rs \
+  '    if c.nothing_loaded() {' \
+  '    if false {' \
+  geode-timeseries the_expression_field_says_when_no_series_is_loaded
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -4557,13 +4557,39 @@ fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The grip is the member row's drag handle: a press on it arms the drag
+/// and nothing else, so a column can be reordered by the mouse without
+/// the press opening that column's stage the way a press on the row's
+/// body does.
+#[gpui::test]
+fn pressing_a_member_rows_grip_does_not_open_its_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let grip = cx
+        .debug_bounds("objectdialog-grip-npv")
+        .expect("npv is one of tree's own columns and paints a grip");
+    cx.simulate_mouse_down(
+        gpui::point(grip.origin.x + gpui::px(3.0), grip.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "a press on the grip leaves the dialog on the view's edit stage"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Task 8: the object dialog to the mock — crumb, badges, grip and tick,
 // section headers (§18.1).
 // ---------------------------------------------------------------------
 
 #[gpui::test]
-fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
+fn the_edit_stage_paints_section_headers_and_the_crumb_and_no_destination_badge(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -4577,8 +4603,10 @@ fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
             .is_some(),
         "delta01 is available"
     );
-    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_some());
-    assert!(cx.debug_bounds("objectdialog-dest-columns").is_some());
+    // Every field here writes the view document, so a per-row `doc` badge
+    // would say the same thing on every row.
+    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_none());
+    assert!(cx.debug_bounds("objectdialog-dest-columns").is_none());
     assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
 }
 
@@ -5864,6 +5892,69 @@ fn services_with_schema() -> ShellServices {
     services
 }
 
+/// Schema rows name the layer their value came from, and the names differ
+/// in width (`builtin` against `user`). Each badge sits in a slot as wide
+/// as the widest name, so a builtin column's value lines up with a
+/// user-layer derived dimension's.
+#[gpui::test]
+fn schema_values_line_up_whatever_layer_each_row_names(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dimensions.toml"),
+        "[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n",
+    )
+    .unwrap();
+    let mut services = services_with_schema();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-columns.book")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-derived.desk")
+            .is_some()
+    );
+    let column = cx
+        .debug_bounds("objectdialog-value-columns.book")
+        .expect("book paints a value");
+    let derived = cx
+        .debug_bounds("objectdialog-value-derived.desk")
+        .expect("the derived dimension paints a value");
+    assert_eq!(
+        column.right(),
+        derived.right(),
+        "a builtin row's value lines up with a user row's"
+    );
+    // The builtin row carries the widest name, so a slot sized for anything
+    // narrower would spill its badge over its value.
+    for (value, badge) in [
+        (column, "objectdialog-field-layer-columns.book"),
+        (derived, "objectdialog-field-layer-derived.desk"),
+    ] {
+        let badge_bounds = cx.debug_bounds(badge).unwrap();
+        assert!(
+            badge_bounds.left() >= value.right(),
+            "{badge} sits in its own slot beside the value, not over it"
+        );
+    }
+}
+
 /// §19.4: the inspector lists datasets, opens one to its column rows —
 /// each with the layer it came from — and refuses every verb with one
 /// notice; `n` is refused in browse and the footer never offers it.
@@ -6872,6 +6963,62 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         dialog_state(&shell, &cx, |s| s.mode),
         DialogMode::Normal,
         "the stage opens in normal mode whatever mode enter arrived in"
+    );
+}
+
+/// A column-stage row names the layer its value comes from and no
+/// destination: every field there writes the same overlay, so a per-row
+/// `pres` says nothing. The layer badge sits in a slot of one width, so a
+/// row that gains or lacks a badge keeps its value where every other
+/// row's is.
+#[gpui::test]
+fn the_column_stage_badges_the_layer_in_one_aligned_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[(
+        "dataset_presentation",
+        "[risk_snapshot.columns.npv]\nscale = \"k\"\n",
+    )]);
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-scale")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_none()
+    );
+    for selector in [
+        "objectdialog-dest-label",
+        "objectdialog-dest-width",
+        "objectdialog-dest-scale",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector}: the column stage paints no destination badge"
+        );
+    }
+    let scale = cx
+        .debug_bounds("objectdialog-value-scale")
+        .expect("scale paints a value");
+    let width = cx
+        .debug_bounds("objectdialog-value-width")
+        .expect("width paints a value");
+    assert_eq!(
+        scale.right(),
+        width.right(),
+        "a badged row's value lines up with an unbadged row's"
+    );
+    let badge = cx
+        .debug_bounds("objectdialog-field-provenance-scale")
+        .expect("scale names its layer");
+    assert!(
+        badge.left() >= scale.right(),
+        "the badge sits in its own slot beside the value, not over it"
     );
 }
 

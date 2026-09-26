@@ -51,8 +51,10 @@ focus cannot point at a hidden member. The shell sends each occupant a
 to open the shell-owned member list.
 
 A fullscreen tile paints with the same chrome as a workspace's only tile,
-so the status bar marks it instead. While a main-tree tile is
-fullscreen, a muted segment reads `fullscreen · N hidden` (just
+so the status bar marks it instead. The bar's right region is its
+view-state section: how the window is being shown, then the active
+theme's name. While a main-tree tile is fullscreen, a muted segment there
+reads `fullscreen · N hidden` (just
 `fullscreen` when it hides nothing). N comes from
 `Workspace::fullscreen_hidden`. The segment's tooltip names the
 `workspace::fullscreen_tile` key, resolved on hover. Clicking the segment
@@ -376,6 +378,13 @@ element: gpui repaints on a hover transition only for an element with an
 id, so an id-less row's hover fill lags the pointer until an unrelated
 repaint. Stateful inputs, lists, and tables are
 created once and retained rather than rebuilt during render.
+
+Every pressable element on the toolbar calls `occlude()`. `TitleBar`
+starts a window move from any press that reaches its own hitbox, even one
+a child has already handled. On Windows its drag area also answers the
+caption hit test. Occluding keeps both from seeing a press on a control,
+so dragging in the scope field selects text. Only bare title-bar space
+moves the window.
 
 Theme values provide colors and radii. Chrome geometry is authored against
 the rem scale so application zoom changes the interface coherently. Prepared
