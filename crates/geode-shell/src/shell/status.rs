@@ -43,7 +43,8 @@ pub fn height(window: &Window) -> f32 {
 
 /// Build the status bar: left — the count prefix (§3.3, in the mono face)
 /// when one is in flight, then the pending keystrokes as space-separated
-/// text, then the reload indicator when `reload_message` is `Some` (Task
+/// text when `pending` is not empty, then the reload indicator when
+/// `reload_message` is `Some` (Task
 /// 1c-1: a danger-toned `config: N error(s) — keeping last good` marker,
 /// `None` when config is healthy), then the write-failure indicator when
 /// `write_error_message` is `Some` (Phase 4c §7.1: a config write the

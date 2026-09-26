@@ -117,8 +117,8 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
-# --anchors-only collects (name, file, anchor) NUL-separated here and
-# checks them all in one pass at the end.
+# --anchors-only collects (name, file, anchor, package, filter) NUL-separated
+# here and checks them all in one pass at the end.
 anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
@@ -240,7 +240,7 @@ run_mutation() {
   local hits
   hits=$(python3 - "$file" "$from" <<'PY'
 import sys, pathlib
-print(pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2]))
+print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").count(sys.argv[2]))
 PY
   ) || hits=-1
   if (( hits < 0 )); then
@@ -261,7 +261,7 @@ PY
   in_flight="$file"
   python3 - "$file" "$from" "$to" <<'PY'
 import sys, pathlib
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
+p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
   if [[ -n "$filter" ]]; then
@@ -18764,6 +18764,7 @@ if not entries:
     sys.exit(1)
 
 FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+TEST_ATTR = re.compile(r"^#\[(?:\w+::)*test(\]|\()")
 
 _fn_cache = {}
 
@@ -18780,7 +18781,7 @@ def test_fns(pkg):
     names = set()
     for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
         try:
-            lines = path.read_text().splitlines()
+            lines = path.read_text(encoding="utf-8").splitlines()
         except OSError:
             continue
         saw_test_attr = False
@@ -18792,7 +18793,7 @@ def test_fns(pkg):
                     names.add(declared.group(1))
                 saw_test_attr = False
             elif stripped.startswith("#["):
-                if "test" in stripped:
+                if TEST_ATTR.match(stripped):
                     saw_test_attr = True
             elif stripped and not stripped.startswith("//"):
                 saw_test_attr = False
@@ -18805,7 +18806,7 @@ stale = ambiguous = bad_filters = loose = 0
 for name, file, anchor, pkg, filt in entries:
     if file not in texts:
         try:
-            texts[file] = pathlib.Path(file).read_text()
+            texts[file] = pathlib.Path(file).read_text(encoding="utf-8")
         except OSError:
             texts[file] = None
     text = texts[file]

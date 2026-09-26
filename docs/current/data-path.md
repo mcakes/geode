@@ -213,9 +213,12 @@ echoing the requester's key and tag. A refusal decided on the service thread
 requested document, an unregistered document kind, a `DocumentKind::write`
 failure, or a full or stopped queue — answers synchronously, before anything
 reaches a worker thread. An accepted job answers from its target's worker
-once the transport call returns. Every `Err` is prefixed `egress
-'<target>': ` and names the specific reason, so the requesting tile can
-report a failure without knowing the target's configuration.
+once the transport call returns; if the transport panics, the worker
+contains it and answers `Err("egress '<target>': transport panicked: …")`
+instead of dying, so the next queued job for that target is still served.
+Every `Err` is prefixed `egress '<target>': ` and names the specific reason,
+so the requesting tile can report a failure without knowing the target's
+configuration.
 
 The document's key selects the write address: `EgressSpec::address`
 substitutes the document key's parts, joined by `/`, for `{key}` in the
