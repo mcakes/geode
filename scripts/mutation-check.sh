@@ -2714,7 +2714,7 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
 ' \
   geode-shell \
-  emits_config_reloaded_before_the_frame_notifies
+  a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
@@ -17784,7 +17784,7 @@ run_mutation "panel: an outcome for a key no longer shown is a notice" \
   '        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {' \
   '        if let Some(flight) = flight.filter(|_| false) {' \
   geode-marketdata \
-  outcome_after_a_key_switch_is_a_notice_naming_the_key
+  an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key
 
 # Switching away gives up the outgoing draft's echo check. Mutated to keep
 # `sent` and `submitted`, the kept rows outlive the switch.
@@ -17797,7 +17797,7 @@ run_mutation "panel: a key switch drops the upload's sent rows" \
   '        self.upload_error = None;
         // Park the outgoing draft' \
   geode-marketdata \
-  outcome_after_a_key_switch_is_a_notice_naming_the_key
+  an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key
 
 # The confirm names every kind of edit it sends. Mutated to omit a single
 # attribute, an attribute-only upload reads "0 cells".
@@ -18024,11 +18024,16 @@ run_mutation "pricer tile: the cell editor is dropped unblurred" \
   '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
   geode-pricer the_editor_gives_up_focus_before_it_is_dropped
 
+# No test covers this contract today: the mutation makes a commit whose
+# line moved fall back to row 0, so it lands on a different line than the
+# one edited, and the named test exercises the editor closing when its row
+# vanishes rather than a commit arriving afterwards. SURVIVED here is the
+# honest verdict, not a stale filter.
 run_mutation "pricer tile: a commit ignores that its line went away" \
   crates/geode-pricer/src/tile.rs \
   '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
   '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
-  geode-pricer a_commit_whose_line_went_away_is_refused
+  geode-pricer an_editor_whose_line_went_away_closes_with_moved
 
 run_mutation "pricer tile: a refused save is silent" \
   crates/geode-pricer/src/tile.rs \
