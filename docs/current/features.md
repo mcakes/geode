@@ -376,6 +376,14 @@ opens at the depth it will land at. A long tree label or text cell ends in
 `…`; a number never truncates. Cell text is floored to the readable ratio on
 the row's own ground and on the table's hover and selected-row grounds.
 
+`[ui] line_numbers` adds a gutter beside the tree column, before the depth
+indent, so numbers share one lane; the tree column widens by the gutter.
+Lines, packages, and an open package's legs are numbered in painted order —
+the index `NG` jumps to. The entry placeholder is blank and does not shift the
+numbers below it, since no motion lands on it. Relative mode shows distance
+from the cursor row, with its absolute number on that row, and numbers
+absolutely when there is no cursor row.
+
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens

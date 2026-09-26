@@ -20107,6 +20107,30 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
 
+# The pricer's gutter follows `[ui] line_numbers` through the observed
+# `UiSettings` global. Mutated, the mirror never takes the new mode and
+# no gutter paints.
+run_mutation "pricer gutter: the settings observer applies the mode" \
+  crates/geode-pricer/src/tile.rs \
+  '                d.line_numbers = mode;' \
+  '' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# The tree column widens by the gutter, so the tree text keeps its room.
+run_mutation "pricer gutter: the tree column's width includes the gutter" \
+  crates/geode-pricer/src/delegate.rs \
+  '                width: px(TREE_WIDTH + self.gutter_px()),' \
+  '                width: px(TREE_WIDTH),' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# Relative numbers are re-derived when the cursor row moves. Mutated, the
+# stamp ignores the cursor and a move leaves the old distances painted.
+run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let stamp = (len, entry, cursor, mode);' \
+  '        let stamp = (len, entry, None, mode);' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

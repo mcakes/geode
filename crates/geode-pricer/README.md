@@ -160,6 +160,17 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   moving it, so otherwise `enter` commits the typed text.
 - A row's own ground (package, entry) is painted by `render_tr` on the row,
   never per cell, so the table's hover and selected-row fills stay visible.
+- The line-number gutter (`[ui] line_numbers`, read from the `UiSettings`
+  global and observed) sits beside the tree cell, outside its depth indent,
+  so numbers share one lane at every depth. The tree column widens by the
+  gutter; the observer refreshes the table's cached widths. Numbers count
+  cursor rows (lines, packages, visible legs) — the index `NG` jumps to and
+  `Nj`/`Nk` count — so the entry placeholder is blank and shifts nothing.
+  Relative mode measures from the cursor row and numbers absolutely with no
+  cursor row. `refresh_numbers` prepares the text and width outside render,
+  before every `refresh`, keyed by row count, placeholder, relative cursor
+  row, and mode. Gutter text uses the row's floored muted paint (the row's
+  own text paint on the cursor row).
 - `paint` prepares grid-row and action-menu text colours and tests their
   contrast across every bundled theme. Row text is checked against its base,
   hover, and selection backgrounds; menu text against popover and enabled
