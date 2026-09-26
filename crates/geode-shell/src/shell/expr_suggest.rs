@@ -26,7 +26,11 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
     if let Some(state) = view.scope_expr_dialog.as_mut() {
         return Some(&mut state.completion);
     }
-    None
+    let state = view.object_dialog.as_mut()?;
+    if !super::objectdialog::expression_entry_open(state) {
+        return None;
+    }
+    Some(state.expr.get_or_insert_with(ExprCompletion::default))
 }
 
 /// The scope the finished expression will be ANDed with, which is what
@@ -35,6 +39,14 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     let current = view.frame.read(cx).scope();
     if let Some(state) = view.scope_expr_dialog.as_ref() {
         return Some(scope_expr_view::request_scope(&state.mode, current));
+    }
+    if let Some(state) = view.object_dialog.as_ref()
+        && super::objectdialog::expression_entry_open(state)
+        && let Some(draft) = state.draft.as_ref()
+    {
+        let pending = super::objectdialog::apply::config_with_pending(view);
+        let config = pending.as_ref().unwrap_or(&view.services.config);
+        return Some(super::objectdialog::scopes::expression_scope(draft, config));
     }
     None
 }
@@ -153,6 +165,18 @@ pub(crate) fn accept(
         s.replace(write.text.clone(), window, cx);
         s.focus(window, cx);
     });
+    // The object dialog's draft is its text's source of truth:
+    // `sync_dialog_text` runs after the key and would put the old query
+    // back unless the draft already holds the new text. A pointer accept
+    // passes no key branch, so it syncs here; with the texts equal, the
+    // sync writes nothing.
+    let text = view.dialog_input.read(cx).value().to_string();
+    if let Some(state) = view.object_dialog.as_mut()
+        && let Some(draft) = state.draft.as_mut()
+    {
+        draft.set_query(text);
+        super::dialog::sync_dialog_text(view, window, cx);
+    }
     refresh(view, cx);
 }
 

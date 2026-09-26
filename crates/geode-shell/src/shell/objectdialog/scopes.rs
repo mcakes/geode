@@ -486,7 +486,7 @@ pub fn fold_values(draft: &mut Draft) {
 /// it) yields the empty scope: the counts are then dataset-wide, which is honest for a
 /// scope that does not yet parse.
 ///
-/// `render::enter_values_stage` is the one caller.
+/// `render::enter_values_stage` and [`expression_scope`] are the callers.
 pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
     let table = rendered_doc_table(draft);
     let doc = merge_docs(
@@ -509,6 +509,15 @@ pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
     let (mut saved, _) = saved_scopes_from_doc(&doc, &schema, &dims);
     let mut scope = saved.remove(&draft.name).unwrap_or_default();
     scope.dimensions.retain(|d| d.column != minus);
+    scope
+}
+
+/// The scope a new `expression` for this draft is ANDed with: its own
+/// selections and text filter, with no expression, since that is being
+/// replaced. Narrows the expression field's value suggestions.
+pub fn expression_scope(draft: &Draft, config: &Config) -> Scope {
+    let mut scope = draft_scope(draft, config, "");
+    scope.expression = None;
     scope
 }
 

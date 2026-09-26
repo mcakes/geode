@@ -21434,6 +21434,24 @@ run_mutation "expr suggest: a row click inserts" \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
+# The Scopes draft must learn the inserted text, or sync_dialog_text
+# restores the old query after the key.
+run_mutation "expr suggest: a Scopes insert reaches the draft" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        draft.set_query(text);' \
+  '        let _ = text;' \
+  geode-shell \
+  the_scopes_expression_field_suggests_and_tab_inserts
+
+# A Scopes expression naming an unknown column is refused at Enter, not
+# saved for the reader to drop later.
+run_mutation "expr suggest: a Scopes expression refuses an unknown column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        return Err(format!("expression: {}", w.message));' \
+  '                        let _ = w;' \
+  geode-shell \
+  the_scopes_expression_field_refuses_an_unknown_column
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

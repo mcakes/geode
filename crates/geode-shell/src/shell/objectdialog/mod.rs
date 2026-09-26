@@ -17,7 +17,7 @@ mod dataset_columns;
 mod groupings;
 pub mod render;
 mod schema;
-mod scopes;
+pub(crate) mod scopes;
 mod sources;
 mod views;
 
@@ -2943,6 +2943,21 @@ pub struct ObjectDialogState {
     /// (`render::enter_values_stage`); an outcome with any other tag is stale and
     /// dropped.
     pub values_tag: u64,
+    /// Suggestions for the Scopes `expression` field, created on the first
+    /// refresh after it opens and dropped when it opens again, so a reopened
+    /// field never shows values fetched under another scope. Read only while
+    /// [`expression_entry_open`] holds.
+    pub expr: Option<crate::exprcomplete::ExprCompletion>,
+}
+
+/// Whether the Scopes dialog's `expression` field is the open text entry,
+/// which is the condition for its suggestions to be shown and to claim keys.
+pub(crate) fn expression_entry_open(state: &ObjectDialogState) -> bool {
+    state.domain == Domain::Scopes
+        && state.draft.as_ref().is_some_and(|d| {
+            matches!(d.text_entry, Some(TextEntry { row: EditRow::Field(i), .. })
+                if d.fields.get(i).is_some_and(|f| f.key == "expression"))
+        })
 }
 
 impl ObjectDialogState {
@@ -2964,6 +2979,7 @@ impl ObjectDialogState {
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             values_tag: 0,
+            expr: None,
         }
     }
 
