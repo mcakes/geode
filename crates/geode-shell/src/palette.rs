@@ -273,7 +273,7 @@ pub struct PaletteState {
     lowered: Vec<String>,
     /// Each item's lowered title length in chars: where `lowered`'s title
     /// ends and its category begins, the boundary [`fuzzy_match_lowered`]
-    /// discounts past and [`split_label_indices`] splits the highlight at.
+    /// discounts past and `split_label_indices` splits the highlight at.
     title_len: Vec<usize>,
     /// Each item's usage bonus (`crate::palette_usage`), baked once at
     /// construction against the clock as it stood when the palette opened
@@ -351,10 +351,8 @@ impl PaletteState {
                 scored.push((i, score + self.bonus[i], indices));
             }
         }
-        // Stable sort: ties — including an empty query, where every item
-        // scores the same 0 plus its usage bonus — keep their original
-        // `items` order (the brief's "empty query returns all in registry
-        // order", now after the rows a trader has actually used).
+        // Usage bonuses rank previously chosen items first under an empty query.
+        // Ties retain registry order.
         scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
         self.filtered = scored
             .into_iter()
@@ -410,7 +408,7 @@ impl PaletteState {
     /// stable element id), the item, its matched indices over
     /// `"{title} {category}"`, and the title length the matcher scored
     /// against (the lowered title's char count), which is what
-    /// [`split_label_indices`] must split at for the highlight to agree
+    /// `split_label_indices` must split at for the highlight to agree
     /// with the alignment by construction.
     pub fn rows(&self) -> impl Iterator<Item = (usize, &PaletteItem, &[usize], usize)> {
         self.filtered

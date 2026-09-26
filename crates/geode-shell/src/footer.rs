@@ -1,23 +1,12 @@
-//! The footer hints every modal dialog paints, organised by what a key
-//! *does* rather than by which dialog wrote the line (user ruling
-//! 2026-09-14, interaction-model spec §19).
+//! Shared dialog footer hints, grouped by what a key does.
 //!
-//! Each dialog used to hand-assemble two rows, "motion" and "action",
-//! and the same key landed on different rows depending on who wrote it:
-//! the object dialog's edit stage put `space`/`shift+space` beside `j`/`k`,
-//! the settings dialog put them on the action row. A trader reading a
-//! footer has to know *where to look*, and that only works if the row a
-//! key sits on is decided once, by its category, everywhere.
+//! Dialogs supply the currently active [`Hint`]s, each tagged with a
+//! [`HintRow`]. [`rows`] returns move, edit, and go in fixed order, including
+//! empty rows. The painter reserves their height so selection changes do
+//! not move the footer or the content below it.
 //!
-//! So a footer is a flat list of [`Hint`]s, each tagged with the
-//! [`HintRow`] it belongs to, and [`rows`] lays them out in a fixed
-//! order — move, edit, go — dropping a row with nothing in it. The
-//! dialogs only decide *which* hints are live (the mode-honesty rule:
-//! name only keys that act right now); the row is not their call.
-//!
-//! No `gpui` here, in the mould of [`crate::dialogmode`]: the rendering
-//! lives in `shell::dialog::hint_rows`, and this module is what a unit
-//! test can pin without a window.
+//! This module contains the model and grouping rules; rendering lives in
+//! `shell::dialog::hint_rows`.
 
 use std::borrow::Cow;
 
@@ -65,7 +54,7 @@ pub struct Hint {
     /// range reads as one, not as two keys.
     pub between: Option<&'static str>,
     /// What the keys do. Owned, because a few hints are decided per
-    /// paint (`escape`'s rung, "back to <object>").
+    /// paint (`escape`'s rung, `back to <object>`).
     pub word: Cow<'static, str>,
     /// A `debug_selector` for the first chip, so a window test can ask
     /// whether this hint was painted at all.
@@ -108,14 +97,10 @@ impl Hint {
     }
 }
 
-/// Lay the hints out as rows, in [`HintRow::ALL`] order, each row
-/// keeping its hints in the order they were given — and **every row
-/// present, empty or not**. A row with no hints used to be dropped, so
-/// the footer grew a line when the cursor reached a row with something
-/// to edit and lost it again on a read-only one, shifting everything
-/// below (user report 2026-09-19). The painter gives an empty row a full
-/// row's height, so the footer is the same three lines whichever row is
-/// selected.
+/// Group hints in [`HintRow::ALL`] order, preserving their order within
+/// each row. Return all three rows even when empty: the painter reserves
+/// a full line for each so the footer's height stays constant as the
+/// selection or available actions change.
 pub fn rows(hints: &[Hint]) -> Vec<(HintRow, Vec<&Hint>)> {
     HintRow::ALL
         .into_iter()
@@ -153,12 +138,8 @@ mod tests {
         );
     }
 
-    /// A row nobody put a hint on is not painted — a read-only surface
-    /// has no edit row, the naming stage has only a go row — but every
-    /// row is still laid out, empty, in its fixed place (user report
-    /// 2026-09-19: a footer that dropped its empty edit row grew and
-    /// shrank as the cursor moved between editable and read-only rows,
-    /// shifting everything below it).
+    /// Empty hint categories retain their fixed row positions. The painter
+    /// can reserve those lines even when only the go row contains hints.
     #[test]
     fn an_empty_row_is_kept_empty_and_the_order_holds() {
         let hints = vec![

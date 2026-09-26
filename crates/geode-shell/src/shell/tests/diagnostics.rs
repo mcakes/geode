@@ -1,8 +1,6 @@
-//! `ShellView`'s wiring of the `Diagnostics` entity (Phase 4b §4.4): the
-//! status bar's summary, an `[log]` reload's `LevelControl` apply, and
-//! the overlay-toggle drain. The catalog-request drain lives entirely
-//! in `geode-app::bridge` (the only crate allowed to touch `geode-data`)
-//! and is tested there instead.
+//! `ShellView` integration with the `Diagnostics` entity: status summary, log-level
+//! reloads, and overlay requests. Catalog requests are handled and tested in
+//! `geode-app::bridge`, which can access `geode-data`.
 
 use super::*;
 use crate::diagnostics::Health;
@@ -33,10 +31,8 @@ impl LevelControl for RecordingLevelControl {
     }
 }
 
-/// The status bar's `diagnostics-summary` indicator (spec §4.4), fed
-/// from `Diagnostics::summary()` after `note_health` — the replacement
-/// for Phase 3's deleted `set_data_status` (see the note left in
-/// `shell/tests/occupants.rs`).
+/// The status bar's diagnostics summary reflects `Diagnostics::summary()` after a
+/// health update.
 #[gpui::test]
 fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services());
@@ -71,9 +67,8 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
     );
 }
 
-/// Hovering the diagnostics summary segment (Task 4, spec §5.1) says what
-/// a click on it does — the one action this segment has, since it names
-/// no keyboard chord.
+/// The diagnostics-summary tooltip explains its click action. This segment has no
+/// keyboard chord to display.
 #[gpui::test]
 fn hovering_the_diagnostics_summary_says_it_opens_the_tile(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -107,20 +102,13 @@ fn hovering_the_diagnostics_summary_says_it_opens_the_tile(cx: &mut gpui::TestAp
     assert!(vcx.debug_bounds("tip-diagnostics-summary").is_some());
 }
 
-/// Clicking the status bar's diagnostics summary opens the diagnostics
-/// tile via `open_module("diagnostics", ..)` (Phase 4b Task 5) — the one
-/// production caller since `diagnostics::open` was retired (user ruling
-/// 2026-09-09). `services_with_recorder`'s roster carries no
-/// "diagnostics" factory, so the split tile falls back to the default
-/// ("rec") kind — this test is only about the click reaching
-/// `open_module` at all, not about which factory answers it (that's
-/// `shell/tests/occupants.rs`'s job).
+/// Clicking the diagnostics summary opens a tile through `open_module("diagnostics",
+/// ..)`. Register a diagnostics factory so the test distinguishes opening that kind
+/// from merely creating a tile.
 #[gpui::test]
 fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) {
-    // MIN-8 (fix round 1): a "diagnostics"-kind factory registered, so
-    // this test can assert the click actually reached `open_module
-    // ("diagnostics", ..)` — not merely that a click on the summary
-    // split *something* open.
+    // Register the requested kind so the assertion identifies the diagnostics tile, not
+    // just a new split.
     let (mut services, _log) = services_with_recorder();
     services
         .roster
@@ -168,18 +156,10 @@ fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// `hot_reload::apply_reload`'s `[log]`-change detection (Phase 4b
-/// §4.3): a reload whose `app` doc now carries a different `[log]`
-/// table applies it through `LevelControl::set` exactly once, and
-/// updates `Diagnostics.levels` to match — never re-persisted (this
-/// only ever *applies* what was already on disk).
-///
-/// MAJ-6 (Phase 4b Task 4 fix round 1): `user_dir` is now a real
-/// tempdir (was `None`, which made "never re-persisted" true only
-/// because nothing *could* persist) — this test now proves
-/// `apply_reload`'s `[log]` handling calls `Diagnostics::set_levels`,
-/// not `request_level`, by asserting `app.toml` still does not exist
-/// after the reload.
+/// A changed `[log]` table applies through `LevelControl::set` exactly once and updates
+/// `Diagnostics.levels`. Reloading reads existing configuration; it must not queue
+/// another persistence write. A real user directory makes this observable: `app.toml`
+/// must remain absent after the reload.
 #[gpui::test]
 fn a_log_table_change_on_reload_applies_it_through_level_control_once(
     cx: &mut gpui::TestAppContext,
@@ -253,11 +233,8 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
     assert!(!user_dir.join("app.toml").exists());
 }
 
-/// MIN-9: `Diagnostics.levels` must track a reload's `[log]` table even
-/// when `ShellServices.log` is `None` (every test fixture that doesn't
-/// opt in, and — in principle — a real run where `install_logging`
-/// somehow never wired up `LogServices`) — only `LevelControl::set`
-/// needs a real subscriber to call.
+/// `Diagnostics.levels` follows a reloaded `[log]` table even without
+/// `ShellServices.log`. Only applying levels to a subscriber requires `LevelControl`.
 #[gpui::test]
 fn a_log_table_change_updates_the_entity_even_without_log_services(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services()); // services.log is None
@@ -277,10 +254,9 @@ fn a_log_table_change_updates_the_entity_even_without_log_services(cx: &mut gpui
     );
 }
 
-/// `Diagnostics::request_overlay_toggle`'s drain (Phase 4b §4.4): a
-/// module can queue an overlay toggle but never reach `ShellView`
-/// directly (spec ruling) — `ShellView::on_diagnostics_changed` is the
-/// one door, exercised here without going through a real module tile.
+/// Modules request an overlay toggle through `Diagnostics`;
+/// `ShellView::on_diagnostics_changed` drains the request without exposing the shell
+/// entity to the module.
 #[gpui::test]
 fn request_overlay_toggle_flips_perf_overlay_on_the_next_observe(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services());
@@ -315,11 +291,9 @@ fn request_overlay_toggle_flips_perf_overlay_on_the_next_observe(cx: &mut gpui::
     );
 }
 
-/// `Diagnostics::request_level`'s drain persists into the tempdir's
-/// `app.toml` (Phase 4b §4.3) — `log_persist::persist_log_level_to_
-/// user_config`'s own unit tests cover the write itself; this proves
-/// `ShellView::on_diagnostics_changed` actually calls it, on the
-/// background executor, from a real `user_dir`.
+/// A requested log level reaches persistence through
+/// `ShellView::on_diagnostics_changed` and the background executor. The persistence
+/// helper's unit tests cover the file edit itself.
 #[gpui::test]
 fn request_level_persists_into_the_tempdirs_app_toml(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -356,11 +330,8 @@ fn request_level_persists_into_the_tempdirs_app_toml(cx: &mut gpui::TestAppConte
     assert_eq!(doc["log"]["ingest"].as_str(), Some("debug"));
 }
 
-/// MAJ-5's exact amplification path, end to end: a standing
-/// `config_version` error (reproduced by every load from this desk
-/// dir, independent of anything `:level` touches) must not inflate when
-/// `request_level`'s own persist write triggers a reload that hands
-/// `note_config` the *same* diagnostics batch again.
+/// Persisting a requested log level triggers a reload. Repeatedly receiving the same
+/// standing `config_version` error must not accumulate duplicate diagnostics.
 #[gpui::test]
 fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
     cx: &mut gpui::TestAppContext,
@@ -478,10 +449,9 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
     );
 }
 
-/// The status bar's 2 px loading strip and `loading <source> · <n>
-/// queued` segment (spec 2026-09-19 §5.3) paint only while
-/// `Diagnostics.ingest` is `Some`, and the strip sits on the bar's top
-/// edge as an absolute overlay — it must not move or grow the bar.
+/// While `Diagnostics.ingest` is present, the status bar paints a loading segment and a
+/// 2 px strip at its top edge. The strip is an absolute overlay and must not change the
+/// bar's geometry.
 #[gpui::test]
 fn the_ingest_strip_and_segment_paint_only_while_a_load_is_running(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -545,9 +515,9 @@ fn the_ingest_strip_and_segment_paint_only_while_a_load_is_running(cx: &mut gpui
     );
 }
 
-/// `Set log level…` (command-line locality spec §4.2): target, then
-/// level, landing on `Diagnostics::request_level` — the path `:level`
-/// used to take. `escape` on the level step returns to the target step.
+/// The log-level dialog selects a target, then a level, and calls
+/// `Diagnostics::request_level`. Escape from the level step returns to target
+/// selection.
 #[gpui::test]
 fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "log::level");

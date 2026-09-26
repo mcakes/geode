@@ -390,12 +390,9 @@ impl Workspace {
         Some(self.tree.slot_count() - 1 + docked)
     }
 
-    /// Fullscreen stays main-tree-only, even now that docks are trees:
-    /// while a dock is focused this is a no-op (still claimed as handled
-    /// by the router — the keystroke must not fall through). A fullscreen
-    /// dock tile would cover only its dock's little frame, a state with no
-    /// meaning the dock frame toggle (`dock::toggle_*`) doesn't already
-    /// serve better.
+    /// Toggle fullscreen only in the main tree. With a dock focused this is
+    /// a no-op, but the router still consumes the action. Dock visibility is
+    /// controlled separately by `dock::toggle_*`.
     pub fn toggle_fullscreen(&mut self) {
         if self.region == FocusRegion::Main {
             self.tree.toggle_fullscreen();
@@ -1973,7 +1970,7 @@ mod tests {
         }
     }
 
-    /// `focus_empty_dock` (2026-09-19): the mouse's click-to-focus on
+    /// `focus_empty_dock`: the mouse's click-to-focus on
     /// an empty visible dock moves the region there so the next add
     /// lands in it; refused on a hidden dock, an occupied one (a click
     /// there is a tile's, `focus_dock_tile`), and when the region is

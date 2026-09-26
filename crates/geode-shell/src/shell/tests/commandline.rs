@@ -100,15 +100,10 @@ fn completions_rank_accept_on_tab_and_submit_on_a_unique_enter(cx: &mut gpui::Te
     );
 }
 
-/// C1, final review: a second `tab` used to corrupt the line, because
-/// `CommandLine::word` was only ever refreshed by
-/// `on_command_line_changed` (which `InputEvent::Change` drives), and
-/// the Accept branch's `set_value` emits no `Change` at the pinned
-/// gpui-component rev — so the *second* accept spliced the new
-/// candidate into the byte range the *first* accept had already made
-/// stale. Both `delta01` and `gamma01` match "a01" (the branch's own
-/// fixture — see `RecordingFactory::new`), so this exercises the
-/// two-candidate cycle the single-tab tests never reach a second time.
+/// Repeated completion must refresh the active word range after each acceptance.
+/// Programmatic `set_value` emits no change event, so relying on that event would
+/// splice the second candidate into stale offsets. Two matching fixture candidates
+/// exercise the full cycle.
 #[gpui::test]
 fn a_second_tab_cycles_the_completion_instead_of_corrupting_the_line(
     cx: &mut gpui::TestAppContext,
@@ -233,10 +228,8 @@ fn slash_streams_find_events_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix round 1, finding 1: `ctrl+k` is a shipped, always-reachable
-/// binding, so it must still open the palette (and clean up after
-/// itself) even from inside an open `:` line, rather than the line
-/// swallowing it silently and staying stuck open.
+/// `ctrl+k` opens the palette from an open command line and closes the line, preserving
+/// the chord's reachability and overlay cleanup.
 #[gpui::test]
 fn ctrl_k_cancels_an_open_command_line_and_opens_the_palette(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
@@ -276,16 +269,9 @@ fn ctrl_k_cancels_an_open_command_line_and_opens_the_palette(cx: &mut gpui::Test
     );
 }
 
-/// Fix round 1, finding 1: opening a shell dialog over an open `/`
-/// line must cancel it (mirroring the existing `close_palette` call
-/// in `dialog::open_shell_dialog_with_key`) — otherwise the line
-/// stays `Some`, still painted, but the modal branch in
-/// `handle_key_down` is checked first and would swallow every key
-/// meant for it from then on. Dispatches `settings::open` directly,
-/// the same real path `settings_open_opens_the_modal` above uses,
-/// rather than a raw `ctrl-,` keystroke: this is testing what opening
-/// a dialog does to an open command line, not how the dialog itself
-/// gets reached.
+/// Opening a shell dialog cancels an open find line. Otherwise the modal would claim
+/// the keys while leaving an unusable line painted beneath it. Dispatch
+/// `settings::open` directly to isolate overlay cleanup from the settings shortcut.
 #[gpui::test]
 fn opening_a_shell_dialog_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
@@ -329,14 +315,9 @@ fn opening_a_shell_dialog_cancels_an_open_command_line(cx: &mut gpui::TestAppCon
     );
 }
 
-/// Fix round 1, finding 2: a mouse-down on a different tile is the one
-/// way the workspace's focused tile can change while a command line
-/// is open (every keystroke is claimed ahead of the matcher), so it
-/// must cancel the line rather than leaving it painted under the
-/// wrong tile — this is what keeps "focused tile == command_line.tile
-/// while open" an invariant (see the comment where the strip is
-/// painted). Same click-point layout math as `mouse_down_on_a_tile_
-/// focuses_it` below.
+/// A mouse-down on another tile cancels an open command line, keeping the line's owner
+/// equal to the focused tile. Keyboard events are claimed by the line, so the mouse is
+/// the path that can move tile focus while it is open.
 #[gpui::test]
 fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
@@ -417,9 +398,8 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
     );
 }
 
-/// Spec §20.4: a tile mouse-down while a `/` line holds text COMMITS
-/// the find (the cursor stays on the match, `n`/`N` have a target), an
-/// empty `/` line cancels, and a `:` line still cancels.
+/// A tile mouse-down commits a nonempty find line, preserving its match and repeat
+/// target; an empty find line cancels. A command line cancels regardless of its text.
 #[gpui::test]
 fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContext) {
     use crate::module::{FindEvent, recording::Recorded};
@@ -508,19 +488,9 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
     );
 }
 
-/// I1, final review: the sidebar's workspace-switch mouse-down
-/// (`sidebar::sidebar`) dispatches `workspace::switch_N` directly —
-/// there is no sidebar-click precedent to imitate instead, so this
-/// dispatches the same action the real mouse-down does, the way
-/// `switching_away_and_back_within_one_frame_voids_the_drop` already
-/// does for the identical reason. Switching workspaces changes which
-/// tile the active workspace considers focused without ever touching
-/// the command line or moving keyboard focus, so nothing in the
-/// pre-fix code cancelled the line: the strip kept painting over the
-/// OLD workspace's tile while `enter` would have run the line against
-/// a tile the switch just left. The render-time backstop (see the
-/// comment beside `ensure_occupants`'s drag-cancel neighbours in
-/// `render`) is what closes this.
+/// Switching workspaces cancels an open command line so it cannot remain attached to
+/// the previous workspace's tile. Dispatch the same switch action as the sidebar to
+/// exercise the render-time ownership check.
 #[gpui::test]
 fn switching_workspaces_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
@@ -579,14 +549,9 @@ fn switching_workspaces_cancels_an_open_command_line(cx: &mut gpui::TestAppConte
     );
 }
 
-/// I1, final review, the other half: a click into the toolbar's
-/// `filter_input` steals keyboard focus from `command_input` without
-/// touching the workspace at all — the opposite failure shape from
-/// `switching_workspaces_cancels_an_open_command_line`'s above, and
-/// the other arm of the same render-time backstop's `||`. Focuses
-/// `filter_input`'s handle directly, the same real path
-/// `escape_in_the_filter_input_returns_focus_to_the_shell_root`
-/// already uses instead of a pixel-coordinate click.
+/// Moving keyboard focus from the command input to the toolbar filter cancels the line
+/// even when tile focus is unchanged. Set the filter's focus handle directly to isolate
+/// this arm of the render-time ownership check.
 #[gpui::test]
 fn clicking_the_filter_input_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();

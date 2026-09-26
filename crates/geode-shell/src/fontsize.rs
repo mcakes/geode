@@ -1,26 +1,13 @@
-//! The UI font size setting (small/medium/large): a single scale knob the
-//! settings dialog's Appearance group exposes as a toggle button group.
+//! The small, medium, and large UI scale setting.
 //!
-//! **One lever: window rem size.** Applying a [`FontSize`] means
-//! `window.set_rem_size(size.rem_px())` — done in `ShellView::render`
-//! (guarded, only when the value differs), because that's the one place
-//! with a `Window` on every path that can change the setting (startup,
-//! the settings control, a config hot reload). Everything in this crate
-//! sizes text with rem-based `Styled` helpers (`text_sm`, `text_xs`, ...),
-//! so the whole shell follows. gpui-component's `Theme.font_size` (a px
-//! value feeding its typography *tokens*) is deliberately left alone in
-//! v1 — the pinned components overwhelmingly use rem-based helpers too,
-//! and pushing a second, px-denominated lever through `Theme::change`'s
-//! projection sync buys nothing visible today.
+//! `ShellView::render` applies [`FontSize`] with `window.set_rem_size` only
+//! when the value differs. Rem-based text and geometry follow that scale;
+//! `Theme.font_size`, which feeds separate pixel-based typography tokens,
+//! is left unchanged.
 //!
-//! **Persistence**: `[ui] font_size = "small" | "medium" | "large"` in the
-//! user `app.toml` — its own table, not `[theme]`, because font size is
-//! not part of a theme family (switching themes must never change it).
-//! Written by [`persist_to_user_config`] through the one write door
-//! ([`crate::config_write::edit`]), which is where the format-preserving
-//! toml_edit round trip and the atomic write live; read back through the layered
-//! [`Config`] by [`FontSize::from_config`], so desk/user layers and hot
-//! reload behave exactly like every other config key.
+//! Persisted as `[ui] font_size` through [`crate::config_write::edit`] and
+//! read through [`FontSize::from_config`]. Keeping it outside `[theme]`
+//! lets a theme change preserve the chosen scale.
 
 use std::path::Path;
 
@@ -28,11 +15,8 @@ use toml_edit::{Item, Table, value};
 
 use geode_core::config::{Config, Layer};
 
-/// The three offered UI text scales: 10/12/14px (user direction — shifted
-/// down twice, from the original 14/16/18 through 12/14/16). `Medium`
-/// (12px) is the default for configs without a `[ui] font_size` key; note
-/// this is deliberately well below gpui's own 16px rem default, so the app
-/// renders at 12px out of the box.
+/// UI scales with 10, 12, or 14 pixel rem sizes. `Medium` (12px) is the
+/// default when configuration omits `[ui] font_size`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FontSize {
     Small,

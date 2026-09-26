@@ -1,74 +1,28 @@
-//! The one door a clickable control's pointer states come through — the
-//! scope bar's chips and their `×`, the sidebar's discs and gear, the
-//! status bar's diagnostics segment, a dialog's steppable value chips
-//! and ticks, the blotter's chevron, the market-data `⋯` button: any
-//! element with a mouse listener that is not a list row (those take
-//! [`super::listrow::row_paint`]) and not a gpui-component `Button`
-//! (which paints its own).
+//! Hover and pressed colours for clickable controls: chips, icons, ticks,
+//! and other elements with mouse listeners. List rows use
+//! [`super::listrow::row_paint`]; component buttons paint their own states.
 //!
-//! It exists because the design guide asks two things of every control
-//! that the 2026-09-19 audit delivered for only one kind of element. The
-//! guide's pointer convention keeps the ARROW cursor over buttons, tabs
-//! and chips — the pointing hand is for links — so the audit removed the
-//! six `cursor_pointer()` sites; but its interaction-state table also
-//! owes every control a hover state ("subtle pointer feedback, never the
-//! only cue") and a pressed state, and the audit added a hover fill to
-//! list rows alone. Every other clickable element was left with no
-//! pointer feedback at all, which read as "nothing here is clickable"
-//! (user finding, 2026-09-19). This module is the second half: one
-//! [`ControlPaint`] per control, applied through
-//! [`PointerStates::pointer_states`] as gpui's `hover` and `active`
-//! refinements — `active` is the pressed state.
+//! [`ControlPaint`] supplies the two states through
+//! [`PointerStates::pointer_states`]. Each fill uses the theme's component
+//! token when it is visibly distinct from rest ([`DISTINCT_RATIO`]);
+//! otherwise it steps toward `foreground`. Pressed fills must also differ
+//! from hover by [`PRESSED_STEP`]. Theme tokens can equal the rest fill,
+//! so using them directly would sometimes hide the interaction state.
 //!
-//! **The fills.** The first cut borrowed gpui-component's own `Button`
-//! tokens outright — `secondary_hover`/`secondary_active` for a chip
-//! with a fill of its own, the ghost variant's `accent` for a bare glyph
-//! — and the review measured them: on 6 of 44 bundled themes
-//! `secondary_hover` IS the rest fill (the token falls back to
-//! `secondary` when a theme leaves it unset, and Fahrenheit's equals
-//! `muted`), and on 28 the two are within 1.10:1 of each other — a hover
-//! the eye cannot find, the very defect this module answers. So a state's
-//! fill is the component's token where that token is visibly distinct
-//! from what the control looked like at rest ([`DISTINCT_RATIO`]), and
-//! otherwise the rest fill stepped toward `foreground` until it is; the
-//! pressed fill must be distinct from rest the same way and a smaller
-//! step ([`PRESSED_STEP`]) from hover, so the press reads as a press.
-//! `accent` over the window background clears 1.09:1 on every bundled
-//! theme, so a bare control's hover is almost always the component's own.
+//! Comparisons composite fills over the control's actual surface, such as
+//! `title_bar`, `sidebar`, `popover`, or `table`. Each state's text keeps
+//! the control's semantic colour, adjusted to the readability floor against
+//! that fill. Measuring against the window background would give incorrect
+//! results for translucent fills on other surfaces.
 //!
-//! **The ground.** Every comparison and every readability check is made
-//! over the SURFACE the control sits on — the scope chips on
-//! `title_bar`, the rail on `sidebar`, the status bar on `status_bar`,
-//! a dialog's chips and ticks on `popover`, a blotter cell on `table` —
-//! never the window background: 16 bundled `secondary_hover` values are
-//! translucent, and a text floored to exactly 3:1 over `background` lands
-//! under it on the title bar of six themes (review finding). The same
-//! reason `listrow::row_paint` grounds on `popover`.
+//! [`ControlInputs`] includes every colour read by the derivation. A caller
+//! painting many rows can cache a [`ControlPaint`] by these inputs and avoid
+//! repeating colour conversions and readability adjustments.
 //!
-//! **The text.** A control keeps its OWN text on every state — a ticked
-//! tick stays `success`, the diagnostics segment stays `warning` — floored
-//! to 3:1 over that state's fill (`geode_core::colour::readable_on`, Part
-//! 2c §2.2's rule); the floor is not decoration: `muted_foreground` over
-//! `secondary_hover` is under 3:1 on 16 bundled themes unfloored
-//! (Catppuccin Latte 1.93:1), over `secondary_active` on 19, `warning`
-//! over the pressed fill on 15 (measured 2026-09-19).
-//!
-//! **The key.** [`ControlInputs`] is every colour the derivation reads,
-//! `Copy` and `PartialEq`, so a per-row painter (the blotter's chevron)
-//! memoises one [`ControlPaint`] behind it and pays a few `Hsla` compares
-//! per row rather than the OKLab bisection `readable_on` runs when the
-//! floor bites — the delegate's documented steady path ("no `Hsla ->
-//! Rgb` conversion at all") holds.
-//!
-//! Two gpui facts the trait depends on, verified against the pinned
-//! `gpui-pre-0.3.5/src/elements/div.rs`: a STATELESS element's `.hover()`
-//! never `notify`s on a hover transition (only an element with
-//! `hover_state` in its element state does), so the `Stateful` bound is
-//! what makes the hover repaint at all, not just what `active` needs; and
-//! `hover` carries a debug assertion that no hover style was set before,
-//! so `pointer_states` composes with no other `.hover()` on the same
-//! element. The two sweeps below have no exception list: a new rest kind
-//! or a new (surface, text) pairing that fails either cannot ship.
+//! Controls must be stateful for GPUI to repaint on hover transitions and
+//! track presses. Apply `pointer_states` once: GPUI rejects a second hover
+//! style on the same element in debug builds. Theme sweeps below check fill
+//! distinction and text readability for each supported control pairing.
 
 use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use gpui::prelude::*;
@@ -77,12 +31,9 @@ use gpui_component::Theme;
 
 use super::colours::{over, to_hsla, to_rgb};
 
-/// The least luminance ratio between a state's fill and the control's
-/// rest fill for the state to count as visible. Calibrated against the
-/// bundled themes' own `secondary → secondary_hover` deltas: the
-/// deliberate ones sit at 1.12–1.78 (Nord 1.17, TradingView Dark 1.17,
-/// Catppuccin Mocha 1.78); the accidental ones, where the token fell
-/// back to the rest fill, at 1.00–1.08.
+/// Minimum luminance ratio between a state's fill and the control at
+/// rest. Theme tokens below this ratio receive a lightness adjustment so
+/// hover and pressed states remain visible.
 pub const DISTINCT_RATIO: f32 = 1.10;
 
 /// The least ratio between the pressed and the hover fill: a press
@@ -268,7 +219,7 @@ mod tests {
             ),
             (
                 ControlInputs::new(theme, Rest::Bare, theme.title_bar, theme.muted_foreground),
-                // The grouping readout and the `+`/save verbs (2026-09-19);
+                // The grouping readout and the `+`/save verbs;
                 // the chip's `×` takes the chip pairing above.
                 "bare title-bar glyph",
             ),
@@ -326,8 +277,7 @@ mod tests {
                 "stack marker (Tone::Neutral on a tile header)",
             ),
             (
-                // The toolbar's AS OF chip (2026-09-19): clickable since
-                // the restyle, a `Tone::Warning` chip on the title bar.
+                // The clickable AS OF chip uses `Tone::Warning` on the title bar.
                 ControlInputs::new(
                     theme,
                     Rest::Filled(theme.warning.opacity(crate::shell::chip::FILL_ALPHA)),
@@ -337,12 +287,8 @@ mod tests {
                 "as-of chip (Tone::Warning on the title bar)",
             ),
             (
-                // The timeseries tile's slot chips (timeseries spec
-                // §9.3): clickable — a click moves the cursor — and on
-                // the tile's own BACKGROUND rather than a chrome
-                // surface, which is a different ground from the as-of
-                // chip above and so a pairing of its own. A slot that
-                // is fetching wears `Tone::Warning`…
+                // Timeseries slot chips sit on the tile background and move the
+                // cursor when clicked. Fetching slots use `Tone::Warning`.
                 ControlInputs::new(
                     theme,
                     Rest::Filled(theme.warning.opacity(crate::shell::chip::FILL_ALPHA)),
@@ -352,8 +298,7 @@ mod tests {
                 "timeseries slot chip (Tone::Warning on a tile background)",
             ),
             (
-                // …and one whose fetch failed wears `Tone::Danger`, the
-                // first clickable danger-toned chip in the codebase.
+                // A timeseries slot with a failed fetch uses `Tone::Danger`.
                 ControlInputs::new(
                     theme,
                     Rest::Filled(theme.danger.opacity(crate::shell::chip::FILL_ALPHA)),

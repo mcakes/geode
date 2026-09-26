@@ -247,11 +247,9 @@ fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext
     }
 }
 
-/// dataset-presentation spec §6: `dataset_presentation.toml` is merged
-/// under the view overlay in `load_views`, exactly the seam
-/// `view_presentation` rides — so a change to it must fan out through
-/// `ConfigReloaded` the same way, or a dataset-level column edit sits
-/// on disk until the next restart.
+/// Dataset presentation participates in resolved views beneath the view overlay.
+/// Reloading it must emit `ConfigReloaded` so dataset-level column edits reach
+/// consumers immediately.
 #[gpui::test]
 fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -303,10 +301,8 @@ fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppCon
     );
 }
 
-/// A clean reload (no error diagnostics) is applied: the mod alias
-/// (and therefore the keymap built from it) updates to match the new
-/// config, an open palette closes (brief: "must close on a successful
-/// reload"), and the outcome is recorded as `Applied`.
+/// A valid reload applies the changed modifier alias and rebuilt keymap, closes the
+/// palette whose bindings changed, and records an Applied outcome.
 #[gpui::test]
 fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     cx: &mut gpui::TestAppContext,
@@ -339,9 +335,7 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     cx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
-    // "cmd" (not "ctrl" — Task 4b, Phase 4a user ruling: `keymap.mod =
-    // "ctrl"` is refused as invalid config) is the non-default alias
-    // exercised here.
+    // Use the nondefault `cmd` alias; `ctrl` is invalid configuration.
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
@@ -363,18 +357,9 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     });
 }
 
-/// Phase 4b Task 5 fix round 1, MAJ-3: `versions.config` must bump on
-/// every *applied* reload, not only one that changes `views`/
-/// `dimensions` — `note_config_reloaded`'s call used to sit behind the
-/// same `views_changed` gate as `ShellEvent::ConfigReloaded` (which is
-/// correctly scoped to what the data thread needs), so anything gating
-/// on "config was just reloaded" — chiefly the diagnostics module's
-/// config-section explainer — went stale on the reload `:level`'s own
-/// persist write causes (an `[log]`-only `app.toml` change).
-/// `config_with_mod` only touches `app.toml`'s `[keymap]` table:
-/// `views`/`dimensions` are both absent, so `views_changed` is false for
-/// this reload, and before the fix `versions.config` would not have
-/// moved at all.
+/// Every applied reload bumps `versions.config`, including changes outside views and
+/// dimensions. This fixture changes only `[keymap]`, so it verifies the general config
+/// notification independently of the narrower data-reload event.
 #[gpui::test]
 fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version(
     cx: &mut gpui::TestAppContext,
@@ -515,9 +500,8 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
     });
 }
 
-/// §19.6: a rejected reload says so as an event carrying the errors, so
-/// a dialog (or the bridge) can tell a trader the file they just wrote
-/// is on disk but not live.
+/// A rejected reload emits its errors, allowing dialogs and the bridge to explain that
+/// the file is on disk but its config is not live.
 #[gpui::test]
 fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx, bad_config) = bad_config_and_shell(cx);
@@ -533,12 +517,8 @@ fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAp
 
     shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
 
-    // Sanity: `apply_reload` folds the `keymap.toml` fixture's own
-    // unknown-action warning into `new_config.diagnostics` (`note_config`
-    // below stores exactly that set, on every outcome — Phase 4b §4.4)
-    // alongside the `app.toml` fixture's error — otherwise the assertion
-    // below would hold trivially whether or not the filter it is meant
-    // to pin is even there.
+    // The fixture contains both an unknown-action warning and a config error. Confirm
+    // both enter the diagnostics batch so the event's error filtering is observable.
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     assert!(
         diagnostics.read_with(&cx, |d, _| d
@@ -569,14 +549,9 @@ fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAp
     );
 }
 
-/// Task 4b (Phase 4a, user ruling): `keymap.mod = "ctrl"` is refused as
-/// invalid config, exactly like the unsupported-`config_version` case
-/// above (`reload::decide` folds the mod-alias error diagnostic into
-/// `new_config.diagnostics` the same as any other error, so "any error
-/// diagnostic ⇒ keep last-good entire Config" applies unchanged) — a
-/// reload carrying it keeps the previous mod alias untouched, surfaces
-/// the error in the status bar's reload message, and a later reload back
-/// to a real alias clears it.
+/// `keymap.mod = "ctrl"` produces an error and rejects the reload, preserving the
+/// entire last-good config and modifier alias. A later valid alias applies and clears
+/// the error status.
 #[gpui::test]
 fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_it(
     cx: &mut gpui::TestAppContext,
@@ -807,15 +782,9 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
     });
 }
 
-/// Review fix round 1, Finding 2: an open palette must NOT close on a
-/// reload whose `[theme]` table is the only thing that changed — the
-/// palette's own items (Task 6: built from the registry + keymap
-/// bindings, `toggle_palette`) don't depend on `[theme]` at all, so
-/// closing it here would just be spurious churn. This is exactly the
-/// situation `theme::persist_to_user_config`'s own write triggers (see
-/// its doc comment): the app writes its own theme choice to disk, the
-/// watcher picks that up as "config changed", and this reload must not
-/// silently close a palette the user still has open.
+/// A theme-only reload preserves an open palette because its registry and keymap inputs
+/// have not changed. This includes the watcher reading back a theme choice persisted by
+/// the app itself.
 #[gpui::test]
 fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
     cx: &mut gpui::TestAppContext,
@@ -902,9 +871,7 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
     cx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
-    // "cmd" (not "ctrl" — Task 4b, Phase 4a user ruling: `keymap.mod =
-    // "ctrl"` is refused as invalid config) is the non-default alias
-    // exercised here.
+    // Use the nondefault `cmd` alias; `ctrl` is invalid configuration.
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
@@ -921,16 +888,9 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
     });
 }
 
-/// Fix-round regression for the orphaned-`FocusId` finding on
-/// `apply_reload`'s palette-close path (see `pending_focus_restore`'s
-/// and that call site's own doc comments): a background reload closing
-/// the palette while its query `Input` genuinely holds window focus
-/// must still end up with focus back on the shell root — `apply_reload`
-/// itself has no `Window` to do that with directly, so this proves the
-/// `pending_focus_restore` flag actually gets consumed by the very next
-/// render, the same "assert the shell handle is focused after" pattern
-/// `escape_closes_the_palette_without_dispatching` uses for the
-/// ordinary key-driven close.
+/// A background reload that closes a focused palette input schedules root-focus
+/// restoration. The next render consumes that flag because `apply_reload` itself has no
+/// Window for moving focus directly.
 #[gpui::test]
 fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
     cx: &mut gpui::TestAppContext,
@@ -972,12 +932,9 @@ fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
         "sanity: ctrl+k opening the palette should have focused its query Input"
     );
 
-    // A keymap-differing reload (not just a theme-only one — see the
-    // contrasting pair of tests above) closes the palette out from
-    // under that still-focused input, with no Window available to
-    // `apply_reload` itself to redirect focus. "cmd" (not "ctrl" —
-    // Task 4b, Phase 4a user ruling: `keymap.mod = "ctrl"` is refused as
-    // invalid config) is the non-default alias exercised here.
+    // A keymap change closes the palette while its input holds focus. `apply_reload`
+    // has no Window to redirect focus immediately, so the next render must recover it.
+    // Use `cmd` as the valid nondefault alias.
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
@@ -1005,7 +962,7 @@ fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
     );
 }
 
-// --- Task 6: frame keys, the readout, and config reload -------------
+// Frame keys, readouts, and config reload.
 
 #[gpui::test]
 fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestAppContext) {
@@ -1132,11 +1089,9 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
     );
 }
 
-/// M8 (3b final review): `restart_required` compares each reload's
-/// `sources` doc against the baseline the running `DataService` was
-/// actually built from, not against the previous reload — so reverting
-/// the offending edit back to that baseline clears the stale message
-/// rather than leaving it up for the rest of the session.
+/// Compare reloads against the sources baseline used to start the data service.
+/// Returning to that baseline clears restart-required status, even after intervening
+/// reloads.
 #[gpui::test]
 fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     cx: &mut gpui::TestAppContext,
@@ -1181,10 +1136,8 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     );
 }
 
-/// Egress spec §10 amendment 2: `egress.toml` is restart-required exactly
-/// as `sources.toml` is — nothing reloads a resolved target's transport
-/// live, so a reload whose `egress` doc no longer matches the baseline
-/// the data engine actually started with must ask for a restart.
+/// Egress transports are resolved at startup. A changed `egress.toml` requires restart
+/// while it differs from the engine's startup baseline.
 #[gpui::test]
 fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -1223,11 +1176,8 @@ fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// line-pricer §5.5: the pricer the data engine runs is chosen at startup
-/// from `[pricing] adapter`, so a reload that changes that table needs a
-/// restart on the same terms `sources`/`datasets` already follow —
-/// reverting to the baseline the shell started with clears the message
-/// again.
+/// The pricing adapter is selected at startup. Changing it requires restart; reverting
+/// to the startup baseline clears that message.
 #[gpui::test]
 fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -1280,9 +1230,8 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
     assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
 }
 
-/// line-pricer §5.5, final-review finding 2: the restart baseline is
-/// narrowed to `[pricing] adapter` — `refresh` becomes a live sheet
-/// setting in Part 3 and must never demand a restart.
+/// Only `[pricing] adapter` belongs to the restart baseline. Changes to the live
+/// `refresh` setting must not request restart.
 #[gpui::test]
 fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -1318,18 +1267,9 @@ fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
 }
 
-/// Phase 4c: `view_presentation.toml` is merged over the views
-/// (`geode_core::config::load_views`), so a change to it changes the
-/// `ViewSpec`s every tile runs on just as a `views` edit does. The Views
-/// dialog writes it on the commonest edit a trader makes — a column
-/// width — and then relies on the 500 ms mtime watcher's ordinary reload
-/// to apply it. Left out of `views_changed`, that write would sit on disk
-/// until the next restart, which is the one outcome the whole
-/// presentation split exists to avoid.
-///
-/// Two reloads: the first establishes a baseline whose `views` doc is
-/// already present, so the second differs in `view_presentation` and in
-/// nothing else.
+/// View presentation changes resolved `ViewSpec`s and must participate in
+/// `ConfigReloaded`. Establish a config with a views document first, then change only
+/// its presentation overlay to isolate that dependency.
 #[gpui::test]
 fn a_view_presentation_only_change_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
     const DATASETS: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n";
@@ -1383,20 +1323,10 @@ fn a_view_presentation_only_change_emits_config_reloaded(cx: &mut gpui::TestAppC
     );
 }
 
-/// I2 (final review): a `views`-changing reload must queue
-/// `ShellEvent::ConfigReloaded` *before* it notifies the frame. gpui
-/// flushes effects FIFO, so which of the two runs first for any given
-/// subscriber/observer pair is decided purely by which effect was
-/// *queued* first, not by subscription order — a frame observer (a real
-/// tile's `on_frame_changed`, which requeries when its followed versions
-/// moved) queued ahead of the event's own subscribers (the app bridge,
-/// which forwards `ConfigReloaded` as `ReplaceViews`) would otherwise
-/// run its requery against the still-old views while already recording
-/// the new frame version, leaving nothing to trigger the requery it
-/// actually needed. This records the firing order directly rather than
-/// the requery behaviour itself (which needs a real tile — a module
-/// `geode-shell` cannot depend on) and RED-then-GREENs the statement
-/// order in `apply_reload`'s `views_changed` branch.
+/// Queue `ConfigReloaded` before notifying the frame. GPUI flushes effects in queue
+/// order, so the app bridge must replace view definitions before frame observers
+/// requery using the new config version. Record callback order directly; shell tests
+/// cannot depend on a real module tile to observe its requery.
 #[gpui::test]
 fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
     cx: &mut gpui::TestAppContext,
@@ -1448,23 +1378,9 @@ fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
     );
 }
 
-/// I2 residual (re-review after 7814fdc): the test above only exercises
-/// the `views_changed` branch's own two statements — its
-/// `groupings_changed` block never actually notifies, since no
-/// `groupings`/`dimensions` doc is present there and `rebuild_slots`
-/// reproduces the same empty `GroupingSlots`, so `replace_slots` returns
-/// `false`. But `groupings_changed` and `views_changed` both key off a
-/// changed `dimensions` doc (`apply_reload`'s `changed(..)` closure), and
-/// `GroupingSlots::from_doc` genuinely depends on `dimensions` — a slot
-/// naming a derived-dimension column resolves once that dimension exists
-/// — so one reload can make BOTH branches touch the frame. This builds
-/// that case: slot 1 names dimension `desk`, unresolved (and so dropped,
-/// an "unknown column" diagnostic) at construction, and resolved once the
-/// reload's `dimensions.toml` defines it — `replace_slots` genuinely
-/// returns `true` here, which the previous fix (hoisting the emit only
-/// above `views_changed`'s own `frame.update`) left free to queue the
-/// frame's `Effect::Notify` first, since `groupings_changed`'s block runs
-/// earlier in source order.
+/// A dimensions change can rebuild both grouping slots and views in one reload. Resolve
+/// a previously unknown grouping dimension so slot replacement really notifies the
+/// frame, then verify that `ConfigReloaded` is queued before that notification too.
 #[gpui::test]
 fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies(
     cx: &mut gpui::TestAppContext,
@@ -1554,14 +1470,9 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
     );
 }
 
-/// Phase 4b Task 1 fix round 1, MIN-8: M15's `pub use` re-export gave
-/// `main.rs` a second startup caller of `rebuild_saved_scopes` alongside
-/// `ShellView::new`'s own — printing diagnostics from both
-/// unconditionally would mean one malformed `scopes.toml` entry prints
-/// twice at every launch. `report_diagnostics: false` must not print;
-/// `true` must — pinned via `hot_reload::SAVED_SCOPES_REPORT_CALLS`
-/// (a test-only counter incremented once per printing call) rather than
-/// by capturing `stderr`, which `eprintln!` gives no in-process hook for.
+/// Saved-scope rebuilding can run at both app and shell startup. `report_diagnostics`
+/// controls which caller reports errors, avoiding duplicate messages. The test counter
+/// verifies reporting without capturing the logging output.
 #[test]
 fn rebuild_saved_scopes_prints_only_when_asked() {
     use crate::shell::hot_reload::{SAVED_SCOPES_REPORT_CALLS, rebuild_saved_scopes};
@@ -1591,15 +1502,10 @@ fn rebuild_saved_scopes_prints_only_when_asked() {
     );
 }
 
-/// Phase 4b Task 1 fix round 1, MIN-9: `ShellView::today` is read fresh
-/// from the clock once per ~500ms reload-poll tick (alongside the flip
-/// sweep and the dirty-session flush), not on every paint. A stale value
-/// set directly here stands in for "yesterday" — the test executor's
-/// virtual clock (what `advance_clock` moves) never touches the
-/// `AppClock` global (the machine's zone unless `[time] zone` is set)
-/// this reads, the same limitation `shell::tests::flip`'s own
-/// reload-poll-tick test documents — so this proves the tick corrects a
-/// wrong value rather than proving a date rollover specifically.
+/// The reload-poll tick refreshes `ShellView::today` from `AppClock`. Seed a stale date
+/// and advance the executor clock to prove the poll corrects it. The virtual executor
+/// clock does not move the application clock, so this verifies refresh rather than a
+/// real midnight rollover.
 #[gpui::test]
 fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -1624,14 +1530,8 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The reload half of keymap fragments (market-data documents §8.4): a
-/// hot reload rebuilds the keymap from the freshly loaded config, which
-/// knows nothing about any module, so `apply_reload` has to splice the
-/// services' own fragments back in. Without that, the FIRST config write
-/// of a session — a theme pick, a font-size step, any dialog save —
-/// silently unbinds every module key until restart, the same class of bug
-/// `ShellServices::builtin`'s own doc comment records for the builtin
-/// docs.
+/// Hot reload splices module fragments back into the rebuilt keymap. The loaded files
+/// alone do not contain them; module bindings must survive any config reload.
 #[gpui::test]
 fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_a_module_fragment(REC_FRAGMENT);
@@ -1665,20 +1565,10 @@ fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix round 1, Minor 1: a dropped fragment binding's diagnostic must
-/// still be in the diagnostics tile's config section after a hot reload.
-/// It cannot be recomputed there — `check_fragment` removed the offending
-/// binding before `build_keymap` ever saw it, so the fresh keymap build a
-/// reload runs has nothing to say about it — and the reload replaces the
-/// whole config batch, so without `ShellServices::
-/// keymap_fragment_diagnostics` being folded back in the entry silently
-/// vanished at the first reload of the session.
-///
-/// Also pins the other half of that fold: the reload is still APPLIED. A
-/// compiled-in fragment's error is the module author's mistake, not the
-/// trader's, so it must not join `new_config.diagnostics` and make
-/// `reload::decide` keep last-good over something no file they can edit
-/// would fix.
+/// Diagnostics for dropped fragment bindings survive reload through
+/// `keymap_fragment_diagnostics`; the filtered bindings cannot be diagnosed again by
+/// keymap building. These module-authored errors remain visible without rejecting an
+/// otherwise valid user config reload.
 #[gpui::test]
 fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestAppContext) {
     let services = services_with_a_dropped_fragment_binding();
@@ -1703,9 +1593,8 @@ fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestA
     );
 }
 
-/// `[time] zone` is live (as-of dialog spec §6.1): a reload with a new
-/// zone re-publishes `AppClock`, and nothing requeries — the frame's
-/// data and as-of versions are untouched.
+/// Reloading `[time] zone` republishes `AppClock` without changing frame data or as-of
+/// versions, so display-time changes do not trigger queries.
 #[gpui::test]
 fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1714,10 +1603,8 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     let before = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
     let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
 
-    // Final review, Minor 4: `before` is the MACHINE's zone (no `[time]`
-    // section yet), which fails unmutated on a Tokyo machine if this
-    // hardcodes "Asia/Tokyo" as the target — pick a zone that can never
-    // equal `before`'s.
+    // Choose a zone different from the machine's current zone so the test observes a
+    // change on any host.
     let target = if before.zone_name() == "Asia/Tokyo" {
         "Europe/London"
     } else {

@@ -1,18 +1,12 @@
-//! Persist a log-level change into the user layer's `app.toml` `[log]`
-//! table (Phase 4b Task 4, spec §4.3) — `Diagnostics::request_level`'s
-//! `take_pending_level` drain calls this on the background executor.
-//! `request_level` was reached by the tile command line's `:level`
-//! until command-line locality closed that route 2026-09-20; the live
-//! door is the palette's `Set log level…` (`log::level`), a two-step
-//! `shell::choicedialog` pick.
+//! Persist log levels to the user layer's `app.toml` `[log]` table.
 //!
-//! Goes through [`crate::config_write::edit`], the one config-write door
-//! (Phase 4c §6): the format-preserving `toml_edit` read-modify-write, the
-//! user-layer-only guard, the atomic write, and the refuse-an-unparseable-
-//! file-untouched contract are all that door's, not reimplemented here. 4b
-//! landed this on `theme::write_atomic` under the plan ruling that "config
-//! write paths stay separate in 4b"; that ruling's own stated end state was
-//! this migration, and merging 4c is where it happens.
+//! The palette's `Set log level…` action queues a request through
+//! `Diagnostics::request_level`. The shell drains it with
+//! `take_pending_level` and persists it on the background executor.
+//!
+//! [`crate::config_write::edit`] owns the user-layer guard, preservation of
+//! unrelated keys and comments, atomic replacement, and refusal to overwrite
+//! an unparseable file.
 
 use geode_core::config::Layer;
 use geode_core::log::Level;

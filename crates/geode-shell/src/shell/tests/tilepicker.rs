@@ -1,8 +1,7 @@
-//! The tile picker (2026-09-19): a bare double-click on a placeholder
-//! tile opens it and a pick fills that placeholder in place; `tile::add`
-//! (`mod+n`, dispatched here as the literal `alt-n`) opens it from
-//! anywhere and a pick from a real tile splits; a double-click on a real
-//! tile, or one with a modifier held, opens nothing.
+//! Tile-picker integration: double-clicking a placeholder opens the picker and fills it
+//! in place; `tile::add` (`mod+n`, Alt-N in this fixture) opens it anywhere and splits
+//! when launched from a real tile. Double-clicking a real tile or holding a modifier
+//! does not open it.
 
 use super::drag::{dock_tile_point, main_tile_point};
 use super::occupants::dispatch_and_draw;
@@ -315,12 +314,9 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
     );
 }
 
-/// A fresh session has no tile at all — the main tree is empty and the
-/// `ctrl+k → Add a tile` text is the EMPTY-REGION hint, not a
-/// placeholder occupant (display finding 2026-09-19: the placeholder
-/// door alone left this, the first thing a trader sees, deaf). A bare
-/// double-click on it opens the picker too, and the pick becomes the
-/// tree's root tile, exactly where `ctrl+k` would put it.
+/// A fresh session has an empty main tree rather than a placeholder tile.
+/// Double-clicking its empty-region hint opens the picker, and the selected kind
+/// becomes the tree's root tile.
 #[gpui::test]
 fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tree(
     cx: &mut gpui::TestAppContext,
@@ -389,10 +385,8 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
     }));
 }
 
-/// Showing an empty dock focuses it (`Workspace::toggle_dock`, add-tile
-/// spec §8), so `mod+n` there adds INTO the dock — user ruling
-/// 2026-09-19, pinned through the real key path with a real tile in
-/// the main tree first, as on a working screen.
+/// Showing an empty dock focuses that region, so `mod+n` adds into the dock even when a
+/// real tile already exists in the main tree.
 #[gpui::test]
 fn showing_an_empty_dock_focuses_it_and_mod_n_adds_into_it(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);
@@ -432,10 +426,8 @@ fn showing_an_empty_dock_focuses_it_and_mod_n_adds_into_it(cx: &mut gpui::TestAp
     assert_eq!(main.len(), 1, "main untouched");
 }
 
-/// The mouse half of the same ruling: a click on an EMPTY dock focuses
-/// it as the region (click-to-focus, like a tile's), and a double-click
-/// there opens the picker whose pick lands in THAT dock — an empty
-/// dock's "add a tile here" is a gesture that adds one here.
+/// Clicking an empty dock focuses it; double-clicking opens a picker whose selection
+/// adds into that dock.
 #[gpui::test]
 fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     cx: &mut gpui::TestAppContext,

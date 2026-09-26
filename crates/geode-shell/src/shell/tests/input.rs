@@ -1,12 +1,7 @@
-//! `handle_key_down`'s own seams. Dispatch's action tail recording
-//! (Phase 4b Task 6): every dispatched action's FNV-1a hash lands in
-//! `ShellServices::action_tail` before `dispatch` matches the action —
-//! the crash hook's only view into "what was the user doing"
-//! (`geode_app::crash::install_panic_hook`, `ActionTail`'s own doc
-//! comment on why hashes rather than `ActionId`s). And insert mode
-//! (market-data spec §8.6): while a focused handle the shell does not own
-//! sits under a context reporting `mode == insert`, typing belongs to
-//! that input and only single-keystroke bindings resolve.
+//! Key dispatch records each action's FNV-1a hash in `ShellServices::action_tail`
+//! before handling it, providing the crash hook's action history. Insert-mode tests
+//! verify that a tile-owned focused input receives typing while shell bindings resolve
+//! only as single keystrokes.
 
 use super::*;
 use crate::actions::ActionId;
@@ -85,19 +80,10 @@ fn dispatched(
         .collect()
 }
 
-/// Spec §8.6, the whole rule: a tile that owns a focused `Input` gets the
-/// keystrokes. `j` is bound — in the module's own fragment — to
-/// `rec::down` in `mode == normal`, and the panel's cursor must not move
-/// while a trader types a value into a cell; the digits and the decimal
-/// point must not feed the matcher's count state either, which is what
-/// makes this test fail before the branch exists (a typed `5` left the
-/// shell holding a count of 5, waiting to multiply the next motion the
-/// trader made after leaving the cell).
-///
-/// Then `escape`: the module's own insert-mode binding claims it,
-/// `rec::cancel` drops the tile's `InputState`, and the shell's existing
-/// dropped-focus net (`render`'s `focused(cx).is_none()`) is what turns
-/// that back into shell focus — no module touches the shell's own handle.
+/// A tile-owned input receives typing in insert mode: normal-mode `j` must not move the
+/// recorder, and digits must not enter the shell matcher's count state. Escape resolves
+/// through the module fragment, drops the input, and lets the shell's dropped-focus
+/// recovery restore root focus.
 #[gpui::test]
 fn typed_keys_reach_a_tiles_focused_input_in_insert_mode(cx: &mut gpui::TestAppContext) {
     let (services, log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -143,11 +129,8 @@ fn typed_keys_reach_a_tiles_focused_input_in_insert_mode(cx: &mut gpui::TestAppC
     );
 }
 
-/// The other half of the branch (spec §8.6, the filter field's own rule
-/// generalised to a tile): a chord still reaches the shell from inside a
-/// tile's input — `ctrl+k` opens the palette — because it resolves as a
-/// single keystroke against the live context stack. A binding that has
-/// shipped is a promise, insert mode or not.
+/// Chords still resolve against the live context stack while a tile input is focused:
+/// `ctrl+k` opens the palette as a single-keystroke binding.
 #[gpui::test]
 fn chords_still_dispatch_from_insert_mode(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -209,20 +192,10 @@ fn a_count_prefix_typed_in_insert_mode_is_text_not_a_count(cx: &mut gpui::TestAp
     );
 }
 
-/// The branch keys on the tile actually HOLDING the keyboard, not on its
-/// mode alone (`!holds_shell_focus`): with focus back on the shell's own
-/// root and the tile still in insert mode, nothing is being typed into an
-/// input, so the shell's matcher is in charge again — count prefix and
-/// all. `3 enter` therefore commits with `Some(3)`, the ordinary Phase 3
-/// §3.3 semantics, where the same two keys typed INTO the input commit
-/// with no count at all (the test above).
-///
-/// This state is reachable in one click: every tile mouse-down re-arms
-/// `pending_focus_restore`, so the next frame hands the keyboard back to
-/// the shell root while the occupant's own editor is still open. Focus is
-/// set on the handle directly here, as `escape_in_the_filter_input_
-/// returns_focus_to_the_shell_root` does, rather than depending on the
-/// tile's on-screen geometry.
+/// Insert-mode input handling requires the occupant to hold keyboard focus. With focus
+/// on the shell root, the normal matcher handles count prefixes even if the editor
+/// remains open: `3 enter` dispatches with `Some(3)`. Set focus directly to isolate
+/// dispatch from tile-click focus restoration.
 #[gpui::test]
 fn the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode(
     cx: &mut gpui::TestAppContext,
@@ -275,30 +248,13 @@ fn mouse_down_on_the_rec_tile(shell: &Entity<ShellView>, vcx: &mut gpui::VisualT
     vcx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::none());
 }
 
-/// User ruling 2026-09-17 (reversing 2026-09-14's "editing is
-/// keyboard-only"): the focus restore every tile mouse-down arms is
-/// SKIPPED only while the focused tile's occupant itself HOLDS the focused
-/// handle in insert mode — `occupant_holds_insert_focus`, the very
-/// predicate the insert branch keys on — so an editor a module opens
-/// from a double-click keeps the
-/// keyboard past the next frame instead of going deaf. The flag is still
-/// consumed (cleared), only the focus move is withheld.
+/// Pending root-focus restoration is consumed without moving focus only when the
+/// focused occupant owns the focused input in insert mode.
 ///
-/// Two phases. First, the RECORDER's own press timeline: its view
-/// `track_focus`es its handle, so the press arms the flag AND moves window
-/// focus onto that handle — which is NOT an input the occupant holds, so
-/// ownership (`TileContent::holds_focus`, review C-1) fails and the
-/// restore runs even though the editor is still open (the test harness
-/// draws inside the simulated event, so it has run by the time the press
-/// returns). That is the fixture's shape, not the panel's: the panel's
-/// view tracks no focus — a cell press lands on its `DataTable`'s tracked
-/// handle and an attribute press on nothing — and in the panel the editor
-/// is opened and focused on the click, after the press. Then the tight
-/// timeline the panel's attribute press really has: the editor is opened
-/// and focused in the SAME event the tile listener arms the flag, so both
-/// hold when the frame comes; stood in for by re-focusing the fixture's
-/// open editor and arming the flag by hand. Typing afterwards proves the
-/// keyboard really stayed.
+/// First exercise the recorder's press: its tracked view handle takes focus, which is
+/// not its editor handle, so restoration runs. Then focus the editor and arm
+/// restoration in the same event, matching a module that opens an editor on click.
+/// Typing after the frame proves that an owned editor keeps the keyboard.
 #[gpui::test]
 fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -338,13 +294,9 @@ fn a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore(cx: &mut gpu
     );
 }
 
-/// The control for the test above: the same press on the same tile with
-/// insert mode OFF. The view's `track_focus` handle takes window focus on
-/// the press — an occupant handle, but not an input the occupant HOLDS,
-/// and with no editor open at all — and the frame the press schedules
-/// hands the keyboard back to the shell root, exactly as before the
-/// ruling. An owned input in insert mode, not "some occupant handle is
-/// focused", is what withholds the restore.
+/// With insert mode off, pressing a tile's tracked handle restores focus to the shell
+/// root on the next frame. A focused occupant view alone is insufficient to suppress
+/// restoration; the occupant must own an input in insert mode.
 #[gpui::test]
 fn a_tile_out_of_insert_mode_still_hands_focus_back_on_a_mouse_down(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -368,21 +320,10 @@ fn a_tile_out_of_insert_mode_still_hands_focus_back_on_a_mouse_down(cx: &mut gpu
     );
 }
 
-/// Review C-1 on the 2026-09-17 rule: the restore is withheld only while
-/// the focused tile's occupant itself HOLDS the focused handle in insert
-/// mode (`TileContent::holds_focus`), never because the focused tile
-/// merely CLAIMS insert. Two tiles, four keystrokes: `i` in A, `mod+l`
-/// (A's editor is left open — the I-3 ruling), `i` in B, `mod+h`. The
-/// ring is now on A, whose abandoned editor still reports `mode ==
-/// insert`, while B's field holds the keyboard. Read from the mode alone,
-/// the predicate withheld the restore here: the keyboard stayed in B's
-/// cell with the ring on A, every bare key was typed into B against A's
-/// stack, and `escape` — A's cancel, which blurs only its OWN field —
-/// then left B's field focused for good with no restore pending (I-3's
-/// exact failure, with no recovery until a click). With ownership, the
-/// restore runs: the shell root has the keyboard, a typed `3` is the
-/// matcher's count and types into nobody's cell, and `enter` reaches the
-/// FOCUSED tile's own action.
+/// Focus ownership is checked against the currently focused tile. Move from an editor
+/// in A to one in B and back to A: A still reports insert mode, but B owns the focused
+/// input. Restoration must return the keyboard to the shell root, where `3` becomes a
+/// count and Enter reaches A without typing into B.
 #[gpui::test]
 fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_focused(
     cx: &mut gpui::TestAppContext,
@@ -485,19 +426,10 @@ fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_foc
     );
 }
 
-/// I-3 (final whole-branch review): a KEYBOARD focus move out of a tile
-/// that owns a focused editor must hand the keyboard back to the shell,
-/// exactly as a tile click already does. `mod+h` moves the FOCUSED TILE
-/// without touching WINDOW focus, so the abandoned editor stayed focused
-/// and painted: the next bare key was dispatched by the matcher against
-/// the newly focused tile AND typed itself into the old tile's cell (the
-/// insert branch skips, because the stack no longer carries `mode ==
-/// insert`, and the matcher path does not `stop_propagation`), and a
-/// count prefix leaked into both.
-///
-/// The editor itself is left open on purpose (the ruling): it persists
-/// until commit or cancel, and `escape` on the tile once focus returns
-/// there still cancels it through the module's own fragment binding.
+/// Keyboard tile navigation restores root focus when leaving a focused editor.
+/// Otherwise a count or command for the newly focused tile could also type into the
+/// previous editor. The editor remains open until commit or cancel; returning to its
+/// tile and pressing Escape still cancels it.
 #[gpui::test]
 fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::TestAppContext) {
     let (services, log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -531,11 +463,8 @@ fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::Tes
         "the editor is orphaned, not closed: commit or cancel owns that"
     );
 
-    // The matcher governs the keyboard again — the same state a tile
-    // CLICK already produced, and the same assertions
-    // `the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode`
-    // makes about it. Before the fix the `3` went into the abandoned
-    // cell instead and the count stayed `None`.
+    // With root focus restored, the matcher owns the keyboard: a digit becomes a count
+    // without typing into the abandoned editor.
     vcx.simulate_input("3");
     assert_eq!(
         rec_input_value(&input, &vcx).as_deref(),
@@ -561,18 +490,10 @@ fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::Tes
     assert!(dispatched(&log, "rec::commit").is_empty());
 }
 
-/// A BARE keystroke in insert mode resolves only against the contexts that
-/// themselves carry `mode == insert` — the tile's own (controller ruling,
-/// market-data spec §8.6). The shell's own bare-key bindings are the
-/// reason: `/` and `:` open the find and command lines from the `tile`
-/// context and `shift+d` duplicates the tile from `workspace`, and every
-/// one of them is an ordinary character a trader types into a cell.
-/// Requiring each future text-entry module to reclaim them one by one in
-/// its own fragment is the wrong side of the seam.
-///
-/// The fragment's `escape`/`enter` still resolve, because the context they
-/// name is exactly the one that is kept — `chords_still_dispatch_from_
-/// insert_mode` pins the other half, a chord against the full stack.
+/// Bare keys in a tile input resolve only against contexts that themselves declare
+/// insert mode. Shell commands such as `/`, `:`, and `shift+d` are ordinary input
+/// characters there. The module's Escape and Enter bindings still resolve, while the
+/// separate chord test checks resolution against the full context stack.
 #[gpui::test]
 fn bare_shell_keys_are_text_in_insert_mode(cx: &mut gpui::TestAppContext) {
     let (services, _log, input) = services_with_an_insert_recorder(REC_INSERT_FRAGMENT);
@@ -608,19 +529,10 @@ fn bare_shell_keys_are_text_in_insert_mode(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// gpui-component's `Root` binds `tab`/`shift-tab` window-wide to its own
-/// focus cycling (`gpui-component-0.6.2/src/root.rs`, the `"Root"` key
-/// context), and gpui dispatches a MATCHED BINDING before any
-/// `on_key_down` listener — so before the shell root carried its own
-/// `"GeodeShell"` context and `init_reclaimed_keybindings` reclaimed both
-/// keys there, a bare `tab` never reached `ShellView::handle_key_down`
-/// while a tile was focused, and a module that binds `tab` in its own
-/// context (the timeseries tile's `tab = timeseries::next`, timeseries
-/// spec §9.4) was simply dead in the real app.
-///
-/// This is the end-to-end proof, in a real window inside a real `Root`:
-/// a user-layer binding puts `tab` on the recorder's own `rec` context,
-/// and the keystroke has to arrive as a dispatch on the focused tile.
+/// GPUI dispatches matched framework bindings before `on_key_down`. The shell's
+/// `GeodeShell` context reclaims Tab and Shift-Tab from the component root's focus
+/// cycling so module bindings can receive them. Exercise a recorder Tab binding inside
+/// a real `Root` and assert it reaches the focused occupant.
 #[gpui::test]
 fn tab_reaches_a_focused_tiles_own_binding_rather_than_roots_focus_cycling(
     cx: &mut gpui::TestAppContext,

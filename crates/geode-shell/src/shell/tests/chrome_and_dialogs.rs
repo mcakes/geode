@@ -3,14 +3,10 @@
 
 use super::*;
 
-// --- Task 4: chrome (toolbar, sidebar, slimmed status bar) ----------
+// Chrome: toolbar, sidebar, and status bar.
 
-/// Cheap evidence the new chrome actually paints something, on a
-/// window with zero tiles open — before this task, an empty workspace
-/// painted no quads at all (just the "ctrl+k → Add a tile" placeholder
-/// text). The title bar and sidebar now fill their own background
-/// regardless of tile state, so this is a real regression check, not a
-/// tautology.
+/// An empty window still paints title-bar and sidebar backgrounds. A nonempty quad
+/// scene verifies chrome rendering independently of any tile content.
 #[gpui::test]
 fn chrome_paints_quads_even_with_no_tiles_open(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -38,16 +34,9 @@ fn chrome_paints_quads_even_with_no_tiles_open(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Focus interplay (brief): pressing Escape while the filter input has
-/// focus hands focus back to the shell root, through the real key-event
-/// pipeline — Input's own `Escape` action handler `cx.propagate()`s (no
-/// popover/inline-completion/IME text to consume it), and
-/// `ShellView::handle_key_down`'s filter-input guard is what actually
-/// does the refocus. Focus is set directly on the input's `FocusHandle`
-/// (equivalent to what a real mouse click on it would produce) rather
-/// than simulating the click itself, since the filter field's on-screen
-/// position depends on window/text layout this test shouldn't need to
-/// know.
+/// Escape propagates from the focused filter input to the shell's guard and restores
+/// root focus. Set the field's focus handle directly to exercise key routing without
+/// depending on its pixel position.
 #[gpui::test]
 fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -106,14 +95,9 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
     );
 }
 
-/// Focus interplay: while the filter input has focus, a shell chord
-/// that has no key binding at all in the input's own gpui action context
-/// (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`) reaches the
-/// shell and adds a tile. The original brief's rule was the opposite
-/// ("shell chords won't fire — acceptable while typing a filter"); the
-/// user ruling of 2026-09-12 superseded it, and `scopebar.rs`'s
-/// `a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types`
-/// pins the half that did not change: shift alone is still typing.
+/// A shell chord with no binding in the focused filter's GPUI context still reaches the
+/// shell: the fixture's `ctrl+h` adds a tile. `scopebar.rs` separately checks that
+/// Shift alone remains ordinary typing.
 #[gpui::test]
 fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -159,17 +143,9 @@ fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppCont
     );
 }
 
-/// `settings::open` (dispatched via `ctrl+,`, the palette, or the
-/// sidebar profile icon) opens the real settings modal (Task 5, Task 9
-/// instant-modal redesign): `shell.modal` flips `Some`, and the modal
-/// Every shell dialog's panel starts at the same top edge —
-/// `dialog::MODAL_TOP_RATIO` of the viewport below the backdrop's own
-/// top — rather than being vertically centered (user direction:
-/// differently-sized dialogs centering to different heights defeats
-/// spatial memory; a shared top edge is what the eye expects). Proven
-/// across two differently-sized dialogs: settings (tall) and keyboard
-/// shortcuts must paint their panels at the SAME y, at exactly the
-/// ratio offset.
+/// Shell dialogs align their panels at `dialog::MODAL_TOP_RATIO` below the backdrop's
+/// top. Settings and keyboard shortcuts have different heights but must share the same
+/// top edge, preserving a stable location for dialog content.
 #[gpui::test]
 fn all_shell_dialogs_share_the_same_top_edge(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -341,10 +317,8 @@ fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// A real `ctrl+,` keystroke, through the actual key-event pipeline,
-/// dispatches `settings::open` and opens the modal — end-to-end
-/// coverage of the `BUILTIN_KEYMAP` binding added in Task 5, mirroring
-/// `mod_shift_t_keystroke_toggles_the_theme_mode` above.
+/// A real `ctrl+,` keystroke traverses the key-event pipeline, dispatches
+/// `settings::open`, and opens the settings modal.
 #[gpui::test]
 fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -379,21 +353,10 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix wave, Fix 1 regression, carried forward by the Task 9
-/// instant-modal redesign: while the settings modal is open, `ctrl+v`
-/// (the fixture layer's `tile::add_rec_horizontal`) must not reach the
-/// shell's keymap
-/// `Matcher` at all — modeled on the filter-input guard this mirrors
-/// (`handle_key_down`'s early return while the filter field is
-/// focused). Before the original fix, `ShellView::handle_key_down`'s
-/// `on_key_down` listener still received every raw keystroke regardless
-/// of the dialog (dialogs paint above the tile surface but don't
-/// interrupt this view's own key dispatch); the same is true of the
-/// modal that replaced it, so a chord typed while e.g. picking a theme
-/// in the modal would silently also mutate the workspace behind it.
-/// Also checks the closed-palette case (`ctrl+k` = `palette::toggle`):
-/// that must not open either, since the palette-toggle intercept sits
-/// ahead of the matcher in `handle_key_down` and needs the same guard.
+/// While settings is open, shell chords must not reach the workspace matcher. The
+/// fixture's `ctrl+v` must leave the tile layout unchanged, and `ctrl+k` must not open
+/// a palette through its earlier intercept. Modal painting alone does not prevent raw
+/// key events from reaching `ShellView`.
 #[gpui::test]
 fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -498,11 +461,8 @@ fn escape_keystroke_closes_the_modal(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The settings dialog went modal (interaction-model spec §18): it opens
-/// in normal mode with the shared filter BLURRED (it used to be focused —
-/// the filter-first shape it kept while the keybinding dialog went
-/// modal), so a bare letter is a verb rather than filter text. `/` is
-/// what hands the field focus.
+/// Settings opens in normal mode with the shared filter blurred. Bare letters are
+/// commands; `/` enters filter mode and focuses the field.
 #[gpui::test]
 fn opening_the_settings_dialog_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -735,11 +695,9 @@ fn the_settings_mode_pill_paints_the_mode_it_is_actually_in(cx: &mut gpui::TestA
     );
 }
 
-/// `space`/`shift+space` step the selected row's value in normal mode —
-/// the shared vocabulary's `Toggle`/`ToggleBack`, the same keys Phase
-/// 4c's `Choice` rows use. Font size (three values) rather than a
-/// two-value row, for the direction-pinning reason
-/// `tab_and_shift_tab_step_the_selected_value` gives.
+/// Space and Shift-Space step the selected value in opposite directions during normal
+/// mode. Use Font size's three values so forward and backward steps are
+/// distinguishable.
 #[gpui::test]
 fn space_and_shift_space_step_the_selected_value_in_normal_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -769,10 +727,9 @@ fn space_and_shift_space_step_the_selected_value_in_normal_mode(cx: &mut gpui::T
     );
 }
 
-/// Spec 2026-09-19 §3.3: `i` on the Theme row opens the shared `Input`
-/// as a typeahead over every theme name, painted in the row list's
-/// place; `enter` applies the lit theme live (the same `set_theme_on`
-/// core a step takes) and closes; the mode is back to normal.
+/// `i` on Theme opens a typeahead in place of the settings rows. Enter applies the
+/// highlighted theme through `set_theme_on`, closes the field, and returns to normal
+/// mode.
 #[gpui::test]
 fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
     cx: &mut gpui::TestAppContext,
@@ -815,13 +772,9 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
     );
 }
 
-/// Task 4 fix round 1: the Theme row's typeahead used to drop the
-/// highlight to the FIRST theme whenever the active one ranked past the
-/// painted cap (`Default Light` is well past row 12 of ~44 alphabetical
-/// names) — `i` `enter` silently switched the theme. The cap is now a
-/// window that follows the highlight, so `i` always lights the ACTIVE
-/// theme wherever it ranks, and a bare `enter` right after `i` must
-/// leave the theme exactly as it was.
+/// Theme typeahead opens with the active theme highlighted even when it lies beyond the
+/// initial visible rows. Enter immediately after `i` must preserve the active theme;
+/// the visible window follows the selection.
 #[gpui::test]
 fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -856,9 +809,8 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     );
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
 
-    // Task 4 review Minor 2: enter picks the HIGHLIGHTED row, never the
-    // top match — step the highlight down once and confirm the theme
-    // that lands is the one after `before` in `names()` order.
+    // Enter picks the highlighted row. Move down once and check that the theme
+    // following `before` in `names()` order is applied.
     let names = shell.read_with(&cx, |s, _| s.services.theme.names());
     let before_ix = names.iter().position(|n| n == &before).unwrap();
     let expected_next = names[before_ix + 1].clone();
@@ -877,12 +829,9 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
 }
 
-/// The choice list is a scroll container, as the palette and every
-/// dialog row list are (user report 2026-09-19: "I'd expect to be able
-/// to scroll them with the mouse wheel"): every ranked option is
-/// painted inside a viewport capped at twelve rows, and the keys keep
-/// the lit row inside it through `scroll_to_item`, so the wheel has a
-/// list to scroll and `j`/`k` past the fold still show what they lit.
+/// The choice viewport shows at most twelve rows while its scroll container holds every
+/// ranked option. Mouse-wheel scrolling and keyboard `scroll_to_item` can reach options
+/// beyond the initial viewport.
 #[gpui::test]
 fn the_choice_list_paints_every_option_in_a_scrolling_viewport(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -940,10 +889,8 @@ fn the_choice_list_paints_every_option_in_a_scrolling_viewport(cx: &mut gpui::Te
     );
 }
 
-/// A double-click on a settings row is `i` (user ruling 2026-09-19): the
-/// first mouse-down selects the row as a single click does, and the
-/// second opens the row's typeahead through the same door `i`/`enter`
-/// take. A single click on its own still only selects.
+/// A double-click selects a settings row, then opens its typeahead through the same
+/// path as `i` or Enter. A single click only selects.
 #[gpui::test]
 fn a_double_click_on_a_settings_row_opens_its_typeahead(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -996,10 +943,8 @@ fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContex
     );
 }
 
-/// The spec's own risk item (§11.3): `space` in FILTER mode is text, not
-/// a step. A handler that stepped on `space` regardless of mode would
-/// pass every normal-mode test and silently change a setting under a
-/// trader typing a two-word query.
+/// Space in filter mode is text. It must not step a setting while the user types a
+/// query containing spaces.
 #[gpui::test]
 fn space_types_in_settings_filter_mode_rather_than_stepping(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1039,11 +984,9 @@ fn tab_still_steps_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// User ruling 2026-09-13: `l`/`h` step too, in normal mode, through the
-/// shared `dialogmode` table rather than an arm of this dialog's own —
-/// which is exactly why a window test is worth having here: the pure
-/// test proves `route` answers `Step`, this one proves the answer
-/// reaches a setting.
+/// In normal mode, `l` and `h` step the selected setting through `dialogmode`. The
+/// window test verifies that the routed `Step` command reaches the setting, beyond the
+/// pure routing tests.
 #[gpui::test]
 fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1059,13 +1002,8 @@ fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAp
         crate::fontsize::FontSize::Medium,
         "h should step it back, Large -> Medium"
     );
-    // And the footer teaches `tab` in normal mode, where it has always
-    // stepped and was withheld until the same ruling (review
-    // 2026-09-13). Since 2026-09-14 the group is one hint in the object
-    // dialog's spelling (`space shift+space tab h l · change`, spec §19);
-    // `settings-hint-change` says the group is painted and
-    // `settings-hint-change-tab` says `tab` is one of its chips, which is
-    // the claim.
+    // The change hint groups the stepping keys, including Tab. Assert both the group
+    // and its Tab chip are painted.
     assert!(
         cx.debug_bounds("settings-hint-change").is_some(),
         "the normal-mode footer names the stepping group"
@@ -1082,8 +1020,7 @@ fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAp
     );
 }
 
-/// §17.1 rule 1 reaches this dialog too: the frozen filter row is the
-/// mouse form of `/`.
+/// Clicking the frozen filter row enters filter mode, just like `/`.
 #[gpui::test]
 fn clicking_the_settings_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1122,15 +1059,10 @@ fn clicking_the_settings_frozen_filter_row_enters_filter_mode(cx: &mut gpui::Tes
     );
 }
 
-/// A row click is a sync seam (§16.1 class 3) and must leave focus with
-/// whichever surface the current mode owns: the shell root in normal
-/// mode, the field in filter mode. Honest scope: on this dialog the
-/// click changes neither mode nor query and a mouse-down on a plain row
-/// moves gpui focus nowhere, so the sync in `on_row_clicked` is
-/// unobservable here (see its doc comment) — this test is green with or
-/// without it. What it does catch is a handler that hardcodes a focus
-/// move either way (the pre-modal handler focused the filter
-/// unconditionally, which would silently defeat normal mode).
+/// Row clicks retain the surface that owns focus: the shell root in normal mode, the
+/// field in filter mode. A plain row click changes neither mode nor query and does not
+/// itself move GPUI focus, so this test catches an unconditional focus move but cannot
+/// distinguish whether a redundant sync ran.
 #[gpui::test]
 fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1169,9 +1101,8 @@ fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppCo
     );
 }
 
-/// Spec §20.3: the value chip is the mouse form of `space`/`shift+space`
-/// — click steps forward, shift+click steps back — and a click on the
-/// row's label only selects. The old second-click-steps rule is gone.
+/// Clicking the value chip steps forward; Shift-click steps back. Clicking the row
+/// label only selects.
 #[gpui::test]
 fn the_settings_value_chip_steps_and_a_row_click_only_selects(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1292,19 +1223,9 @@ fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The three `apply_setting` arms `tab_and_shift_tab_step_the_
-/// selected_value` doesn't reach (that test covers Font size) --
-/// Theme and Find style -- each stepped once through a real
-/// `tab` keystroke, so a mis-wired arm (e.g. `SettingId::Theme =>
-/// set_font_size_on`) is caught here rather than nowhere: `
-/// apply_setting` takes `&mut ShellView` and has no pure unit test of
-/// its own. One fresh dialog per row rather than one dialog walked
-/// with `j`/`k` (as the retired vim-nav version of this test did):
-/// selecting a different row now means typing a different filter
-/// query, and there's no key that clears the shared field back to
-/// empty mid-session, so two small dialogs are simpler than one
-/// that fights its own filter. (A Dark mode row used to be the third;
-/// retired 2026-09-12.)
+/// Step Theme and Find style through real Tab keystrokes to cover the
+/// setting-application arms beyond Font size. Open a fresh filtered dialog for each row
+/// so selection setup remains independent.
 #[gpui::test]
 fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     {
@@ -1338,13 +1259,9 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// Enter is inert and reserved in FILTER mode (spec §3): it must not
-/// step a value, and must not close the dialog either. (Amended
-/// 2026-09-19 §3.3/§7: `enter` is no longer inert in NORMAL mode — it
-/// opens the selected row's typeahead beside `i`, covered by
-/// `i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme`
-/// — so this test now presses an ordinary unclaimed letter, `s`, in
-/// normal mode to keep its "an unclaimed key does nothing" half honest.)
+/// Leaving filter mode with Enter must not step a setting or close the dialog. In
+/// normal mode, an unclaimed letter (`s`) likewise changes nothing; Enter's normal-mode
+/// typeahead behavior is covered separately.
 #[gpui::test]
 fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1372,15 +1289,9 @@ fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     });
 }
 
-/// The full inertness contract for the reserved `enter` (spec §3):
-/// with a focused `Input`, `handle_key` returning `false` for it would
-/// NOT make it inert — `enter` would reach the filter, be normalized
-/// away to an empty edit, but still fire an unconditional
-/// `InputEvent::Change` that resets `selected` back to the top match
-/// via `SettingsState::set_query`. `handle_key` claims it instead (see
-/// its own doc comment). Unlike `enter_does_nothing_in_the_settings_
-/// dialog` above, this moves the selection off the top row FIRST, so
-/// a reset back to 0 is actually observable.
+/// The filter-exit Enter must be claimed before it reaches the shared `Input`. An input
+/// change event could rerank the list and reset selection, so move off the first row
+/// before asserting that Enter preserves the query, selection, value, and open dialog.
 #[gpui::test]
 fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1632,15 +1543,9 @@ fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContex
     }
 }
 
-/// `settings_view::set_theme` is the exact core the dialog's Theme row
-/// applies on a step (see its doc comment: driving the row through real
-/// keystrokes is covered elsewhere — this drives the identical apply
-/// path directly). Exercises both live-apply and the `ThemeService`
-/// bookkeeping (`active_name`) staying in sync, the same contract
-/// `theme::toggle_mode` already has coverage for elsewhere in this file.
-/// The dialog's own Dark mode row and its `set_dark_mode` setter were
-/// retired 2026-09-12 (every theme name carries its mode already), so
-/// mode flipping is `theme::toggle_mode`'s test alone now.
+/// The theme setter applies the selected theme live and keeps
+/// `ThemeService::active_name` synchronized. Call the shared application path directly;
+/// separate tests drive row stepping through keys.
 #[gpui::test]
 fn settings_dialog_theme_setter_applies_live_through_theme_service(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -1955,12 +1860,9 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     );
 }
 
-/// Final-review Minor 3: the *reload* half of the `[app] modules.default`
-/// diagnostic (spec 2026-09-08 add-tile §7.1). `defaults::modules_
-/// default_diagnostic` has a pure test of its own, but nothing checked
-/// that `apply_reload` actually folds it into `new_config.diagnostics`
-/// and forwards it to the diagnostics entity — and, being a *warning*,
-/// that it does not reject the reload the way an error diagnostic does.
+/// Reload folds `[app] modules.default` diagnostics into the config batch and forwards
+/// them to the diagnostics entity. An invalid default is a warning, so the reload must
+/// still apply.
 #[gpui::test]
 fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services());
@@ -1994,13 +1896,8 @@ fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppCont
     });
 }
 
-/// The *startup* half of the same diagnostic. `ShellView::new` used to
-/// seed the entity's config section with `services.config.diagnostics`
-/// alone — but `modules_default_diagnostic` and the refused-`keymap.mod`
-/// alias are computed OUTSIDE that list (by `main.rs`, which only logged
-/// them), so a trader who never edited config mid-session saw neither in
-/// the diagnostics tile. `new` now folds both in, in `apply_reload`'s
-/// order.
+/// Startup folds default-module and modifier-alias diagnostics into the entity's config
+/// section, including diagnostics computed outside the loaded config's own list.
 #[gpui::test]
 fn a_modules_default_key_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -2025,11 +1922,8 @@ fn a_modules_default_key_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::
     );
 }
 
-/// `[timeseries] default_source` (timeseries spec §9.12) resolves at
-/// startup and re-resolves on hot reload — the two paths `line_numbers`
-/// rides — and a default naming no configured fetch source is a
-/// *warning* in the diagnostics entity from BOTH, the third diagnostic
-/// of `modules_default_diagnostic`'s shape.
+/// `[timeseries] default_source` resolves at startup and on hot reload. Both paths
+/// report a warning when the name has no configured fetch source.
 #[gpui::test]
 fn a_stale_default_source_warns_at_startup_and_clears_on_reload(cx: &mut gpui::TestAppContext) {
     use crate::series::SeriesSettings;
@@ -2105,10 +1999,9 @@ fn a_stale_default_source_warns_at_startup_and_clears_on_reload(cx: &mut gpui::T
     );
 }
 
-/// The other half of the startup seeding: the refused `keymap.mod =
-/// "ctrl"` alias (Phase 4a Task 4b) is an *error*, and the diagnostics
-/// tile is where a trader would look to find out why their mod key is
-/// not what they wrote.
+/// The invalid `keymap.mod = "ctrl"` alias produces an error at startup. The
+/// diagnostics entity must receive it so the user can see why their configured modifier
+/// was refused.
 #[gpui::test]
 fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -2129,14 +2022,9 @@ fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::T
     );
 }
 
-/// The fourth and last startup group, and the one that cannot be
-/// recomputed: what `build_keymap` reported. `apply_reload` extends it;
-/// `ShellView::new` has no way to rebuild them (the registry as it stood
-/// at startup is gone), so they ride on `ShellServices::keymap_
-/// diagnostics` — filled by `main.rs`, and modelled here the same way.
-/// Without it a binding naming an action nothing registered was logged at
-/// startup and then absent from the diagnostics tile until some later hot
-/// reload happened to put it there (review finding, Important 2).
+/// Startup keymap diagnostics arrive through `ShellServices::keymap_diagnostics`,
+/// populated by the app after building the keymap. `ShellView::new` must forward them
+/// immediately; an unknown action should be visible before any hot reload.
 #[gpui::test]
 fn startup_keymap_diagnostics_are_in_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -2178,14 +2066,9 @@ fn startup_keymap_diagnostics_are_in_the_diagnostics_entity(cx: &mut gpui::TestA
     );
 }
 
-/// `settings_view::set_add_direction` (the add-direction row's setter,
-/// driven directly for the same reason `set_theme`'s and `set_find_
-/// style`'s tests drive the handler rather than the control) updates
-/// `ShellView::add_direction` immediately and persists `[tiles] add` to
-/// `<user_dir>/app.toml` off the UI thread — mirrors `set_find_style_
-/// updates_the_shell_state` plus the persistence half `persist_find_
-/// style` has no dedicated test for, since `add_direction`'s own spec
-/// task (2026-09-08 add-tile §5) calls it out explicitly.
+/// The add-direction setter updates `ShellView::add_direction` immediately and persists
+/// `[tiles] add` to the user `app.toml` on the background executor. Call the handler
+/// directly to isolate state publication and persistence from row navigation.
 #[gpui::test]
 fn set_add_direction_updates_the_shell_state_and_persists(cx: &mut gpui::TestAppContext) {
     use crate::tileadd::AddDirection;
@@ -2266,11 +2149,8 @@ fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// `[ui] line_numbers` (user ruling 2026-09-11): the settings row steps
-/// off → on → rel, and every step is published as the `UiSettings`
-/// global — the only door a module has to the value — so a blotter tile
-/// observing it repaints on the very keystroke, not on some later
-/// config reload.
+/// The line-number setting cycles off → on → rel and publishes every step through
+/// `UiSettings`, allowing observing modules to repaint immediately.
 #[gpui::test]
 fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAppContext) {
     use crate::linenumbers::{LineNumbers, UiSettings};
@@ -2309,11 +2189,8 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
     );
 }
 
-/// `[timeseries] default_source` (timeseries spec §9.12): the settings
-/// row steps `(none)` → every configured fetch source → back to
-/// `(none)`, and every step is published as the `SeriesSettings` global
-/// — the only door a timeseries tile has to the value, exactly as
-/// `UiSettings` is the blotter's.
+/// The timeseries default-source row cycles through `(none)` and configured fetch
+/// sources, publishing each step through `SeriesSettings` for observing tiles.
 #[gpui::test]
 fn the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global(
     cx: &mut gpui::TestAppContext,
@@ -2426,15 +2303,9 @@ fn the_line_numbers_cycle_action_steps_the_setting_once(cx: &mut gpui::TestAppCo
     );
 }
 
-/// Task 9: opening a modal through `dialog::open_shell_dialog` (here,
-/// `settings::open` — the only current call site, migrated onto the
-/// utility) must cancel a pending keymap sequence, the same hygiene
-/// `toggle_palette` already gives palette-open. A real `g` keystroke
-/// starts the test-only `"g g"` sequence (`test_services_with_gg_binding`
-/// — the builtin keymap has no sequences of its own anymore), which
-/// leaves one pending keystroke and paints the
-/// which-key overlay (Task 8); opening the settings modal must clear
-/// both.
+/// Opening a modal through `dialog::open_shell_dialog` cancels any pending keymap
+/// sequence and clears the which-key overlay. The fixture adds `g g` because the
+/// builtin keymap has no sequence binding.
 #[gpui::test]
 fn modal_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -2507,14 +2378,9 @@ fn modal_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestA
     );
 }
 
-/// Task 9: `open_shell_dialog` must close an open palette. `settings::
-/// open` can't be reached with the palette open through its own Enter
-/// path (`dispatch_palette_item` closes the palette before dispatching
-/// anything, and `dispatch`'s `palette::toggle` arm is the only one that
-/// re-touches `self.palette` — there is no route from an open palette
-/// back into `dispatch`'s `settings::open` arm while it's still open),
-/// so this drives `dialog::open_shell_dialog` directly to exercise the
-/// utility's own hygiene in isolation from any one call site.
+/// `open_shell_dialog` closes an open palette. Call the utility directly: selecting a
+/// settings action through the palette already closes the palette before dispatch,
+/// which would hide the utility's own cleanup behavior.
 #[gpui::test]
 fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -2565,7 +2431,7 @@ fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// --- Tooltips (Task 2): sidebar discs and the profile icon ----------
+// Tooltips: sidebar discs and the profile icon.
 
 /// The hover mechanism end to end: no tooltip before hover, the disc's
 /// own bounds paint a tooltip after the show delay, and the chord chip
@@ -2659,13 +2525,9 @@ fn a_tooltip_goes_away_when_the_mouse_leaves(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Zoom is a system, not a text-size knob (design-guide audit 2026-09-19,
-/// `shell::scale`): stepping the font size to `Large` must scale the
-/// chrome that holds the text with it — the status bar, the sidebar rail
-/// and a dialog's row list all grow by the same 14/12 the rem does — and
-/// the tile surface must give up exactly that much, so the status bar
-/// never paints over the bottom tile. Before `scale`, every one of those
-/// was a `px` literal that stayed put while the text inside it grew.
+/// Large font size scales the status bar, sidebar, and dialog rows by the same 14/12
+/// ratio as the text. The tile surface gives up the corresponding space so the enlarged
+/// status bar cannot overlap the bottom tile.
 #[gpui::test]
 fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
     use crate::fontsize::FontSize;
@@ -2754,9 +2616,8 @@ fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
         at_large.3
     );
 
-    // The PAINTED rail is the width the surface reserved (review M1: the
-    // two are separate declarations, and `sidebar::width` alone only
-    // re-checks the arithmetic). Still at Large.
+    // Measure the painted sidebar rail as well as its reserved width; checking the
+    // width helper alone would miss a render mismatch. The scale is still Large.
     let rail = cx
         .debug_bounds("shell-sidebar")
         .expect("sidebar rail painted");
@@ -2767,10 +2628,8 @@ fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
         at_large.4
     );
 
-    // The command-line strip (review M2): its painted height is the
-    // scaled one, and it still ends exactly on the focused tile's bottom
-    // border — `strip_top` is computed from the scaled height, so a strip
-    // painted at the literal would float above it at Large.
+    // At Large scale, the command strip uses its scaled height and ends exactly on the
+    // focused tile's bottom border.
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes(":");
     cx.update(|window, cx| {

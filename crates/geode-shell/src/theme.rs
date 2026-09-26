@@ -1,102 +1,23 @@
-//! Theming (Task 5): gpui-component's bundled theme JSONs, selectable from
-//! config, the palette and the settings dialog. Geode is a lens, not a
-//! brand exercise (PHILOSOPHY.md): theming stays entirely inside
-//! gpui-component's own theme-config format, applied through its own theme
-//! global — nothing here invents a raw color.
+//! Bundled themes selected by name through configuration, the palette,
+//! or settings. Theme JSON is embedded at compile time and parsed using
+//! GPUI Component's `ThemeSet` and `ThemeConfig` types, with no runtime file
+//! I/O. The bundle includes upstream and Geode-specific themes in the same
+//! format.
 //!
-//! ## Registry findings (gpui-component 0.6.2, pinned in the workspace
-//! root `Cargo.toml`)
+//! Each named variant is a complete theme. For example, `"Gruvbox Light"`
+//! and `"Gruvbox Dark"` resolve separately; the family name `"Gruvbox"` does
+//! not select a variant. The legacy `[theme] mode` key is ignored with a
+//! warning and removed when a theme choice is persisted. `ThemeConfig.mode`
+//! is still needed by GPUI Component to project the theme into its Base layer.
 //!
-//! Two theme sources exist in the pinned release:
-//! - `gpui-component-0.6.2/src/theme/default-theme.json` — the crate's
-//!   own baseline pair, `"Default Light"` / `"Default Dark"`, both
-//!   `is_default: true`.
-//!   `gpui_component::init` loads these into a `ThemeRegistry` global and
-//!   immediately applies `"Default Light"` (`theme::mod.rs::init`).
-//! - **upstream repo (`longbridge/gpui-kit`), not the registry crate:** a
-//!   repo-root `themes/*.json` directory of 21 further theme families
-//!   (Adventure, Alduin, ... Twilight). The crate's own `story` example app
-//!   loads these via `ThemeRegistry::watch_dir`, which does real filesystem
-//!   I/O against a `./themes` directory at runtime — exactly what the shell
-//!   must not do on any path that can run during rendering (PHILOSOPHY.md:
-//!   "nothing may stall the render thread").
+//! [`ThemeService`] owns a context-free index for parsing and lookup.
+//! Applying a theme first calls `Theme::global_mut(cx).apply_config` to set
+//! its tokens, then `Theme::change(config.mode, None, cx)` to synchronize the
+//! Base projection used by controls such as scrollbars and resize handles.
 //!
-//! Neither set is reachable through a Cargo feature or an `include_str!`
-//! friendly crate API, so per the brief both are vendored verbatim into
-//! `assets/themes/` (22 files: `default.json` plus the 21 family files) and
-//! embedded here with `include_str!` — no runtime file I/O, binary stays
-//! self-contained.
-//!
-//! Four further files are written for this repo rather than vendored, to the
-//! same `ThemeSet` schema so none of them needs special handling here:
-//! - `bloomberg.json` — two dark variants under one family, the Tokyo Night
-//!   arrangement: `"Bloomberg"`, the classic Terminal palette (black ground,
-//!   amber text, blue column heads), and `"Bloomberg Modern"`, the current
-//!   look (near-black blue-grey ground, white text, orange as accent only).
-//! - `modus.json` — `"Modus Operandi"`/`"Modus Vivendi"`, the one family
-//!   here that ships a real light/dark pair. Its whole design constraint is a
-//!   7:1 (WCAG AAA) floor on every information-bearing pairing; that floor
-//!   is measured, not assumed — see the note below.
-//! - `nord.json` — the canonical nord0–nord15 palette.
-//! - `tradingview.json` — `"TradingView Dark"`, dark-only, named for the
-//!   mode because the product ships a light theme too.
-//!
-//! Contrast: the two derived-tint colours in Nord and TradingView
-//! (`muted.foreground`, `tab.foreground`) were raised off their first values
-//! to clear 4.5:1, and Nord's `chart_bearish` uses a lighter tint of nord11
-//! rather than nord11 itself, which sits at only 3.05:1 on nord0 — too weak
-//! to encode a loss. Nord's `danger` fill keeps light-on-nord11 (3.55:1)
-//! because that is what Nord itself does; it is chrome, not data.
-//!
-//! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
-//! `ThemeConfig` (`gpui-component-0.6.2/src/theme/schema.rs`) — a theme
-//! JSON file is a `ThemeSet` (a family: `name`, `author`, `url`, and a
-//! `themes: Vec<
-//! ThemeConfig>` list, one `ThemeConfig` per variant the family ships). A
-//! `ThemeConfig`'s own `.name` is already fully qualified, e.g. `"Gruvbox
-//! Dark"`; the `ThemeSet`'s `.name` is the bare family, e.g. `"Gruvbox"`.
-//!
-//! ## No light/dark mode
-//!
-//! There is no mode axis (user ruling 2026-09-12): Geode has themes, some
-//! of which are light and some dark, and a theme's name says which. The
-//! family is a file-level grouping only — `"Gruvbox"` is not a theme and
-//! resolves to nothing; `"Gruvbox Light"` and `"Gruvbox Dark"` are two
-//! themes. The `theme::toggle_mode` action, its `mod+shift+t` chord, the
-//! settings dialog's Dark mode row and the `[theme] mode` config key were
-//! all retired with it; a `mode` key still present in a config file is
-//! ignored with a warning, and the next persisted theme pick removes it.
-//! `ThemeConfig.mode` itself stays, because gpui-component reads it for
-//! its own Base-layer projection — it is a property of the theme, not a
-//! choice a trader makes.
-//!
-//! Application goes through the crate's own two-call sequence — confirmed
-//! against its own reference usage (`crates/story/src/themes.rs::
-//! apply_theme_config`), not just the general "usage.md" skill note (which
-//! names `apply_config` alone; at this pinned rev that skips the Base-layer
-//! projection sync that `Theme::change` performs, so scrollbars/resize
-//! handles would lag the new theme):
-//! ```ignore
-//! Theme::global_mut(cx).apply_config(&config); // sets colors/tokens/mode
-//! Theme::change(config.mode, None, cx);        // syncs the Base projection
-//! ```
-//!
-//! `ThemeRegistry` itself (the crate's own theme index) is deliberately not
-//! used as our index: it is a gpui `Global`, reachable only via `cx: &mut
-//! App`, which would make the parsing/lookup step untestable without a
-//! window. `ThemeService` is its own `cx`-free bundled-theme index instead;
-//! only the two `cx`-touching methods (`apply`, `apply_from_config`)
-//! reach into gpui at all.
-//!
-//! ## Persistence
-//!
-//! Every UI theme change (settings dialog, palette theme pick) is applied
-//! live through this service, then persisted into the user config layer
-//! by [`persist_to_user_config`] — see its own doc comment for the full
-//! contract, and `ShellView::persist_theme` (`shell/input.rs`) for the
-//! one seam both UI paths call through. There is no longer a session-file theme mechanism: a
-//! theme choice is ordinary config, resolved by the same builtin → desk →
-//! user merge (`geode_core::config`) as everything else.
+//! UI choices apply immediately and queue a user-layer `[theme] name` write
+//! through [`persist_to_user_config`]. Startup and reload resolve that setting
+//! through the ordinary layered configuration. Session files do not store it.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -111,11 +32,9 @@ use geode_core::config::{Config, Layer};
 /// exist: gpui-component's own default family, at its dark variant.
 pub const DEFAULT_THEME: &str = "Default Dark";
 
-/// One vendored theme JSON, embedded at compile time as `(label, json)`.
-/// `label` is only used in parse-failure warnings — the real family name
-/// comes from the parsed `ThemeSet::name`, so there is exactly one source of
-/// truth for it. No runtime file I/O (spec: PHILOSOPHY.md "nothing may
-/// stall the render thread").
+/// One theme JSON embedded at compile time as `(label, json)`. The label
+/// identifies parse warnings; the family name comes from `ThemeSet::name`.
+/// Loading requires no filesystem access.
 const BUNDLED: &[(&str, &str)] = &[
     (
         "default",
@@ -201,18 +120,17 @@ const BUNDLED: &[(&str, &str)] = &[
 
 /// The bundled-theme index plus whichever theme is currently active. Built
 /// once via [`load_bundled`]; the app keeps one instance for the life of the
-/// window (spec: `ShellServices`).
+/// window in `ShellServices`.
 pub struct ThemeService {
     /// Every bundled `ThemeConfig`, in bundle order. Flat: a family that
     /// ships several variants (Tokyo Night/Storm/Moon, Gruvbox Light and
     /// Dark) contributes one entry each, and nothing here groups them
-    /// back into families — a theme is one named entry (see the module
-    /// doc's "No light/dark mode").
+    /// back into families — a theme is one named entry.
     entries: Vec<Rc<ThemeConfig>>,
     active_name: String,
 }
 
-/// Parse every [`BUNDLED`] theme JSON. A file that fails to parse becomes a
+/// Parse every `BUNDLED` theme JSON. A file that fails to parse becomes a
 /// warning string, never a crash (config philosophy) — its themes are just
 /// absent from the resulting service. `ThemeService::names()` and
 /// `resolve()` are meaningful even with zero warnings ignored: the returned
@@ -247,7 +165,7 @@ pub fn load_bundled() -> (ThemeService, Vec<String>) {
     (service, warnings)
 }
 
-/// Normalize a theme name for lookup (Task 6): `-` and `_` become spaces,
+/// Normalize a theme name for lookup: `-` and `_` become spaces,
 /// then the whole string is lowercased — so `"macos-classic-light"`,
 /// `"macos_classic_light"`, and `"macOS Classic Light"` all compare equal.
 /// [`ThemeService::resolve`]'s second, forgiving pass; its first pass
@@ -280,7 +198,7 @@ impl ThemeService {
     /// outright (`"Gruvbox Dark"`); failing that, a case- and
     /// punctuation-insensitive match on the same full name
     /// (`"gruvbox-dark"`, `"macos_classic_light"` — see
-    /// [`normalize_theme_name`]). A bare family name (`"Gruvbox"`) is not
+    /// `normalize_theme_name`). A bare family name (`"Gruvbox"`) is not
     /// a theme and resolves to nothing: there is no light/dark axis to
     /// complete it with (module doc, "No light/dark mode"), so a config
     /// must name the variant it means. `None` means "no such theme" —
@@ -303,7 +221,7 @@ impl ThemeService {
     /// to it with a warning (config philosophy: bad input is a warning,
     /// never a crash). A `theme.mode` key — the retired light/dark axis —
     /// is ignored with a warning that names the replacement, since the
-    /// theme's own name is what carries it now; `persist_to_user_config`
+    /// theme's own name carries the variant; `persist_to_user_config`
     /// removes the key on the next theme pick, so the warning is
     /// self-clearing.
     pub fn resolve_config(&self, config: &Config) -> (Option<&Rc<ThemeConfig>>, Vec<String>) {
@@ -364,67 +282,22 @@ impl ThemeService {
     }
 }
 
-/// Persist a theme choice into the user config layer (`<user_dir>/app.toml`,
-/// `[theme] name`), so it survives a restart via the ordinary desk/user
-/// config merge (`geode_core::config`) rather than a session file — the
-/// settings dialog and palette theme picks both call this right after
-/// applying the change live (`ShellView::persist_theme`, `shell/input.rs`).
-/// A `mode` key left in `[theme]` from before the light/dark axis was
-/// retired (module doc) is removed by the same write, so the load-time
-/// "theme.mode is retired" warning clears itself on the first theme pick.
+/// Write `[theme] name` to the user layer's `app.toml` and remove the
+/// unsupported `[theme] mode` key. Startup restores the choice through
+/// layered configuration. Settings and palette callers apply the live theme
+/// first, then submit this blocking write to the configuration write queue.
 ///
-/// `toml_edit` — not the plain `toml` crate already used elsewhere in this
-/// codebase (`session.rs`, `geode_core::config`) — is the whole reason this
-/// function exists in this shape: a hand-written `app.toml` can carry
-/// comments and unrelated keys/tables this write knows nothing about, and
-/// only a format-preserving editor can update just `[theme]` without
-/// clobbering any of that. Parsing with plain `toml::Table` and
-/// re-serializing would silently destroy every comment and reorder every
-/// key on the very first theme change — exactly the failure mode this
-/// dependency exists to avoid.
+/// [`crate::config_write::edit`] preserves unrelated fields and comments,
+/// creates a missing file with `config_version = 1`, and refuses to overwrite
+/// an unparseable file. Atomic replacement uses a synced temporary `.tmp`
+/// file that the TOML watcher ignores. An error is returned to the caller;
+/// the shell logs it without rolling back the live theme.
 ///
-/// - **Missing file**: created fresh, with `config_version = 1` at the top
-///   (matching every other config document in this codebase) followed by
-///   `[theme]`.
-/// - **Existing, valid file**: `[theme]` is created if absent; `name` is
-///   set (or overwritten) inside it and a stale `mode` removed. Everything
-///   else — every other table, key, and comment — is byte-preserved by
-///   `toml_edit`.
-/// - **Existing, unparseable file**: returns `Err` without touching the
-///   file at all. A user's hand-edited config, however broken, must never
-///   be destroyed by a UI-driven write; the caller turns this into a
-///   `[theme] warning:` stderr line, same convention as every other
-///   config-write failure in this codebase, never a crash.
-///
-/// All three of those behaviours are [`crate::config_write::edit`]'s, not
-/// this function's own: the missing-file stamp, the comment-preserving
-/// `toml_edit` round trip, and the untouched-on-parse-failure refusal now
-/// have exactly one implementation, shared with every other persist in
-/// this crate. This function is only the `[theme]` half. The write itself
-/// is atomic — a unique temp file in `user_dir`, an `fsync`, then a
-/// rename — and the temp filename ends in `.tmp`, not `.toml`, so the
-/// reload watcher's `*.toml` glob (`reload::scan`) never sees a partial
-/// write mid-flight.
-///
-/// Hot-reload interplay (corrected, Finding 3 of review fix round 1 — the
-/// previous wording here overclaimed a guard that doesn't exist): this
-/// write lands inside a directory the reload watcher polls, so it WILL be
-/// picked up as "config changed" on the watcher's next ~500ms tick and
-/// trigger a reload. `ShellView::apply_reload` decides whether to re-apply
-/// the theme by comparing its own *stale in-memory* `Config`'s `[theme]`
-/// table (never updated by this function — it only ever touches the file
-/// on disk) against the freshly reloaded one — and since this write really
-/// did just change the on-disk `[theme]` table relative to that stale
-/// in-memory copy, that first post-write reload's comparison DOES read as
-/// changed and DOES call `apply_from_config` again. That is redundant, not
-/// skipped: it re-applies a theme that's already active in `ThemeService`
-/// (matching the same name this function just wrote), so it is still
-/// harmless — merely idempotent in effect, not guarded away in mechanism.
-/// (Finding 2 of the same review, separately: this reload must also not
-/// close an open palette on a theme-only change — see `ShellView::
-/// apply_reload`'s own `palette_snapshot_changed` check.) Accepted as-is:
-/// deliberately no self-write suppression here, so this stays one plain
-/// write path with no special-casing of its own output.
+/// The next reload poll detects this write. Since persistence updates the
+/// file but not the shell's in-memory `Config`, a changed `[theme]` table can
+/// cause `apply_reload` to apply the already-active theme again. This is
+/// idempotent; there is no self-write suppression. A theme-only reload does
+/// not close the palette, whose invalidation uses `palette_snapshot_changed`.
 pub fn persist_to_user_config(user_dir: &Path, name: &str) -> Result<(), String> {
     crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
         if !doc.get("theme").is_some_and(Item::is_table_like) {
@@ -557,8 +430,8 @@ mod tests {
             service.resolve("gruvbox light").unwrap().name.as_ref(),
             "Gruvbox Light"
         );
-        // The bundled name is "macOS Classic Light" (spaces); Task 6:
-        // dash/underscore spellings must resolve the same theme.
+        // Dash and underscore spellings resolve the bundled name
+        // "macOS Classic Light".
         assert_eq!(
             service
                 .resolve("macos-classic-light")
@@ -580,8 +453,7 @@ mod tests {
 
     #[test]
     fn a_bare_family_name_is_not_a_theme() {
-        // User ruling 2026-09-12: there is no mode to complete "Gruvbox"
-        // with, so it resolves to nothing rather than to a guessed variant.
+        // A bare family name does not select an arbitrary light or dark variant.
         let (service, _) = load_bundled();
         assert!(service.resolve("Gruvbox").is_none());
         assert!(service.resolve("macos-classic").is_none());
@@ -624,8 +496,8 @@ mod tests {
 
     #[test]
     fn resolve_config_treats_a_bare_family_name_as_unknown() {
-        // The pre-ruling shape, `name = "Gruvbox"` completed by `mode`:
-        // now a warning and the default, never a silently guessed variant.
+        // A bare family name is unknown and falls back to the default theme
+        // with a warning.
         let (service, _) = load_bundled();
         let config = config_from("[theme]\nname = \"Gruvbox\"\n");
         let (resolved, warnings) = service.resolve_config(&config);
@@ -874,32 +746,14 @@ mod gpui_tests {
         );
     }
 
-    /// 2c §7 fix round 2 (controller ruling, 2026-09-13): the exception
-    /// list from fix round 1 is gone. [`geode_core::colour::resolve`]
-    /// itself now floors every `Base::Hue` against the theme's
-    /// own background (`readable_on`, spec §2.2/§7), so every bundled
-    /// theme clears `READABLE_RATIO` at every generated hue, in both
-    /// tones, with no exceptions — asserted here unconditionally, the
-    /// same assertion for `Tone::Normal` and `Tone::Light` alike (the
-    /// prior round's Light-tone report-only split is also gone: a
-    /// floored resolver has nothing left to report there that the
-    /// assertion doesn't already cover).
+    /// Generated hues must clear `READABLE_RATIO` on every bundled theme's
+    /// background in both Normal and Light tones. The resolver applies a
+    /// contrast floor; the same assertion covers every theme without exceptions.
     ///
-    /// What used to be a 107-pair exception list is now one number per
-    /// theme: how many of the 24 (hue, tone) pairs needed the floor at
-    /// all, found by comparing `resolve` against the raw, unfloored
-    /// `interpolate_hue`. The five themes needing it most are
-    /// `eprintln!`'d as the retune work order — as data, not a list
-    /// committed to source, since a maintainer who improves a theme's
-    /// own anchors changes that count on the next run rather than
-    /// editing a line here.
-    ///
-    /// The anchor-arc report stays as an independent number: a folded
-    /// palette (two anchors landing on the same OKLCH hue) is a
-    /// different defect from a contrast failure, and Hybrid Dark
-    /// supplies a live example — its smallest arc measures exactly
-    /// 0.0°, i.e. two of its Normal-tone anchors resolve to the
-    /// identical hue angle.
+    /// Report how many hue/tone pairs require that floor by comparing resolved
+    /// colors with raw `interpolate_hue` output. Report the smallest arc between
+    /// Normal-tone anchors separately: coincident anchor hues reduce palette
+    /// separation even when their contrast is sufficient.
     #[gpui::test]
     fn every_bundled_theme_keeps_generated_hues_readable(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

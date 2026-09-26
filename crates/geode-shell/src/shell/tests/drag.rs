@@ -4,18 +4,10 @@
 
 use super::*;
 
-/// End-to-end (drag-splitters task): a real press-drag-release on the
-/// splitter between two tiles resizes the pair proportionally to
-/// where the cursor was dropped, never touches tile focus (the strip
-/// occludes the tile edges it overlaps, so the mouse-down that starts
-/// the drag must NOT fire the tiles' click-to-focus), and dirties the
-/// session exactly once, at mouse-up — not per move. The drop point is
-/// deliberately far off the 8px strip: the moves land on the
-/// full-window drag catcher, which is the whole capture mechanism
-/// under test. Cursor appearance (col-resize) is NOT asserted —
-/// gpui's `TestPlatform` records `set_cursor_style` into a private
-/// field with no accessor at the pinned rev, so there is no honest way
-/// to check it from a test.
+/// Press-drag-release on a tile divider resizes the pair without moving tile focus, and
+/// dirties the session once at release. Move well outside the divider strip to exercise
+/// the full-window catcher. Cursor appearance is not asserted because the pinned test
+/// platform exposes no cursor-style accessor.
 #[gpui::test]
 fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
     cx: &mut gpui::TestAppContext,
@@ -105,10 +97,8 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
     );
 }
 
-/// End-to-end (drag-splitters task): dragging the left dock's frame
-/// edge resizes the dock frame itself, live per move, pinning at
-/// `DOCK_MAX_SIZE` when dragged past the clamp instead of failing —
-/// the same press keeps working after crossing the limit.
+/// Dragging a dock edge resizes its frame live, clamps at `DOCK_MAX_SIZE`, and
+/// continues tracking when the pointer crosses the limit.
 #[gpui::test]
 fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     cx: &mut gpui::TestAppContext,
@@ -192,12 +182,8 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     );
 }
 
-/// Drag-splitters task: fullscreen already suppresses docks and tile
-/// chrome, and the divider strips must follow — `mod+f` (alt+f here,
-/// the test mod alias) makes the strips disappear and a second toggle
-/// brings them back. Asserted via `debug_bounds` (presence of the
-/// painted strip element), the same honest limitation as the hint
-/// tests above.
+/// Fullscreen hides divider strips along with docks and tile chrome. A second toggle
+/// restores them; debug bounds establish whether each strip is painted.
 #[gpui::test]
 fn fullscreen_suppresses_divider_strips(cx: &mut gpui::TestAppContext) {
     let (mut cx, _shell) = dock_test_shell(cx);
@@ -230,13 +216,10 @@ fn fullscreen_suppresses_divider_strips(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Review fix 1, end-to-end: the keyboard stays live during a drag,
-/// so `mod+2` mid-drag switches workspaces — the drag must cancel
-/// (the recorded address and bounds belong to workspace 1), and a
-/// continued mouse-move must NOT resize workspace 2's tree even
-/// though the same address is structurally valid there. Both
-/// workspaces are set up with the identical two-tile layout precisely
-/// so a wrongly-retargeted move WOULD visibly change workspace 2.
+/// Keyboard navigation remains active during a drag. Switching workspaces cancels the
+/// divider gesture, and later mouse moves cannot resize the new workspace. Give both
+/// workspaces identical layouts so an incorrectly reused divider address would visibly
+/// resize the second tree.
 #[gpui::test]
 fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     cx: &mut gpui::TestAppContext,
@@ -290,9 +273,8 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
         ws2_before, ws2_after,
         "the continued move must not resize workspace 2's tree"
     );
-    // Workspace 1 keeps the part of the drag that was applied before
-    // the switch (cancel is not undo), and — review fix 2 — that
-    // applied resize persists: the cancel dirtied the session.
+    // The original workspace retains and persists the resize already applied before the
+    // switch. Canceling stops tracking; it does not undo completed moves.
     cx.simulate_keystrokes("alt-1");
     let ws1_widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
         shell
@@ -315,10 +297,8 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     );
 }
 
-/// Review fix 2, end-to-end: opening the palette mid-drag cancels the
-/// drag but keeps — and persists — what it already applied. The first
-/// cut dropped the drag without dirtying the session, so the visible
-/// resize silently diverged from the next restore.
+/// Opening the palette ends a divider drag while preserving its applied resize and
+/// marking the session dirty for persistence.
 #[gpui::test]
 fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     cx: &mut gpui::TestAppContext,
@@ -378,7 +358,7 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     );
 }
 
-// --- mod+drag tile movement (tile-drag task) ------------------------
+// Modifier-drag tile movement.
 
 /// The default mod alias (Alt) held on a mouse event — matches the
 /// `alt-h`-style keystrokes the e2e tests already use for `mod+`.
@@ -663,8 +643,7 @@ fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppCont
     );
 }
 
-/// End-to-end: a center drop stacks the dragged tile onto the target
-/// (tile-stacks spec §6.2, replacing the swap), focus following the
+/// A center drop stacks the dragged tile onto the target, with focus following the
 /// dragged tile into the stack.
 #[gpui::test]
 fn mod_dragging_onto_a_tiles_center_stacks_the_pair(cx: &mut gpui::TestAppContext) {
@@ -853,10 +832,8 @@ fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui:
     );
 }
 
-/// A RIGHT press focuses the tile it lands on exactly as a left one does
-/// (timeseries mouse pass, 2026-09-24: a module's context menu opens on
-/// it, and its keys reach the occupant only through the focused tile),
-/// and arms nothing — mod key or not.
+/// Right-click focuses the target tile so context-menu keys reach its occupant, but
+/// never arms a drag, whether or not the modifier is held.
 #[gpui::test]
 fn a_right_click_focuses_the_tile_and_never_arms_a_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -948,14 +925,9 @@ fn a_grab_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppConte
     cx.simulate_mouse_up(grab, MouseButton::Left, gpui::Modifiers::none());
 }
 
-/// Review blocker regression: a keystroke mid-drag flips gpui's
-/// input modality to Keyboard, `MouseUp` does not flip it back, and
-/// `HitboxId::is_hovered` is false under keyboard modality — so a
-/// stationary release after ANY keypress reaches the catcher through
-/// `on_mouse_up_out`, not `on_mouse_up`. The keyboard is documented
-/// hot mid-drag, so that release must still DROP (the fix routes
-/// `up_out` through `finish_tile_drag`); before the fix it silently
-/// cancelled.
+/// After a keystroke changes GPUI's input modality to Keyboard, a stationary release
+/// reaches the drag catcher's `on_mouse_up_out` handler. That path must still finish
+/// the tile drop, matching a release through `on_mouse_up`.
 #[gpui::test]
 fn a_keystroke_mid_drag_does_not_turn_a_stationary_release_into_a_cancel(
     cx: &mut gpui::TestAppContext,
@@ -1008,15 +980,9 @@ fn a_keystroke_mid_drag_does_not_turn_a_stationary_release_into_a_cancel(
     assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
 }
 
-/// Review should-fix regression: in production, input events arrive
-/// between frames — the palette-toggle keystroke and the release can
-/// both land before any render runs the cancel guard (the test
-/// harness draws at the end of every simulated event's update, so
-/// the two events are dispatched inside ONE `cx.update` here, the
-/// same one-frame window real platforms produce; the mid-update
-/// asserts verify the guard genuinely hasn't run). The drop-time
-/// re-check in `finish_tile_drag` must refuse to apply the drop
-/// underneath the just-opened palette.
+/// Opening the palette and releasing a drag can occur before another render. Dispatch
+/// both events inside one update to keep the render guard from running between them;
+/// the drop-time check must reject the drop under the newly opened palette.
 #[gpui::test]
 fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
     cx: &mut gpui::TestAppContext,
@@ -1073,18 +1039,10 @@ fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
     );
 }
 
-/// Post-merge review BUG 1 regression (phantom armed drag): gpui
-/// dispatches multiple input events between frames, so a fast
-/// mod+click can land its mouse-DOWN and mouse-UP inside one frame
-/// window — before any draw registers the tile-drag catcher's up
-/// handlers. Before the fix the armed (never-activated) drag survived
-/// that release forever: the next frame painted the full-window
-/// grabbing catcher, the user's next stationary click was eaten, and
-/// an unmodified press-drag-release could be APPLIED as a
-/// rearrangement without the mod key held. The fix (root-level
-/// mouse-up fallback) must clear the armed drag on that same-frame
-/// release, and a subsequent unmodified press-drag-release must
-/// change nothing.
+/// A modifier-click can press and release before a frame installs drag-catcher
+/// handlers. The root mouse-up fallback must clear that armed drag immediately. A later
+/// unmodified press-drag-release must neither activate the old gesture nor rearrange
+/// tiles.
 #[gpui::test]
 fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -1156,15 +1114,9 @@ fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(cx: &mut gpui::T
     );
 }
 
-/// Fix-round should-fix (the divider-drag twin of BUG 1): a strip's
-/// mouse-down arms `divider_drag`, but the divider catcher's up
-/// handlers only enter the hitbox tree at the next paint — so a
-/// sub-frame click on a strip (down + up before any draw) left a
-/// phantom armed divider drag: the full-window resize-cursor catcher
-/// painted, the next mouse-down was swallowed, and an unmodified
-/// press-drag (no intervening buttonless move) live-RESIZED the
-/// phantom's divider. The root-element release fallback must clear
-/// it, and a subsequent unmodified press-drag must resize nothing.
+/// A divider press and release can arrive before its catcher is rendered. The root
+/// mouse-up fallback must clear the gesture within that frame, and a later unmodified
+/// press-drag must not resize the stale divider.
 #[gpui::test]
 fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
     cx: &mut gpui::TestAppContext,
@@ -1259,9 +1211,8 @@ fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
     );
 }
 
-/// Post-merge review BUG 2: Escape mid-tile-drag cancels the drag —
-/// nothing applied when the (now targetless) release lands, nothing
-/// persisted, and the keystroke never reaches the matcher.
+/// Escape cancels an active tile drag without reaching the matcher. The later release
+/// applies and persists nothing.
 #[gpui::test]
 fn escape_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -1301,9 +1252,8 @@ fn escape_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppConte
     );
 }
 
-/// Post-merge review BUG 2 (armed-but-inactive arm): Escape also
-/// clears a drag that never crossed the movement threshold, so the
-/// release afterwards is a plain unarmed release.
+/// Escape also clears an armed tile drag before it crosses the movement threshold. Its
+/// later release is unarmed.
 #[gpui::test]
 fn escape_clears_an_armed_but_inactive_tile_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
@@ -1318,12 +1268,8 @@ fn escape_clears_an_armed_but_inactive_tile_drag(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// Post-merge review BUG 2 (divider consistency, recorded decision):
-/// Escape mid-divider-drag ENDS the drag — finish, not revert,
-/// because a divider drag's resizes were already applied live and
-/// cancel means "stop tracking the mouse", never "undo". Applied
-/// moves persist (session dirty) and further mouse moves resize
-/// nothing.
+/// Escape ends a divider drag and persists its already-applied resize. Further moves
+/// change nothing; stopping tracking does not undo live divider changes.
 #[gpui::test]
 fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _left, _right) = two_tile_drag_shell(cx);
@@ -1380,13 +1326,8 @@ fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::Te
     );
 }
 
-/// Post-merge review BUG 3: ctrl+w can close the dragged tile
-/// mid-drag (the keyboard stays hot), and neither the render-top
-/// guard nor `finish_tile_drag` checked the tile still exists —
-/// leaving a ghost + zone highlight promising a drop that would
-/// silently no-op. The dragged tile's existence must join the shared
-/// cancel conditions: the drag cancels at the next paint, no
-/// highlight paints, and the release applies nothing.
+/// Closing the dragged tile through the keyboard cancels the gesture at the next
+/// render. No ghost or drop highlight remains, and release applies nothing.
 #[gpui::test]
 fn closing_the_dragged_tile_mid_drag_cancels_the_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -1437,16 +1378,9 @@ fn closing_the_dragged_tile_mid_drag_cancels_the_drag(cx: &mut gpui::TestAppCont
     assert!(!shell.read_with(&cx, |shell, _| shell.session_dirty));
 }
 
-/// Post-merge review BUG 4: platform-uniform chorded-button handling.
-/// macOS delivers a right/middle-dragged event as a MouseMoveEvent
-/// with `pressed_button: Some(Right/Middle)` (gpui_macos events.rs
-/// translates NSRightMouseDragged/NSOtherMouseDragged verbatim, no
-/// left-first normalization), so before the fix a chorded second
-/// button CANCELLED a mid-flight tile drag on macOS while Windows
-/// (whose WM_MOUSEMOVE translation checks MK_LBUTTON first) let it
-/// survive. The unified rule: a non-Left-button move is IGNORED
-/// (neither advances nor cancels); only a buttonless move is the
-/// lost-release cancel.
+/// Moves attributed to a second mouse button are ignored without advancing or canceling
+/// a tile drag. A buttonless move cancels as a lost release. This keeps behavior
+/// consistent when platforms report chorded-button moves differently.
 #[gpui::test]
 fn a_chorded_second_button_move_mid_drag_neither_cancels_nor_advances(
     cx: &mut gpui::TestAppContext,
@@ -1490,10 +1424,8 @@ fn a_chorded_second_button_move_mid_drag_neither_cancels_nor_advances(
     );
 }
 
-/// Post-merge review BUG 4, divider side: the divider catcher had the
-/// same `pressed_button != Some(Left)` branch, so a chorded second
-/// button FINISHED an in-flight divider drag on macOS. Same unified
-/// rule: non-Left moves are ignored, buttonless moves finish.
+/// Divider drags ignore moves attributed to another mouse button; a buttonless move
+/// finishes the drag.
 #[gpui::test]
 fn a_chorded_second_button_move_mid_divider_drag_does_not_finish_it(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _left, _right) = two_tile_drag_shell(cx);
@@ -1525,15 +1457,9 @@ fn a_chorded_second_button_move_mid_divider_drag_does_not_finish_it(cx: &mut gpu
     );
 }
 
-/// Post-merge review finding 6: cmd+tab away with the button held,
-/// release elsewhere — without an activation observer the stale
-/// ACTIVE drag persisted and the re-activation click could advance
-/// and apply it. `ShellView::new` now registers
-/// `cx.observe_window_activation` (verified available at the pinned
-/// gpui rev) and ends both drag kinds on deactivation (tile: cancel;
-/// divider: finish). The test drives the harness's real activation
-/// plumbing: `activate_window` marks the test window active, and
-/// `deactivate_window` fires the platform active-status callback.
+/// Window deactivation cancels tile drags and finishes divider drags, so releasing the
+/// button elsewhere cannot leave an active gesture for the reactivation click. Drive
+/// the test window's real activation callbacks to exercise the observer.
 #[gpui::test]
 fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -1583,26 +1509,14 @@ fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppConte
     );
 }
 
-/// Post-merge review finding 7 (one-frame workspace ABA): the drop
-/// re-check used to compare workspace INDEX equality only, so a
-/// switch away and back with no render between satisfied the letter
-/// of the check while violating its intent. The switch-epoch pin
-/// closes it: any actual switch bumps the epoch, so away-and-back
-/// can never look like "never left".
+/// A workspace switch away and back invalidates an active drag even when the final
+/// workspace index matches its origin. The switch epoch distinguishes this from never
+/// leaving.
 ///
-/// Honesty note on how the state is built: at the pinned gpui rev
-/// this gap is NOT reachable through the real key pipeline — traced
-/// while writing this test: `Window::dispatch_key_event` draws first
-/// whenever the window is dirty, and the first switch's notify makes
-/// it dirty, so the second switch's keystroke always runs the
-/// render-top cancel guard (index mismatch) before dispatching.
-/// `dispatch_mouse_event` does NOT draw-when-dirty, but the only
-/// mouse path to a switch (a sidebar pill click) is occluded by the
-/// drag catcher mid-drag. The epoch re-check is defense in depth for
-/// exactly that reason — it must hold even if gpui's dispatch-order
-/// details change under an upgrade — so the test dispatches the
-/// switch ACTIONS directly (no key dispatch, no draw), constructing
-/// the letter-of-the-rule state the guard can't otherwise see.
+/// Dispatch switch actions directly with no intervening draw. At the pinned GPUI
+/// revision, key dispatch draws a dirty window first, which normally runs the render
+/// cancellation guard before the second switch; the drag catcher also occludes sidebar
+/// clicks. Direct actions isolate the epoch check from those additional guards.
 #[gpui::test]
 fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
@@ -1665,7 +1579,7 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
     assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
 }
 
-// ---- mod+double-click fullscreen (2026-09-19) ---------------------------
+// Modifier-double-click fullscreen.
 
 /// mod+double-click on a main-tree tile focuses it and makes it
 /// fullscreen (the mouse form of `mod+f`, TODO "Mod + doubleclick to

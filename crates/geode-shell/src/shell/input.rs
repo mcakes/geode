@@ -385,15 +385,8 @@ impl ShellView {
         let size = self.font_size;
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
-                // MIN-2: `fontsize`/`vimfind`/`theme::persist_to_
-                // user_config` all write the same `app.toml` and, on
-                // a parse failure, return byte-identical text — a
-                // bare `{e}` here and in `persist_find_style` below
-                // would be indistinguishable at `geode::config`
-                // (`persist_theme`'s own failure already reads
-                // apart, since it logs at the `geode::theme` target
-                // instead). The leading phrase is the only thing
-                // that tells the two apart.
+                // Include the setting in the warning: font size and find style share
+                // `app.toml` and can return identical parse errors on the same log target.
                 tracing::warn!(target: "geode::config", "font size not saved: {e}");
             }
         })
@@ -449,7 +442,7 @@ impl ShellView {
         let style = self.find_style;
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
-                // MIN-2 — see `persist_font_size`'s comment just above.
+                // Identify the setting so a shared `app.toml` parse error is actionable.
                 tracing::warn!(target: "geode::config", "find style not saved: {e}");
             }
         })

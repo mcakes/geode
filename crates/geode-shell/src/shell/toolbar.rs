@@ -1,47 +1,16 @@
-//! The top toolbar row (Task 4). User direction: the toolbar IS the native
-//! title bar — no separate strip underneath eating extra vertical real
-//! estate. Built on gpui-component's [`TitleBar`] (pinned release:
-//! `gpui-component-0.6.2/src/title_bar.rs`), which already draws the
-//! platform window controls (macOS traffic lights overlay it via
-//! `traffic_light_position`; Windows/Linux get real caption buttons) and
-//! owns window-drag/double-click — `TitleBar::title_bar_options()` feeds
-//! `main.rs`'s `WindowOptions`, and the `window_title` example (upstream
-//! repo's `examples/window_title/src/main.rs`) is the reference for
-//! putting content inside it via `TitleBar::new().child(...)`.
+//! The window title bar and scope toolbar. [`TitleBar`] supplies native
+//! window controls and window dragging; the shell supplies the app title,
+//! frame readout, and scope text [`Input`]. `ShellView` owns the input and
+//! its editing session; this module renders the cached [`ScopeBarModel`].
 //!
-//! Content: the app title left, the frame readout centered in the
-//! previously-reserved middle region (Task 6, spec §4.4), and a
-//! right-aligned scope text [`Input`] (Task 4, spec §3.1/§3.11) — every
-//! keystroke while it's focused feeds the frame's scope through
-//! `ShellView`'s own `InputEvent` subscription; this function only
-//! renders it and the chips from the cached [`ScopeBarModel`]. Its focus
-//! interplay (click-to-focus, Esc-restores-pre-focus-text, shell chords
-//! suppressed while it has focus) lives in `ShellView::handle_key_down` —
-//! see that method's filter-focused branch.
+//! The readout separates as-of, grouping, and scope with inset hairlines.
+//! The as-of chip alone uses warning colors. Grouping opens a picker and
+//! stays visibly pressed while it is open. Filled selection chips contain
+//! a separate, occluding close target; add/save actions are bare glyphs.
 //!
-//! **The readout is three segments (toolbar restyle, 2026-09-19, user
-//! ruling on the mockups' option A):** the AS OF chip when the frame is
-//! held at an instant, the grouping readout, and the scope — chips, then
-//! verbs — each pair of neighbours parted by an inset hairline
-//! ([`Separator`]) at the group gap. What the design guide's audit of
-//! the previous bar found, and this layout answers: a selection chip's
-//! `×` used to be a sibling at the same gap on both sides, so it belonged
-//! to neither chip (it is now INSIDE the chip's frame, a second hit zone
-//! that occludes the body's); the `+` and save verbs wore the same filled
-//! chip as the data selections (they are bare glyphs now — data is
-//! filled, verbs are not); the grouping readout was bare text with no
-//! sign it opened a picker (it carries a chevron and a persistent pressed
-//! fill while its picker is up); and the warning tint spread across the
-//! whole readout when scoped to an instant (it is on the AS OF chip
-//! alone — the window stripe and status segment keep the state
-//! unmissable, per the same ruling). The `text "…"` chip is gone: the
-//! field shows the frame's text while unfocused and clears it with the
-//! component's own clear glyph (`Input::cleanable`).
-//!
-//! The scope's chips are the dimension chips, then one chip per
-//! top-level `and` term of the expression (mono text, the same `×`
-//! inside), then the contradiction chip. The `+` opens the add-a-filter
-//! menu ([`super::addfilter`]) rather than a picker directly.
+//! Scope chips show dimensions, top-level expression terms, and any
+//! contradiction. The add action opens [`super::addfilter`]. The text input
+//! shows the frame's text and supplies its own clear glyph.
 
 use std::rc::Rc;
 
@@ -62,7 +31,7 @@ use crate::fonts;
 use crate::scopebar::ScopeBarModel;
 use crate::tips;
 
-/// Compact width of the filter field (brief: "~200px").
+/// Compact width of the filter field in design pixels.
 const FILTER_WIDTH: f32 = 200.0;
 
 /// The square a chip's `×` and each bare verb glyph occupy, in design
@@ -75,20 +44,9 @@ const GLYPH_BOX: f32 = 14.0;
 /// pane divider through it.
 const DIVIDER_HEIGHT: f32 = 14.0;
 
-/// One painted chip: a rounded, colored label with a debug selector so
-/// e2e tests can find it (`debug_bounds`/`simulate_click`) without this
-/// module knowing anything about test infrastructure. `selector` builds
-/// its `String` lazily (fix round 1, Finding 2): `debug_selector` is a
-/// release no-op that never calls its closure, so an already-`format!`ed
-/// `String` handed in here would pay full allocation cost every render
-/// for a value release builds never read — matching the `frame-readout`/
-/// `scope-asof` selectors two calls away, which build their (static)
-/// strings the same lazy way. Takes an `id` (Task 3) so the caller can
-/// chain `.tooltip(..)` — a tooltip needs a stable `Stateful<Div>`
-/// identity across renders, the same reason every hovered element in
-/// this crate (`sidebar.rs`'s discs and profile icon) already carries
-/// one. The chip is an `h_flex` so a selection chip can carry its `×` as
-/// a second child inside the same frame.
+/// A labeled chip with stable identity for tooltips and pointer state.
+/// The lazy debug selector allocates only when test instrumentation reads
+/// it. Horizontal layout keeps a selection's close target inside its frame.
 fn chip(
     id: ElementId,
     label: impl Into<SharedString>,
@@ -222,35 +180,17 @@ pub fn toolbar(
     let mut has_chips = false;
     for (i, c) in model.chips.iter().enumerate() {
         has_chips = true;
-        // `Rc<str>`, not `String`: the mouse-down handler, the chip-body
-        // selector and the close-glyph selector are three separate
-        // `'static` closures, each needing its own owned handle to the
-        // column name — an `Rc` clone is a refcount bump, so this is one
-        // real allocation (the `Rc::from` below) per chip per render,
-        // not three (fix round 1, Finding 2's "the one clone... is
-        // unavoidable and fine" — this is that one clone, shared).
+        // Share one owned column name among the mouse handler and selectors.
+        // Cloning these `Rc` handles increments a count without copying text.
         let column: Rc<str> = Rc::from(c.column.as_str());
         let on_close = on_chip_close.clone();
         let on_open = on_chip_open.clone();
         let body_column = column.clone();
         let open_column = column.clone();
         let close_column = column.clone();
-        // The chip body opens the dimension picker on this column (Phase
-        // 4a §3.3); the `×` INSIDE it drops the dimension. One frame, two
-        // hit zones: the `×` calls `occlude()`, which makes its hitbox
-        // opaque to the hit test, so while the pointer is on it the
-        // body's hitbox is not hovered at all — its mouse-down listener
-        // does not fire (gpui gates every mouse listener on
-        // `hitbox.is_hovered`), its tooltip does not show and its hover
-        // fill does not paint. That one call is the whole reason a click
-        // on the `×` drops the chip without ALSO opening the picker;
-        // there is no `stop_propagation` beside it to mask its absence.
-        // `c.summary`/`c.full`/`c.tip_selector` are all `build_model`'s
-        // own fields (fix round 1): attaching the tooltip here costs a
-        // `SharedString` clone (a refcount bump, or a stack copy for
-        // anything under `SmolStr`'s inline cap) per render, never a
-        // fresh `format!`/heap `String` the way the first cut of this
-        // task did.
+        // The body opens the dimension picker; the close target occludes it
+        // so closing cannot also open the picker or show its hover/tooltip.
+        // Tooltip strings come from the cached model and clone shared handles.
         chips_row = chips_row.child(
             chip(
                 ElementId::NamedInteger(SharedString::new_static("scope-chip"), i as u64),
@@ -432,16 +372,9 @@ pub fn toolbar(
             }),
     );
     if model.savable {
-        // The save door: the mouse form of `scope::save_current`,
-        // withdrawn rather than merely disabled while the frame has
-        // nothing to save (`ScopeBarModel::savable`'s own doc has the
-        // reasoning — a verb that always does nothing is worse than no
-        // verb). A save icon rather than the word (user ruling
-        // 2026-09-19): `Save` is outside `gpui_component::IconName`'s 101,
-        // so it is named through the shared catalog and its bytes come
-        // from `geode-app`'s `ExtraIcons` source — a shell that paints it
-        // under the plain `Assets` alone gets an empty glyph, not a
-        // panic, which is why the tooltip still says what it does.
+        // Show Save only when the scope is savable. Its icon comes from the
+        // shared catalog and requires the app's `ExtraIcons` asset source; the
+        // plain component assets do not include it.
         verbs = verbs.child(
             verb(
                 "scope-save-chip",
@@ -469,16 +402,9 @@ pub fn toolbar(
         .when(has_chips, |el| el.child(chips_row))
         .child(verbs);
 
-    // The grouping readout (2026-09-19) is a control: a click opens the
-    // grouping picker, the mouse form of `frame::grouping`/`mod+g`. It
-    // reads as the dropdown trigger it is — a trailing chevron, down at
-    // rest and up while its picker is open — and while the picker is up
-    // it holds the pressed fill instead of answering the pointer (the
-    // guide's "a control that owns a popup stays visibly pressed until
-    // the popup closes"; selected and open states take no hover, like
-    // the active workspace disc). Same `(Bare, title_bar,
-    // muted_foreground)` pairing as the verbs, and a tooltip naming the
-    // chord.
+    // The grouping picker trigger retains pressed styling while open and
+    // uses a chevron to expose that state. Closed, it shares the bare
+    // control pointer colors used by the toolbar actions.
     let grouping = h_flex()
         .id("scope-grouping")
         .items_center()
@@ -519,7 +445,7 @@ pub fn toolbar(
                 .debug_selector(|| "scope-grouping-chevron".to_string())
         });
 
-    // The frame readout (§4.4): AS OF first when scoped to a snapshot
+    // The frame readout: AS OF first when scoped to a snapshot
     // rather than the live data, then the grouping, then the scope, a
     // hairline between neighbours. Mono face, matching every other
     // data-adjacent readout in the shell.
@@ -534,22 +460,9 @@ pub fn toolbar(
         .when_some(
             model.as_of_badge.as_ref().zip(model.as_of_full.as_ref()),
             |el, (badge, full)| {
-                // The one warning-toned element on this row, and its own
-                // segment: a stray as-of scope must be unmissable, and
-                // the window stripe and status segment beside this chip
-                // keep it so (user ruling 2026-09-19, retiring the tint
-                // that used to spread across the whole readout). Through
-                // the chip door, and clickable — the mouse form of
-                // `frame::as_of`, the chord its tooltip has always named.
-                // `scope-asof` names the chip for tests. `badge`/`full`
-                // are both `build_model`'s own finished strings
-                // (`ScopeBarModel::as_of_badge`/`as_of_full`) — the
-                // tooltip's TITLE is the full resolved timestamp (final
-                // review, spec §5.1: a trader hovering to see exactly
-                // when must not get the same elided text the badge
-                // already shows), and the elided badge text moves to the
-                // detail line. Both clones below are refcount bumps,
-                // never a fresh `format!`.
+                // The as-of chip opens its picker and carries the row's warning tone.
+                // The tooltip title shows the full timestamp; the badge uses the
+                // compact label. Both strings are shared values from the cached model.
                 let as_of = chip::chip_paint(theme, chip::Tone::Warning);
                 let as_of_states = control::for_chip(theme, &as_of, theme.title_bar);
                 let on_as_of = on_as_of.clone();

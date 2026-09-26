@@ -1,11 +1,6 @@
-//! The dimension picker (Phase 4a §3.3, §3.4): the real key-dispatch and
-//! `Request::Distinct` pipeline, end to end — `shell::picker`'s own
-//! `mod tests` covers the pure core, this covers the wiring: opening
-//! through `frame::pick_<column>`, the emitted `ShellEvent::
-//! DistinctRequested`, `ShellView::deliver_distinct`'s stale-tag guard,
-//! and the keyboard vocabulary (`tab`/`ctrl+a`/`ctrl+x`/`enter`/`escape`)
-//! driven through the same `GeodeModal` reclaims (`dialog::
-//! init_reclaimed_keybindings`) production uses.
+//! Dimension-picker integration through real key dispatch and distinct-value requests:
+//! opening by action, request events, stale delivery rejection, and modal keyboard
+//! handling. Pure picker state is tested in `shell::picker`.
 
 use super::*;
 use crate::shell::picker;
@@ -185,13 +180,9 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
-/// Fix round 1, Finding 3: the scope chip's body click (`toolbar::
-/// on_chip_open`, wired in `render.rs`) had no test proving it actually
-/// opens the picker — only the close glyph's `on_chip_close` was
-/// e2e-covered. A real mouse click on `debug_bounds("scope-chip-book")`'s
-/// centre must land the picker on `Stage::Values { column: "book" }` and
-/// submit a real `DistinctRequested` for it, the same proof the keyed
-/// `frame::pick_book` action gets in the test above.
+/// Clicking a scope chip's body opens its column's Values stage and emits a
+/// distinct-value request, matching the corresponding picker action. Click the rendered
+/// chip to exercise the mouse handler.
 #[gpui::test]
 fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
@@ -255,11 +246,9 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     assert_eq!(req.column, "book");
 }
 
-/// Task 3 (tooltips): hovering a scope chip's body shows the full,
-/// un-elided selection (`Chip::full`) — not the elided `summary` painted
-/// on the bar — and names `frame::pick`'s chord. `services_with_pickable`
-/// is used only to keep this fixture identical in shape to the click
-/// test above; the picker action need not fire for a tooltip.
+/// A scope-chip tooltip shows the unelided selection (`Chip::full`) and the picker
+/// chord. The fixture matches the click test, but hovering need not dispatch the picker
+/// action.
 #[gpui::test]
 fn hovering_a_scope_chip_shows_the_full_selection_and_the_picker_chord(
     cx: &mut gpui::TestAppContext,
@@ -465,9 +454,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// §20.3's split applied here: a click on a Values row SELECTS it; the
-/// tick glyph is the click target that toggles, as it is on the object
-/// dialog's list rows. Until now the whole row toggled on one click.
+/// Clicking a Values row selects it; clicking its tick toggles it.
 #[gpui::test]
 fn a_values_row_click_selects_and_only_the_tick_toggles(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
@@ -590,9 +577,8 @@ fn the_values_hint_says_escape_goes_back() {
     assert_eq!(after_escape, Some(Hint::Text("close")));
 }
 
-/// Spec §20.5 on the picker: `ctrl+d` moves five and clamps, `up` at
-/// row 0 wraps — the same `nav_command` + `apply` pair every other list
-/// routes through, replacing the picker's own four-key `nav_delta`.
+/// Picker navigation uses shared list handling: Ctrl-D moves five rows and clamps,
+/// while Up from row zero wraps.
 #[gpui::test]
 fn the_values_list_takes_the_full_nav_set(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
@@ -624,13 +610,8 @@ fn the_values_list_takes_the_full_nav_set(cx: &mut gpui::TestAppContext) {
     assert_eq!(selected(&vcx), 7, "and a bare up at the top wraps");
 }
 
-/// Phase 4b M5: `PickerState::tag` used to reset to the same starting
-/// value on every `open`, so a stale `DistinctOutcome` from a first open
-/// on `book` could pass the tag check of a second, unrelated open on the
-/// same column (both opens' one `request_values` call bumped a fresh
-/// `PickerState`'s tag from 0 to 1). `ShellView::next_picker_tag` is now
-/// the session-wide source of every tag, so a second open's request
-/// always carries a strictly larger tag than the first's.
+/// Picker request tags increase across dialog openings. An outcome from a previous open
+/// on the same column must not pass the new dialog's tag check.
 #[gpui::test]
 fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
     cx: &mut gpui::TestAppContext,
@@ -641,8 +622,8 @@ fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
     dispatch_action(&shell, "frame::pick_book", &mut vcx);
     let first_tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
 
-    // `frame::pick_book` opens straight into `Values` (spec §20.2's first
-    // `escape` steps back to `Columns`; the second closes).
+    // The action opens Values directly; Escape returns to Columns, and another Escape
+    // closes the dialog.
     vcx.simulate_keystrokes("escape");
     vcx.simulate_keystrokes("escape");
     assert!(
@@ -660,13 +641,9 @@ fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
     );
 }
 
-/// The single-value flow, end to end through the real key pipeline:
-/// `alt+p`, a column, arrow to a value, `enter` — no `tab` anywhere. This
-/// used to close the modal having changed nothing, because `apply` read
-/// an empty tick set as "select nothing" (see `PickerState::
-/// ticks_touched`). Driven from `frame::pick` at the `Columns` stage
-/// rather than `frame::pick_book`, since the columns stage's own `enter`
-/// had no end-to-end coverage at all.
+/// Opening the picker, selecting a column, navigating to a value, and pressing Enter
+/// without ticking commits that highlighted value. Start at Columns to exercise its
+/// Enter transition as well as Values commit.
 #[gpui::test]
 fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
@@ -787,15 +764,9 @@ fn ctrl_x_then_enter_clears_the_columns_selection(cx: &mut gpui::TestAppContext)
     );
 }
 
-/// Fix round 1, Finding 1: keyboard navigation past `palette::
-/// VISIBLE_ROWS` (12) must scroll the values `uniform_list`'s viewport
-/// to follow `selected` (`ShellView::picker_scroll`, driven by
-/// `picker::sync_picker_scroll`) — the same "prove the viewport actually
-/// followed, not just that an index changed" standard `palette`'s own
-/// `arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_
-/// view` test holds itself to, copied here for the picker's `uniform_
-/// list` (a different gpui scroll-follow type — see that module's doc
-/// comment — but the same observable contract).
+/// Moving beyond the visible values must scroll the list viewport with the selection.
+/// Assert rendered row visibility as well as the selected index to verify
+/// `sync_picker_scroll` drives the uniform-list handle.
 #[gpui::test]
 fn keyboard_navigation_past_visible_rows_scrolls_the_selection_into_view(
     cx: &mut gpui::TestAppContext,

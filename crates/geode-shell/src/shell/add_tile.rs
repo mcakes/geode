@@ -1,9 +1,9 @@
-//! The one door every new tile comes through (spec
-//! `2026-09-08-geode-add-tile-design.md` §4): `add_tile` resolves a
-//! direction, places the tile (fill a placeholder, fill an empty region,
-//! or split), and records an addressed occupant request for
-//! `ensure_occupants` to fill on the next render. `duplicate_tile` and
-//! `open_module` are its two callers besides `dispatch`.
+//! Tile creation and module activation.
+//!
+//! [`ShellView::add_tile`] resolves placement, fills a placeholder or empty
+//! region, stacks onto the focused tile, or splits it. It records an addressed
+//! occupant request for `ensure_occupants` to fill on the next render.
+//! Duplication and opening a module use the same creation path.
 
 use gpui::{Context, Window};
 
@@ -15,18 +15,15 @@ use crate::tiling::{DockSide, Orientation, TileId};
 use super::{PendingTile, ShellView, render::content_area};
 
 impl ShellView {
-    /// Create (or fill an empty pane with) a tile of `kind`, carrying
-    /// `state` as the factory's `restored` record when given. `placement`
-    /// (tile-stacks spec §6.1): a split in an explicit or setting-resolved
-    /// direction (`Auto` reading the focused tile's painted shape, §4.1),
-    /// or stacked onto the focused tile. Placement (§4.2), first match
-    /// wins: a focused placeholder is filled in place; a stacked add onto
-    /// a real focused tile stacks after it; an empty focused region gets
-    /// the tile as its root (`Tree::split` on an empty tree, which is
-    /// also where a stacked add with nothing focused falls through — a
-    /// stack of one is meaningless); otherwise the focused tile is split.
-    /// Every path dirties the session and notifies, so `ensure_occupants`
-    /// sees the request on the very next render.
+    /// Create a tile of `kind`, passing `state` to the factory as its restored
+    /// record. Placement follows this order: fill a focused placeholder;
+    /// stack after a real focused tile for `Stacked`; fill an empty focused
+    /// region; otherwise split the focused tile. A stacked add with no focus
+    /// falls back to a split, creating a single tile in an empty region.
+    ///
+    /// Splits use an explicit direction when supplied, otherwise the add
+    /// setting. `Auto` uses the focused tile's shape. Every path marks the
+    /// session dirty and notifies so the next render creates the occupant.
     pub fn add_tile(
         &mut self,
         kind: &str,
@@ -42,9 +39,8 @@ impl ShellView {
             if let Some(o) = self.occupants.remove(&tile) {
                 o.content.set_visible(false, cx);
             }
-            // The tile is claimed now, so a record this build could not
-            // place (spec 2026-09-08 add-tile §7.2) is no longer written
-            // back — the occupant about to be created owns the id.
+            // The new occupant owns this tile ID. Stop preserving any unrestorable
+            // session record that previously occupied its placeholder.
             self.unplaced_records.remove(&tile.0);
             self.pending_tiles.insert(
                 tile,
@@ -100,11 +96,10 @@ impl ShellView {
         cx.notify();
     }
 
-    /// `workspace::duplicate_*` (§6): the focused occupant's own
-    /// `serialize` output becomes the new tile's `restored` record — the
-    /// session format exactly, so what survives a restart survives a
-    /// duplicate and nothing else does. A placeholder or an empty region
-    /// has nothing to duplicate: no-op, no notify.
+    /// Duplicate the focused occupant using its serialized session state as
+    /// the new tile's restored record. Only state that survives a restart
+    /// survives duplication. A placeholder or empty region is a no-op and
+    /// sends no notification.
     pub fn duplicate_tile(
         &mut self,
         direction: Orientation,
@@ -131,13 +126,10 @@ impl ShellView {
         );
     }
 
-    /// Focus an existing occupant of `kind` wherever it lives in the
-    /// active workspace (the main tree or a dock), else add one through
-    /// [`Self::add_tile`] with the setting's direction (§3.4). A request
-    /// already pending for `kind` counts as "open": a second click on the
-    /// status bar's diagnostics summary — the one production caller,
-    /// since `diagnostics::open` was retired (user ruling 2026-09-09) —
-    /// before the render adds nothing.
+    /// Focus an existing occupant of `kind` in the active workspace's main
+    /// tree or a dock; otherwise add one through [`Self::add_tile`] with the
+    /// configured direction. A pending request for `kind` also counts as open,
+    /// so repeated requests before the next render create at most one tile.
     pub fn open_module(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.services.workspaces.active();
         let found: Option<(TileId, Option<DockSide>)> = ws
@@ -166,10 +158,8 @@ impl ShellView {
                 }
             }
             self.session_dirty = true;
-            // A focus move by keyboard, exactly like a directional verb's
-            // (I-3): this arm focuses an existing tile, and a tile
-            // occupant still holding the window's focus must give the
-            // keyboard back.
+            // Release keyboard focus from an occupant when moving to the existing
+            // tile, as for directional focus actions.
             self.note_keyboard_focus_move(window, cx);
             cx.notify();
             return;

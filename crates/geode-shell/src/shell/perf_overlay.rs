@@ -1,20 +1,15 @@
-//! The frame-time debug overlay (spec §7.4: "visible via a debug overlay
-//! toggle"): a small palette-style instant panel over the top-right corner
-//! showing live p50/p95/max frame intervals and the sample count since the
-//! last reset, read straight from `ShellView`'s [`crate::perf::FrameHistogram`].
+//! Performance readout over the top-right of the tile area.
 //!
-//! **Refresh semantics** (recorded decision): this overlay adds NO timer and
-//! never forces frames — that would violate the render discipline it exists
-//! to observe (an always-animating diagnostic would turn an idle app into a
-//! 60Hz one and poison its own measurements). The numbers shown are as-of
-//! the last invalidation: while the shell is idle the panel simply keeps
-//! showing the stats from the last frame that painted, and any interaction
-//! that redraws the window refreshes it for free.
+//! Shows frame interval count, p50, p95, and maximum, plus the latest
+//! requery timings and their medians. Values come from
+//! [`FrameHistogram`] and [`RequeryStats`].
 //!
-//! Rendering cost: four short `String`s per painted frame (the sanctioned
-//! small-String class — same as the status bar's pending-keystroke text);
-//! percentile queries are a walk of 37 integer counters. Theme tokens only
-//! (popover/border/muted — no raw colors); values in the mono data face.
+//! The panel adds no timer and requests no frames: while idle it keeps the
+//! last painted values. Any shell redraw refreshes the readout. Forcing
+//! frames would alter the render intervals being measured.
+//!
+//! Rendering formats short metric strings and queries fixed-size histogram
+//! buckets. Colours come from the theme; values use the monospace data face.
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, Pixels, div, px};

@@ -7666,10 +7666,10 @@ run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
 
 run_mutation "focus: the drag grab re-arms the focus restore" \
   crates/geode-shell/src/shell/drag.rs \
-  '        // as the plain-click path (§3.3).
+  '        // taken window focus and must not strand it after a workspace switch.
         self.pending_focus_restore = true;
         cx.stop_propagation();' \
-  '        // as the plain-click path (§3.3).
+  '        // taken window focus and must not strand it after a workspace switch.
         cx.stop_propagation();' \
   geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
 

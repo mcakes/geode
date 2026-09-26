@@ -1,9 +1,6 @@
-//! Tiling key bindings end to end: adds, focus motion, resize, swap,
-//! and close, dispatched through the real key pipeline. `ctrl+v` /
-//! `ctrl+h` are the fixture layer's own bindings (`tests::
-//! TEST_ADD_KEYMAP` — `tile::add_rec_horizontal`/`_vertical`), not
-//! shipped keys: the builtin keymap has no create-a-tile chord (spec
-//! 2026-09-08 add-tile §3.1).
+//! Tiling through real key dispatch: add, focus motion, resize, swap, and close. The
+//! fixture layer supplies `ctrl+v` and `ctrl+h` for recorder adds; neither chord
+//! belongs to the builtin keymap.
 
 use super::*;
 
@@ -188,10 +185,8 @@ fn a_test_layer_add_keystroke_creates_the_first_tile(cx: &mut gpui::TestAppConte
          created the first tile on the empty starting workspace"
     );
 
-    // The tile render path (Task 3) paints a background/border quad per
-    // visible tile, not just text; a non-empty scene after the add is
-    // cheap evidence the tiling surface actually drew something (the
-    // geometry itself is tiling::tree's job, already unit-tested there).
+    // A nonempty scene after adding a tile shows that the surface rendered its
+    // background and border. Tree geometry has separate unit tests.
     let quads_after_add = cx.update(|window, _cx| window.painted_quads().len());
     assert!(
         quads_after_add > 0,
@@ -384,16 +379,10 @@ fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// End-to-end (ledgered from 1b-ui T3): a real mouse-down at a
-/// non-focused tile's on-screen coordinates focuses it, exercising the
-/// `on_mouse_down` handler wired up in `Render for ShellView` (not the
-/// keyboard path). Two tiles side by side; `mod+h` first moves focus
-/// off the freshly-split (right) tile so the click has something to
-/// change. The click point is derived from the same layout `render`
-/// itself uses — `Tree::layout` over the tile area, offset by the
-/// sidebar/toolbar chrome (`sidebar::width(window)`, `TITLE_BAR_HEIGHT`; see
-/// CLAUDE.md's chrome-offset note) — rather than a hand-guessed pixel,
-/// so the test tracks the real geometry instead of duplicating it.
+/// A real mouse-down on an unfocused tile focuses it through the render handler. First
+/// move focus away from the right tile, then click coordinates derived from
+/// `Tree::layout` and the sidebar/toolbar offsets so the test follows the actual
+/// geometry.
 #[gpui::test]
 fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -685,9 +674,8 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Spec 2026-09-08 add-tile §3.1: the shipped keymap has no split chord.
-/// This shell is built on `BUILTIN_KEYMAP` alone (no test layer), so
-/// `ctrl+v`/`ctrl+h` reach the matcher and match nothing.
+/// With only `BUILTIN_KEYMAP` loaded, `ctrl+v` and `ctrl+h` match no split action. The
+/// recorder add bindings belong only to the fixture layer.
 #[gpui::test]
 fn the_shipped_keymap_has_no_split_chord(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();

@@ -8,28 +8,21 @@ publish.workspace = true
 bench = false
 
 [features]
-# Profiler support (spec §7.4), off by default: nothing but gpui's own
-# `profiler` feature (hdrhistogram frame/input-latency histograms, the
-# painted debug frame overlay, hang detection) plus the two shell actions
-# that surface it (`perf::gpui_overlay`, `perf::dump` —
-# `shell::profiling_hook`). No Tracy client: gpui at the pinned rev uses
-# the backend-less `profiling` facade, and this workspace deliberately
-# adds no backend dependency. Enable via geode-app's same-named feature.
+# Enable GPUI's frame/input-latency histograms, debug overlay, and hang
+# detection, plus the shell actions that expose them. Off by default and
+# enabled through geode-app's same-named feature. No profiling backend
+# dependency is added; the pinned GPUI uses the backend-less facade.
 profiling = ["gpui/profiler"]
-# Exposes `module::recording`, the shell-hosting test double, outside this
-# crate's own `#[cfg(test)]` — so Plan 3c's blotter tests can host a
-# recorded neighbour without depending on geode-shell's dev-dependencies.
+# Expose the recording module for downstream hosting tests without
+# requiring this crate's dev-dependencies.
 test-support = []
 
 [dependencies]
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
-# For the scope bar's save chip alone: `Save` is not one of the 101 icons
-# `gpui_component::IconName` names, so the chip names it through the
-# shared catalog (`gpui_kit_assets::IconName`, which `Icon::new` accepts
-# directly). The bytes are embedded by `geode-app`'s asset source, not
-# here — an `IconName` is only a path. Same pin as the root's `=0.6.2`.
+# The scope bar's save icon comes from the shared asset catalog.
+# geode-app embeds its bytes; this crate uses only the icon's path.
 gpui-kit-assets.workspace = true
 # For the as-of dialog's Custom row alone: `geode_shell::shell::asof_rows`
 # seeds and reads a `geode_widgets::datefield::DateTimeField`, the same
@@ -39,41 +32,29 @@ toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"
 async-channel = "2.5"
-# Phase 4a (M6's earlier "test-only" note no longer holds): `Frame::
-# note_published`'s `Publish::at`, `scopebar::build_model`'s "is the as-of
-# date today" check (`chrono::Local::now()`), and the scope bar's as-of
-# formatting are all runtime code now, not just `#[cfg(test)]` fixtures.
+# Runtime timestamps and date formatting for frame publishes and the
+# scope bar. Local-time interpretation uses the configured clock.
 chrono = "0.4.42"
-# Every migrated `eprintln!` site (Phase 4b Task 2) emits through this
-# instead — `geode_core::log::LevelControl`/`Ring` own the subscriber
-# machinery itself, so this crate only ever needs the emitting macros.
+# Logging macros; geode-core owns the subscriber and ring buffer.
 tracing.workspace = true
 
 [dev-dependencies]
-# Test-feature parity (2026-09-19): the downstream crates' dev-dependencies
-# enable this crate's `test-support`, so `cargo test --workspace` compiles
-# geode-shell with it on — and `cargo test -p geode-shell` used to compile
-# a second, feature-less copy of the same 95k lines (and the mutation
-# harness a third, per entry). A self dev-dependency (cargo allows it for
-# exactly this; geode-core's is the precedent) makes the two graphs one.
-# Every `test-support` cfg is `any(test, feature = "test-support")`, so
-# nothing is defined twice with both on.
+# Match the test-support feature enabled by downstream hosting tests,
+# so crate-only and workspace tests share the same feature configuration.
+# The cfg gates use any(test, feature = "test-support") to avoid duplicate
+# definitions when both are active.
 geode-shell = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
 # The Snapshot fixture builder, so probe tests never name an Arrow type.
 geode-core = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
-# `open_module`'s no-matching-factory test scopes a real `RingLayer`
-# subscriber to assert on the warning it logs (Phase 4b Task 5) — the same
-# pattern `geode_core::log`'s own `RingLayer`/`MessageVisitor` tests use.
+# Capture the warning from open_module when no factory matches.
 tracing-subscriber.workspace = true
 
-# Criterion benches over the pure shell cores (spec §7.4). Kept in this
-# crate rather than a dedicated bench crate: criterion is a dev-dependency
-# only (zero cost to lib consumers), matching geode-demo-data's precedent.
-# harness = false + the lib's bench = false are the workspace-wide criterion
-# invariants (see CLAUDE.md).
+# Criterion benchmarks of shell core logic. Criterion is a dev-dependency;
+# lib consumers do not compile it. Disable the default benchmark harness
+# for both the library and these Criterion entry points.
 [[bench]]
 name = "shell_cores"
 harness = false

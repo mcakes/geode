@@ -1,5 +1,4 @@
-//! Tile stacks (spec 2026-09-19): delivery of the stack position, the
-//! visible set, the four verbs and their notice.
+//! Tile-stack position delivery, visible membership, navigation, and notices.
 
 use super::*;
 use crate::module::recording::Recorded;
@@ -204,8 +203,8 @@ fn unstack_pops_the_focused_member_out_and_the_survivors_are_re_notified(
 fn a_cycle_re_arms_the_focus_restore_while_an_abandoned_editor_holds_the_keyboard(
     cx: &mut gpui::TestAppContext,
 ) {
-    // Same shape as `input.rs`'s I-3 test: focus a module input, then
-    // move which tile has focus by a stack verb; the shell must re-arm.
+    // Focus a module input, then change the active tile through a stack command. The
+    // shell must arm root-focus restoration.
     let (services, focus) = services_with_recorder_focus();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
@@ -385,13 +384,9 @@ fn pick_on_a_plain_tile_refuses_with_the_notice(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix round 1, Ruling 5 (Important): opening the list while the scope
-/// bar's own text field holds the keyboard used to paint the list but
-/// leave it deaf — `close_palette`'s `overlay_return_to_filter` arm (were
-/// the palette involved) or simply the field's own standing focus is a
-/// shell surface `note_keyboard_focus_move`'s `holds_shell_focus` check
-/// treats as legitimate, so that call alone never reclaimed the keyboard.
-/// `open_stack_list` must take the shell root's focus directly.
+/// Opening a stack list takes shell-root focus even when the scope field owns the
+/// keyboard. General tile-focus restoration accepts that field as a shell surface and
+/// therefore cannot perform this overlay-specific transfer.
 #[gpui::test]
 fn the_list_takes_the_keyboard_from_the_scope_bar(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _log, _left, right, _top) = stacked_shell(cx);
@@ -418,10 +413,8 @@ fn the_list_takes_the_keyboard_from_the_scope_bar(cx: &mut gpui::TestAppContext)
     assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
 }
 
-/// Fix round 1, Ruling 5 (Minor 2): a chord (`ctrl`/`alt`/`cmd`) is not a
-/// list key and must fall through to the matcher, whose `dispatch`
-/// clears `stack_list` at its own top — `ctrl+3` (a grouping slot) must
-/// never be read as "activate member 3".
+/// Chords fall through the stack list to the matcher, whose dispatch closes the list.
+/// `ctrl+3` must select a grouping slot rather than activate stack member three.
 #[gpui::test]
 fn a_chord_falls_through_the_list_to_the_matcher(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _log, _left, _right, top) = stacked_shell(cx);
@@ -442,10 +435,8 @@ fn a_chord_falls_through_the_list_to_the_matcher(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// `{Kind}: Stack` on a placeholder or an empty region does exactly what
-/// `{Kind}: Split` does — a stack of one is meaningless (spec §6.1): a
-/// fresh window has an empty region focused, so the stacked add falls
-/// through `add_tile`'s split path and the tile becomes the root.
+/// Adding a stack member to an empty region or placeholder follows the split path,
+/// creating its first real tile rather than a one-member stack.
 #[gpui::test]
 fn a_stacked_add_on_a_placeholder_or_empty_region_fills_or_roots_like_a_split(
     cx: &mut gpui::TestAppContext,
@@ -477,8 +468,8 @@ fn a_stacked_add_on_a_placeholder_or_empty_region_fills_or_roots_like_a_split(
     );
 }
 
-/// `{Kind}: Stack` on a leaf or a member lands the new tile after the
-/// FOCUSED one in its stack, active and focused (spec §6.1/§4.2).
+/// Adding to a leaf or stack inserts after the focused tile and makes the new member
+/// active and focused.
 #[gpui::test]
 fn a_stacked_add_on_a_member_lands_after_it(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);
@@ -504,10 +495,8 @@ fn a_stacked_add_on_a_member_lands_after_it(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// End-to-end (tile-stacks spec §6.2): a centre drop across regions —
-/// the dragged tile lives in the main tree, the target in the left
-/// dock — stacks into the TARGET's stack (`Workspace::drop_stack`, not
-/// `drop_swap`), region and focus following the dragged tile.
+/// A center drop across regions stacks into the target's stack, with region and focus
+/// following the dragged tile.
 #[gpui::test]
 fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);
@@ -539,12 +528,8 @@ fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::Test
     assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
 }
 
-/// Task 9: the marker chip paints in the placeholder occupant too, not
-/// just the modules — built here with the `Workspaces` API directly
-/// (no `rec` roster verb, no session restore) so both stack members are
-/// plain placeholders: a leaf, then a second tile stacked onto it. Only
-/// the ACTIVE member (`b`, shown) paints the marker; the other member
-/// (`a`, hidden by the stack) paints nothing.
+/// Placeholder occupants paint the stack marker on the active member only. Build both
+/// members through `Workspaces` directly so no recorder factory fills them.
 #[gpui::test]
 fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -569,17 +554,13 @@ fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::Tes
     );
 }
 
-/// Whole-branch review, Important 2: `add_tile` fills a stacked
-/// placeholder in place by removing its occupant and letting
-/// `ensure_occupants` recreate one under the same id — the fresh
-/// occupant must still hear its own stack position, which needs
-/// `stack_sent`'s stale entry from the REPLACED placeholder cleared at
-/// the recreation site, not just at the delivery site.
+/// Filling a stacked placeholder recreates its occupant under the same tile ID. Clear
+/// cached stack delivery for that ID so the new occupant receives its initial stack
+/// position.
 #[gpui::test]
 fn a_replaced_occupant_is_re_told_its_position(cx: &mut gpui::TestAppContext) {
     let (mut services, log) = services_with_recorder();
-    // Built via `Workspaces` directly, no `rec` roster fill — both
-    // members start as plain placeholders (Task 9's own fixture shape).
+    // Both members are placeholders because the fixture uses `Workspaces` directly.
     services
         .workspaces
         .split_active(crate::tiling::Orientation::Horizontal);

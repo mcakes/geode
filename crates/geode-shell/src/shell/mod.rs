@@ -1,10 +1,7 @@
-//! The shell's window root view (spec §3): a single view owning the whole
-//! window contents, key dispatch, and workspace state. Chrome (Task 4):
-//! `toolbar::toolbar` (the native title bar) on top, `sidebar::sidebar`
-//! (workspace indicators + profile icon) on the left, `status::status_bar`
-//! (pending keys, reload indicator, theme name) on the bottom. Between
-//! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
-//! tiles over whatever rect is left. Task 6 wires the real command palette.
+//! The shell's window root: owns key dispatch, workspace state, overlays,
+//! and tile occupants. The toolbar serves as the native title bar; the
+//! sidebar and status bar surround the remaining tile area. Rendering,
+//! input routing, persistence, and occupant lifecycle live in sibling modules.
 
 mod add_tile;
 pub mod addfilter;
@@ -79,26 +76,13 @@ use std::sync::{Arc, Mutex};
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
-/// initial workspace state (spec §3, §8). `ShellView` owns this for the
+/// initial workspace state. `ShellView` owns this for the
 /// life of the window.
 pub struct ShellServices {
     pub config: Config,
-    /// The compiled-in builtin layer `config` was loaded from: the
-    /// default keymap, plus whatever else this particular binary compiled
-    /// in for this run (the app decides — under `--demo` it is a whole
-    /// generated desk: `app`, `datasets`, `dimensions`, `groupings`,
-    /// `sources`, `views`).
-    ///
-    /// Kept here because it is process-lifetime state, decided at startup
-    /// and reachable from nowhere on disk, while a config hot reload
-    /// re-reads only the desk and user *directories*. The reload path
-    /// must therefore REUSE these docs ([`crate::reload::load_config`]
-    /// takes them verbatim) rather than reconstruct a guess at what the
-    /// app compiled in. Reconstructing them was a live bug: the reload
-    /// rebuilt the builtin keymap and nothing else, so the first config
-    /// write of a session — a theme toggle, a font-size change, a dialog
-    /// save — dropped every other builtin doc, and under `--demo` the
-    /// views, datasets and sources vanished until restart.
+    /// The compiled-in builtin layer used to load `config`. Hot reload reads
+    /// only the desk and user directories and reuses these exact documents,
+    /// including any demo datasets, sources, and views supplied by the app.
     pub builtin: Vec<LayerDoc>,
     pub registry: ActionRegistry,
     pub keymap: Keymap,
@@ -108,7 +92,7 @@ pub struct ShellServices {
     /// Session file used by periodic and shutdown saves. `None` disables
     /// session persistence; layout actions only mark pending state dirty.
     pub session_path: Option<PathBuf>,
-    /// The modules the app compiled in (§9.1); the shell creates tile
+    /// The modules the app compiled in; the shell creates tile
     /// occupants through it and never names a module crate.
     pub roster: ModuleRoster,
     /// Module names and state from `session.toml`, consumed as the shell
@@ -121,16 +105,11 @@ pub struct ShellServices {
     /// table — empty for a fresh session and in every test setup that
     /// doesn't opt in. `ShellView::new` takes it as the live history.
     pub restored_palette_usage: crate::palette_usage::PaletteUsage,
-    /// The `tracing` foundation (Phase 4b Task 2): the ring the
-    /// diagnostics tile reads, the control the palette's `Set log
-    /// level…` writes through (the `:level` command line word wrote
-    /// through it too, until command-line locality closed that route
-    /// 2026-09-20), and the levels `[log]` resolved to at startup. `None`
-    /// in every test
-    /// setup that doesn't opt in — logging is then simply not wired up,
-    /// never a panic (mirrors `session_path`'s own "missing = skipped").
+    /// Optional logging services: the diagnostics ring, runtime level control,
+    /// and startup levels. The palette updates levels through this control.
+    /// When absent, the shell skips logging integration.
     pub log: Option<LogServices>,
-    /// The last 32 dispatched actions' hashes (Phase 4b Task 6): recorded
+    /// The last 32 dispatched actions' hashes: recorded
     /// by `ShellView::dispatch` before it matches the action, read by the
     /// crash hook (`geode_app::crash::install_panic_hook`) through the
     /// `Arc<Mutex<_>>` handed to it at startup — a shared handle, not a
@@ -139,56 +118,26 @@ pub struct ShellServices {
     /// to be captured by the 'static panic hook closure alongside
     /// `ActionRegistry::hash_names`'s own `Arc<RwLock<_>>`.
     pub action_tail: Arc<Mutex<ActionTail>>,
-    /// What `build_keymap` reported at startup; `main.rs` fills it,
-    /// fixtures leave it empty.
-    ///
-    /// It cannot be recomputed from `config` alone the way the mod-alias
-    /// and `modules.default` diagnostics can: `build_keymap` is resolved
-    /// against the `ActionRegistry` as it stood at startup, after the
-    /// roster's and the pick/scope/add registrations. Carrying the list
-    /// is what lets `ShellView::new` seed the diagnostics entity's config
-    /// section with the same five groups `apply_reload` extends, in the
-    /// same order — otherwise a keymap diagnostic (a binding naming an
-    /// action nothing registered, say) was logged at startup and then
-    /// invisible in the diagnostics tile until some later hot reload.
+    /// Startup keymap diagnostics, resolved against the app's action registry.
+    /// Carried separately because `Config` alone cannot reproduce them. The
+    /// shell includes them in the diagnostics entity from the first frame.
     pub keymap_diagnostics: Vec<Diagnostic>,
-    /// The modules' own default bindings (market-data documents §8.4),
-    /// as `ModuleRoster::keymap_fragments` produced them at startup —
-    /// already checked against each factory's contexts, ready to splice.
-    ///
-    /// Carried on the services for the same reason `builtin` is: a config
-    /// hot reload re-reads only the desk and user *directories*, so
-    /// `apply_reload` has to splice the very same fragments back in
-    /// ([`crate::keymap::fragments::splice`]) or the first config write
-    /// of a session would silently unbind every module key until restart.
-    /// They cannot be recomputed here either — the roster is on these
-    /// services, but re-running the check on every reload would re-report
-    /// every fragment diagnostic each time, and `main.rs` has already
-    /// logged them once.
+    /// Validated module keymap fragments produced by `ModuleRoster` at startup.
+    /// Hot reload splices these same fragments back into the loaded config.
+    /// Reusing them preserves module bindings without revalidating and logging
+    /// compiled-in fragment errors on every reload.
     pub keymap_fragments: Vec<LayerDoc>,
-    /// What `ModuleRoster::keymap_fragments` reported while checking those
-    /// fragments — a binding dropped for naming a context its module does
-    /// not declare, or a fragment that does not parse.
-    ///
-    /// Carried separately from [`Self::keymap_diagnostics`] (which
-    /// `main.rs` also folds these into, for `ShellView::new`'s startup
-    /// seeding) because a RELOAD has to re-state them: `apply_reload`
-    /// rebuilds the config section from the freshly loaded config plus the
-    /// fresh `build_keymap` diagnostics, and `check_fragment` has already
-    /// removed the offending binding by then — so `build_keymap` has
-    /// nothing to say about it and the diagnostic would vanish from the
-    /// diagnostics tile at the first hot reload of the session. They are
-    /// folded in AFTER `reload::decide`: a compiled-in fragment's mistake
-    /// is not the trader's config and must never reject their reload.
+    /// Diagnostics from validating compiled-in module fragments, including
+    /// undeclared contexts and parse failures. Reload includes these after
+    /// `reload::decide`: a module fragment error must remain visible without
+    /// rejecting the user's config. The dropped bindings cannot be diagnosed
+    /// again by `build_keymap`. Startup also includes this list in
+    /// [`Self::keymap_diagnostics`].
     pub keymap_fragment_diagnostics: Vec<Diagnostic>,
 }
 
-/// The pieces of the installed `tracing` subscriber the shell needs at
-/// runtime: a handle to read the ring (the diagnostics tile), a handle to
-/// change the level filter (the palette's `Set log level…`; `:level` on
-/// a tile's command line reached the same handle until command-line
-/// locality closed that route 2026-09-20), and the levels currently in
-/// effect.
+/// Runtime logging services: the diagnostics ring, the palette's level
+/// control, and the currently effective levels.
 pub struct LogServices {
     pub ring: Arc<Ring>,
     pub control: Arc<dyn LevelControl>,
@@ -196,65 +145,40 @@ pub struct LogServices {
 }
 
 impl ShellServices {
-    /// Loads `config` from `sources` and returns it paired with the exact
-    /// `builtin` docs it was loaded from — the one way to produce this
-    /// struct's `config`/`builtin` pair that cannot drift, because both
-    /// come out of the same `ConfigSources` value instead of two separate
-    /// call sites independently deciding what the builtin layer is.
-    ///
-    /// This is the field-level version of the bug fixed in 665be45: there
-    /// it was two independent *builders* of the builtin layer (`main.rs`
-    /// and `reload.rs`) disagreeing; here it would be two independent
-    /// *assignments* on the same struct (`services.config = ...` without
-    /// the matching `services.builtin = ...`) disagreeing instead. Every
-    /// other `ShellServices` field still has to be assembled by the
-    /// caller — most of them (the registry, the keymap) depend on
-    /// `config` itself, so they cannot be produced here too.
-    ///
-    /// A fixture that deliberately needs a `config`/`builtin` mismatch
-    /// (modelling a stale reload, say) can still set the two fields by
-    /// hand instead of calling this — just comment why at the call site.
+    /// Load config and retain the exact builtin documents used for that load.
+    /// Constructing both from one `ConfigSources` value keeps startup and
+    /// reload consistent. The caller assembles the remaining services, many of
+    /// which depend on the resulting config.
     pub fn config_and_builtin(sources: ConfigSources) -> (Config, Vec<LayerDoc>) {
         let builtin = sources.builtin.clone();
         (Config::load(&sources), builtin)
     }
 }
 
-/// What `ShellView` tells the rest of the app about a config reload (§4.5)
-/// — plus, since the dimension pickers (Phase 4a §3.3/§3.4), the one thing
-/// it needs the app bridge to do FOR it, since `geode-shell` cannot depend
-/// on `geode-data` (CLAUDE.md): submit a `Request::Distinct`. The app
-/// bridge (`geode-app`, which alone may touch `geode-data`) subscribes to
-/// these to know when the views it feeds the data thread need re-sending,
-/// when to tell the user a restart is needed, and — for `DistinctRequested`
-/// — to call `DataHandle::distinct` and route the outcome back through
-/// [`ShellView::deliver_distinct`].
+/// Events for the app bridge: configuration changes and distinct-value
+/// requests. The bridge submits data requests and delivers their outcomes;
+/// the shell does not depend on `geode-data`.
 ///
-/// `PartialEq` only, not `Eq` — `DistinctParams` carries a `Scope`, whose
-/// own expression filter can hold a float literal (`Literal::Num(f64)`,
-/// `geode_core::scope::expr`) and so stops at `PartialEq` itself; every
-/// existing use of this derive (`events.contains(&ShellEvent::
-/// ConfigReloaded)`, `shell/tests/reload.rs`) only ever needed `PartialEq`.
+/// `PartialEq` follows `DistinctParams`: its scope can contain floating-point
+/// literals and therefore does not implement `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
-    /// Sources or datasets changed. The data engine needs a restart to
-    /// pick up new source paths or column definitions — but a `datasets`
-    /// change is also a `groupings_changed` input, so the frame's own
-    /// slot labels (pure presentation) are still replaced immediately;
-    /// this event is only about what the data engine cannot pick up live.
+    /// Restart-sensitive configuration differs from the running data engine:
+    /// sources, datasets, egress targets, or the pricing adapter. Presentation
+    /// changes such as grouping labels can still apply immediately.
     RestartRequired(String),
     /// A dimension picker (`shell::picker`) needs distinct values for one
     /// column, scoped by everything except that column's own selection
-    /// (spec §3.4) — the caller has already done that removal. The bridge
+    /// — the caller has already done that removal. The bridge
     /// calls `handle.distinct(params)`; the result comes back as
     /// `DataEvent::Distinct`, which the bridge routes to
     /// [`ShellView::deliver_distinct`].
     DistinctRequested(geode_core::query::DistinctParams),
     /// The last reload was refused — `reload::decide` kept the previous
-    /// config because the new one carried these error diagnostics (§19.6).
+    /// config because the new one carried these error diagnostics.
     /// Distinct from `RestartRequired`: nothing here is live, the file is
     /// on disk exactly as written, and a dialog that just wrote it needs
     /// to say so. Carries the diagnostics, not the count, so a consumer
@@ -265,8 +189,8 @@ pub enum ShellEvent {
 impl EventEmitter<ShellEvent> for ShellView {}
 
 /// The coalescing key the dimension pickers submit their `Request::
-/// Distinct` under (spec §3.4). Reserved, not user-reachable: every real
-/// tile's query key comes from `TileId` (spec §2.4), which is a small
+/// Distinct` under. Reserved, not user-reachable: every real
+/// tile's query key comes from `TileId`, which is a small
 /// sequential counter nowhere near `u64::MAX`, so this can never collide
 /// with a live tile. `ShellView::deliver` (the `Delivery` route) never
 /// sees this key — a picker's own outcome arrives as `DataEvent::Distinct`
@@ -275,17 +199,17 @@ impl EventEmitter<ShellEvent> for ShellView {}
 pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
 
 /// The coalescing key the diagnostics tile's `Request::Catalog` submits
-/// under (Phase 4b §4.5) — same reservation reasoning as [`PICKER_KEY`]
+/// under — same reservation reasoning as [`PICKER_KEY`]
 /// just above, one lower so the two can never collide with each other or
 /// with a real tile's `TileId`-derived key.
 pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 
 /// The Scopes dialog's Values stage submits its `Request::Distinct` under
-/// this key (scopes-editing spec §4) — one lower than `DIAGNOSTICS_KEY`,
+/// this key — one lower than `DIAGNOSTICS_KEY`,
 /// same reservation reasoning. `deliver_distinct` routes on it.
 pub const SCOPES_KEY: QueryKey = QueryKey(u64::MAX - 3);
 
-/// One column a dimension picker can open (spec §3.3): every categorical
+/// One column a dimension picker can open: every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
 /// for any other categorical column (an attribute that opted in via
@@ -301,22 +225,13 @@ pub struct Pickable {
     pub datasets: Vec<String>,
 }
 
-/// Every column a picker can open, in schema order: for each dataset (in
-/// the order `SchemaSpec::from_doc` parsed them), every
-/// `DatasetSpec::categorical_columns()` entry becomes (or, if a later
-/// dataset carries the same column name, extends) a [`Pickable`] —
-/// first-seen order, so a column carried by two datasets appears once,
-/// where it was first seen, with both datasets listed. Every derived
-/// dimension (`[dimensions]`, `DerivedDimensions::all()`) is appended
-/// after, role `"derived"`. A key column (`ColumnRole::Key`) is never
-/// categorical by default (`SchemaSpec`'s own test,
-/// `categorical_defaults_true_for_dimensions_and_false_otherwise...`), so
-/// it never reaches `categorical_columns()` and is never pickable.
+/// Collect categorical dataset columns in schema order, merging repeated
+/// column names across datasets and appending their dataset names. Append
+/// derived dimensions afterward with role `"derived"`. Key columns are not
+/// categorical by default, so ordinary keys are excluded.
 ///
-/// Stored on `ShellView.pickable` at construction
-/// (`ShellView::new`) and rebuilt by `hot_reload::apply_reload` whenever
-/// `datasets` or `dimensions` changes (§4.5) — the same "changed" check
-/// `hot_reload::rebuild_slots`'s callers already make for those two docs.
+/// The shell caches this at construction and rebuilds it when datasets or
+/// derived dimensions change.
 pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
     let (schema, _) = config
         .doc("datasets")
@@ -357,7 +272,7 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
 
 /// Every column a grouping slot may name, in schema order — the query
 /// compiler's own vocabulary (`carries_all` in `geode-data`'s `compile`),
-/// not the picker's: for each dataset, [`DatasetSpec::groupable_columns`]
+/// not the picker's: for each dataset, [`geode_core::schema::DatasetSpec::groupable_columns`]
 /// — every declared column some *declared* grain carries as a dimension:
 /// a grain's key columns (`position_ref`, `instrument_ref`) and every
 /// carried dimension, categorical or not (a numeric strike included) —
@@ -416,27 +331,12 @@ pub fn groupable_columns(config: &Config) -> Vec<Pickable> {
     out
 }
 
-/// Every saved scope, keyed by name (spec §3.9/§3.11) — `defaults::
-/// register_scope_actions`'s `scope::<name>` companion to
-/// [`pickable_columns`]'s own `register_pick_actions`, and read the same
-/// way: `[scopes]` validated against the `datasets`/`dimensions` docs a
-/// scope's own columns must resolve against.
-///
-/// Phase 4b M15: this used to be its own copy of `hot_reload::
-/// rebuild_saved_scopes`'s load logic (kept separate because that
-/// function is `pub(super)` — internal reload housekeeping, out of
-/// `main.rs`'s reach across the crate boundary) — a real duplication,
-/// not just a naming difference: the copy here silently dropped
-/// `saved_scopes_from_doc`'s diagnostics (`.0` on the tuple) where
-/// `rebuild_saved_scopes` prints them. A `pub use` re-export needs no
-/// copy: `hot_reload` the *module* stays private, but re-exporting one
-/// of its `pub(super)` items under a public name here is exactly as
-/// legal as `pickable_columns` living in this module in the first
-/// place — nothing about `pub(super)` prevents `shell::mod` itself,
-/// which is `hot_reload`'s parent, from naming and re-exporting it.
+/// Load and validate saved scopes against the configured datasets and
+/// derived dimensions. Shared by startup action registration and hot reload;
+/// the caller controls whether validation diagnostics are logged.
 pub use hot_reload::rebuild_saved_scopes as saved_scopes;
 
-/// One addressed occupant request (spec 2026-09-08 add-tile §4.3).
+/// One addressed occupant request.
 pub(super) struct PendingTile {
     pub(super) kind: String,
     /// The record the factory sees as `restored` — a duplicate's
@@ -444,10 +344,10 @@ pub(super) struct PendingTile {
     pub(super) state: Option<toml::Table>,
 }
 
-/// The window's root view. Intercepts all keyboard input via `on_key_down`
-/// rather than gpui's own action-dispatch system, because key resolution
-/// here goes through the shell's own layered, sequence-aware [`Matcher`]
-/// (spec §3.4), not a static `KeyBinding` table.
+/// Window root that routes keyboard input through the layered,
+/// sequence-aware [`Matcher`]. Rendering and modal input handling share
+/// this state with the workspace and tile lifecycle.
+///, not a static `KeyBinding` table.
 pub struct ShellView {
     services: ShellServices,
     matcher: Matcher,
@@ -457,25 +357,14 @@ pub struct ShellView {
     /// the settings control via `settings_view::set_font_size`, config hot
     /// reload) — see the `fontsize` module doc.
     font_size: FontSize,
-    /// The `/`-find behavior setting for list dialogs (vim jump vs. fzf
-    /// filter — `[ui] find_style`, see `vimfind::FindStyle`). Same
-    /// lifecycle as `font_size` above: resolved at startup, re-resolved on
-    /// config hot reload, set directly by the settings control
-    /// (`settings_view::set_find_style`) — minus the render-time apply,
-    /// since there is nothing window-level to apply. Neither dialog reads
-    /// it for behaviour any more: the filter-first rewrite (spec
-    /// `2026-09-01-dialog-filter-input-design.md` §8) retired both `/`
-    /// sessions this setting used to steer. The field, its config
-    /// plumbing, and the settings row that steps it all survive whole —
-    /// on purpose, for Phase 3's blotter (§9) — so this is honestly a
-    /// setting with no reader today, not a live behavior switch.
+    /// The configured `/`-find style (`[ui] find_style`). Resolved at startup,
+    /// on reload, and by the settings control. Dialog filtering does not read
+    /// this field; updating it changes the stored setting only.
     find_style: FindStyle,
     focus_handle: FocusHandle,
-    /// The open command palette's state (Task 6), or `None` when closed.
-    /// Built fresh from the registry/keymap/theme service each time
-    /// `palette::toggle` opens it (brief: the reverse binding index is
-    /// built once at palette-open, not per frame) and dropped on close —
-    /// nothing about it survives being closed and reopened.
+    /// State for the open command palette, or `None`. Each open rebuilds the
+    /// registry/keymap/theme snapshot and reverse binding index; closing drops
+    /// it. Usage history persists separately in `palette_usage`.
     palette: Option<PaletteState>,
     /// How often and how recently each palette row was chosen
     /// (`crate::palette_usage`): read once per palette open to rank the
@@ -490,166 +379,58 @@ pub struct ShellView {
     /// mutates nothing else still reaches the flush.
     palette_usage_version: u64,
     last_palette_usage_written: u64,
-    /// The open modal's state (Task 9, instant-modal redesign), or `None`
-    /// when closed. Set only through [`dialog::open_shell_dialog`] (the one
-    /// standard door — see that function's and `dialog`'s module doc), read
-    /// by `Render for ShellView` to paint the backdrop/panel/title-row/
-    /// close-button chrome (`dialog::render_modal`) and by
-    /// [`handle_key_down`](Self::handle_key_down)'s modal branch, which
-    /// makes Escape close it and swallows every other shell chord while
-    /// it's open. Unlike `palette`, nothing here is per-frame scroll state
-    /// to track alongside it — a modal's content owns whatever internal
-    /// state it needs (the two list dialogs' own state lives in the
-    /// sibling `keybindings`/`settings` fields below).
+    /// Open modal chrome and callbacks, installed through
+    /// `dialog::open_shell_dialog`. Key routing gives the modal handler first
+    /// refusal; an unclaimed Escape closes it. Other shell actions cannot
+    /// reach tiles behind the modal. Dialog-specific data and scroll handles
+    /// live in the fields below.
     modal: Option<dialog::ShellModal>,
-    /// The open keybinding dialog's own pure state (Part B), or `None` when
-    /// closed/never opened. Set fresh by [`keybindings_view::open`] each
-    /// time (mirrors `palette`'s "nothing survives a close/reopen"
-    /// contract) and read/mutated both by the modal's render closure
-    /// (`keybindings_view::build`, via a plain `&ShellView` reborrow — see
-    /// `ShellModal::build`'s doc comment) and by its
-    /// [`dialog::ModalKeyHandler`] (`keybindings_view::handle_key`, reached
-    /// through `handle_key_down`'s modal branch). Deliberately holds no
-    /// `gpui` types itself (a selection index, the filter query, and the
-    /// in-progress capture sequence only) so it stays unit-testable without
-    /// a window, the same way `PaletteState` does — the dialog's
-    /// `ScrollHandle` lives in the sibling `keybindings_scroll` field below
-    /// instead, following `palette`/`palette_scroll`'s own split exactly.
+    /// State for the open keybinding dialog. Created by `keybindings_view::open`
+    /// and cleared on close. The render callback and modal handler share this
+    /// state; GPUI scrolling remains in `keybindings_scroll` so filtering,
+    /// selection, and capture can be tested without a window.
     keybindings: Option<keybindings_view::KeybindingsState>,
     /// Scroll state for the open keybinding dialog's row list — same
     /// reasoning and lifecycle as `palette_scroll` (a fresh `ScrollHandle`
     /// per open, driven by `keybindings_view`'s selection-change paths via
     /// `ScrollHandle::scroll_to_item`).
     keybindings_scroll: ScrollHandle,
-    /// The open settings dialog's own pure state (the settings-dialog
-    /// rewrite: the keybinding dialog's pattern applied to settings —
-    /// selection and filter query, the same shape `KeybindingsState` has
-    /// minus the capture sequence), or `None` when closed/never opened.
-    /// Set fresh by [`settings_view::open`] each time
-    /// and read/mutated by that module's `build` closure and
-    /// [`dialog::ModalKeyHandler`], exactly the `keybindings` field's own
-    /// contract two fields up — including holding no `gpui` types, for the
-    /// same unit-testability reason. Replaces the composite-era arrangement
-    /// where the settings modal kept no `ShellView` state at all (the
-    /// gpui-component `Settings` composite owned its own).
+    /// State for the open settings dialog, created by [`settings_view::open`]
+    /// and cleared on close. Selection, filtering, and choice editing remain
+    /// independent of GPUI; scrolling lives in `settings_scroll`.
     settings: Option<settings_view::SettingsState>,
     /// Scroll state for the open settings dialog's row list — the
     /// `keybindings_scroll` split, one dialog over.
     settings_scroll: ScrollHandle,
-    /// Scroll state for the open palette's results list, tracked across
-    /// frames the same way `filter_input`'s `Entity<InputState>` is
-    /// (`gpui::ScrollHandle` is a cheap `Clone` — `Rc<RefCell<..>>` — but a
-    /// *fresh* one must still be handed to `track_scroll` every frame the
-    /// list renders, so this is that stable handle). Rebuilt alongside
-    /// `palette` in `toggle_palette` on every open, and driven from the
-    /// same selection-change path as `palette` itself (`set_selected`
-    /// after `vimnav::apply`, `push_char`, `backspace` in
-    /// `handle_palette_key`) via `sync_palette_scroll`, so the selected
-    /// row always scrolls into view.
+    /// Stable scroll handle for the open palette. Each open creates a new
+    /// handle; every render tracks that same handle. Selection changes call
+    /// `sync_palette_scroll` to keep the highlighted row visible.
     palette_scroll: ScrollHandle,
-    /// The palette's query field (palette-input-polish task): a real
-    /// gpui-component `Entity<InputState>`, replacing the hand-rolled
-    /// `String` + trailing caret glyph `palette::render` used to draw
-    /// itself. Built once here (like `filter_input` below — same
-    /// "`Input` needs a stable entity across frames to keep its own
-    /// cursor/selection/focus state" reasoning), *not* rebuilt per palette
-    /// open the way `PaletteState`/`palette_scroll` are: `toggle_palette`
-    /// instead resets its *value* to `""` on every open (`InputState::
-    /// set_value` — deliberately chosen over a fresh entity so the same
-    /// `FocusHandle` survives close/reopen, and so the one `InputEvent::
-    /// Change` subscription set up in `new` below stays wired for the
-    /// life of the window instead of needing to be re-subscribed on every
-    /// open).
+    /// The palette query input, built once so its focus handle, selection, and
+    /// change subscription survive close/reopen. Opening the palette resets its
+    /// value and focuses it; closing returns focus through
+    /// `return_focus_from_overlay`.
     ///
-    /// **Routing** (the routing design this task settled on, verified
-    /// against the pinned gpui rev's `Window::dispatch_key_event`/
-    /// `dispatch_action_on_node` before writing any of this): `toggle_
-    /// palette` focuses this field's `FocusHandle` on open and
-    /// `close_palette` returns focus to `self.focus_handle` (the shell
-    /// root) on every close path. While it's focused, gpui-component's
-    /// `Input` consumes printable characters, caret movement, ctrl+a
-    /// (select-all), and — new versus the old free-text palette — ctrl+v
-    /// (paste) natively, via its own `KeyBinding`-bound actions
-    /// (`gpui-base-0.6.2/src/input/base/state.rs`'s `CONTEXT = "Input"`
-    /// bindings): those actions run and stop propagation *before*
-    /// `ShellView`'s own `on_key_down` (`handle_key_down`) ever sees the
-    /// raw `KeyDownEvent` (confirmed by reading `dispatch_key_event`
-    /// itself — an action handler that doesn't call `cx.propagate()`
-    /// returns early without ever reaching `finish_dispatch_key_event`,
-    /// which is what fires raw key listeners). Up/down, ctrl+p/ctrl+n,
-    /// enter, and escape all still reach `handle_palette_key` as bubbled
-    /// `KeyDownEvent`s, for three different reasons each confirmed against
-    /// the pinned release rather than assumed: up/down have a global
-    /// `KeyBinding` in the "Input" context, but the *element* only
-    /// attaches an `on_action` listener for them `.when(self.is_multi_
-    /// line(), ..)` — this field is single-line, so no listener exists to
-    /// consume them and the raw event falls through untouched; ctrl+p and
-    /// ctrl+n have no `KeyBinding` in "Input" at all (grepped the whole
-    /// `gpui-base-0.6.2/src/input` tree — absent), so they're never
-    /// matched in the first place; enter and escape *are* bound and *do* have
-    /// listeners (`InputBaseState::enter`/`escape`), but for a single-line,
-    /// non-`clean_on_escape` input those handlers explicitly call
-    /// `cx.propagate()` after emitting their `InputEvent`, letting the
-    /// event continue to raw dispatch. `ctrl+k` (the palette toggle) has no
-    /// "Input" binding either, so it always reaches `handle_key_down`'s
-    /// earlier `is_palette_toggle` intercept regardless of focus — Escape
-    /// remains the one *guaranteed* close either way. `handle_palette_key`
-    /// itself now only acts on that short nav list and is a true no-op for
-    /// everything else (deliberately, not via `cx.stop_propagation()` —
-    /// see that method's doc comment: a typed character must keep
-    /// propagating past it so the window's separate IME/text-input phase
-    /// still delivers it to this field).
+    /// The input handles text editing and paste. Single-line navigation keys
+    /// (up/down, ctrl+p/ctrl+n), enter, and escape reach the palette key handler.
+    /// Other keys must keep propagating so IME/text-input dispatch can deliver
+    /// text to this field.
     palette_input: Entity<InputState>,
-    /// The two list dialogs' shared filter field (the filter-first dialog
-    /// UX). One entity, not one per dialog: only one modal is ever open —
-    /// each dialog's own `open` returns early when `view.modal.is_some()`
-    /// (`keybindings_view::open`, `settings_view::open`; the shared door
-    /// `dialog::open_shell_dialog_with_key` does not guard this itself,
-    /// it assigns `view.modal` unconditionally) — so they can never both
-    /// want it at once. Built once here
-    /// and reset by value on every open, exactly like `palette_input`
-    /// above and for the same reasons — a stable `FocusHandle` across
-    /// close/reopen, and one `InputEvent::Change` subscription for the
-    /// life of the window instead of one per open.
+    /// The dialogs' shared input. Only one modal can be open, and closing it
+    /// clears every dialog state before another can use this subscription. The
+    /// entity and focus handle persist; each dialog resets its value on open.
     ///
-    /// **Focused or blurred is per-dialog state, not a constant.** A
-    /// focused `Input` consumes bare letters as text before any raw key
-    /// listener sees them, so every surface that wants letters as verbs
-    /// must blur this field first. Three states, of which the first is
-    /// now history and the other two are live:
-    ///
-    /// - the settings dialog was filter-first — it opened with this
-    ///   focused (`open_shell_dialog_with_key`'s `focus_filter: true`)
-    ///   and kept it that way for the life of the dialog — until it went
-    ///   modal on 2026-09-12 (spec §18) and joined the next case;
-    /// - the keybinding dialog opens BLURRED and stays that way in
-    ///   `DialogMode::Normal`, where bare letters are its verbs
-    ///   (`crate::dialogmode`, the dialog interaction model); `/` focuses
-    ///   it to enter `DialogMode::Filter`, and `escape` blurs it again.
-    ///   Focus parks on `ShellView::focus_handle` whenever it is blurred;
-    /// - it is blurred for the duration of a rebind capture in either
-    ///   mode, for the same letters-as-input reason (see
-    ///   `keybindings_view`'s module doc, "Rebind capture"), and focus is
-    ///   restored to whichever mode started the capture when it ends.
+    /// Normal mode blurs the input so letters reach dialog commands. Entering
+    /// filter mode focuses it; leaving filter mode blurs it again. Keybinding
+    /// capture also blurs it and restores the starting mode's focus on exit.
+    /// Value and naming fields manage focus according to their own editing state.
     dialog_input: Entity<InputState>,
-    /// Desk and user config directories the reload watcher polls (Task
-    /// 1c-1). Owned here (not just captured by the background task) so the
-    /// watcher's own loop re-reads them fresh from the entity each poll —
-    /// a single source of truth, rather than a stale copy baked in at
-    /// spawn time.
+    /// Config directories read by each watcher poll from the live shell state.
     desk_dir: Option<PathBuf>,
     user_dir: Option<PathBuf>,
-    /// The mtime snapshot as of the last poll. Starts as `Snapshot::
-    /// default()` (empty) — `reload::scan` does real filesystem I/O, so it
-    /// must not run synchronously in `new` on the UI thread (spec
-    /// PHILOSOPHY.md: "nothing may stall the render thread"); the watcher's
-    /// first poll iteration performs the real seed scan on the background
-    /// executor instead, storing it here *without* treating it as a
-    /// "change" (see `new`'s doc comment on why: comparing it against the
-    /// empty default would always look changed and trigger a spurious
-    /// reload on every window open). Compared against a fresh scan every
-    /// ~500ms after that; a difference is what triggers loading a new
-    /// `Config`.
+    /// Last config-directory snapshot. The first background scan replaces the
+    /// empty initial value without triggering a reload. Later scans compare
+    /// against it about every 500 ms. Scanning never runs on the UI thread.
     last_snapshot: reload::Snapshot,
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
@@ -666,92 +447,51 @@ pub struct ShellView {
     /// successfully serialized periodic snapshot, initially zero. Detects
     /// frame-only changes; updated before the disk write completes.
     last_frame_versions_written: (u64, u64, u64),
-    /// Set by a background path that closed the palette without a `Window`
-    /// to restore focus with (today: only `apply_reload`'s palette-
-    /// snapshot-changed branch) — see that call site's own comment for the
-    /// orphaned-`FocusId` failure mode this exists to close. Consumed at
-    /// the *top* of `render`, the next place downstream that actually has
-    /// a `&mut Window`: `apply_reload` already calls `cx.notify()`
-    /// unconditionally, which schedules exactly the render that will pick
-    /// this up, so the fix lands within one frame. `render` is the right
-    /// consumption point specifically *because* `handle_key_down` is
-    /// unreachable in the orphaned state this guards against (that's the
-    /// whole bug) — a fix that waited for the next keystroke to run would
-    /// never run at all.
+    /// Deferred focus restoration for paths without a `Window`, such as hot
+    /// reload closing the palette. `render` consumes it before painting. Waiting
+    /// for a key event is unsafe: dropping a focused overlay can leave no live
+    /// focus target through which that event could reach the shell.
     pending_focus_restore: bool,
-    /// Did the scope bar's text field hold focus when the current overlay
-    /// (palette or modal) opened? Recorded by `toggle_palette`'s open arm
-    /// and `dialog::open_shell_dialog_with_key`, consumed by
-    /// `close_palette` and `close_modal`, which return focus to the field
-    /// instead of the shell root (user ruling 2026-09-12: a dialog
-    /// launched from the field hands focus back to it). The palette's
-    /// enter arm closes the palette *before* dispatching, so a dialog an
-    /// item opens sees the field focused again and records it afresh —
-    /// palette → dialog → escape lands back in the field with no chain
-    /// bookkeeping. The overlays are mutually exclusive (the door closes
-    /// the palette; the modal branch of `handle_key_down` never lets the
-    /// toggle through), so one flag serves both.
+    /// Whether the scope input held focus when an overlay opened. Closing the
+    /// overlay consumes this flag and restores either the input or shell focus.
+    /// Palette selection closes before dispatching, so a dialog launched from
+    /// the palette records the restored focus itself. One flag suffices because
+    /// the palette and modal are mutually exclusive.
     overlay_return_to_filter: bool,
-    /// The in-flight divider drag, or `None` when no drag is active
-    /// (drag-splitters task). Set by a strip's mouse-down, advanced by the
-    /// full-window drag catcher's mouse-moves (live re-layout via the pure
-    /// drag verbs), and cleared by its mouse-up — which is also the point
-    /// the session goes dirty, so a drag-resize persists exactly like a
-    /// keyboard resize (coalesced onto the same ~500ms background flush).
-    /// Cancelled (top of `render`, via `cancel_divider_drag`) whenever the
-    /// palette or a modal opens mid-drag, a tree tile goes fullscreen, or
-    /// mod+N switches workspaces — all of which make the dragged boundary
-    /// invisible or unreachable, and silently resizing an invisible layout
-    /// would be a surprise on return. Cancel keeps whatever the drag
-    /// already applied AND still dirties the session if it moved (review
-    /// fix — "stop tracking the mouse", never "undo", and never a visible
-    /// resize the next restore would lose).
+    /// Active divider drag. Mouse moves resize the layout immediately; release
+    /// or cancellation preserves those changes and marks the session dirty if
+    /// it moved. Opening an overlay, changing workspace, or entering fullscreen
+    /// cancels tracking because the dragged boundary is no longer reachable.
     divider_drag: Option<drag::DividerDrag>,
-    /// The in-flight mod+drag of a tile, or `None` (tile-drag task). Armed
-    /// by a tile body's mouse-down with the configured mod key held (see
-    /// [`TileDrag`] for every recorded decision), advanced by its own
-    /// full-window catcher's mouse-moves, applied — through the pure
-    /// `Workspace` drop verbs — only by the mouse-up's drop, and cancelled
-    /// (top of `render`, `cancel_tile_drag`) by the same conditions that
-    /// cancel a divider drag plus a which-key hint appearing (the hint
-    /// paints over the tiles with no handlers of its own, so a drag
-    /// continuing under it would target tiles the user can't fully see).
-    /// Cancel applies nothing and dirties nothing — nothing has been
-    /// applied yet, so unlike `divider_drag` there is no `moved`
-    /// bookkeeping to preserve.
+    /// Active mod+drag of a tile. Movement updates the drop preview; release
+    /// applies the selected workspace drop operation. Cancellation changes no
+    /// layout or persistence state. Overlays, workspace changes, fullscreen,
+    /// and which-key hints cancel tracking when they obscure its targets.
     tile_drag: Option<drag::TileDrag>,
-    /// The per-tile command line's input (§3.4), built once like
+    /// The per-tile command line's input, built once like
     /// `palette_input` — a stable `Entity<InputState>` across frames, its
     /// value reset (not rebuilt) on every open.
     command_input: Entity<InputState>,
-    /// The open command line's own pure state (§3.4), or `None` when
+    /// The open command line's own pure state, or `None` when
     /// closed. Set fresh by `open_command_line` each time (mirrors
     /// `palette`'s "nothing survives a close/reopen" contract) and read/
     /// mutated by `handle_command_line_key`/`on_command_line_changed` and
     /// painted by `commandline_view::render`.
     command_line: Option<CommandLine>,
-    /// The toolbar's right-aligned filter field (Task 4), now the scope
-    /// bar's live text field (Task 4, spec §3.1/§3.11): every keystroke
-    /// while it's focused feeds `Frame::set_scope_in_session` through the
-    /// `InputEvent::Change` subscription in `new`, coalesced into one
-    /// undo entry per focus session. Owned here (rather than built fresh
-    /// per render, like `status_bar`/`sidebar`'s stateless element fns) is
-    /// required: `Input` is a stateful gpui-component that needs a stable
-    /// `Entity<InputState>` across frames to keep its own cursor/selection/
-    /// focus state, not something rebuildable from scratch each render.
+    /// The scope bar's text input. Each focused edit updates the frame inside
+    /// one undo session. The stable entity preserves cursor, selection, and
+    /// focus across renders.
     filter_input: Entity<InputState>,
-    /// The field's value at the moment it took focus (spec §3.11),
+    /// The field's value at the moment it took focus,
     /// captured by the `InputEvent::Focus` arm of `filter_input`'s
     /// subscription and taken by whichever of Enter/Escape/Blur ends the
     /// session first. `Some` only while a text-editing session is open —
     /// `handle_key_down`'s escape branch uses it to restore the pre-focus
     /// text; `Enter`/`Blur` just clear it without restoring anything.
     filter_session_base: Option<String>,
-    /// Frame-time histogram (spec §7.4 — always compiled, cheap): fed at
-    /// the top of `render` with the interval since the previous render.
-    /// See `crate::perf`'s module doc for exactly what that signal does
-    /// and doesn't capture. Owned plainly by the view — recording is a
-    /// `&mut` array bump, no locks, no allocation, no extra frames.
+    /// Always-on render-interval histogram. Recording mutates a fixed array
+    /// without locks, allocation, or scheduling another frame. See `crate::perf`
+    /// for the limits of this signal.
     perf: FrameHistogram,
     /// `Instant` at the top of the previous `render` call, the other half
     /// of the frame-interval measurement. `None` until the first render
@@ -762,47 +502,35 @@ pub struct ShellView {
     /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
     /// changes nothing about recording, which always runs.
     perf_overlay: bool,
-    /// The shared frame (§4), created here so every occupant can hold it.
+    /// The shared frame, created here so every occupant can hold it.
     frame: Entity<Frame>,
-    /// The shell-owned diagnostics gatherer (Phase 4b §4.4), created
-    /// alongside the frame so every occupant can hold it too. Fed by
-    /// the app bridge and by config load/reload (`hot_reload::
-    /// apply_reload`); drained by the `cx.observe` set up in `new` for
-    /// the palette's `Set log level…` persistence (`:level` reached the
-    /// same drain until command-line locality closed that route
-    /// 2026-09-20), the overlay toggle (kept as the sweep seam; `:overlay`
-    /// closed the same day and `perf::toggle_overlay` no longer routes
-    /// through it), and the catalog request.
+    /// Shared diagnostics state, fed by the app bridge and config load/reload.
+    /// Its observer drains log-level and overlay requests; the app bridge
+    /// handles catalog requests.
     diagnostics: Entity<Diagnostics>,
-    /// Occupant requests addressed by tile id (spec 2026-09-08 add-tile
-    /// §4.3): `add_tile` records one under the id it just allocated (or
-    /// the placeholder tile it is filling), and `ensure_occupants`
-    /// (`shell/occupants.rs`) takes it when it reaches that tile on the
-    /// next render. Keyed, not a single slot, so two requests in one
-    /// render each land where they were asked. Touched only on dispatch
-    /// and in `ensure_occupants` — never per frame.
+    /// Pending occupant creation, addressed by the tile ID allocated or filled
+    /// by `add_tile`. `ensure_occupants` consumes each request at that tile on
+    /// the next render; simultaneous requests cannot replace one another.
     pending_tiles: BTreeMap<TileId, PendingTile>,
-    /// Restored `tiles` records `ensure_occupants` could not place (no
-    /// factory for their kind — spec 2026-09-08 add-tile §7.2), keyed
-    /// like `session::TileRecords`. Written back verbatim by
-    /// `current_tiles` so a flush never thins a session saved by a build
-    /// with more modules; dropped when the tile closes or is filled.
+    /// Restored records whose module factory is unavailable. `current_tiles`
+    /// writes them back unchanged, preserving sessions from builds with more
+    /// modules. Closing or filling their tile removes them.
     unplaced_records: crate::session::TileRecords,
-    /// `[tiles] add` (spec 2026-09-08 add-tile §5): resolved at startup,
+    /// `[tiles] add`: resolved at startup,
     /// re-derived on hot reload, stepped by the settings row.
     pub(super) add_direction: crate::tileadd::AddDirection,
-    /// `[ui] line_numbers` (user ruling 2026-09-11): same lifecycle as
+    /// `[ui] line_numbers`: same lifecycle as
     /// `add_direction`, and additionally published as the
     /// `linenumbers::UiSettings` global on every change so a module
     /// (the blotter) can read and observe it — see that module's doc.
     pub(super) line_numbers: crate::linenumbers::LineNumbers,
-    /// `[timeseries] default_source` (timeseries spec §9.12): same
+    /// `[timeseries] default_source`: same
     /// lifecycle as `line_numbers`, published with it as the
     /// `series::SeriesSettings` global so a timeseries tile can read the
     /// source `:add` means without a path to `ShellView`.
     pub(super) default_source: Option<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
-    /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
+    /// `on_frame_changed` — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
     /// Seeded once in `new`, right after a restored session's scope/slot/
     /// as-of are applied, so that restore is never itself mistaken for
@@ -817,19 +545,17 @@ pub struct ShellView {
     /// every occupant every frame.
     visible_tiles: HashSet<TileId>,
     /// The last `(index, len)` `ensure_occupants` delivered to each tile
-    /// through `TileContent::set_stack` (tile-stacks spec §5.1) — a
+    /// through `TileContent::set_stack` — a
     /// missing entry means "unsent", so a fresh occupant always hears its
     /// stack position once (`None` included) and a later render tells it
     /// again only when the value actually changes. Retained to live tiles
     /// at the end of every `ensure_occupants`, the same lifecycle
     /// `pending_tiles`/`unplaced_records` follow.
     stack_sent: HashMap<TileId, Option<(usize, usize)>>,
-    /// A stack verb's one-line refusal (tile-stacks spec §4: every verb
-    /// on a non-member is a no-op with `"not in a stack"`), cleared at
-    /// the top of the next `dispatch`. Painted by the status bar's
-    /// `shell-notice` segment.
+    /// Status notice for a refused stack action, such as `"not in a stack"`.
+    /// Cleared at the start of the next dispatch.
     notice: Option<&'static str>,
-    /// The transient stack-member list (tile-stacks spec §5.2), or
+    /// The transient stack-member list, or
     /// `None` when closed — `open_stack_list`'s own contract, the same
     /// "nothing survives a close/reopen" shape `palette`/`command_line`
     /// follow. Owns the keyboard while open (`handle_key_down`'s own
@@ -842,30 +568,21 @@ pub struct ShellView {
     /// closed by any dispatch (which is also how a row commits), by the
     /// palette or a dialog opening, and by a click outside it.
     add_filter_menu: Option<addfilter::AddFilterMenu>,
-    /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
-    /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
-    /// fresh `HashSet` every render). Always cleared and refilled there;
-    /// empty at rest between renders, but its heap allocation survives so
-    /// nothing is allocated once warm.
+    /// Reusable storage for the per-frame tile diff. Each reconciliation
+    /// clears and refills it, retaining capacity between renders.
     scratch_all_tiles: HashSet<TileId>,
     /// Same purpose as `scratch_all_tiles`, for the active-tiles half of
     /// the diff.
     scratch_active_tiles: HashSet<TileId>,
-    /// Scratch storage for `visible_tile_keys` (Phase 4 §3.10), same
+    /// Scratch storage for `visible_tile_keys`, same
     /// reasoning as the two fields above — a flip only opens on a user
     /// mutation of scope/grouping/as-of, nowhere near every render, but
     /// there is no reason for it to allocate fresh every time either.
     scratch_visible_keys: Vec<QueryKey>,
-    /// Set by `apply_reload` when a reload's `sources`/`datasets` docs
-    /// (§4.5) no longer match [`sources_baseline`](Self::sources_baseline)/
-    /// [`datasets_baseline`](Self::datasets_baseline) — those need a
-    /// restart to take effect, unlike `groupings`/`views`/`dimensions`,
-    /// which the frame picks up live. Cleared when a later reload's docs
-    /// match the baseline again (M8, 3b final review: reverting the
-    /// offending edit clears the message rather than leaving it up for
-    /// the rest of the session). Drives the status bar's own "restart
-    /// required" message, alongside the `ShellEvent::RestartRequired` the
-    /// app bridge hears.
+    /// Restart notice for config that differs from the running data service.
+    /// Reload compares restart-sensitive settings against their startup
+    /// baselines; restoring those values clears the notice. The status bar
+    /// paints it and the app bridge receives `ShellEvent::RestartRequired`.
     restart_required: Option<String>,
     /// The `sources` layered doc the running `DataService` was actually
     /// built from — captured once here at construction, since a reload
@@ -881,170 +598,78 @@ pub struct ShellView {
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
-    /// the `egress` doc (egress spec §10 amendment 2): nothing reloads a
+    /// the `egress` doc: nothing reloads a
     /// resolved target's transport live, so `egress.toml` is restart-
     /// required exactly as `sources.toml` is.
     egress_baseline: Vec<LayerDoc>,
-    /// The `[pricing] adapter` key (inside the `app` doc) the data
-    /// engine's pricer was actually chosen from at startup (line-pricer
-    /// §5.5, `crates/geode-app/src/bridge.rs::data_setup`) — same purpose
-    /// and lifecycle as [`sources_baseline`](Self::sources_baseline),
-    /// never re-seeded on reload. A reload whose `adapter` key no longer
-    /// matches this needs a restart, on the same terms `sources`/
-    /// `datasets` already follow. Narrowed to just this key (not the
-    /// whole `[pricing]` table) because `refresh` is a live sheet setting
-    /// (Part 3) the frame picks up without a restart — only the adapter
-    /// choice is baked into the running data engine.
+    /// The startup `[pricing] adapter` value used to build the data engine.
+    /// Reload compares against this baseline to determine whether a restart is
+    /// required. The rest of `[pricing]`, including `refresh`, remains live.
     pricing_baseline: Option<toml::Value>,
-    /// Every column a dimension picker can open (Phase 4a §3.3),
-    /// [`pickable_columns`] over the current config — computed once at
-    /// construction and rebuilt by `hot_reload::apply_reload` whenever
-    /// `datasets`/`dimensions` changes, the same lifecycle
-    /// `sources_baseline`/`datasets_baseline` two fields up describe for a
-    /// config-derived cache. `defaults::register_pick_actions` is handed
-    /// this same list once at startup (`main.rs`, `test_services`) to
-    /// register one `frame::pick_<column>` action per entry — the action
-    /// registry itself never changes at runtime (module doc,
-    /// `keybindings_view`), so a column a later reload adds has no
-    /// palette-reachable action of its own; picking it still works via
-    /// `frame::pick`'s two-stage flow.
+    /// Cached [`pickable_columns`] for the current datasets and dimensions.
+    /// Reload rebuilds this list; startup registers per-column actions once.
+    /// Columns added later remain reachable through the two-stage `frame::pick`
+    /// flow even though they have no new per-column palette action.
     pickable: Vec<Pickable>,
-    /// The open dimension picker's own pure state (Phase 4a §3.3), or
-    /// `None` when closed/never opened — the `keybindings`/`settings`
-    /// fields' own contract. Set fresh by [`picker::open`] each time and
-    /// cleared by [`close_modal`](Self::close_modal), same as the other
-    /// two dialogs.
+    /// State for the open dimension picker. Created by `picker::open` and
+    /// cleared on modal close.
     picker: Option<picker::PickerState>,
-    /// The tag [`picker::open`]/[`picker::request_values`] hands out next
-    /// (Phase 4b M5) — monotonic across the whole session, never reset
-    /// per open. `PickerState::new` used to always start a fresh picker
-    /// at `tag: 0`, so two separate opens on the same column produced
-    /// the *same* sequence of tags (0, then 1 once the first request
-    /// went out); a `DistinctOutcome` that arrived late from the first
-    /// open could then be mistaken for the second open's own answer.
-    /// Reusing one counter across opens instead of restarting it makes
-    /// every tag this session ever hands out unique.
+    /// Next distinct-request tag. Shared across picker opens so a late reply
+    /// from a closed picker cannot match a fresh request for the same column.
     next_picker_tag: u64,
-    /// Scroll state for the picker's `Values`-stage `uniform_list` (fix
-    /// round 1, Finding 1) — the `keybindings_scroll`/`settings_scroll`/
-    /// `palette_scroll` split, one gpui type over: `uniform_list` is
-    /// self-virtualizing (it never lays out an off-screen row), but that
-    /// buys nothing for scroll-FOLLOW — nothing scrolls the viewport when
-    /// `selected` moves without this handle, so keyboard navigation past
-    /// [`palette::VISIBLE_ROWS`] would leave the highlight off-screen with
-    /// only its index having changed. `gpui::UniformListScrollHandle`, not
-    /// the plain `gpui::ScrollHandle` the other three use: `uniform_list`
-    /// only tracks scroll through its own handle type (see
-    /// `picker::sync_picker_scroll`'s doc comment for the call sites that
-    /// drive it).
+    /// Scroll handle for the picker's virtualized Values list. Selection-change
+    /// paths call `picker::sync_picker_scroll` to keep keyboard navigation
+    /// visible; virtualization alone does not move the viewport.
     picker_scroll: UniformListScrollHandle,
-    /// The open as-of dialog's own pure state (as-of dialog spec
-    /// 2026-09-20 §5), or `None` when closed/never opened — the
-    /// `picker`/`keybindings`/`settings` fields' own contract. Set fresh
-    /// by [`asof_view::open`] each time and cleared by
-    /// [`close_modal`](Self::close_modal), same as the other three
-    /// dialogs.
+    /// State for the open as-of dialog. Created by [`asof_view::open`] and
+    /// cleared by [`close_modal`](Self::close_modal).
     as_of_dialog: Option<asof_rows::AsOfState>,
-    /// Scroll state for the as-of dialog's `as-of-rows` list (review
-    /// round 2, finding 3) — the `choice_dialog_scroll` split, one
-    /// dialog over: `handle_key`'s nav/tab arms call `scroll_to_item`
-    /// with `asof_rows::child_index_of` on every highlight move, so
-    /// keyboard navigation past the visible window still scrolls the
-    /// list rather than moving an off-screen index.
+    /// Scroll handle for the as-of rows. Navigation and refresh use
+    /// `asof_rows::child_index_of` to keep the highlighted row visible.
     as_of_scroll: ScrollHandle,
-    /// The frame `data` version the open as-of dialog last refreshed
-    /// against (review round 2, finding 5 — parity with the old
-    /// `cached_presets`) — `on_frame_changed` compares against this and
-    /// calls `AsOfState::refresh` only on an actual data-version bump
-    /// while the dialog is open, set at open time by [`asof_view::open`]
-    /// and never read while `as_of_dialog` is `None`.
+    /// The frame data version used to build the open as-of dialog's rows.
+    /// `on_frame_changed` refreshes them only when this version changes. Set on
+    /// open and unused while the dialog is closed.
     as_of_data_version: u64,
-    /// The open scope expression dialog's own pure state (command-line
-    /// locality spec §4.1), or `None` when closed/never opened — the
-    /// `picker`/`as_of_dialog` fields' own contract. Set fresh by
-    /// [`scope_expr_view::open`] each time and cleared by
-    /// [`close_modal`](Self::close_modal).
+    /// State for the open scope expression dialog. Created by
+    /// [`scope_expr_view::open`] and cleared by [`close_modal`](Self::close_modal).
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
-    /// The open choice dialog's own pure state (2026-09-19: the grouping
-    /// picker — the toolbar readout's click and `frame::grouping` — and
-    /// the tile picker — a placeholder's double-click and `tile::add`),
-    /// or `None` when closed/never opened — the `picker`/`as_of_dialog`
-    /// fields' own contract. Set fresh by `choicedialog::open_grouping`/
-    /// `open_tile_kinds` each time and cleared by
-    /// [`close_modal`](Self::close_modal).
+    /// State for the open grouping or tile-kind picker. Created by
+    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared on close.
     choice_dialog: Option<choicedialog::ChoiceDialogState>,
     /// Scroll state for the choice dialog's row list
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
     /// one dialog over.
     choice_dialog_scroll: ScrollHandle,
-    /// The open config-object dialog's own pure state (Phase 4c: the
-    /// shared scaffold every config domain's dialog is built on — see
-    /// `objectdialog`'s module doc), or `None` when closed/never opened.
-    /// Set fresh by [`objectdialog::render::open`] each time and cleared
-    /// by [`close_modal`](Self::close_modal), the same contract the four
-    /// dialogs above hold — including holding no `gpui` types itself, so
-    /// the stage machine and the provenance markers stay unit-testable
-    /// without a window.
+    /// State for the open config-object dialog, shared across config domains.
+    /// Created by [`objectdialog::render::open`] and cleared on close. The stage
+    /// machine and provenance data contain no GPUI types; scrolling is separate.
     object_dialog: Option<objectdialog::ObjectDialogState>,
     /// Scroll state for the object dialog's row list — the
     /// `keybindings_scroll`/`settings_scroll` split, one dialog over.
     object_dialog_scroll: ScrollHandle,
-    /// Config edits applied to memory and not yet flushed to disk (Phase
-    /// 4c, `objectdialog::apply`): the debounce's accumulated batch, plus
-    /// the layered documents a failed write restores memory from.
-    ///
-    /// It lives on `ShellView` rather than on `ObjectDialogState` because
-    /// it must outlive the dialog: a trader can close the dialog inside
-    /// the 250 ms debounce window, and the write — and its failure
-    /// handling — still has to happen.
+    /// Pending config-write batch and rollback documents. This state outlives
+    /// the dialog because the user can close it within the 250 ms debounce
+    /// window; the write and any failure handling must still complete.
     pending_config_write: Option<objectdialog::apply::PendingConfigWrite>,
     /// Which scheduled config-write flush is the current one. Bumped by
     /// every applied edit; a flush task that wakes holding an older value
     /// has been superseded and does nothing, which is how N keystrokes
     /// coalesce into one write.
     config_write_seq: u64,
-    /// The status bar's own notice for the last config write that did
-    /// not fully land, as either of two independent outcomes leaves it
-    /// (§19.6): a write that failed and had to be rolled back out of
-    /// memory (`objectdialog::apply::revert_failed_write`), or one that
-    /// reached disk but whose in-memory merge the reload decided to
-    /// reject (`objectdialog::apply::REJECTED_STATUS`, set by
-    /// `finish_flush`'s `rejected` arm — the file and the memory halves
-    /// of a flush are independent, and this is the file succeeding while
-    /// memory does not). Cleared only by the next flush memory ACCEPTS,
-    /// never by the write that failed or was rejected in the first
-    /// place — `None` therefore means "memory currently agrees with
-    /// disk", not merely "no failure since the last success".
-    ///
-    /// The status bar rather than the dialog's own notice, because
-    /// `pending_config_write` outlives the dialog on purpose: a trader can
-    /// close the dialog inside the 250 ms debounce window, which is the
-    /// commonest way to reach the failure path with no dialog left on
-    /// screen to carry a notice.
+    /// Status notice for a failed config write or a disk write whose in-memory
+    /// reload was rejected. Cleared by the next accepted flush. Kept on the
+    /// shell because the debounced flush may finish after its dialog closes.
     pub(crate) config_write_error: Option<String>,
-    /// Today's date on the configured clock (Phase 4b Task 1 fix round
-    /// 1, MIN-9) — refreshed once per reload-poll tick (~500ms,
-    /// alongside the flip sweep and the dirty-session flush) rather than
-    /// read fresh on every paint. Before this, `render`'s own fresh
-    /// clock-read call (feeding `Frame::bar_model`'s `(versions, today)`
-    /// cache key, M12) ran on every single render — including every one
-    /// of the ~100% of frames that hit the cache — new per-frame
-    /// clock-read work on the render path for a value that only
-    /// meaningfully changes once a day.
+    /// Today on the configured clock, refreshed by the reload poll. Rendering
+    /// uses this cached date for the scope bar instead of reading the clock on
+    /// every repaint. A date change triggers a new render.
     pub(super) today: chrono::NaiveDate,
 }
 
-/// Whether two layered doc slices for the same config file
-/// (`Config::layered_docs(name)`, Builtin → Desk → User order) are
-/// identical — content, not just count. Used by [`ShellView::apply_reload`]
-/// both for the keymap (Review fix round 1, Finding 2 — deciding whether a
-/// reload's palette-relevant inputs actually changed) and, per-doc, for
-/// deciding whether `groupings`/`views`/`dimensions`/`sources`/`datasets`
-/// changed (§4.5). A free function comparing fields directly rather than a
-/// `PartialEq` derive on `LayerDoc` itself (`geode_core::config`): every
-/// field here already implements `PartialEq` (`Layer`, `String`, `PathBuf`,
-/// `toml::Table`), so this needs no change to that shared type just for
-/// these call sites.
+/// Compare layered config documents by layer, name, path, and table content,
+/// in order. Reload uses this to invalidate config-dependent state only
+/// when its inputs actually change.
 fn docs_equal(a: &[LayerDoc], b: &[LayerDoc]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
@@ -1063,14 +688,14 @@ impl ShellView {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
-        // The toolbar's filter field (Task 4): built once here, not per
+        // The toolbar's filter field: built once here, not per
         // render, so `Input`'s own cursor/selection/focus state survives
         // across frames. No placeholder — `toolbar::toolbar` names the
         // field with a search icon in the `Input`'s prefix slot instead,
         // the same way the palette and the dialogs' filter row do.
         let filter_input = cx.new(|cx| InputState::new(window, cx));
 
-        // The scope bar's live text field (Task 4, spec §3.1/§3.8/§3.11):
+        // The scope bar's live text field:
         // one subscription for the life of the window, same lifecycle
         // shape as `palette_input`'s below. `Focus` opens a text-editing
         // session (`begin_scope_session`) and remembers the pre-focus
@@ -1113,24 +738,12 @@ impl ShellView {
         )
         .detach();
 
-        // The palette's own query field (palette-input-polish task) — see
-        // the `palette_input` field's own doc comment for the full
-        // lifecycle/routing story. No placeholder text (unchanged plan
-        // constraint carried over from the old hand-rolled input: an empty
-        // query renders bare, no hint-text fallback).
+        // The palette input is stable for the life of the window and has no
+        // placeholder; opening resets its value without replacing the entity.
         let palette_input = cx.new(|cx| InputState::new(window, cx));
-        // One subscription for the life of the window, not re-subscribed
-        // per palette open: `InputEvent::Change` only ever fires while this
-        // field is actually focused (which only happens while `self.
-        // palette` is open), and `toggle_palette`'s own `set_value("", ..)`
-        // reset deliberately does *not* emit `Change` (`InputState::
-        // set_value`'s own doc comment: it suppresses events around the
-        // replace) — so this handler only ever runs for a real user edit,
-        // never for the open-time reset. Feeds the new value into the
-        // *pure* `PaletteState::set_query` (selection-reset-to-0 included),
-        // exactly mirroring what `push_char`/`backspace` used to do
-        // per-keystroke, then follows the selection change into view the
-        // same way every other selection-changing path here does.
+        // A user edit updates the pure query state, resets selection, and
+        // scrolls it into view. Programmatic `set_value` resets suppress Change
+        // events, so opening the palette does not enter this path.
         cx.subscribe_in(&palette_input, window, |view, input, event, _window, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
@@ -1144,7 +757,7 @@ impl ShellView {
         })
         .detach();
 
-        // The per-tile command line's own input (§3.4) — same lifecycle
+        // The per-tile command line's own input — same lifecycle
         // as `palette_input` above (built once, value reset on every
         // open, one `InputEvent::Change` subscription for the life of the
         // window). Unlike the palette's own subscription, this only ever
@@ -1219,17 +832,14 @@ impl ShellView {
                 view.choice_dialog_scroll
                     .scroll_to_item(state.list.ranked_highlighted());
             } else if let Some(state) = view.as_of_dialog.as_mut() {
-                // The field's text is the query (spec §5.1); a re-rank
-                // resets the highlight to 0, so follow it the same way
-                // the sibling arms above do (review round 2 re-review,
-                // finding 3's second seam).
+                // Re-ranking resets the highlight; keep the selected row visible.
                 asof_view::on_query_changed(state, &query);
                 view.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
                     state.painted(),
                     state.highlighted(),
                 ));
             } else if let Some(state) = view.scope_expr_dialog.as_mut() {
-                // The field IS the value (spec §4.1); typing clears the last
+                // The field IS the value; typing clears the last
                 // failed commit's message.
                 scope_expr_view::on_query_changed(state);
             }
@@ -1237,23 +847,10 @@ impl ShellView {
         })
         .detach();
 
-        // End any in-flight drag when the window deactivates (post-merge
-        // review finding 6): cmd+tab away with the button held means the
-        // release lands in some other app where no event reaches this
-        // window — without this observer the stale ACTIVE drag survived,
-        // and the click that re-activated the window could advance and
-        // apply it. `cx.observe_window_activation` is available at the
-        // pinned gpui rev (`gpui-pre-0.3.5/src/app/context.rs`); the
-        // platform layer feeds it from `on_active_status_change`, which
-        // macOS wires (`gpui-pre-macos-0.3.5/src/window.rs`) — the
-        // Windows wiring (`gpui-pre-windows`) was not re-read on this
-        // host. Each drag kind ends per its own recorded semantics — the
-        // same split as the Escape cancel in `handle_key_down`: a tile
-        // drag CANCELS (nothing was applied, so nothing is lost) and a
-        // divider drag FINISHES (its resizes were applied live and
-        // persist; `cancel_divider_drag` keeps them and dirties the
-        // session). The BUG 4 buttonless-move cancel remains the backstop
-        // for any deactivation a platform fails to report.
+        // End tracking on window deactivation: the mouse release may land in
+        // another app. Tile drags cancel without applying; divider drags keep
+        // their live resizes and mark them dirty. Buttonless mouse moves also
+        // terminate tracking if a platform does not report deactivation.
         cx.observe_window_activation(window, |view, window, cx| {
             if !window.is_window_active()
                 && (view.tile_drag.is_some() || view.divider_drag.is_some())
@@ -1265,12 +862,8 @@ impl ShellView {
         })
         .detach();
 
-        // `last_snapshot` starts empty rather than being seeded with a
-        // synchronous `reload::scan` call right here: that would be real
-        // filesystem I/O on the UI thread, during `new` (spec PHILOSOPHY.md
-        // — review finding: the seed scan is exactly as much "the UI
-        // thread" as any other poll). The watcher spawned below performs
-        // the real seed scan, off-thread, as its first iteration.
+        // Seed the config snapshot on the background executor. Directory scans
+        // perform filesystem I/O and must not run during UI construction.
         cx.spawn(async move |this, cx| {
             let mut is_first_poll = true;
             loop {
@@ -1278,23 +871,9 @@ impl ShellView {
                     .timer(hot_reload::RELOAD_POLL_INTERVAL)
                     .await;
 
-                // Sweep the flip barrier's deadline (Phase 4b M7),
-                // unconditionally on every tick just like the session
-                // flush right below — one always-running timer rather
-                // than a fresh detached one per scope/grouping/as-of
-                // mutation (`on_frame_changed` used to spawn one on every
-                // such change; a burst of keystrokes spawned a burst of
-                // timers, all racing to sweep the same barrier). `sweep`
-                // itself is a cheap no-op once nothing is open or the
-                // deadline hasn't passed, so this costs nothing on a
-                // quiet tick. The tradeoff (spec §3.10's as-built note,
-                // corrected in Task 1 fix round 1 MIN-5): a barrier now
-                // releases on the poll loop's next iteration after
-                // `FLIP_DEADLINE`, not exactly at it — bounded by that
-                // whole iteration (this timer, then the session flush
-                // below, then the `reload::scan` further down), not by
-                // the timer interval alone, since nothing sweeps again
-                // until the loop comes back around to this line.
+                // Sweep the flip barrier on the shared poll loop. An expired barrier
+                // releases on the next iteration, so delay includes the timer, session
+                // write, and config scan rather than only the timer interval.
                 let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
                     return; // window/entity gone; stop polling
                 };
@@ -1304,19 +883,9 @@ impl ShellView {
                     }
                 });
 
-                // Copy the frame-time histogram into `Diagnostics`
-                // (Phase 4b open question 2's ruling), same tick — a
-                // no-op, allocation-free, unless a diagnostics tile is
-                // actually watching. `refresh_frame_hist` itself also
-                // compares before copying (Task 4 fix round 1, MAJ-3),
-                // but the `~176`-byte `view.perf.clone()` (`FrameHistogram`
-                // is `[u32; 36]` plus four scalars) that used to happen
-                // unconditionally right here, every ~500ms tick,
-                // regardless of `watchers()`, is gated on it too now
-                // (Task 4 fix round 1, MIN-1 — the comment used to claim
-                // this whole thing was already "allocation-free unless
-                // watching" while the clone ran every tick regardless;
-                // now it's actually true, not just documented that way).
+                // Refresh the diagnostics histogram only while a tile watches it.
+                // The source clone is gated as well; the destination compares before
+                // copying and notifying.
                 let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {
                     let watched = view.diagnostics.read(cx).watchers() > 0;
                     (view.diagnostics.clone(), watched)
@@ -1334,17 +903,8 @@ impl ShellView {
                     });
                 }
 
-                // Refresh `today` (Phase 4b Task 1 fix round 1, MIN-9),
-                // same tick, same "cheap no-op unless it actually
-                // changed" shape as the sweep just above — this is the
-                // one clock read the whole ~500ms tick needs; `render`
-                // (and therefore `Frame::bar_model`'s cache key) reads
-                // `self.today` rather than reading the clock fresh
-                // itself, so a held key no longer pays a clock read on
-                // every repaint for a value that only changes once a
-                // day. Only notifies when the date actually moved on —
-                // any other trigger repaints "for free" with the fresh
-                // value already in place.
+                // Refresh the cached date and notify only when it changes. Rendering
+                // reads this value without an additional clock read.
                 let Ok(changed) = this.update(cx, |view, cx| {
                     let today = cx
                         .global::<crate::clock::AppClock>()
@@ -1463,56 +1023,36 @@ impl ShellView {
         let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
         cx.set_global(crate::clock::AppClock(clock));
 
-        // The keymap's bindings for module-visible chord lookup
-        // (`tips::Chords`, the workspace's second global — see its doc).
+        // Publish bindings for module tooltip chord lookup through `tips::Chords`.
         cx.set_global(crate::tips::Chords(Arc::new(
             services.keymap.bindings().to_vec(),
         )));
 
-        // The shared frame (§4): built from whatever `[groupings]`/
+        // The shared frame: built from whatever `[groupings]`/
         // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
         // against) config resolved to — see `hot_reload::rebuild_slots`/
         // `rebuild_saved_scopes`, shared with `apply_reload`'s own
         // rebuilds.
         let frame = {
             let slots = hot_reload::rebuild_slots(&services.config);
-            // `true` (Phase 4b Task 1 fix round 1, MIN-8): the frame's
-            // own initial load is the one startup caller that reports —
-            // `main.rs`'s `saved_scopes(&config)` call (action
-            // registration, before this even runs) passes `false`, so a
-            // malformed `scopes.toml` entry doesn't print twice.
+            // Report saved-scope diagnostics here. Startup action registration
+            // loads the same scopes with reporting disabled to avoid duplicate logs.
             let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
             cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
         };
-        // A slot or scope saved through `Frame::save_slot`/`save_scope`
-        // is drained and persisted here — see `on_frame_changed`'s own
-        // doc comment (§4.2/§3.9: the frame is pure and has no file
-        // access, so `ShellView` is the one place that can do the
-        // write). Until command-line locality closed the route
-        // 2026-09-20, a module reached those two through `:group save
-        // N`/`:scope save NAME`; both now save through the Groupings and
-        // Scopes dialogs' own `config_write` calls, and this drain is
-        // kept as the seam the locality sweep tests watch. `observe_in`
-        // (not `observe`) because
-        // Task 4's text-field reflection needs `&mut Window` to call
-        // `InputState::set_value`.
+        // Observe the frame before creating occupants. GPUI notifies observers
+        // in registration order, so `on_frame_changed` opens the flip barrier
+        // before any occupant reacts or reports its arrival.
         //
-        // Registered here, before any tile occupant exists (occupants
-        // are built later, as tiles are hosted), this is the FIRST
-        // observer of `frame`'s notify — gpui fans a notify out to an
-        // entity's observers in registration order. `on_frame_changed`'s
-        // `open_flip` branch below relies on that: every occupant sees
-        // the barrier already open (or the flip barrier's key set
-        // finalised) before its own `on_frame_changed` runs in the same
-        // flush, which is what lets a non-following tile
-        // (`BlotterTile::on_frame_changed`'s `barrier_wants`/`arrived`
-        // branch) self-arrive without ever requerying.
+        // This observer also drains pending config writes and reflects scope
+        // text into the input. It needs `observe_in` because input updates
+        // require a `Window`.
         cx.observe_in(&frame, window, |view, frame, window, cx| {
             view.on_frame_changed(frame, window, cx)
         })
         .detach();
 
-        // The shell-owned diagnostics gatherer (Phase 4b §4.4), created
+        // The shell-owned diagnostics gatherer, created
         // alongside the frame — see the field's own doc comment. Seeded
         // from `services.log`'s levels when logging is wired up (`None`
         // in every test setup that doesn't opt in, mirroring `log`
@@ -1525,41 +1065,15 @@ impl ShellView {
                 .unwrap_or_default();
             cx.new(|_| Diagnostics::new(levels))
         };
-        // The config this window started with already carries whatever
-        // `Config::load` diagnosed — `main.rs`'s own startup
-        // `print_diagnostic` loop logs the same list to `geode::config`;
-        // recorded here too so the diagnostics tile's "config" section
-        // has it from the very first frame, not only from the first live
-        // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
-        //
-        // Plus the three diagnostics that are NOT in that list, because
-        // they are computed from the config rather than by loading it:
-        // the refused `keymap.mod` alias (Phase 4a Task 4b, an error),
-        // the retired `[app] modules.default` key (spec 2026-09-08
-        // add-tile §7.1, a warning), a `[timeseries] default_source`
-        // naming no fetch source (timeseries spec §9.12, a warning) and
-        // the `[time]` clock's diagnostics (as-of dialog spec §6.1).
-        // `main.rs` only logged the first two at startup, so before this
-        // a trader who never edited config mid-session saw neither in
-        // the diagnostics tile — while `apply_reload` had been folding
-        // them in all along, meaning the tile's contents depended on
-        // whether a reload had happened yet. Same six groups
-        // `apply_reload` extends, in the same order (config, mod alias,
-        // `modules.default`, `default_source`, `[time]`, keymap), so the
-        // section reads the same whichever path filled it. The first five
-        // are pure over `&Config` and recomputed here; the keymap
-        // diagnostics are not — `build_keymap` needs the startup
-        // registry — so they ride on `ShellServices::keymap_diagnostics`,
-        // which `main.rs` fills.
+        // Seed diagnostics from config loading, derived settings validation,
+        // and startup keymap compilation. Keep this order aligned with
+        // `apply_reload` so the section is consistent before and after reload.
         let startup_diagnostics = {
             let cfg = &services.config;
             let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            // And the third of the same shape: `[timeseries]
-            // default_source` naming no configured fetch source
-            // (timeseries spec §9.12) — pure over `&Config`, a warning,
-            // folded in here and in `apply_reload` alike.
+            // Warn when the default timeseries source names no fetch source.
             diags.extend(crate::series::default_source_diagnostic(cfg));
             diags.extend(clock_diags.iter().cloned());
             diags.extend(services.keymap_diagnostics.iter().cloned());
@@ -1594,16 +1108,16 @@ impl ShellView {
         // `on_frame_changed`.
         let last_flip_versions = frame.read(cx).versions();
 
-        // M8: the docs the data engine actually starts with — see
+        // The docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
         let egress_baseline = services.config.layered_docs("egress").to_vec();
         // Same reasoning, for the `[pricing] adapter` key the data
-        // engine's pricer was chosen from (line-pricer §5.5) — see
+        // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
         let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
-        // The dimension pickers' column list (Phase 4a §3.3) — see
+        // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
 
@@ -1684,22 +1198,10 @@ impl ShellView {
         }
     }
 
-    /// Close whatever modal is open and hand focus back to the shell root
-    /// — the modal-side twin of [`close_palette`](Self::close_palette),
-    /// added by the filter-first dialog UX because a dialog's filter
-    /// field may currently hold focus and nothing else would give it
-    /// back. The one standard door for closing a modal: the escape arm in
-    /// `handle_key_down`, and `dialog::render_modal`'s close-button and
-    /// backdrop listeners, all go through this rather than setting
-    /// `self.modal = None` directly.
-    ///
-    /// Also clears every dialog's state (`keybindings`, `settings`, the
-    /// dimension picker — Phase 4a §3.3 — `picker`, the as-of dialog —
-    /// Phase 4a §3.6 — `as_of_dialog`, and Phase 4c's `object_dialog`).
-    /// That is not tidiness: the shared `dialog_input` subscription
-    /// routes by "whichever state is `Some`", so a stale `settings` left
-    /// behind by an earlier open would swallow the *keybinding* dialog's
-    /// queries.
+    /// Close the modal, clear every dialog state, and restore overlay focus.
+    /// Escape, the close button, and backdrop clicks use this same path.
+    /// Clearing all states is required because the shared input subscription
+    /// routes to whichever dialog state is present.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.settings = None;
@@ -1740,41 +1242,20 @@ impl ShellView {
             .is_focused(window)
     }
 
-    /// Fired by the `cx.observe_in(&frame, ..)` set up in `new` whenever
-    /// the frame notifies — which covers the keyboard's `frame::slot_*`
-    /// dispatches and, until command-line locality closed the route
-    /// 2026-09-20, a module's own `:group save N` (now the Groupings
-    /// dialog's own `config_write` call). A slot saved through
-    /// `Frame::save_slot` is persisted here, off the UI thread, because
-    /// the frame is pure and has no file access (§4.2): the frame only
-    /// remembers the save in `pending_persist`, and this is where it
-    /// gets drained and actually written.
+    /// Respond to frame notifications: coordinate visible-tile flips, refresh
+    /// as-of rows, drain pending scope/grouping writes in the background, and
+    /// reflect scope text into the input. The frame itself performs no I/O.
     fn on_frame_changed(
         &mut self,
         frame: Entity<Frame>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Phase 4 §3.10: a scope/grouping/as-of change opens a flip
-        // barrier over every currently visible tile before anything
-        // requeries, so the tiles that follow it all swap to the new
-        // triple in one notify pass rather than painting one at a time
-        // as their own outcomes happen to land. `data`/`config` bumps
-        // never open one — every tile already requeries independently
-        // for those (§4.1), and there is no "everyone at once" to
-        // coordinate. `open_flip` itself bumps no version, so the notify
-        // it does not emit cannot re-enter this branch.
-        //
-        // "before anything requeries" holds because this observer is
-        // registered (in `new`, above) before any tile occupant's own —
-        // gpui calls one entity's observers in registration order, so
-        // `open_flip` below always finishes before a single tile's own
-        // `on_frame_changed` runs for the same notify. A non-following
-        // tile's self-arrival from its own `on_frame_changed`
-        // (`BlotterTile`'s `barrier_wants`/`arrived` branch) depends on
-        // the barrier already being open with the full key set by the
-        // time it checks — it never requeries, so nothing else would
-        // open one for it.
+        // Open a flip barrier for scope, grouping, or as-of changes so visible
+        // tiles publish the new frame together. Data/config changes query
+        // independently and do not open a barrier. This observer is registered
+        // before occupants, ensuring the full key set is ready before their
+        // frame callbacks run, including non-following tiles that self-arrive.
         let now_v = frame.read(cx).versions();
         let last = self.last_flip_versions;
         if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
@@ -1784,33 +1265,18 @@ impl ShellView {
             self.visible_tile_keys(&mut keys);
             frame.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
             self.scratch_visible_keys = keys;
-            // Phase 4b M7: no detached per-mutation timer here any more —
-            // a burst of keystrokes used to spawn one `FLIP_DEADLINE`
-            // timer each, all racing to sweep the same barrier. The
-            // reload-poll loop (`ShellView::new`, ~500ms) sweeps every
-            // tick instead, so the deadline is "released on the next
-            // tick after `FLIP_DEADLINE`" rather than exactly on it —
-            // see that loop's own comment and spec §3.10's as-built note.
+            // The shared reload poll sweeps the deadline; no timer is needed
+            // for each frame mutation.
         }
-        // Review round 2, finding 5 (as-of dialog spec §5.1, parity with
-        // the old `cached_presets`): a publish landing while the dialog
-        // is open must show up in its row list without a close/reopen.
-        // Gated on the `data` version alone (never `scope`/`grouping`/
-        // `as_of`, which this method's own flip-barrier branch above
-        // already owns) so a scope edit elsewhere does not also rebuild
-        // rows a trader is actively filtering.
+        // Refresh an open as-of dialog when publishes change. Scope, grouping,
+        // and as-of edits do not rebuild rows while the user is filtering.
         if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {
             self.as_of_data_version = now_v.data;
             let as_of = frame.read(cx).as_of().clone();
             let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
             if let Some(state) = self.as_of_dialog.as_mut() {
                 state.refresh(&as_of, &publishes, chrono::Utc::now());
-                // Final whole-branch review, finding M-10: the same
-                // scroll-follow every other seam that moves the
-                // highlight already owns (`input.rs`'s query-change arm,
-                // `handle_key`'s `tab` and nav arms) — a publish landing
-                // below the fold must not leave the restored highlight
-                // (`refresh`'s identity match) off-screen.
+                // Keep the identity-preserved highlight visible after refreshing rows.
                 self.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
                     state.painted(),
                     state.highlighted(),
@@ -1827,15 +1293,9 @@ impl ShellView {
             })
             .detach();
         }
-        // A scope saved through `Frame::save_scope` (spec §3.9) is
-        // persisted here too — same reasoning as the grouping slot above:
-        // the frame is pure and has no file access. Until command-line
-        // locality closed the route 2026-09-20, a module reached
-        // `save_scope` through `:scope save NAME`; the live door is the
-        // Scopes dialog's `Scope: Save current as…` action
-        // (`open_save_scope`, `NameSeed::FromFrame`), which writes
-        // through `config_write` directly, so this drain is kept as the
-        // seam the locality sweep tests watch.
+        // Drain scope saves in the background, just like grouping saves. The
+        // Scopes dialog writes through `config_write` directly; this handles
+        // requests queued on the frame itself.
         if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
             && let Some(dir) = self.user_dir.clone()
         {
@@ -1846,14 +1306,9 @@ impl ShellView {
             })
             .detach();
         }
-        // Reflect the frame's text back into the field (Task 4, spec
-        // §3.11): an unfocused field always shows the frame's truth — a
-        // scope set elsewhere (a saved-scope load, the expression dialog —
-        // `:scope` was a tile command until 2026-09-20) must show up here even though this field
-        // never had focus. Skipped while the field IS focused: the user's
-        // own typing is the truth then, and `set_value` would stomp the
-        // caret/selection mid-edit. Reading the value is a `SharedString`
-        // clone per frame notify, not per render — fine.
+        // Reflect external scope changes into an unfocused input. While it is
+        // focused, its text remains authoritative; replacing the value would
+        // interrupt the user's caret and selection.
         if !self
             .filter_input
             .read(cx)
@@ -1871,13 +1326,9 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Fired by the `cx.observe(&diagnostics, ..)` set up in `new`
-    /// whenever the entity notifies: drains the two pending requests a
-    /// module can queue but never reach `ShellView` to act on directly
-    /// (spec ruling — modules never reach `ShellView`) — `request_level`'s
-    /// runtime apply + persist, and `request_overlay_toggle`. The catalog
-    /// request drain lives in the app bridge (`geode-app` is the only
-    /// crate allowed to touch `geode-data`), not here.
+    /// Apply queued log-level and overlay requests from shared diagnostics.
+    /// Modules access that entity without reaching `ShellView`. Catalog
+    /// requests are drained by the app bridge, which owns data-service access.
     fn on_diagnostics_changed(&mut self, diagnostics: Entity<Diagnostics>, cx: &mut Context<Self>) {
         let (pending_level, pending_overlay) = diagnostics.update(cx, |d, _cx| {
             (d.take_pending_level(), d.take_pending_overlay_toggle())
@@ -1906,15 +1357,10 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Set a grouping slot in memory. Until command-line locality closed
-    /// the route 2026-09-20, a module reached this through `:group save
-    /// N` — modules hold no config/file access, so this was the seam
-    /// they called through; the Groupings dialog now writes a slot
-    /// through `config_write` directly. This method has had no
-    /// production caller since 2026-09-20 and is kept as the seam the
-    /// locality sweep tests watch. The write to the user layer's
-    /// `groupings.toml` happens off the UI thread, via
-    /// `on_frame_changed` observing the frame's own notify.
+    /// Set a grouping slot in memory and notify the frame observer, which
+    /// writes it to the user layer in the background. The Groupings dialog
+    /// uses its own config-write path; this entry point is exercised by
+    /// locality tests.
     pub fn save_slot(
         &mut self,
         slot: u8,
@@ -1931,7 +1377,7 @@ impl ShellView {
     }
 
     /// The current config, for the app bridge to read the new `views` doc
-    /// out of after a `ShellEvent::ConfigReloaded` (§4.5) — `geode-app` is
+    /// out of after a `ShellEvent::ConfigReloaded` — `geode-app` is
     /// the only crate allowed to touch `geode-data`, so it needs to reach
     /// the reloaded config through the shell rather than reloading it a
     /// second time itself.
@@ -1939,18 +1385,17 @@ impl ShellView {
         &self.services.config
     }
 
-    /// The shared frame entity every occupant holds (§4).
+    /// The shared frame entity every occupant holds.
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
     }
 
-    /// The shell-owned diagnostics entity every occupant can hold too
-    /// (Phase 4b §4.4).
+    /// The shared diagnostics entity available to occupants.
     pub fn diagnostics(&self) -> &Entity<Diagnostics> {
         &self.diagnostics
     }
 
-    /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —
+    /// The open dimension picker's state, if any —
     /// cross-crate test reach only, the same door `module::recording`
     /// opens for `geode-blotter`'s tests: `geode-app`'s bridge tests need
     /// to see a picker's `values` land (or fail to) without a `dispatch`
@@ -1972,24 +1417,10 @@ impl ShellView {
         &self.dialog_input
     }
 
-    /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by
-    /// the app bridge from the `ShellEvent::DistinctRequested` it submitted
-    /// on this same picker's behalf (or, since the scopes-editing spec §4,
-    /// the object dialog's own Values stage). An outcome tagged
-    /// `SCOPES_KEY` is diverted to `objectdialog::deliver_values` before
-    /// any of the picker's own guards run — the two callers ask under
-    /// different keys precisely so neither can be mistaken for the
-    /// other's answer. Everything below this is the picker's own path:
-    /// dropped — no picker mutation, no notify — unless every one of
-    /// these holds: a picker is open, its stage is `Values` (a
-    /// `Columns`-stage picker asked for nothing and wants nothing), the
-    /// outcome names that stage's own column (a picker that moved on to a
-    /// different column between request and reply), and the outcome's tag
-    /// matches the picker's *latest* `request_values` call (`PickerState::
-    /// tag`, bumped once per request) — an outcome racing in from a
-    /// superseded request (the user re-opened the same column, or the
-    /// query pool simply finished them out of order) is exactly the stale
-    /// result §7.3 says must never be rendered.
+    /// Deliver a distinct-value reply from the app bridge. `SCOPES_KEY` routes
+    /// to the object dialog's Values stage. Other replies reach the dimension
+    /// picker only if it is open in Values stage and both column and latest
+    /// request tag match. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
         if outcome.key == SCOPES_KEY {
             objectdialog::deliver_values(self, outcome, cx);

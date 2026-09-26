@@ -2725,18 +2725,9 @@ fn build(
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
 
-    // the merged `colours.toml` AND the theme's own anchors/tokens, read once for the
-    // whole list rather than once per row — every browse row's swatch resolves its own
-    // saved color against them. `None` for every other domain, so a non-Colors dialog
-    // never even asks `Config` for a doc it will never read the rest of the row loop
-    // for.
-    //
-    // The pair is hoisted with the doc: `resolve_named` (since deleted — this hoist
-    // left it with no caller) read the theme inside itself, so resolving per row cost M
-    // x 28 `Hsla -> Rgb` conversions for a list of M colors. Bounded by color count
-    // in a modal rather than by row count on the paint path, so it is tidiness rather
-    // than budget — but it is the same shape the blotter's I-1 memo answers, and the
-    // list was already hoisting the doc.
+    // Read named colours and theme anchors/tokens once for the whole Colors
+    // list. Swatches share these inputs, avoiding repeated theme conversions
+    // per row. Other domains do not load the colour document.
     let named_colours: Option<(
         geode_core::colour::NamedColours,
         geode_core::colour::Anchors,
