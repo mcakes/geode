@@ -16,6 +16,7 @@ use crate::keymap::fragments;
 use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
+use geode_core::launch::{ContextField, LaunchContext};
 use geode_core::pricing::PriceOutcome;
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
@@ -244,6 +245,18 @@ pub trait TileContent {
     fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
+    /// The context at this tile's cursor, for `tile::open_with`. Pulled by
+    /// the shell when the action runs, so a module needs no handle into the
+    /// shell. Empty (the default) whenever the cursor names no single
+    /// value; the shell then opens the plain tile-kind picker.
+    fn launch_context(&self, _cx: &App) -> LaunchContext {
+        LaunchContext::default()
+    }
+    /// Called once, deferred after the first render, for an occupant that
+    /// `ShellView::add_tile` created (not a session restore) and that is the
+    /// focused tile on that render. A module that is useless without some
+    /// state asks for it here; the default does nothing.
+    fn launched(&self, _window: &mut Window, _cx: &mut App) {}
     /// Expose the last stack handle to hosting tests. Content is stored as
     /// `Box<dyn TileContent>`, so tests cannot access the concrete occupant's
     /// fields. Defaults to `None`; [`recording::RecordingContent`] returns its
@@ -285,6 +298,18 @@ pub trait ModuleFactory {
     /// `None` for a module without its own bindings. See
     /// [`crate::keymap::fragments`] for validation and layer order.
     fn default_keymap(&self) -> Option<&'static str> {
+        None
+    }
+    /// Context fields this kind can open on. Empty (the default) keeps the
+    /// kind out of `tile::open_with`'s list.
+    fn accepts(&self) -> &'static [ContextField] {
+        &[]
+    }
+    /// Translate a launch context into the table [`Self::create`] reads as
+    /// its restored record. The factory owns the translation so the shell
+    /// never learns a module's state format. `None` (the default) creates
+    /// the tile as a plain add would.
+    fn launch_state(&self, _ctx: &LaunchContext) -> Option<toml::Table> {
         None
     }
     /// Build an occupant for `tile`, optionally restoring its opaque state.
@@ -510,6 +535,7 @@ pub mod recording {
         /// arrived.
         SeriesFetched(TileId, String),
         Stack(TileId, Option<(usize, usize)>),
+        Launched(TileId),
     }
 
     pub struct RecordingFactory {
@@ -553,6 +579,20 @@ pub mod recording {
         /// `Window::focused` `None` — see it for why dropping is not
         /// enough on its own.
         pub input: Rc<RefCell<Option<Entity<InputState>>>>,
+        /// What every occupant this factory creates answers from
+        /// `launch_context`. Shared and mutable so a test can change the
+        /// source's context AFTER `tile::open_with` has opened its dialog,
+        /// and so prove the shell captured it at open.
+        pub launch_context: Rc<RefCell<LaunchContext>>,
+        /// What `accepts` answers. Empty by default, so every existing
+        /// fixture stays out of `tile::open_with`'s list.
+        pub accepts: &'static [ContextField],
+        /// When set, `launched` opens the insert-mode input exactly as
+        /// `<kind>::edit` does — the stand-in for a panel that opens its own
+        /// picker when launched, so a shell test can prove the input still
+        /// holds the keyboard after the modal's focus return and the next
+        /// frame's focus restore.
+        pub edit_on_launch: bool,
     }
 
     impl RecordingFactory {
@@ -566,6 +606,9 @@ pub mod recording {
                 fragment: None,
                 contexts: &[],
                 input: Rc::new(RefCell::new(None)),
+                launch_context: Rc::new(RefCell::new(LaunchContext::default())),
+                accepts: &[],
+                edit_on_launch: false,
             }
         }
     }
@@ -622,6 +665,12 @@ pub mod recording {
         /// — a test's window into `set_stack`, since the field itself is
         /// only ever written by the trait method.
         pub stack: RefCell<Option<StackHandle>>,
+        /// Shared with [`RecordingFactory::launch_context`]; see it for why
+        /// it is mutable after creation.
+        launch_context: Rc<RefCell<LaunchContext>>,
+        /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
+        /// `launched` does with it.
+        edit_on_launch: bool,
     }
 
     impl TileContent for RecordingContent {
@@ -781,6 +830,16 @@ pub mod recording {
         fn stack_handle_for_test(&self) -> Option<StackHandle> {
             self.stack.borrow().clone()
         }
+        fn launch_context(&self, _cx: &App) -> LaunchContext {
+            self.launch_context.borrow().clone()
+        }
+        fn launched(&self, window: &mut Window, cx: &mut App) {
+            self.log.borrow_mut().push(Recorded::Launched(self.tile));
+            if self.edit_on_launch {
+                // The verb is what `dispatch` matches; the kind is irrelevant.
+                self.dispatch(&ActionId("launch::edit".into()), None, window, cx);
+            }
+        }
     }
 
     impl ModuleFactory for RecordingFactory {
@@ -796,6 +855,23 @@ pub mod recording {
         }
         fn default_keymap(&self) -> Option<&'static str> {
             self.fragment
+        }
+        fn accepts(&self) -> &'static [ContextField] {
+            self.accepts
+        }
+        /// `{ underlying = ["<u>"] }`, the market-data panel's own shape,
+        /// when this fixture accepts the underlying field.
+        fn launch_state(&self, ctx: &LaunchContext) -> Option<toml::Table> {
+            if !self.accepts.contains(&ContextField::Underlying) {
+                return None;
+            }
+            let u = ctx.underlying.clone()?;
+            let mut t = toml::Table::new();
+            t.insert(
+                "underlying".into(),
+                toml::Value::Array(vec![toml::Value::String(u)]),
+            );
+            Some(t)
         }
         /// `noop`, plus the four verbs a keymap fragment needs to drive
         /// insert mode through real keypresses:
@@ -851,6 +927,8 @@ pub mod recording {
                     insert: Cell::new(false),
                     input: self.input.clone(),
                     stack: RefCell::new(None),
+                    launch_context: self.launch_context.clone(),
+                    edit_on_launch: self.edit_on_launch,
                 }),
             }
         }
