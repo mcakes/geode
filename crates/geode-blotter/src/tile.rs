@@ -191,7 +191,12 @@ pub struct BlotterTile {
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
-    pub error: Option<String>,
+    /// A notice painted in the header, paired with the tone it paints in
+    /// — a dropped sort is a state change the trader caused, not a
+    /// failure, so it carries [`Tone::WarningText`] rather than the
+    /// [`Tone::DangerText`] every other writer here uses. The renderer
+    /// reads the tone from here rather than assuming one.
+    pub error: Option<(String, Tone)>,
     find: Option<FindState>,
     /// An outcome that arrived while the frame's flip barrier (Phase 4
     /// §3.10) still wants this tile's key — held here, not applied, until
@@ -709,8 +714,9 @@ impl BlotterTile {
                 t.delegate_mut().dropped_sort.take()
             });
             if let Some(name) = dropped_sort {
-                self.error = Some(format!(
-                    "sort on '{name}' dropped: the column is no longer in this view"
+                self.error = Some((
+                    format!("sort on '{name}' dropped: the column is no longer in this view"),
+                    Tone::WarningText,
                 ));
             }
         }
@@ -724,7 +730,10 @@ impl BlotterTile {
         // otherwise have caught it against.
         self.staged = None;
         let Some(view) = self.view() else {
-            self.error = Some(format!("view '{}' is not configured", self.view_name));
+            self.error = Some((
+                format!("view '{}' is not configured", self.view_name),
+                Tone::DangerText,
+            ));
             cx.notify();
             return;
         };
@@ -770,7 +779,10 @@ impl BlotterTile {
             max_depth,
         });
         if !queued {
-            self.error = Some("query refused: the data service is busy or gone".into());
+            self.error = Some((
+                "query refused: the data service is busy or gone".into(),
+                Tone::DangerText,
+            ));
             self.in_flight = None;
             // A refused submit means nothing is ever coming for these
             // versions (market-data Part 3 Task 6 review, MIN-3, fixed at
@@ -844,7 +856,7 @@ impl BlotterTile {
                 }
             }
             Err(e) => {
-                self.error = Some(e);
+                self.error = Some((e, Tone::DangerText));
                 // A failed outcome still counts as arrival (§3.10): one
                 // broken tile must never hold every other tile open until
                 // the deadline.
@@ -1681,10 +1693,10 @@ impl gpui::Render for BlotterTile {
         {
             header = header.child(div().child("…"));
         }
-        if let Some(e) = &self.error {
+        if let Some((e, tone)) = &self.error {
             header = header.child(
                 div()
-                    .text_color(chip::chip_paint(theme, Tone::DangerText).text)
+                    .text_color(chip::chip_paint(theme, *tone).text)
                     .child(e.clone()),
             );
         }
@@ -2579,7 +2591,11 @@ mod tests {
             (t.table().read(cx).delegate().shown.clone(), t.error.clone())
         });
         assert_eq!(rows, vec![0, 1, 2], "the last good snapshot stays");
-        assert_eq!(error.as_deref(), Some("binder error"));
+        assert_eq!(
+            error,
+            Some(("binder error".to_string(), Tone::DangerText)),
+            "a delivered error still paints danger"
+        );
     }
 
     #[gpui::test]
@@ -2935,13 +2951,18 @@ mod tests {
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_none()),
             "the sorted column is gone, so the sort is gone"
         );
-        let notice = h
+        let (notice, tone) = h
             .tile
             .read_with(&cx, |t, _| t.error.clone())
             .expect("a notice names the dropped sort");
         assert!(
             notice.contains("delta01"),
             "the notice names the column whose sort went: {notice}"
+        );
+        assert_eq!(
+            tone,
+            Tone::WarningText,
+            "a dropped sort is a state change the trader caused, not an error"
         );
     }
 
@@ -4456,7 +4477,10 @@ mod tests {
             "B keeps its last-good snapshot"
         );
         let b_error = h.b.read_with(&vcx, |t, _| t.error.clone());
-        assert_eq!(b_error.as_deref(), Some("binder error"));
+        assert_eq!(
+            b_error,
+            Some(("binder error".to_string(), Tone::DangerText))
+        );
     }
 
     /// A pinned tile ignores a grouping-only change (§4.1: `follows_

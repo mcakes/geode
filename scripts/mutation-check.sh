@@ -3128,6 +3128,30 @@ run_mutation "delegate: the cursor is re-derived by column name across a move" \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 
+# The same re-derivation runs again in `apply_snapshot`, on a plan rebuild
+# rather than a drag — nearly identical to the `move_column` copy above,
+# so the anchor closes over the `if rebuild` block's own brace and the
+# line after it, both unique to this site, rather than the bare `if let`
+# the two copies share.
+run_mutation "delegate: a plan rebuild re-derives the cursor by column name" \
+  crates/geode-blotter/src/delegate.rs \
+  '            if let Some(name) = under_cursor
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  '            if let Some(name) = None::<String>
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  geode-blotter \
+  hiding_a_column_left_of_the_cursor_carries_it_by_name
+
 run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
   crates/geode-blotter/src/core/commands.rs \
   '    while !line.is_char_boundary(cursor) {' \
@@ -3317,8 +3341,8 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some(e);' \
-  '                self.error = Some(e);
+  '                self.error = Some((e, Tone::DangerText));' \
+  '                self.error = Some((e, Tone::DangerText));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
