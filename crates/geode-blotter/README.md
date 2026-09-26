@@ -40,6 +40,14 @@ cargo bench -p geode-blotter   # the pure core
   stops propagation and ignores `click_count() > 1`.
 - `apply_snapshot` rebuilds the column plan on every delivery and swaps on
   inequality. Do not reinstate a cheaper gate.
+- A sort and the cursor are held by column name, not plan position.
+  `SortSpec.column` is re-resolved against the fresh plan on every
+  rebuild in `apply_snapshot`, and `move_column` re-derives `Cursor.col`
+  from the name under it before the reorder; neither needs a remap, so a
+  column drag or a hide cannot re-point either at a column the trader
+  never chose. A sort whose column leaves the plan is dropped rather than
+  left dangling, and the dropped name is kept as `dropped_sort` for the
+  tile to report.
 - `ColourCache` is keyed on `(Anchors, Tokens)` and `set_colours` compares
   the `Arc` pointer and invalidates, or a redefined colour paints stale.
 - The gutter (`[ui] line_numbers`) is painted inside the tree cell, and
