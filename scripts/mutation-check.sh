@@ -1117,6 +1117,32 @@ run_mutation "pool: a panicking query does not wedge its view" \
   geode-data \
   a_panicking_query_degrades_its_view_without_wedging_it
 
+# A worker leaves every run outside a transaction: an aborted one left by an
+# interrupt on BEGIN, COMMIT or ROLLBACK otherwise fails every later query.
+run_mutation "pool: a worker releases a transaction left behind" \
+  crates/geode-data/src/query/pool.rs \
+  '        release_transaction(&conn);
+
+        // The stale check' \
+  '
+        // The stale check' \
+  geode-data \
+  a_transaction_left_aborted_does_not_wedge_the_worker
+
+# An interrupted ROLLBACK is retried, not taken as the end of the attempt.
+run_mutation "pool: an interrupted rollback is retried" \
+  crates/geode-data/src/query/pool.rs \
+  '            Err(_) => {}
+        }
+    }
+    tracing::error!(' \
+  '            Err(_) => return,
+        }
+    }
+    tracing::error!(' \
+  geode-data \
+  interrupts_on_the_transaction_statements_do_not_wedge_the_connection
+
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
   '        if q.shutdown {
