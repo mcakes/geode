@@ -93,12 +93,15 @@ impl ReadQuery {
                         AsOf::Live => Freshness {
                             dataset: dataset.clone(),
                             as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
-                            generation: catalog.latest_gen_id()?,
+                            generation: catalog.dataset_generation(dataset)?,
                         },
+                        // A historical view read pins one generation per
+                        // partition; no scalar names that, and a placeholder
+                        // integer would be a lie now the field has a reader.
                         AsOf::At(_) => Freshness {
                             dataset: dataset.clone(),
                             as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
-                            generation: 0,
+                            generation: None,
                         },
                     };
                     provenance.datasets.push(freshness);
@@ -121,7 +124,11 @@ impl ReadQuery {
                                 None,
                             )?
                             .map(|t| t.to_rfc3339()),
-                        generation: catalog.latest_gen_id()?,
+                        generation: catalog.live_generation(
+                            &params.dataset,
+                            &join_key(&params.document_key),
+                            None,
+                        )?,
                     },
                     AsOf::At(_) => Freshness {
                         dataset: params.dataset.clone(),
@@ -129,7 +136,9 @@ impl ReadQuery {
                             .resolved_as_of
                             .get(&params.dataset)
                             .map(|t| t.to_rfc3339()),
-                        generation: 0,
+                        // The document compiler pinned exactly one
+                        // generation; report the one it read.
+                        generation: compiled.resolved_generation,
                     },
                 };
                 let mut provenance = provenance(&params.as_of);
@@ -240,5 +249,76 @@ mod tests {
         }).unwrap();
         assert_eq!(before_eviction.f64_at(col, 0), Some(1.));
         assert_eq!(historical.run(&reader).unwrap().rows(), 0);
+    }
+
+    /// A corrected republish keeps its source time and takes a new
+    /// generation. A reader holding unsent work over the older one can only
+    /// tell them apart if provenance says so.
+    #[test]
+    fn a_republish_at_the_same_source_time_reports_a_different_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("gen.duckdb")).unwrap();
+        let ds = cvi_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        let publish = |value: f64| {
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: "test",
+                    rows: &cvi_doc("SPX.Z", [value; 6]),
+                    source_time: ts("2026-09-12T14:00:00Z"),
+                    received_at: ts("2026-09-12T14:00:00Z"),
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        };
+        publish(1.);
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds.clone());
+        let config = Arc::new(ReadConfig {
+            schema: Arc::new(schema),
+            dimensions: DerivedDimensions::default(),
+        });
+        let params = DocumentParams {
+            key: QueryKey(1),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: ds.name.clone(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        };
+        let live = ReadQuery::document(Arc::clone(&config), params.clone());
+        let reader = store.reader().unwrap();
+        let first = live.run(&reader).unwrap();
+        publish(2.);
+        let second = live.run(&reader).unwrap();
+
+        let (a, b) = (
+            &first.provenance().datasets[0],
+            &second.provenance().datasets[0],
+        );
+        assert_eq!(a.as_of, b.as_of, "the republish kept its source time");
+        assert!(
+            a.generation.is_some() && b.generation.is_some(),
+            "a live document read names the generation it read"
+        );
+        assert_ne!(
+            a.generation, b.generation,
+            "a same-time republish must be distinguishable from its predecessor"
+        );
+
+        // A historical read of the same document reports the generation it
+        // pinned, not a placeholder.
+        let mut at = params;
+        at.as_of = AsOf::At(ts("2026-09-12T14:30:00Z"));
+        let historical = ReadQuery::document(config, at);
+        assert_eq!(
+            historical.run(&reader).unwrap().provenance().datasets[0].generation,
+            b.generation,
+            "as-of at a time after both publishes resolves the newer generation"
+        );
     }
 }

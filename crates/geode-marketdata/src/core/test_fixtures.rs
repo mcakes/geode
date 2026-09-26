@@ -35,7 +35,7 @@ fn provenance(as_of: &str) -> Provenance {
         datasets: vec![Freshness {
             dataset: "div_schedule".into(),
             as_of: Some(as_of.into()),
-            generation: 7,
+            generation: Some(7),
         }],
         as_of_request: None,
     }
@@ -526,7 +526,7 @@ pub(crate) fn snapshot_of_at(
             datasets: vec![Freshness {
                 dataset: spec.dataset.into(),
                 as_of: Some(as_of.into()),
-                generation: 7,
+                generation: Some(7),
             }],
             as_of_request: None,
         },

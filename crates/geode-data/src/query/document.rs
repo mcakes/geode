@@ -95,6 +95,7 @@ pub fn compile_document(
 
     let tables = TablePair::for_document(&ds.name);
     let mut resolved_as_of = BTreeMap::new();
+    let mut resolved_generation: Option<i64> = None;
     let (table, era) = match &params.as_of {
         AsOf::Live => (tables.live.clone(), String::new()),
         AsOf::At(t) => {
@@ -115,6 +116,7 @@ pub fn compile_document(
             match resolved {
                 Some(g) => {
                     resolved_as_of.insert(ds.name.clone(), g.source_time);
+                    resolved_generation = Some(g.gen_id);
                     // `generation_predicate`'s own doc comment warns that
                     // `gen_id` alone can collide on a database loaded by
                     // a build that predates the id sequence. That does
@@ -164,6 +166,7 @@ pub fn compile_document(
         columns: compiled_columns,
         stalest_input: vec![ds.name.clone()],
         resolved_as_of,
+        resolved_generation,
     })
 }
 
