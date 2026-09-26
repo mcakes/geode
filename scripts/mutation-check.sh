@@ -19166,7 +19166,7 @@ run_mutation "pricer tile: the entry field is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
   '        if entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
   '        if false && entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
-  geode-pricer escape_removes_the_placeholder_and_the_field_blurs_before_it_drops
+  geode-pricer escape_closes_the_bar_and_the_field_blurs_before_it_drops
 
 run_mutation "pricer tile: the cell editor is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
@@ -19272,7 +19272,7 @@ run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
   '            leg: if below { leg } else { leg },' \
-  geode-pricer o_lands_after_the_cursor_row_and_shift_o_before_it
+  geode-pricer a_place_lands_after_the_cursor_row_or_before_it
 
 # With no cursor row a typed line lands at the end, where the bar's
 # label says `at end`. Mutated, it lands at the top.
@@ -19288,6 +19288,30 @@ run_mutation "pricer entry: the label names a leg for a root place" \
   '            let root = sheet.parent(before).unwrap_or(before);' \
   '            let root = before;' \
   geode-pricer the_label_names_where_enter_lands
+
+# A refused enter's reason describes the text as it was; an edit must
+# clear it, or the bar blames text that is no longer there.
+run_mutation "pricer entry bar: an edit keeps a stale error" \
+  crates/geode-pricer/src/tile.rs \
+  '                && entry.error.take().is_some()' \
+  '                && entry.error.clone().is_some()' \
+  geode-pricer a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it
+
+# A refused insert must put the place back, or the next enter lands
+# past a line that never went in.
+run_mutation "pricer entry bar: a refusal keeps the advanced place" \
+  crates/geode-pricer/src/tile.rs \
+  '                    entry.place = at;
+                    entry.error = Some(e.to_string().into());' \
+  '                    entry.error = Some(e.to_string().into());' \
+  geode-pricer a_package_typed_at_a_leg_place_is_refused_under_the_field
+
+# The label follows the place after each enter.
+run_mutation "pricer entry bar: the label stays on the first place" \
+  crates/geode-pricer/src/tile.rs \
+  '                    entry.label = target_label(&self.sheet, entry.place).into();' \
+  '' \
+  geode-pricer o_lands_below_the_cursor_row_and_the_label_says_so
 
 run_mutation "pricer cell: an empty shift commits zero" \
   crates/geode-pricer/src/core/cell.rs \
@@ -19427,46 +19451,6 @@ run_mutation "pricer tile: the entry field is not insert mode" \
 
 # ---- Pricer post-merge cleanup (2026-09-24) ----
 
-# The entry placeholder is a grid row: a chevron's row read after the
-# entry closes names the package below the one clicked.
-run_mutation "pricer tile: a chevron click reads its row after the entry closes" \
-  crates/geode-pricer/src/tile.rs \
-  '        let line = self.line_at(row);
-        self.close_entry(window, cx);
-        self.close_editor(window, cx);' \
-  '        self.close_entry(window, cx);
-        self.close_editor(window, cx);
-        let line = self.line_at(row);' \
-  geode-pricer a_chevron_click_below_an_open_entry_toggles_that_package
-
-# The same for a cell click: the cursor lands one row low.
-run_mutation "pricer tile: a cell click reads its row after the entry closes" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.close_entry(window, cx);
-                self.close_editor(window, cx);
-                if let Some(id) = line {' \
-  '                self.close_entry(window, cx);
-                self.close_editor(window, cx);
-                let line = self.line_at(*row);
-                if let Some(id) = line {' \
-  geode-pricer a_cell_click_below_an_open_entry_lands_on_that_row
-
-# A double-click's second press carries a row index the first press's
-# close has shifted: without the hand-off it edits the next line.
-run_mutation "pricer tile: a double-click's second press ignores the first's line" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
-  '                self.pressed = None;' \
-  geode-pricer a_double_click_below_an_open_entry_edits_that_row
-
-# The hand-off is for the very next press only: kept longer, a later
-# double-click at the same spot edits the line that used to be there.
-run_mutation "pricer tile: the closing press's line outlives the next press" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
-  '                self.pressed = self.click_anchor.filter(|(r, _)| r == row);' \
-  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
-
 # "loading…" is the only sign a load is pending.
 run_mutation "pricer tile: escape clears the loading notice" \
   crates/geode-pricer/src/tile.rs \
@@ -19533,24 +19517,6 @@ run_mutation "pricer tile: a restored leg's package stays closed" \
   '                        self.expansion.set(self.sheet.id(p), true);' \
   '                        let _ = p;' \
   geode-pricer undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg
-
-# A press on the placeholder must hand on "nothing" too, or its
-# double-click edits the row that slides up under the second press.
-run_mutation "pricer tile: a placeholder press hands nothing on" \
-  crates/geode-pricer/src/tile.rs \
-  '                    self.click_anchor = Some((*row, line));' \
-  '                    self.click_anchor = line.map(|id| (*row, Some(id)));' \
-  geode-pricer a_double_click_on_the_placeholder_opens_nothing
-
-# The handed-on line must reach the cursor before the tree-column return,
-# or a tree-column double-click leaves it on the row that slid up.
-run_mutation "pricer tile: a tree-column double-click keeps the slid-up row" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.cursor.line = Some(id);
-                self.sync_cursor(cx);
-                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  geode-pricer a_tree_column_double_click_below_an_open_entry_keeps_that_row
 
 # Planning decision 4's gate: every line in flight at its revision asks
 # for nothing more.
@@ -20621,8 +20587,8 @@ run_mutation "pricer gutter: the tree column's width includes the gutter" \
 # stamp ignores the cursor and a move leaves the old distances painted.
 run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
   crates/geode-pricer/src/delegate.rs \
-  '        let stamp = (len, entry, cursor, mode);' \
-  '        let stamp = (len, entry, None, mode);' \
+  '        let stamp = (len, cursor, mode);' \
+  '        let stamp = (len, None, mode);' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 # A tenor line's date commit replaces the tenor with that date. Mutated,

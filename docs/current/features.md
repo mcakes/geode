@@ -405,16 +405,20 @@ largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
-row, so roots share one leading edge and legs sit one step in; the entry row
-opens at the depth it will land at. A long tree label or text cell ends in
-`…`; a number never truncates. Cell text is floored to the readable ratio on
-the row's own ground and on the table's hover and selected-row grounds.
+row, so roots share one leading edge and legs sit one step in. A long tree
+label or text cell ends in `…`; a number never truncates. Cell text is
+floored to the readable ratio on the row's own ground and on the table's
+hover and selected-row grounds.
+
+The entry bar sits between the header and the column headers. A muted label
+names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
+parse error or a refused insert keeps the text and shows the reason under
+the field in danger text; any edit clears it.
 
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
 Lines, packages, and an open package's legs are numbered in painted order —
-the index `NG` jumps to. The entry placeholder is blank and does not shift the
-numbers below it, since no motion lands on it. Relative mode shows distance
+the index `NG` jumps to. Relative mode shows distance
 from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
@@ -428,7 +432,7 @@ Normal-mode keys:
 
 | Keys | Effect |
 |---|---|
-| `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
+| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `escape` closes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -481,14 +485,12 @@ edit, and an empty shift on an inherited shift stays inherited. An explicit
 shift is a change from inherited to own even when it equals the inherited
 value.
 
-Open editors and the entry field paint no field chrome: no background, border,
+Open editors paint no field chrome: no background, border,
 radius, or horizontal padding. Their text sits where the cell's text sat
 (numbers right-aligned, text left) at the row's height, and the cell's cursor
 border is the only frame. The date field's segments are flush.
 
-A grid click cancels an editor or entry field before acting on the painted
-row's identity. Removing an entry placeholder therefore cannot redirect the
-click to a neighboring row. Clicking the placeholder itself only closes it.
+A grid click closes an open editor or the entry bar, then acts on the row it hit.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 

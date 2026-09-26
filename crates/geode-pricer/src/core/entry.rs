@@ -1,6 +1,7 @@
-//! The entry field's pure half (line-pricer spec §8.4): where `o` and
-//! `shift+o` land (planning decision 12), where the next placeholder
-//! opens after a successful `enter`, and the `up`/`down` history.
+//! The entry bar's pure half (line-pricer spec §8.4, entry-bar spec §4):
+//! where `o` (always below) and `p`/`shift+p` land, where the next line
+//! lands after a successful `enter`, the bar's target label, and the
+//! `up`/`down` history.
 
 use crate::core::sheet::{Place, RowKind, RowSpec, Sheet};
 
@@ -41,7 +42,7 @@ fn span(spec: &RowSpec) -> usize {
     }
 }
 
-/// The placeholder after `inserted` landed at `place`, so a book of lines
+/// The place after `inserted` landed at `place`, so a book of lines
 /// is typed without another `o` (spec §8.4). A package at a leg place is
 /// refused by `apply`, so that pair answers `place` unchanged.
 pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
@@ -125,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn o_lands_after_the_cursor_row_and_shift_o_before_it() {
+    fn a_place_lands_after_the_cursor_row_or_before_it() {
         let s = sheet();
         assert_eq!(
             place_for(&s, None, true),
