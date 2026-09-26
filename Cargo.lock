@@ -2656,9 +2656,11 @@ dependencies = [
  "criterion",
  "geode-core",
  "geode-data",
+ "geode-pricer",
  "geode-shell",
  "gpui-component",
  "gpui-pre",
+ "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
 ]

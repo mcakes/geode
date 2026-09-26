@@ -31,7 +31,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `document` | The struct-of-arrays rows a parsed market-data document becomes, and the `DocumentKind` trait a parser implements. |
 | `source_config` | I/O-free source parsing: defaults, dataset-family routing, topic and timestamp-field validation, and field-addressed diagnostics. Source tables replace whole objects across layers. |
-| `egress_config` | I/O-free `egress.toml` parsing: adapter and per-document address templates (`{key}` joins the document key with `/`), field-addressed diagnostics, and target-dropping validation. Egress tables replace whole objects across layers, like `source_config`; restart-required, not hot-reloaded. |
+| `egress_config` | I/O-free upload-target parsing and field-addressed diagnostics. Invalid targets are skipped; address templates substitute raw key parts joined by `/`. Targets replace whole objects across layers. Runtime workers retain startup configuration until restart. |
 | `format` | Number formatting (scale, precision, grouping, negative style) shared by the blotter and the market-data panel. |
 | `colour` | Named colours from semantic tokens or OKLCH hue interpolation. Contrast correction targets 3:1 but may fall short for custom themes. Pure; callers supply `Anchors`/`Tokens`. |
 | `health` | The degradation vocabulary (`Ok`, `Pending`, `PendingTooLong`, `Degraded`, `Failed`). Roll up by `severity_rank`, never by the derived `Ord`. |

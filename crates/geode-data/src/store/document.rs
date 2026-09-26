@@ -1,14 +1,10 @@
-//! Publishing a parsed document (market-data spec §4.1): stage the rows
-//! through DuckDB's appender, then run the same transaction a CSV file's
-//! grain tables go through (`publish_file`) against the dataset's one
-//! document pair. The message *is* the file: its key is the batch, its
-//! book is empty, and every downstream mechanism — generations, the
-//! backfill guard, as-of, retention, the freshness catalog — is reused
-//! rather than reimplemented.
+//! Validate and stage columnar document rows, then publish them through the
+//! shared storage transaction. The document key identifies its batch, and its
+//! book is NULL. Generations, backfill, as-of reads, retention, and freshness use
+//! the same catalog and publication machinery as file ingestion.
 //!
-//! Nothing here is a row (PHILOSOPHY §6): `DocumentRows` is
-//! struct-of-arrays, and the appender loop reads each staged column at
-//! index `i` through a plan built once before the loop.
+//! A column access plan is built once per document; the appender reads columns
+//! by row index without constructing intermediate domain row objects.
 
 use crate::store::catalog::{Catalog, FileGeneration};
 use crate::store::ddl::{self, TablePair};
@@ -20,17 +16,14 @@ use geode_core::health::Health;
 use geode_core::schema::{ColumnSpec, DatasetSpec};
 use std::path::PathBuf;
 
-/// One global staging table, like `staging_raw`: the ingest runner is the
-/// single writer, so two documents never stage concurrently (see
-/// `docs/ingest-cold-start-handoff.md` for why that invariant matters — a
-/// fixed global name is exactly what makes concurrent staging unsafe).
+/// Shared staging table, used only by the single ingest writer. Concurrent
+/// staging would replace another document's rows before publication.
 pub const STAGING_TABLE: &str = "staging_document";
 
 pub struct DocumentPublishRequest<'a> {
     pub dataset: &'a DatasetSpec,
-    /// The `[sources.<name>]` name, for the synthetic path and the
-    /// `Published` event. Not the dataset: a source whose name differs
-    /// from its dataset is ordinary (Phase 4b's MAJ-1).
+    /// Source configuration name, used in the synthetic path and `Published`
+    /// event. It can differ from the dataset name.
     pub source: &'a str,
     pub rows: &'a DocumentRows,
     pub source_time: DateTime<Utc>,
@@ -117,14 +110,12 @@ pub fn publish_document(
     let ds = req.dataset;
     let batch = join_key(&req.rows.key);
     let catalog = Catalog::new(conn);
-    // Reserved rather than peeked, for the reasons `ingest::load` records:
-    // the file id is stamped onto the staged rows before the catalog entry
-    // exists, and a generation id must be spent whether or not anything is
-    // ever recorded against it.
+    // Reserve identifiers before staging so failed attempts cannot reuse ids
+    // already stamped onto rows, even when no catalog entry was committed.
     let file_id = catalog.reserve_file_id()?;
     let gen_id = catalog.reserve_gen_id()?;
 
-    // 1. Stage. `create or replace` so a previous attempt's leftovers can
+    // Stage with `create or replace` so a previous attempt's leftovers can
     // never be published as this document's rows. The column list is
     // `document_columns()` order followed by the same storage columns
     // `ddl::create_document_table_sql` appends — `batch`, `book`,
@@ -181,9 +172,8 @@ pub fn publish_document(
                 });
             }
             cells.push(duckdb::types::Value::Text(batch.clone()));
-            // A document's book is empty (market-data spec §4.1), and
-            // empty is a NULL in a column that exists: every
-            // partition-keyed statement in `store` joins on `book`.
+            // Document partitions have a NULL book. The column remains present
+            // because partition-keyed storage statements join on it.
             cells.push(duckdb::types::Value::Null);
             cells.push(duckdb::types::Value::BigInt(file_id));
             app.append_row(duckdb::appender_params_from_iter(cells.iter()))
@@ -201,7 +191,7 @@ pub fn publish_document(
         })?;
     }
 
-    // 2. Publish through the shared transaction. One partition: the key as
+    // Publish through the shared transaction. One partition: the key as
     // the batch, no book. The backfill guard reads the live source time
     // the same way `load_file` does — for the one partition this writes,
     // so a document older than what is live becomes history instead of
@@ -227,20 +217,17 @@ pub fn publish_document(
         },
     )?;
 
-    // 3. Dictionary refresh, so the query path can cast the key dimension
-    // to its ENUM and the text filter's rewrite can reach it (spec §3.5,
-    // §3.6; same reasoning as `load_file` step 5). No grain search here,
-    // unlike a CSV load: the document family's one pair carries every
-    // column the dataset declares, so there is only one table a
-    // categorical column could be read from.
+    // Refresh categorical dictionaries from both live and archive rows in this
+    // transaction. Queries and text filters can then resolve values from either
+    // current or historical documents. The document's single table pair carries
+    // all declared columns.
     for col in ddl::categorical_columns(ds) {
         ddl::refresh_enum(conn, &ds.name, col, &tables.live, &tables.archive)?;
     }
 
-    // 4. Provenance commits together with the rows and dictionaries. A document
-    // that went straight to the archive is recorded all the same — the
-    // load happened — but flagged, because a generation that was never
-    // live cannot be what freshness measures staleness from (§4.5).
+    // Commit provenance with rows and dictionaries. Record archived-only
+    // backfills too, but exclude them from live freshness: they never replaced
+    // the current document.
     catalog.record(&FileGeneration {
         file_id,
         dataset: ds.name.clone(),
@@ -268,6 +255,118 @@ pub fn publish_document(
         rows,
         outcome,
     })
+}
+
+/// Forget one document: delete every live and archived row of `batch`, its
+/// generation summary rows and its provenance (`file_generations` and their
+/// `file_books`), in one transaction, then rebuild the dataset's categorical
+/// dictionaries so the forgotten key is no longer offered. Returns the
+/// payload rows deleted (live plus archive); a batch nothing holds deletes
+/// nothing and is not an error.
+///
+/// All or nothing: a failure part-way rolls back, so a forget can never
+/// leave rows with no summary (unreachable through as-of) or a summary with
+/// no rows (a generation `assert_generations_match_tables` rejects).
+///
+/// Only the ingest writer may call this, serialized with publication — a
+/// publish of the same key interleaved inside the transaction would be
+/// half-deleted. Whether the dataset may be forgotten at all (only `local`
+/// ones) is the caller's gate; this refuses only a non-document dataset,
+/// whose batches are files, not documents.
+pub fn forget_document(store: &Store, ds: &DatasetSpec, batch: &str) -> Result<usize, StoreError> {
+    if !ds.is_document() {
+        return Err(StoreError::Document(format!(
+            "dataset '{}' is not a document dataset; only a document can be forgotten",
+            ds.name
+        )));
+    }
+    let tables = TablePair::for_document(&ds.name);
+    let tx = crate::store::begin_transaction(store.writer())?;
+    let conn = &tx;
+    let run = |sql: &str, params: &[&dyn duckdb::ToSql]| -> Result<usize, StoreError> {
+        conn.execute(sql, params).map_err(|source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        })
+    };
+    let dataset = ds.name.as_str();
+    let mut deleted = run(
+        &format!("delete from \"{}\" where batch = ?", tables.live),
+        &[&batch],
+    )?;
+    deleted += run(
+        &format!("delete from \"{}\" where batch = ?", tables.archive),
+        &[&batch],
+    )?;
+    run(
+        "delete from generations where dataset = ? and batch = ?",
+        &[&dataset, &batch],
+    )?;
+    // `file_books` before `file_generations`: its rows are found through
+    // the provenance rows about to be deleted.
+    run(
+        "delete from file_books where file_id in \
+         (select file_id from file_generations where dataset = ? and batch = ?)",
+        &[&dataset, &batch],
+    )?;
+    run(
+        "delete from file_generations where dataset = ? and batch = ?",
+        &[&dataset, &batch],
+    )?;
+    for col in ddl::categorical_columns(ds) {
+        ddl::refresh_enum(conn, dataset, col, &tables.live, &tables.archive)?;
+    }
+    crate::store::commit_transaction(tx)?;
+    Ok(deleted)
+}
+
+/// How many generations (live and archived) the generation summary holds for
+/// one document. A small indexed-by-nothing read of the summary table, not of
+/// payload rows — what lets a local save decide whether it crossed the
+/// retention bound without sweeping.
+pub fn document_generation_count(
+    store: &Store,
+    ds: &DatasetSpec,
+    batch: &str,
+) -> Result<usize, StoreError> {
+    let sql = "select count(*) from generations where dataset = ? and batch = ?";
+    store
+        .writer()
+        .query_row(sql, duckdb::params![ds.name, batch], |r| r.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(|source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        })
+}
+
+/// Delete the dataset's provenance rows (`file_books`, then
+/// `file_generations`) whose generation the summary no longer holds — the
+/// ones a retention sweep evicted. A sweep deletes payload and summary rows
+/// only, so without this every evicted autosave would leave its provenance
+/// behind forever. One transaction; returns the `file_generations` rows
+/// deleted. A generation still in the summary (live or archived) keeps its
+/// provenance, so freshness and `live_source_time` are unaffected.
+pub fn prune_orphan_provenance(store: &Store, ds: &DatasetSpec) -> Result<usize, StoreError> {
+    const ORPHANS: &str = "select fg.file_id from file_generations fg \
+         where fg.dataset = ? and not exists (select 1 from generations g \
+         where g.dataset = fg.dataset and g.gen_id = fg.gen_id)";
+    let tx = crate::store::begin_transaction(store.writer())?;
+    let run = |sql: String| -> Result<usize, StoreError> {
+        tx.execute(&sql, duckdb::params![ds.name])
+            .map_err(|source| StoreError::Sql {
+                statement: sql.clone(),
+                source,
+            })
+    };
+    run(format!(
+        "delete from file_books where file_id in ({ORPHANS})"
+    ))?;
+    let pruned = run(format!(
+        "delete from file_generations where file_id in ({ORPHANS})"
+    ))?;
+    crate::store::commit_transaction(tx)?;
+    Ok(pruned)
 }
 
 fn cell(col: &Column, i: usize) -> duckdb::types::Value {
@@ -520,8 +619,7 @@ mod tests {
         );
         assert!(matches!(out.outcome, PublishOutcome::ArchivedOnly { .. }));
         assert_eq!(live_params(&store, "SPX.Z"), vec![5.; 6]);
-        // Provenance says the generation happened and never went live, so
-        // freshness does not measure staleness from it (§4.5).
+        // Archived-only backfill must not change the current document's freshness.
         let flag: bool = store
             .writer()
             .query_row(
@@ -772,6 +870,109 @@ mod tests {
             "cvi_params",
             &crate::store::ddl::history_of("cvi_params", &ds),
         );
+    }
+
+    fn count(store: &Store, sql: &str) -> i64 {
+        store.writer().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Forgetting one key removes its whole history — live rows, archived
+    /// generations, the generation summary and the provenance rows — and
+    /// leaves every other document of the dataset exactly as it was. The
+    /// catalog is read through the real builder, so a stray `generations`
+    /// or `file_generations` row would surface as a partition that still
+    /// lists the forgotten sheet.
+    #[test]
+    fn forget_removes_one_document_and_its_history_and_nothing_else() {
+        use crate::store::ddl::tests_support::{local_dataset, sheet_rows};
+        let (_d, store, ds) = fixture_for(local_dataset());
+        let publish_sheet = |sheet: &str, qty: &[i64], at: &str| {
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: geode_core::pricing::LOCAL_SOURCE,
+                    rows: &sheet_rows(sheet, qty),
+                    source_time: ts(at),
+                    received_at: ts(at),
+                    bytes: 0,
+                },
+            )
+            .unwrap()
+        };
+        publish_sheet("gone", &[1, 2], "2026-09-12T14:00:00Z");
+        publish_sheet("gone", &[3, 4, 5], "2026-09-12T14:01:00Z");
+        let kept = publish_sheet("kept", &[9], "2026-09-12T14:02:00Z");
+
+        let deleted = forget_document(&store, &ds, "gone").unwrap();
+        assert_eq!(deleted, 5, "three live rows and two archived rows");
+
+        for sql in [
+            "select count(*) from sheets_document_live where batch = 'gone'",
+            "select count(*) from sheets_document_archive where batch = 'gone'",
+            "select count(*) from generations where dataset = 'sheets' and batch = 'gone'",
+            "select count(*) from file_generations where dataset = 'sheets' and batch = 'gone'",
+        ] {
+            assert_eq!(count(&store, sql), 0, "{sql}");
+        }
+        // Every `file_books` row left belongs to a surviving generation.
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from file_books \
+                 where file_id not in (select file_id from file_generations)"
+            ),
+            0
+        );
+        assert_eq!(count(&store, "select count(*) from file_books"), 1);
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from sheets_document_live where batch = 'kept'"
+            ),
+            1
+        );
+        // The dictionary no longer offers the forgotten key.
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from (select unnest(enum_range(NULL::sheets_sheet_enum)) v) \
+                 where v = 'gone'"
+            ),
+            0
+        );
+        assert_generations_match_tables(
+            store.writer(),
+            "sheets",
+            &crate::store::ddl::history_of("sheets", &ds),
+        );
+        let schema = geode_core::schema::SchemaSpec {
+            datasets: vec![ds.clone()],
+        };
+        let catalog = crate::query::catalog::build_catalog(
+            store.writer(),
+            &schema,
+            &crate::query::as_of::AsOf::Live,
+        )
+        .unwrap();
+        let partitions: Vec<(&str, Vec<i64>)> = catalog.datasets[0]
+            .partitions
+            .iter()
+            .map(|p| {
+                (
+                    p.batch.as_str(),
+                    p.generations.iter().map(|g| g.gen_id).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(partitions, vec![("kept", vec![kept.gen_id])]);
+
+        // Forgetting a key nothing holds deletes nothing and is not an error.
+        assert_eq!(forget_document(&store, &ds, "never").unwrap(), 0);
+        // Forgetting the last document leaves an empty dictionary, not an
+        // error: the ENUM rebuild over zero values must still succeed.
+        assert_eq!(forget_document(&store, &ds, "kept").unwrap(), 1);
+        assert_eq!(count(&store, "select count(*) from generations"), 0);
     }
 
     #[test]

@@ -21,9 +21,8 @@ TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
-`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`,
-`dimensions`, `colours`, `pricer_views`, and `overrides` replace whole named
-objects.
+`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
+`colours`, `pricer_views`, and `overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -104,6 +103,21 @@ publication remains positional. Rebuild a demo database after changing column
 membership, roles, grains, or order. A production schema migration must be an
 explicit operation.
 
+Every build declares one dataset in its builtin layer: `pricer_sheets`, the
+line pricer's local document dataset (see [the line pricer](features.md)).
+`datasets` merges per dataset name, so a demo, desk, or user `datasets`
+document adds its datasets beside it, and a `datasets` document always
+exists. Because its tables are written positionally, the app keeps its own
+declaration: a layer that redeclares `pricer_sheets` identically is accepted
+silently, and any other redeclaration — different columns, order, or flags,
+or one invalid enough that the reader dropped it — is replaced by the builtin
+declaration at startup and on reload, with an error diagnostic naming the
+redeclaring layer and file. The Schema dialog still lists `pricer_sheets`; an
+edit saved there is such a redeclaration. Local datasets are not offered as
+the dataset choice in the Views and Sources dialogs: no view reads the app's
+own documents, and the source reader refuses a local dataset. A value that
+already names one is kept, as any current value is.
+
 ## Source configuration
 
 `sources.toml` has one top-level table per source, such as `[risk_files]`.
@@ -115,15 +129,6 @@ dataset family select its runtime path:
 | Directory | `adapter = "csv_dir"` (the default), with `paths` globs. A series dataset is rejected. |
 | Subscription | Another adapter over a document dataset, with a `document` kind and nonempty `topics`. |
 | Fetch | Another adapter over a series dataset. No document kind or topic list is needed. |
-
-### Credentials
-
-No adapter needs credentials yet, because every shipped adapter is a simulator.
-When one does, they come from the environment. A layered configuration document
-may name the variable an adapter reads and must never carry the secret itself:
-these documents are shared desk-wide, are diffable by design, and the user layer
-is a file the application itself writes. A credential in any of those places
-would be a credential in a place it cannot be taken back from.
 
 The shared reader returns usable sources plus diagnostics addressed to
 `sources.<name>.<field>`. Missing/unknown datasets, local datasets, incompatible
@@ -170,6 +175,13 @@ Source and dataset edits require restart to rebuild runtime workers. See
 and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
 for runtime readiness, delivery, and failure behavior.
 
+### Credentials
+
+Shipped adapters require no credentials. Adapters that need them must read
+secrets from the environment. Layered configuration may name the environment
+variable, but must not contain the secret: these files are shared, diffable,
+and writable by the application.
+
 ## Egress configuration
 
 `egress.toml` has one top-level table per upload target, such as
@@ -184,22 +196,30 @@ cvi_params = "marketdata/cvi/{key}"
 dividend_schedule = "marketdata/dividend/{key}"
 ```
 
-`{key}` is replaced by the document key's parts joined with `/`; an address
-with no `{key}` is one fixed address for every key of that document. A
-missing `adapter` or `documents` field, a `documents` value that is missing,
-not a table, or empty, and a `documents` entry naming no document dataset or
-whose address is not a string, each drop that one target at the typed-reader
-stage with a diagnostic addressed to `egress.<name>[.<field>]`. Resolving the
-survivors against the adapter registry separately drops a target whose
-adapter name is not registered, or whose registered adapter has no egress
-side, with a diagnostic at `egress.<name>.adapter`; other targets still load
-either way. See [egress and uploads](data-path.md#egress-and-uploads) for the
-runtime worker, queueing, and failure semantics, and
-[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs) for parsing.
+Targets replace whole named objects across layers. An override must repeat
+its adapter and documents; omitted fields do not inherit from a lower layer.
+`{key}` is replaced literally by document-key parts joined with `/`, without
+escaping. A template without `{key}` is a fixed address for every key of that
+document. Empty address strings and unknown placeholder text are not rejected
+by this reader; transport-specific address validation belongs to the adapter.
 
-Like `sources.toml`, `egress.toml` is restart-required: nothing reloads a
-resolved target's transport live, so a hot reload keeps the last valid set
-without applying it.
+The typed reader skips non-table targets with a warning. A missing or
+non-string adapter, missing/non-table/empty documents table, non-document
+dataset name, or non-string address produces an error and drops that whole
+target. Diagnostics use `egress.<target>` and a known field or document name.
+Other targets remain usable. The reserved `config_version` entry is skipped.
+
+Startup adapter resolution separately drops targets whose adapter is unknown
+or exposes no egress capability. The app passes the surviving target names and
+accepted documents to panel factories. This does not guarantee that a worker
+starts successfully or a transport accepts an upload. See
+[egress and uploads](data-path.md#egress-and-uploads) and
+[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs).
+
+Egress changes require restart. Reload can update the active configuration
+representation, but running workers and panel target lists retain their startup
+configuration. The restart indicator compares the layered egress document with
+its startup baseline; restoring those inputs clears the indicator.
 
 ## Runtime edits
 
@@ -346,8 +366,9 @@ configuration write path.
 `[pricing]` in `app.toml` configures the line pricer. `adapter` names the
 pricer built into the binary; a change needs a restart. `refresh` is the
 pricer tile's default reprice interval: `30s` when absent, `"off"` to disable
-the timer, or any duration. A value that is neither warns at
-`app.pricing.refresh` and keeps 30 seconds. A reload applies `refresh` to every
+the timer, or a positive duration string accepted by the shared duration
+parser. Zero, invalid strings, and non-string values warn at
+`app.pricing.refresh` and use 30 seconds. A reload applies `refresh` to every
 open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 

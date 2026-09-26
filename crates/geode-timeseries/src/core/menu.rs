@@ -1,14 +1,7 @@
-//! The action list's pure core (mouse pass, 2026-09-24): the tile's
-//! verbs as an ordered list of rows, each naming the action it
-//! dispatches, whether it is pickable and why not, and — for a
-//! toggle — whether it is in force. No gpui, no entity: `popup.rs`
-//! paints it, the tile decides when it opens, and every row ends in
-//! `TimeseriesTile::dispatch` on its own action id, so a menu row, a
-//! key and the palette take one path (the coding guide's "model one
-//! logical command once").
-//!
-//! The market-data panel's `core::menu` is the shape; this one adds the
-//! cursor-slot section, whose rows read the slot under the cursor.
+//! Prepared action-menu rows derived from the model: titles, enablement
+//! reasons, and toggle state. The tile adds binding hints and dispatches enabled
+//! picks through its ordinary action handler. The menu includes selected slot
+//! operations and common tile controls; it is not the full action registry.
 
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
@@ -23,8 +16,7 @@ pub enum MenuRow {
     Action {
         id: ActionId,
         title: SharedString,
-        /// The live chord, resolved by the tile at open; empty when the
-        /// keymap has none.
+        /// Binding hint filled by the tile when rows are prepared; empty if absent.
         hint: Vec<Keystroke>,
         enabled: Result<(), &'static str>,
         /// `None` for a verb; `Some(on)` for a toggle, which paints a
@@ -36,9 +28,7 @@ pub enum MenuRow {
     Section(SharedString),
 }
 
-/// What a row reads off the tile beyond the model: nothing yet, but
-/// spelled as a struct so the next input is a field, not a signature
-/// change at every call site.
+/// Inputs used to prepare menu rows without accessing a retained tile entity.
 pub struct MenuInputs<'a> {
     pub model: &'a Model,
 }
@@ -67,16 +57,10 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
     }
 }
 
-/// The action list, in order: the four openers; then, under a heading
-/// naming the cursor's slot, the seven slot verbs (all disabled with
-/// `no series` while the tile holds none — the section stays so the
-/// list keeps one shape); then the frequency steps, the two toggles
-/// (ticked when on) and the view reset.
-///
-/// A row's enablement is the same refusal its key would give: `Edit
-/// expression…` on a source slot says what `e` says, and `Cycle bucket
-/// rule` on an expression is disabled rather than silently inert as
-/// `b` is.
+/// Build openers, cursor-slot operations, frequency steps, display toggles,
+/// and view reset in fixed order. Empty tiles keep their slot section disabled.
+/// Bucket rules require a source and expression editing requires an expression;
+/// Colour opens a picker while Cycle colour advances through the palette.
 pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     let m = i.model;
     let mut out = vec![
@@ -163,14 +147,10 @@ fn lands(r: &MenuRow) -> bool {
     )
 }
 
-/// Move `delta` ENABLED `Action` rows from `from` — a disabled row, a
-/// `Separator` and a `Section` are all stepped over — clamped at either
-/// end rather than wrapping (the market-data menu's rule: a list read
-/// top-down does not jump to its far end). `delta == 0` is the refresh
-/// case: the highlight stays on its row while that row is still an
-/// `Action` (the pointer may have left it on a disabled one), else lands
-/// on the first enabled row. A highlight on a non-enabled row steps from
-/// where it stands; with no enabled row further that way it stays put.
+/// Move delta enabled actions, skipping disabled rows, headings, and separators.
+/// Clamp at either end. Zero retains any Action row, including a disabled row
+/// selected by the pointer. From a non-action, return first_enabled. From a
+/// disabled action with no enabled row in the requested direction, stay put.
 pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
     if !matches!(rows.get(from), Some(MenuRow::Action { .. })) {
         return first_enabled(rows);
@@ -331,9 +311,8 @@ mod tests {
         assert_eq!(step(&rows, 4, 1), 0, "from a non-row: the first enabled");
     }
 
-    /// A disabled row is stepped over like a separator (user report
-    /// 2026-09-25): on an empty tile the whole slot section is greyed, so
-    /// `j` from `Range…` lands on `Finer frequency`.
+    /// Disabled slot actions are skipped, so an empty tile moves directly from
+    /// Range to Finer frequency.
     #[test]
     fn stepping_skips_disabled_rows() {
         let m = Model::new();

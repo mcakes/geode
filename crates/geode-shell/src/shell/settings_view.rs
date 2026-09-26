@@ -547,9 +547,8 @@ const WIDTH: f32 = 640.0;
 /// every keystroke ([`handle_key`]); rows are never cached, so a step's
 /// effect (or a config hot reload's) is visible on the very next derive.
 ///
-/// The fetch sources come from the `SeriesSettings` global, the same
-/// value an open timeseries tile reads, so the row and the tiles cannot
-/// disagree about which sources exist.
+/// Fetch-source options come from `SeriesSettings`, shared with timeseries
+/// tiles. This is the configured source list, not adapter startup status.
 fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
     derive_rows(
         &shell.services.theme.names(),

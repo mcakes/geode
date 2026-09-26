@@ -51,11 +51,9 @@ impl Rgb8 {
     }
 }
 
-/// Whether two colours are the same to within one 8-bit step on every
-/// channel. The picker's hex field TRUNCATES each channel where
-/// [`Rgb8::from_hsla`] rounds, so a colour read back through that field
-/// can come back one step low; a tolerance of one absorbs that and
-/// nothing a trader could tell apart.
+/// Compare every channel within one byte step. The component hex formatter
+/// truncates while from_hsla rounds; this tolerance absorbs that conversion
+/// difference without requiring exact floating-point equality.
 pub fn within_a_step(a: Rgb8, b: Rgb8) -> bool {
     a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) <= 1)
 }
@@ -64,13 +62,10 @@ fn distance(a: Rgb8, b: Rgb8) -> u32 {
     a.0.iter().zip(b.0).map(|(x, y)| x.abs_diff(y) as u32).sum()
 }
 
-/// What a colour the picker answered with means for the slot. A pick
-/// within a step ([`within_a_step`]) of a featured entry is that entry's
-/// own `Palette` or `Named` colour — which keeps following the theme —
-/// the nearest such entry, the first on a tie. Anything else (a
-/// palette-grid swatch, a slider, a typed hex) is an absolute
-/// [`Colour::Custom`]. A grid swatch that happens to equal a featured
-/// colour is therefore read as that featured colour.
+/// Map a picker value to a featured identity or opaque Custom RGB bytes.
+/// Among featured entries within one byte step on every channel, choose the
+/// smallest summed channel difference, keeping the first on a tie. The component
+/// control used to make the pick does not affect this mapping.
 pub fn colour_from_pick(h: Hsla, featured: &[(Hsla, Colour)]) -> Colour {
     let picked = Rgb8::from_hsla(h);
     let nearest = featured

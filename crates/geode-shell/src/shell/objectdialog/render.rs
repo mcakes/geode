@@ -870,9 +870,8 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         draft.column_ctx = None;
         return;
     }
-    // The installed fields open with the cursor on the first row that answers to
-    // something — `enter_edit`'s rule, applied at the stage's own door because a click
-    // reaches this function without passing through the key handler's settle.
+    // Settle selection at stage entry because pointer activation bypasses the keyboard
+    // handler's final settle.
     draft.settle_selection(domain);
     state.stage = Stage::Column {
         object,
@@ -969,9 +968,8 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     if !draft.enter_values(column, scopes::loading_field()) {
         return;
     }
-    // `enter_column_stage`'s rule at this stage's own door. The loading field is the
-    // only row here and answers to nothing, so the cursor stays on it until the values
-    // arrive — a list with no stop at all leaves the cursor where it is.
+    // The loading placeholder has no cursor stop, so settling leaves it selected.
+    // Delivery settles again after installing the value rows.
     let domain = state.domain;
     draft.settle_selection(domain);
     state.stage = Stage::Values {
@@ -1058,21 +1056,17 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// revalidation because current reorderable domains have no order-sensitive draft
 /// diagnostic; adding one would require revalidation at that branch.
 fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
-    // One settle for every arm below (user ruling 2026-09-23: the cursor rests only on
-    // rows that answer to something). A wrapper rather than a call in each arm because
-    // this handler returns from a dozen places, and the rows under the cursor change
-    // from more than the motion keys: a tick that adds a row, an `x` that removes one,
-    // a filter keystroke that re-ranks the list. The motion keys settle on their own,
-    // in the direction of travel (`Draft::move_selection`); this is what catches every
-    // other way the list can move underneath the cursor.
+    // Settle after every return path, including mutations that add, remove, or re-rank
+    // rows. Motion already snaps in its direction through move_selection; this final
+    // settle preserves that stop and covers other selection changes.
     let claimed = handle_edit_key_inner(shell, ks, cx);
     settle_edit_cursor(shell);
     claimed
 }
 
-/// Put the edit stage's cursor back on a row that answers to something, if the last
-/// change left it on one that does not. A no-op on every other stage, and while a value
-/// field is open (its rows are the field's completions, not the object's rows).
+/// Settle the retained draft's cursor after keyboard handling, including Column and
+/// Values projections. Skip while text entry owns selection, and do nothing when no
+/// draft remains.
 fn settle_edit_cursor(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
@@ -4393,10 +4387,9 @@ fn on_edit_row_clicked(
         if position >= draft.visible_rows().len() {
             return;
         }
-        // A click on a row the cursor cannot rest on does nothing at all (user ruling
-        // 2026-09-23) — not even move the cursor there. The mouse cannot reach a state
-        // the keyboard is not allowed to reach, which is the parity rule §17.1 states
-        // for every other row.
+        // Ignore non-stop rows without moving selection or opening a stage. This also
+        // applies when a filter leaves no stops and keyboard motion can traverse inert
+        // rows.
         let rows = draft.rows();
         let clicked = draft
             .visible_rows()
@@ -4730,13 +4723,10 @@ pub(in crate::shell) fn deliver_values(
     };
     draft.reseed_fields(fields);
     draft.selected = 0;
-    // The delivered values replace the loading row wholesale, so the cursor lands on
-    // the first of them rather than on the `Values` header above (user ruling
-    // 2026-09-23). A delivery arrives outside the key handler, so it settles here.
+    // Delivery replaces the loading row outside keyboard handling. Settle onto the
+    // first available stop, skipping the Values header when there are value rows.
     draft.settle_selection(Domain::Scopes);
-    // The viewport follows the cursor the settle chose, not row 0 — the two would
-    // disagree the moment a Values list ever opened with something above its first
-    // value.
+    // Scroll to the settled cursor, which can differ from the initial index zero.
     let selected = draft.selected;
     shell.object_dialog_scroll.scroll_to_item(selected);
     cx.notify();

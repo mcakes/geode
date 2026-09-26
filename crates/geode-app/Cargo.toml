@@ -102,3 +102,6 @@ geode-data = { path = "../geode-data", features = ["test-support"] }
 # — the bridge's own picker test needs to see a picker's `values` land
 # without a `dispatch` call of its own to drive from.
 geode-shell = { path = "../geode-shell", features = ["test-support"] }
+# `PricerTile::sheet()`/`is_loading()` (test-support-only accessors): the
+# bridge's end-to-end tests read what a sheet load installed.
+geode-pricer = { workspace = true, features = ["test-support"] }

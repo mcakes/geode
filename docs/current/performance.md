@@ -98,15 +98,11 @@ changes still rebuild.
 - Density bars are uncached but capped at 2,000 quads per frame.
 - A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
   entry change, never in render; paints are a per-theme memo.
-- Config dialogs do **not** cache their row sets. Each derives its rows fresh at
-  every call site that needs them, including render, key handling and click
-  resolution, and the object dialog's own doc comment states that rule. The row
-  sets are small and the measured cost is tens of microseconds, so this is a
-  deliberate simplicity rather than a gap. The one to watch is the keybindings
-  dialog: resolving which binding wins scans the binding list for each action and
-  again for each candidate, so its per-frame cost grows as the product of
-  registered actions and user overrides, both of which the product grows on
-  purpose.
+- Config dialogs derive rows at each render, key-handling, and click-resolution
+  call site; they do not retain a row cache. Small row sets have measured costs
+  in the tens of microseconds. Keybinding resolution repeatedly scans bindings
+  for actions and candidates, so its cost grows with the action registry and
+  user overrides. See the [measurement log](../perf.md).
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
@@ -119,9 +115,15 @@ changes still rebuild.
   expensive.
 - Series append deduplication reads every stored version for the pair. Large
   historical pairs may need a narrower live-value index.
-- Measure and document live/archive retention has no production scheduler;
-  the sweep API is exercised by tests. Their archives can grow without that
-  automatic bound. Series retention runs during append.
+- Measure and feed-document live/archive retention has no production
+  scheduler; the sweep API is exercised by tests. Their archives can grow
+  without that automatic bound. Local documents (pricer sheets) are swept to
+  200 archived generations; series retention runs during append.
+- While a diagnostics tile is visible, every publication (each sheet autosave
+  included) rebuilds the catalog on the service thread, listing every
+  generation of every sheet (up to 201 each), and the diagnostics entity
+  compares the new snapshot whole on the UI thread. Unmeasured; with hundreds of sheets it may need
+  a narrower catalog read.
 - Diagnostics perf rows sample requery and catalog resource metrics on their
   next rebuild; those inputs have no dedicated perf invalidation. Histogram
   copying compares sample count and maximum, so idle-only changes and a

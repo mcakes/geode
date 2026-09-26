@@ -28,9 +28,9 @@ mode and records that stage's current query. Each entry takes a fresh snapshot.
 While filtering, Escape restores the entry query and bare Enter keeps the
 query as typed. Both return to Normal mode without opening the selected row,
 committing a value, or closing the dialog. If Escape changes the query, the
-selection and viewport return to the first match; an unchanged query preserves
-the selection. After keeping a filter, a second Enter performs the stage's
-normal action: Browse opens the selected object, and eligible Edit rows open
+list resets toward the first match; edit stages then settle selection onto an
+eligible row as described below. An unchanged query preserves selection.
+After keeping a filter, a second Enter performs the stage's normal action: Browse opens the selected object, and eligible Edit rows open
 Column or Values. Other rows retain their ordinary edit instructions.
 
 In Normal mode, Escape clears a remaining query, then returns to the parent
@@ -47,21 +47,29 @@ and membership or order operations for lists. Keyboard and pointer routes
 share the mutation helpers. A pending destructive confirmation blocks other
 row mutations, including clicks and drops.
 
-The edit selection only rests on a row that answers to something: a row whose
-vocabulary is not inert, or one whose Enter opens a Column or Values stage. A
-display-only text row, a list's own header row, a multi-choice row, and a
-one-option choice row are therefore painted but never selected — Groupings'
-slot number and dimensions header, Scopes' and Views' list headers, and
-Schema's derived dimensions. Schema's column rows stay selectable because
-Enter opens their column stage. Motion settles onto the next such row in the
-direction of travel, following the movement command's own wrap or clamp
-behavior, and a pointer click on a row that answers to nothing is dropped
-rather than moving the selection. Opening a stage, delivering distinct values,
-changing a filter, and rebuilding a draft after a failed write settle the
-selection the same way. In a list with no such row — a filter that leaves only
-headers, or a dataset of only derived dimensions — settling moves nothing, so
-the selection stays where the movement command put it; the footer already
-reports that row as inert.
+In Edit, Column, and Values, `Draft::is_cursor_stop` determines which rows can
+hold selection. A row qualifies when it supports a row-specific command or
+opens a Column or Values stage. Display-only text, list headers, multi-choice
+fields, and one-option choices remain visible for context and diagnostics but
+are skipped when eligible rows exist. Schema's declared-column rows qualify
+because they open presentation editors; derived-dimension rows do not.
+Object-wide commands such as delete, revert, or Groupings' chain editor do
+not make an otherwise inert row eligible.
+
+`Draft::move_selection` first moves through the full filtered list, then finds
+an eligible row in the direction of travel. Counts measure visible rows, not
+eligible stops. A one-row move wraps; larger moves and top/bottom commands
+clamp, searching back from the boundary if necessary. Selection resets use
+`Draft::settle_selection`: the nearest eligible row at or after the current
+position, then the nearest before it. Stage entry, filter changes, distinct
+value delivery, and failed-write reconstruction use this same rule. Open value
+fields bypass this settling: plain fields retain the edited-row selection,
+while chain and choice fields route completion selection separately.
+
+If the filtered list has no eligible row, settling leaves selection unchanged;
+keyboard movement can still traverse the inert rows and the footer reports
+that no row command is available. Pointer clicks on ineligible rows are always
+ignored, including in this fallback state.
 
 Column and Values stages stash the parent fields and fold changes back into
 the same draft before validation and persistence. This avoids independent

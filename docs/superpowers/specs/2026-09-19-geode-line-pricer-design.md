@@ -1208,19 +1208,19 @@ mid grey both poles clear 3:1, so the pole choice went unpinned.
 1,000 rows with every package open, against the 8 ms pure-UI budget
 (`docs/perf.md`, "Line pricer tile").
 
-Part 4 obligations:
+Part 4 obligations (status as of §19):
 
-- The DuckDB `SheetStore`, answering `Loaded::Pending`, and the
+- **Closed.** The DuckDB `SheetStore`, answering `Loaded::Pending`, and the
   `Delivery::Query` arm calling `PricerTile::loaded` with the decoded
   rows.
-- `:e`, `:name`, `:new`, `:rm` (the open-name set exists: `:e` refuses a
+- **Closed.** `:e`, `:name`, `:new`, `:rm` (the open-name set exists: `:e` refuses a
   name open in another tile).
-- The `pricer_sheets` declaration into the builtin layer (`builtin_layer`
+- **Closed.** The `pricer_sheets` declaration into the builtin layer (`builtin_layer`
   in `geode-app/src/main.rs` is the place).
-- `keep_generations` for local datasets.
-- Catalogue underlyings for the typeahead, if a source for them exists
+- **Closed.** `keep_generations` for local datasets.
+- **Deferred again** (no source exists). Catalogue underlyings for the typeahead, if a source for them exists
   by then.
-- Decide the header precedence of a refusal streak over `loading…`. Once
+- **Closed** (a load starting ends the streak). Decide the header precedence of a refusal streak over `loading…`. Once
   `:e` makes loads happen mid-life, a streak standing when a load starts
   paints `REFUSED` over `loading…`, and a retry that fires while loading
   submits nothing and is not re-armed (`loaded` resubmits, which ends or
@@ -1275,3 +1275,201 @@ Unverified on a real window: the header row, the tree column's indent
 and package ground, stale versus fresh contrast, the entry field over
 the active row, the cell editor and its typeahead at the bottom edge,
 the `.` menu's anchoring, and the footer holding its height.
+
+## 19. As built (Part 4, 2026-09-26)
+
+Sheets are stored in DuckDB (plan
+`2026-09-26-line-pricer-part-4-storage.md`, branch `worktree-pricer-4`).
+The plan's seventeen decisions held, one line each; the deviations and
+rulings found in review follow.
+
+1. `SheetStore` is addressed: `load(name, key, tag) → Rows | Missing |
+   Pending | Refused`, `save`/`forget → bool` (admitted, not written),
+   `names`/`contains` over a known-names cache. `MemorySheetStore` stays
+   the tests' fake; `DuckSheetStore` is wired by `bridge::start`.
+2. The tile's own `load_tag` (separate from the pricing tag); a
+   `Delivery::Query` under any other tag, or after the load ended, is
+   dropped.
+3. A hide cancels a pending load by key; the next show resubmits under a
+   fresh tag.
+4. Loads are `AsOf::Live`.
+5. `core::storage::rows_from_snapshot` decodes against the declaration's
+   columns: zero rows → `None`; a missing, wrong-typed or NULL column,
+   differing attributes, or a key naming another sheet → an error naming
+   the column (a failed load, saves blocked).
+6. Save outcomes reach the pricer by sheet name through the bridge
+   (`LocalPublished`/`LocalPublishFailed` beside `Published` and the error
+   diagnostic). Amended by ruling: they route to the tile that queued the
+   save, not the holder (below).
+7. `save` returning `true` means queued; the outcome settles it; a close
+   with a save queued writes nothing extra.
+8. `forget_document` deletes a document's live and archive rows, summary
+   and provenance in one writer transaction and rebuilds the ENUMs; it
+   shares the documents FIFO with publishes. Local datasets only, refused
+   at the service and again in the runner.
+9. Local datasets keep 200 archived generations (`LOCAL_KEEP_GENERATIONS`)
+   swept on the writer. Deviation (review): the sweep runs only once the
+   saved document's generation count passes 201, the evicted
+   generations' `file_generations`/`file_books` are pruned after it, and a
+   local save stamped at or before live is moved one microsecond past it,
+   so a wall clock stepping back never archives the latest save while
+   answering `LocalPublished`.
+10. `sheet` is `categorical = false` (the validator accepts it).
+11. The declaration is frozen (positional inserts, no migration).
+12. Known names are the diagnostics catalog's `pricer_sheets` partitions,
+    plus confirmed saves, less confirmed forgets. Ruling: a later catalog
+    only adds names (a name deleted by another process stays known; its
+    `:e` loads empty).
+13. `:e`, `:new`, `:name`, `:rm` as planned; `:e`/`:new` also refuse to
+    leave a sheet whose outgoing flush the store refused, and reset every
+    per-sheet save state. `:name` on an empty sheet renames the tile only.
+14. The `:rm` confirm copies market-data's upload confirm.
+15. A load starting ends a refusal streak, so `loading…` always shows.
+16. Catalogue underlyings stay deferred.
+17. The builtin `datasets` doc carries `pricer_sheets`. The audit of
+    `config.doc("datasets")` branches found one visible consequence per
+    dialog (below) and one wording change: with no other datasets the
+    picker now says the schema declares no categorical columns rather than
+    that no datasets config is loaded.
+
+Deviations and rulings:
+
+- **Latest-wins reversed.** Task 1 coalesced the four local-write outcomes
+  per document (latest wins). Under it a `LocalPublished` followed by a
+  `Forgotten` of the same name, both undelivered, lost the first, and the
+  pending save it settled never cleared (the name stayed taken and every
+  later `:e` of it waited forever). The mailbox now keys each local-write
+  outcome by arrival sequence (`Key::Local(seq)`): every one is delivered,
+  in the writer's order. Bounded by the writes the app queued.
+- **Service refusals answer.** A local publish or forget the service
+  refuses (not local, undeclared, wrong key arity) now answers
+  `LocalPublishFailed`/`ForgetFailed` beside the error diagnostic, so every
+  admitted write answers exactly once; a deferred load has no timeout and
+  depends on it. Ruling: the bridge routes every `pricer_sheets` outcome.
+- **Retiring set.** `:name` used to queue the old name's forget to run
+  after the confirmed save; a tile could `:e` the old name meanwhile and
+  lose it to the forget. `Shared::retiring` reserves the old name (and a
+  confirmed `:rm`'s) until its forget is answered: `:e`, `:name`, `:rm`
+  and a restore refuse it (`sheet 'x' is being removed`), `untitled-N`
+  skips it, completions leave it out. At confirm time a rename still skips
+  the forget if a tile holds the old name (no route reaches that now; the
+  guard stays).
+- **Deferred loads.** Reads (query pool) and saves (writer) are unordered
+  lanes, so `:e` back to a sheet with a queued save could read the older
+  generation and then overwrite the save. Ruling: a load of a name with a
+  queued save waits (`load_waiting`, `loading…`, nothing submitted) until
+  the save answers, rather than being refused.
+- **Per-name counts.** `Shared::pending_saves` counts queued saves per
+  name (one per admitted save, less one per outcome); a waiting load
+  starts only when the last answers. Exact because every admitted publish
+  answers once and every answer is delivered. A set, released by the first
+  outcome, let a read land between two queued saves.
+- **Origin routing.** Outcomes route to `Shared::save_origins` (the tile
+  that queued the latest save of the name), not the current holder. A tile
+  that moved on paints `sheet 'x' was not saved: …; its last edits were
+  not stored` on a failure; `Ok` paints nothing; a closed origin leaves it
+  to the data tier's diagnostic. Final fixes: a failure of a `:name`'s
+  old-name save is not painted (the edits travel under the new name), and
+  a failed load after a waiting tile heard that its save failed keeps the
+  lost-edits notice beside the `did not load` block.
+- **Quit drain and flush.** The ingest runner dropped its queue at
+  shutdown, so a save queued at quit was lost, contradicting decision 7.
+  Ruling: at shutdown the runner runs the queued local writes, in order,
+  each answering as usual, and drops feed documents, series and files;
+  `bridge::stop_at_quit` calls `PricerFactory::flush_all` inside the data
+  quit hook, before spawning the shutdown, so the flushed saves are
+  admitted ahead of `Shutdown`. gpui still waits only 200 ms.
+- **Pinned declaration.** `datasets` replaces whole objects per name, so a
+  layer redeclaring `pricer_sheets` would swap its column list and write
+  sheet values into the wrong columns. Ruling: `bridge::pin_pricer_sheets`
+  replaces any differing or dropped redeclaration with the builtin one, at
+  startup and on reload, with an error diagnostic naming the layer and
+  file; an identical one is silent. `DatasetSpec` gained `PartialEq`.
+- **Local datasets hidden from dialogs.** The Views and Sources dialogs no
+  longer offer a local dataset as a choice (a current value naming one is
+  kept). The Schema dialog still lists `pricer_sheets`; an edit there is a
+  redeclaration the pin ignores.
+- **Catalog observer detached.** The factory's stored catalog
+  `Subscription` leaked entities at teardown once app-held callbacks
+  captured the factory; the observer is detached over `Weak<Shared>`, a
+  no-op once the factory is gone.
+- **Forgotten names stay forgotten (final review).** The seed re-reads
+  the held catalog on every data-version bump, which every publication
+  causes, but the held catalog is refreshed only while a diagnostics tile
+  is watched. So with diagnostics closed, a removed or renamed-away sheet
+  became known again on the next publish of anything. Both stores now keep
+  a forgotten-names set: `note_forgotten` inserts, `note_saved` removes,
+  and `set_known` skips it. This also closes the stale-catalog race the
+  first draft of this section parked.
+- **`y` re-checks.** The `:rm` confirm's `y` refuses, in the footer, a name
+  that a tile opened or a `:name` began retiring while the question stood,
+  instead of relying on focus routing to have cancelled the confirm.
+- **`:e` of a blocked sheet's own name reloads it.** A load refused at
+  submission (a full request channel) or failed had no in-place retry;
+  `:e` of the tile's own name, otherwise a no-op, now reloads a
+  `save_blocked` sheet (nothing on it was ever saved).
+- **Test accessors.** `PricerTile::sheet`/`is_loading` sit behind the
+  crate's new `test-support` feature.
+- **Fixture init order.** The app's pricer test fixtures ran
+  `geode_pricer::init` before `gpui_component::init`, so `DataTable`'s own
+  `escape` beat the tile's rebind and the first `escape` after a committed
+  line did not close the entry field in tests (production order was
+  right). Fixtures now match `main`; a keystroke test pins it.
+
+Tests: the real-store round trip (`a_sheet_survives_the_real_store`,
+`to_rows` → DuckDB → snapshot → `from_rows`), and the app-level end to end
+(`a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart`,
+real `data_setup`, `start`, DuckDB file and shell window, typed keys, a
+restart) and the quit test
+(`quitting_saves_every_unsaved_sheet_before_the_data_service_stops`).
+About 110 harness entries were added across the part (`forget:`,
+`runner:`, `service:`, `mailbox:`, `bridge:`, `pricer storage:`,
+`pricer store:`, `pricer load:`, `pricer save:`, `pricer names:`,
+`pricer sheets:`, `pricer rm:`, `pricer retiring:`, `pricer deferred
+load:`, `pricer save origin:`, and the pin, dialog and quit entries), each
+caught by its named test.
+
+Parked (minor, deferred):
+
+- A service that fails to open strands requests admitted before it
+  failed, for every request kind: a pricer tile stays `loading…` and a
+  queued save's name stays taken. Pre-existing.
+- The quit flush goes through the 64-slot request channel; a very large
+  number of unsaved tiles at quit could have saves refused, with nothing
+  left to retry them.
+- A write still running when gpui's 200 ms quit wait ends is lost (the
+  database stays consistent).
+- `:e`/`:new` (or closing the tile) after an unconfirmed `:name` gives up
+  the old name's removal, so both documents remain.
+- A `Published` for a sheet can be delivered after its `Forgotten`
+  (separate mailbox keys); harmless for a local dataset.
+- `load_cancelled` can stay set after an answer that raced past the
+  cancel. Harmless: a resubmit on show also needs `loading`, and the next
+  load resets it.
+- A failed save's reason replaces a standing `NOT_SAVED` wording.
+- The zero-row decoder guard's harness entry is caught by the panic it
+  prevents, not by the test's assertion.
+- `storage::declared()` treats any diagnostic from parsing the
+  declaration as fatal.
+- `set_known` only extends; `note_saved` is called only on a confirmed
+  outcome (a documented contract, not a type).
+- Forget's single-transaction atomicity has no harness entry.
+- The runner's 205-publish retention test takes about 12 s.
+
+Obligations for a later slice:
+
+- As-of browsing of a sheet's history (§1.1): generations are kept (200
+  archived), but loads are always live and no reader offers an as-of.
+- Catalogue underlyings for the underlying typeahead, once a source of
+  pricing underlyings exists.
+- Sign-coloured result cells (§18's flag 15).
+- Vim-style ambiguous keys: `y` and `g` alone stay unbound because the key
+  matcher dispatches an exact match at once; a timeout-based matcher would
+  let them coexist with `y y`/`g g`.
+- A migration path before any change to the `pricer_sheets` declaration.
+
+Unverified on a real window: see the display checks in the Part 4
+report (the `:rm` prompt, `loading…` during a deferred load, the save
+slot's lost-edits and blocked notices side by side, the first `escape`
+after a committed line, and a line typed just before ⌘Q surviving a
+relaunch).

@@ -18,7 +18,9 @@ pub mod store;
 pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Request};
 pub use pricing::{PricerConfig, PricerRegistry};
-pub use service::{DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams};
+pub use service::{
+    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
+};
 
 #[cfg(test)]
 mod consistency_tests;

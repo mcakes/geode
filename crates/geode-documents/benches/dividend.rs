@@ -1,10 +1,6 @@
-//! The dividend-schedule kind's parse and write costs at two schedule
-//! sizes: 35 rows (a single index underlying's schedule, the shape
-//! `DividendGenerator` produces for SPX/NDX/RUT) and 2,000 rows (well
-//! past anything one underlying's feed sends, so the walk's per-element
-//! cost is visible rather than swamped by fixed overhead). Both are one
-//! document, which is the unit the receiver thread pays per message
-//! (design spec §6.2) — see `cvi.rs`'s identical bench for why.
+//! Parse and write benchmarks for 35-row and 2,000-row dividend schedules.
+//! Each iteration processes one document. The smaller fixture matches the demo
+//! generator's schedule size; the larger one measures per-element scaling.
 
 use chrono::{Days, NaiveDate};
 use criterion::{Criterion, criterion_group, criterion_main};

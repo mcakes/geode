@@ -1,9 +1,6 @@
-//! The registry of `DocumentKind` parsers/writers `geode-app` fills at
-//! startup, one per format a source can declare (market-data spec §6.4).
-//! `geode-data` depends on `geode-core` alone here — never on
-//! `geode-documents` or any other parser crate — because `geode-app` is
-//! the one place that both wires sources to kinds and needs the concrete
-//! parser implementations; this crate sees only the trait.
+//! Document parser/writer registry populated by the app at startup.
+//! The data service uses `DocumentKind` trait objects; the app supplies concrete
+//! implementations without introducing a dependency on a parser crate here.
 
 use geode_core::document::DocumentKind;
 use std::collections::HashMap;
@@ -15,12 +12,8 @@ pub struct DocumentRegistry {
 }
 
 impl DocumentRegistry {
-    /// Registers a kind, keyed by `kind.name()`. A second registration
-    /// under the same name replaces the first rather than being refused
-    /// — there is no ordering guarantee across `geode-app`'s startup
-    /// wiring that would make "first wins" the safer default — but it is
-    /// logged, since which kind answers a given name from then on would
-    /// otherwise be silent.
+    /// Register by `kind.name()`. Duplicate names replace the previous kind and
+    /// emit a warning so the change of implementation is visible.
     pub fn register(&mut self, kind: Arc<dyn DocumentKind>) {
         let name = kind.name().to_string();
         if self.kinds.insert(name.clone(), kind).is_some() {
