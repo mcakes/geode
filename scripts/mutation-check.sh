@@ -16641,14 +16641,14 @@ run_mutation "pricer commands: group accepts a zero count" \
   '        ["group", n] => n
             .parse::<usize>()
             .ok()' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  geode-pricer bad_arguments_answer_the_usage
 
 run_mutation "pricer commands: refresh accepts a zero duration" \
   crates/geode-pricer/src/core/commands.rs \
   '        ["refresh", d] => parse_duration(d)
             .filter(|d| !d.is_zero())' \
   '        ["refresh", d] => parse_duration(d)' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  geode-pricer bad_arguments_answer_the_usage
 
 run_mutation "pricer commands: a sheet name may hold the key separator" \
   crates/geode-pricer/src/core/commands.rs \
