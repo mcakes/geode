@@ -116,6 +116,15 @@ dataset family select its runtime path:
 | Subscription | Another adapter over a document dataset, with a `document` kind and nonempty `topics`. |
 | Fetch | Another adapter over a series dataset. No document kind or topic list is needed. |
 
+### Credentials
+
+No adapter needs credentials yet, because every shipped adapter is a simulator.
+When one does, they come from the environment. A layered configuration document
+may name the variable an adapter reads and must never carry the secret itself:
+these documents are shared desk-wide, are diffable by design, and the user layer
+is a file the application itself writes. A credential in any of those places
+would be a credential in a place it cannot be taken back from.
+
 The shared reader returns usable sources plus diagnostics addressed to
 `sources.<name>.<field>`. Missing/unknown datasets, local datasets, incompatible
 adapter/dataset shapes, and invalid required subscription settings skip the
