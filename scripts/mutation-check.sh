@@ -720,8 +720,8 @@ run_mutation "derived: a name inside a string literal is not a reference" \
 
 run_mutation "validation: views are checked when the service opens" \
   crates/geode-data/src/service.rs \
-  '            .flat_map(|v| v.validate(&config.schema, &config.dimensions))' \
-  '            .flat_map(|_v| Vec::<Diagnostic>::new())' \
+  '            validate_views(&config.views, &config.schema, &config.dimensions);' \
+  '            validate_views(&[], &config.schema, &config.dimensions);' \
   geode-data \
   a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later
 

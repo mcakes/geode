@@ -540,6 +540,32 @@ impl HealthTracker {
     }
 }
 
+/// Validate every view once, returning the diagnostics to publish and the
+/// refusals to enforce.
+///
+/// One function because `open` and a reload must never disagree about which
+/// views are honourable: a view refused at open and served after a reload would
+/// be a blotter that works until the next config write.
+fn validate_views(
+    views: &[ViewSpec],
+    schema: &SchemaSpec,
+    dimensions: &DerivedDimensions,
+) -> (Vec<Diagnostic>, std::collections::BTreeMap<String, String>) {
+    let mut diagnostics = Vec::new();
+    let mut refused = std::collections::BTreeMap::new();
+    for view in views {
+        let diags = view.validate(schema, dimensions);
+        // The FIRST error is the message the trader sees. Later ones are in
+        // the diagnostics panel; repeating them all in a query refusal would
+        // bury the one that has to be read.
+        if let Some(first) = diags.iter().find(|d| d.severity == Severity::Error) {
+            refused.insert(view.name.clone(), first.message.clone());
+        }
+        diagnostics.extend(diags);
+    }
+    (diagnostics, refused)
+}
+
 pub struct DataService {
     read_config: Arc<ReadConfig>,
     config: DataServiceConfig,
@@ -554,6 +580,12 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
+    /// Views whose configuration cannot be honoured, by name, each with the
+    /// first error explaining why. A query for one is refused instead of
+    /// compiled: the compiler would return the columns it cannot supply as
+    /// absent, and an absent column paints blank with nothing on screen to say
+    /// why.
+    refused_views: std::collections::BTreeMap<String, String>,
     /// One worker per upload target. They only answer the sink, so they
     /// stop first and depend on nothing below.
     egress: EgressWorkers,
@@ -1293,12 +1325,10 @@ impl DataService {
         );
 
         // Validate views at open so diagnostics name the configuration before any
-        // tile queries it. Report and skip broken views while serving valid ones.
-        let diagnostics = config
-            .views
-            .iter()
-            .flat_map(|v| v.validate(&config.schema, &config.dimensions))
-            .collect();
+        // tile queries it. A view with an error is refused by name in `query`;
+        // every other view serves normally.
+        let (diagnostics, refused_views) =
+            validate_views(&config.views, &config.schema, &config.dimensions);
         let egress =
             EgressWorkers::spawn(&config.egress, &config.adapters, Arc::clone(&stored_sink));
         Ok(DataService {
@@ -1309,6 +1339,7 @@ impl DataService {
             config,
             sink: stored_sink,
             diagnostics,
+            refused_views,
             egress,
             subscriptions: std::sync::Mutex::new(subscriptions),
             fetchers: std::sync::Mutex::new(fetchers),
@@ -1351,12 +1382,11 @@ impl DataService {
             dimensions: dimensions.clone(),
         });
         self.config.dimensions = dimensions;
-        let diagnostics: Vec<Diagnostic> = views
-            .iter()
-            .flat_map(|v| v.validate(&self.config.schema, &self.config.dimensions))
-            .collect();
+        let (diagnostics, refused_views) =
+            validate_views(&views, &self.config.schema, &self.config.dimensions);
         self.config.views = views;
         self.diagnostics = diagnostics.clone();
+        self.refused_views = refused_views;
         diagnostics
     }
 
@@ -1388,6 +1418,15 @@ impl DataService {
                 statement: format!("query view '{view}'"),
                 source: duckdb::Error::InvalidParameterName(format!("unknown view '{view}'")),
             })?;
+
+        // Refused before the grouping override is considered: a regrouping of a
+        // view that cannot be honoured is not a way in.
+        if let Some(why) = self.refused_views.get(view) {
+            return Err(StoreError::Sql {
+                statement: format!("query view '{view}'"),
+                source: duckdb::Error::InvalidParameterName(why.clone()),
+            });
+        }
 
         // A grouping override is a per-query copy of the spec with its
         // grouping replaced; validation runs on the copy so an undeclared
@@ -3628,6 +3667,60 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("broken") && d.message.contains("nosuchcolumn")),
             "the diagnostic must name the view and the column: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_view_with_an_error_diagnostic_is_refused_by_name_not_compiled() {
+        // A diagnostic nobody has a panel open for is not a remedy. Before the
+        // refusal, this query compiled: `nosuchcolumn` came back absent, and an
+        // absent column paints blank with nothing on screen to say why.
+        let (db, _src, _svc, _rx) = service();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let good = crate::ingest::load::tests_support::tree_view();
+        let mut broken = good.clone();
+        broken.name = "broken".into();
+        broken.grouping.push("nosuchcolumn".into());
+
+        let (svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![good, broken],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .expect("a broken view must not stop the service opening");
+
+        let err = svc
+            .query(&params(1, "broken", &Scope::default(), AsOf::Live, 1))
+            .expect_err("a view that cannot be honoured must not compile");
+        let message = format!("{err}");
+        assert!(
+            message.contains("nosuchcolumn"),
+            "the refusal must name the column — it is the whole remedy: {message}"
+        );
+
+        // One broken view must not take the service down with it.
+        assert!(
+            svc.query(&params(2, "tree", &Scope::default(), AsOf::Live, 1))
+                .is_ok(),
+            "a healthy view over the same schema still serves"
+        );
+
+        // And a grouping override is not a way past the refusal.
+        let mut regrouped = params(3, "broken", &Scope::default(), AsOf::Live, 1);
+        regrouped.grouping = Some(vec!["book".into()]);
+        assert!(
+            svc.query(&regrouped).is_err(),
+            "an override cannot bypass it"
         );
     }
 

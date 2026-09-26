@@ -2058,4 +2058,49 @@ npv = 120
         );
         assert_eq!(views[0].presentation_of("delta01").width, Some(3.0));
     }
+
+    /// Spec obligation: strictness is only acceptable if what we ship is
+    /// already clean. Every views document in the repo is loaded against its
+    /// own datasets document and must produce no error diagnostic — otherwise
+    /// `--demo` would not open.
+    #[test]
+    fn every_shipped_views_document_validates_clean() {
+        let views_text = include_str!("../../../examples/demo-config/views.toml");
+        let datasets_text = include_str!("../../../examples/demo-config/datasets.toml");
+        let dims_text = include_str!("../../../examples/demo-config/dimensions.toml");
+
+        let (views, read_diags) = ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", views_text).unwrap()],
+        ));
+        let errors: Vec<&Diagnostic> = read_diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "reading the shipped views: {errors:?}");
+
+        let (schema, _) = SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", datasets_text).unwrap()],
+        ));
+        let (dims, _) = DerivedDimensions::from_doc(&merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", dims_text).unwrap()],
+        ));
+
+        assert!(!views.is_empty(), "the fixture must actually load views");
+        for view in &views {
+            let errors: Vec<String> = view
+                .validate(&schema, &dims)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .map(|d| d.message)
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "shipped view '{}' does not validate: {errors:?}",
+                view.name
+            );
+        }
+    }
 }
