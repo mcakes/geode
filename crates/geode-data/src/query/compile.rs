@@ -419,14 +419,23 @@ pub(crate) fn compile_view_with_cache(
             .collect();
         let own_q = quoted(&own);
 
-        let measures: Vec<&ColumnSpec> = view
+        let measures: Vec<(&ColumnSpec, Aggregate)> = view
             .columns
             .iter()
             .filter_map(|c| match c {
                 ViewColumn::Measure { name, .. } => ds.column(name),
                 _ => None,
             })
-            .filter(|c| c.grain() == Some(grain))
+            .filter_map(|c| match c.role {
+                // The role carries the aggregate, so there is no default to
+                // fall back to. Validation refuses a measure column that is
+                // not a measure; anything else here would have been summed,
+                // and a grain-bearing attribute repeats across its rows, so
+                // the sum is plausible and wrong.
+                ColumnRole::Measure { aggregate, .. } => Some((c, aggregate)),
+                _ => None,
+            })
+            .filter(|(c, _)| c.grain() == Some(grain))
             .collect();
         if measures.is_empty() {
             continue;
@@ -434,13 +443,7 @@ pub(crate) fn compile_view_with_cache(
 
         let aggs: Vec<String> = measures
             .iter()
-            .map(|m| {
-                let agg = match m.role {
-                    ColumnRole::Measure { aggregate, .. } => aggregate,
-                    _ => Aggregate::Sum,
-                };
-                format!("{} as \"{}\"", agg.sql(&format!("\"{}\"", m.name)), m.name)
-            })
+            .map(|(m, agg)| format!("{} as \"{}\"", agg.sql(&format!("\"{}\"", m.name)), m.name))
             .collect();
 
         // How many of *this grain's* grouping columns are present at each
@@ -553,7 +556,7 @@ pub(crate) fn compile_view_with_cache(
         };
         agg_joins.push(format!("left join {alias} on {on}"));
 
-        for m in measures {
+        for (m, _) in measures {
             // Attribution per depth, from the schema alone.
             let by_depth: Vec<Attribution> = (0..=n)
                 .map(|d| attribution_of(ds, grain, &view.grouping[..d], dims))
@@ -691,7 +694,14 @@ pub(crate) fn compile_view_with_cache(
     let mut stalest_input = vec![view.dataset.clone()];
     for (i, join) in view.joins.iter().enumerate() {
         let Some(joined_ds) = schema.dataset(&join.dataset) else {
-            continue;
+            // Validation refuses this view before any query reaches here, so
+            // arriving with an unknown join dataset means the caller skipped
+            // the gate. Dropping the join silently is what made the joined
+            // columns paint blank forever.
+            return Err(compile_error(
+                view,
+                format!("join names unknown dataset '{}'", join.dataset),
+            ));
         };
 
         // The key must be on the spine *as materialized*. Testing the
@@ -705,7 +715,17 @@ pub(crate) fn compile_view_with_cache(
             .into_iter()
             .find(|g| carries_all(joined_ds, *g, &join.on, dims))
         else {
-            continue;
+            // Validation refuses a join whose key no grain of the joined
+            // dataset carries, so arriving here means the caller skipped the
+            // gate. Dropping the join silently is what made the joined
+            // columns paint blank forever.
+            return Err(compile_error(
+                view,
+                format!(
+                    "join on {:?} names keys no grain of dataset '{}' carries",
+                    join.on, join.dataset
+                ),
+            ));
         };
         // Only datasets actually read contribute to provenance and freshness.
         stalest_input.push(join.dataset.clone());
@@ -1085,6 +1105,49 @@ kind = "dimension"
 "#;
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_join_the_compiler_cannot_honour_is_an_error_not_a_silent_drop() {
+        // Validation is the gate now, so reaching the compiler with an
+        // unhonourable join is a bug in the caller, not a configuration
+        // mistake to absorb.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        let mut unhonourable = joined_view();
+        unhonourable.joins[0].dataset = "no_such_dataset".to_string();
+
+        let err = compile_view(
+            store.writer(),
+            &unhonourable,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no_such_dataset"),
+            "the error must name the unhonourable join: {message}"
+        );
+
+        // The middle `continue` still holds: a join key that IS in the
+        // grouping but below this query's max_depth is a depth fact, not a
+        // configuration error, so it still compiles and the rolled-up row
+        // carries NULL for the key rather than an arbitrary instrument's.
+        let q = joined_query(&store, &schema, 0);
+        let rows = run(&store, &q, &["row_depth", "instrument_ref"]);
+        assert_eq!(rows.len(), 1, "the grand total alone: {rows:?}");
+        assert_eq!(
+            rows[0][1], "None",
+            "a key below max_depth is NULL, not an error: {rows:?}"
+        );
     }
 
     #[test]
