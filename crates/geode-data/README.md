@@ -93,6 +93,15 @@ often tripped:
 - Generation summaries cover all live/archive pairs, including NULL-book
   partitions. As-of selection and retention break source-time ties by the
   greatest generation ID so corrected republishes win consistently.
+- Provenance names the generation a read actually used, because source time
+  alone cannot see a corrected republish. The catalog answers the live cases:
+  `live_generation` for one partition's newest and `dataset_generation` for a
+  whole dataset's, the maximum where `dataset_as_of` takes the minimum, since
+  this field reports whether the data changed rather than how stale it is. A
+  historical document read reports the `gen_id` it pinned and a historical view
+  read reports none, its era having resolved one generation per partition.
+  `latest_gen_id` stays an internal sequence helper for reserving the next ID
+  on `record`; it names no partition and is not a freshness answer.
 - Live/archive retention has a transactional storage API but no production
   scheduler for measure or feed-published document datasets. Local datasets
   are swept on the writer after a local publish takes its document past
