@@ -3158,8 +3158,10 @@ run_mutation "delegate: narrowing invalidates the cache" \
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), cols);
+        self.refresh_selection();
     }' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
@@ -3175,8 +3177,10 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.refresh_selection();
     }' \
   geode-blotter \
   apply_snapshot_invalidates_the_cache_and_refills_it
@@ -3332,9 +3336,11 @@ run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
   '        // same tree, and the window is only ever tens of rows.
         self.invalidate_cells();
+        self.refresh_selection();
         cx.notify();
     }' \
   '        // same tree, and the window is only ever tens of rows.
+        self.refresh_selection();
         cx.notify();
     }' \
   geode-blotter \
@@ -14606,11 +14612,12 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 
 # Spec §20.5 at the blotter tile's own derivation (the final review's
 # I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from the mode. Mutated to always wrap, a bare `j` in
-# visual mode leaps from the last row to row 0 and inverts the selection.
+# what decides it from whether a selection is live (grid selection spec
+# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
+# with a selection live leaps from the last row to row 0 and inverts it.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = matches!(d.mode, Mode::Normal);' \
+  '                    let wrap = d.selection.is_none();' \
   '                    let wrap = true;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
