@@ -730,7 +730,7 @@ fn a_fresh_tile_paints_the_empty_hint_and_its_title(cx: &mut gpui::TestAppContex
     assert_eq!(h.title(&mut vcx).as_ref(), "timeseries · 1y · 1d");
     assert!(
         h.painted_text(&mut vcx)
-            .contains("no series — a adds one, x composes")
+            .contains("no series — `a` adds one, `x` composes")
     );
     assert_eq!(h.key_context_mode(&mut vcx).as_str(), "normal");
 }

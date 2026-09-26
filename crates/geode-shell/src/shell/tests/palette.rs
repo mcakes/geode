@@ -1517,20 +1517,38 @@ fn tab_in_the_palette_leaves_the_query_field_focused(cx: &mut gpui::TestAppConte
 }
 
 /// Keys on screen paint as gpui-component's `Kbd` (`shell::kbd`), whose
-/// `kbd:{keystroke}` selector is the probe: the pending `g` of `g g`
-/// paints one (status strip and which-key overlay), and the palette's
-/// binding column paints the action's `g g` as chips. Nothing paints
-/// `kbd:g` outside those two states, so each assertion is its route's.
+/// `kbd:{keystroke}` selector is the probe. A `q w` binding keeps the
+/// routes apart: with `q` pending, the status strip alone paints `kbd:q`
+/// (the pending key) and the which-key overlay alone paints `kbd:w` (the
+/// continuation); the palette's binding column paints both. Nothing else
+/// binds a `q` sequence, so no other surface paints either chip.
 #[gpui::test]
-fn pending_keys_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestAppContext) {
+fn pending_keys_which_key_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
+
+    let mut services = test_services();
+    services
+        .registry
+        .register(crate::actions::ActionDef {
+            id: crate::actions::ActionId("test::qw".to_string()),
+            title: "Test qw".to_string(),
+            category: "Test".to_string(),
+        })
+        .unwrap();
+    let user_doc = geode_core::config::LayerDoc {
+        layer: geode_core::config::Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: "[[bindings]]\n[bindings.keys]\n\"q w\" = \"test::qw\"\n"
+            .parse()
+            .unwrap(),
+    };
+    services.keymap = test_keymap(&services.registry, &[user_doc]);
 
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
-                });
+                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1543,28 +1561,32 @@ fn pending_keys_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestAppContext)
     };
     draw(&mut cx);
     assert!(
-        cx.debug_bounds("kbd:g").is_none(),
+        cx.debug_bounds("kbd:q").is_none() && cx.debug_bounds("kbd:w").is_none(),
         "sanity: no key painted yet"
     );
 
-    cx.simulate_keystrokes("g");
+    cx.simulate_keystrokes("q");
     draw(&mut cx);
     assert!(
-        cx.debug_bounds("kbd:g").is_some(),
-        "the pending `g` paints as a Kbd chip"
+        cx.debug_bounds("kbd:q").is_some(),
+        "the status strip paints the pending `q` as a Kbd chip"
+    );
+    assert!(
+        cx.debug_bounds("kbd:w").is_some(),
+        "the which-key overlay paints the continuation `w` as a Kbd chip"
     );
     cx.simulate_keystrokes("escape");
     draw(&mut cx);
     assert!(
-        cx.debug_bounds("kbd:g").is_none(),
-        "sanity: the pending chip is gone once the sequence is cancelled"
+        cx.debug_bounds("kbd:q").is_none() && cx.debug_bounds("kbd:w").is_none(),
+        "sanity: both chips are gone once the sequence is cancelled"
     );
 
     cx.simulate_keystrokes("ctrl-k");
-    cx.simulate_input("Test gg");
+    cx.simulate_input("Test qw");
     draw(&mut cx);
     assert!(
-        cx.debug_bounds("kbd:g").is_some(),
-        "the palette's binding column paints `g g` as Kbd chips"
+        cx.debug_bounds("kbd:q").is_some() && cx.debug_bounds("kbd:w").is_some(),
+        "the palette's binding column paints `q w` as Kbd chips"
     );
 }

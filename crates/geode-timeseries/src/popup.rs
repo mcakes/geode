@@ -55,7 +55,8 @@ const LABEL_WIDTH: f32 = 32.0;
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 
 /// Range keyboard hint showing that presets are typed as their chip labels.
-const RANGE_HINT: &str = "type a preset (3m, 1y) · tab switches · enter commits";
+/// Backtick-quoted runs are keys, painted as chips by `kbd::marked`.
+const RANGE_HINT: &str = "type a preset (3m, 1y) · `tab` switches · `enter` commits";
 
 /// Mutually exclusive transient state. Series and Menu add their popup pair
 /// to normal-mode context. Picker, Expr, Range, and Colour use insert routing;
@@ -604,7 +605,7 @@ fn empty_row(theme: &Theme, text: &'static str) -> Div {
         .flex()
         .items_center()
         .text_color(theme.muted_foreground)
-        .child(text)
+        .child(geode_shell::shell::kbd::marked(text))
 }
 
 /// Anchor fieldless lists, picker, and range to the header's relative wrapper;
@@ -879,7 +880,7 @@ pub(crate) fn render_range(
             .px(scale::design(ROW_INSET))
             .text_xs()
             .text_color(theme.muted_foreground)
-            .child(RANGE_HINT),
+            .child(geode_shell::shell::kbd::marked(RANGE_HINT)),
     );
     if let Some(error) = &p.error {
         panel = panel.child(
@@ -998,13 +999,18 @@ pub(crate) fn render_menu(
                 ..
             } => {
                 let disabled = enabled.is_err();
+                let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
+                let lit = i == m.highlighted && !disabled;
+                let lane = if lit {
+                    theme.accent_foreground
+                } else {
+                    theme.muted_foreground
+                };
                 // A disabled row says why; an enabled one shows its keys.
                 let trailing = match enabled {
                     Err(r) => div().child(*r).into_any_element(),
-                    Ok(()) => geode_shell::shell::kbd::binding(hint).into_any_element(),
+                    Ok(()) => geode_shell::shell::kbd::menu_binding(hint, lane).into_any_element(),
                 };
-                let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
-                let lit = i == m.highlighted && !disabled;
                 h_flex()
                     .id(ElementId::NamedInteger(
                         SharedString::new_static("ts-menu-row"),
@@ -1050,13 +1056,7 @@ pub(crate) fn render_menu(
                             })
                             .child(title.clone()),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .when(lit, |d| d.text_color(theme.accent_foreground))
-                            .when(!lit, |d| d.text_color(theme.muted_foreground))
-                            .child(trailing),
-                    )
+                    .child(div().text_xs().text_color(lane).child(trailing))
                     .into_any_element()
             }
         });

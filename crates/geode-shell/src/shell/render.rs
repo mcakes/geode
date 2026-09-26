@@ -596,7 +596,7 @@ impl Render for ShellView {
             // an offer to fill the space the reader is looking at.
             let hint = match region {
                 crate::tiling::FocusRegion::Main => {
-                    "double-click or ctrl+k → Add a tile".to_string()
+                    "double-click or `ctrl+k` → Add a tile".to_string()
                 }
                 crate::tiling::FocusRegion::Dock(side) => {
                     let side = match side {
@@ -604,7 +604,7 @@ impl Render for ShellView {
                         crate::tiling::DockSide::Right => "right",
                         crate::tiling::DockSide::Bottom => "bottom",
                     };
-                    format!("ctrl+k → Add a tile · focus is in the {side} dock")
+                    format!("`ctrl+k` → Add a tile · focus is in the {side} dock")
                 }
             };
             let selector = "empty-hint";
@@ -639,7 +639,7 @@ impl Render for ShellView {
                             // available for "the hint painted".
                             .debug_selector(|| selector.to_string())
                             .text_color(cx.theme().muted_foreground)
-                            .child(hint),
+                            .child(super::kbd::marked(&hint)),
                     ),
             );
         } else {
@@ -823,15 +823,15 @@ impl Render for ShellView {
             } else {
                 let (hint, selector) = match side {
                     crate::tiling::DockSide::Left => (
-                        "double-click or ctrl+k → Add a tile here · ctrl+shift+[ moves one",
+                        "double-click or `ctrl+k` → Add a tile here · `ctrl+shift+[` moves one",
                         "dock-empty-hint-left",
                     ),
                     crate::tiling::DockSide::Right => (
-                        "double-click or ctrl+k → Add a tile here · ctrl+shift+] moves one",
+                        "double-click or `ctrl+k` → Add a tile here · `ctrl+shift+]` moves one",
                         "dock-empty-hint-right",
                     ),
                     crate::tiling::DockSide::Bottom => (
-                        "double-click or ctrl+k → Add a tile here · ctrl+shift+/ moves one",
+                        "double-click or `ctrl+k` → Add a tile here · `ctrl+shift+/` moves one",
                         "dock-empty-hint-bottom",
                     ),
                 };
@@ -859,7 +859,11 @@ impl Render for ShellView {
                                 view.on_empty_dock_mouse_down(side, event, window, cx);
                             }),
                         )
-                        .child(div().debug_selector(|| selector.to_string()).child(hint)),
+                        .child(
+                            div()
+                                .debug_selector(|| selector.to_string())
+                                .child(super::kbd::marked(hint)),
+                        ),
                 );
             }
         }

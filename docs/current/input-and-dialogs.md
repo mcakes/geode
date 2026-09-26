@@ -133,17 +133,30 @@ the matcher still decides after each key and context change.
 
 ### Displaying keys
 
-Every key painted on its own — dialog footer hints, keybinding rows,
-tooltips, palette binding badges, which-key continuations, the status bar's
-pending keys, and module menus and footers — is gpui-component's `Kbd`,
-reached through [`shell::kbd`](../../crates/geode-shell/src/shell/kbd.rs).
-`Kbd` owns the label and look: platform glyphs on macOS (`⌃⇧P`, `⎋`), and
-`Ctrl+Shift+P` elsewhere, with the key capitalised, so `g` reads `G` and
-`shift+g` reads `⇧G`. A module menu hint stored as a keymap spec goes through
-`kbd::spec`, which keeps a `:` command-line verb as text because it is not a
-key. A key named inside a sentence (a notice, a confirmation, help copy) keeps
-the keymap's lowercase spelling from `palette::render_binding`, since that is
-what a user types into a keymap file.
+Every key shown as a key is gpui-component's `Kbd`, reached through
+[`shell::kbd`](../../crates/geode-shell/src/shell/kbd.rs). That covers dialog
+footer hints, keybinding rows, tooltips, palette binding badges, which-key
+continuations, the status bar's pending keys, empty-state and section hints,
+and module menus and footers. `Kbd` owns the label and look: platform glyphs
+on macOS (`⌃⇧P`, `⎋`) and `Ctrl+Shift+P` elsewhere, with the key capitalised,
+so `g` reads `G` and `shift+g` reads `⇧G`.
+
+- A hint line that names keys inside prose writes them between backticks
+  (``"double-click or `ctrl+k` → Add a tile"``); `kbd::marked` paints each
+  backticked run as chips and the rest as text.
+- A module menu hint stored as a keymap spec goes through `kbd::menu_spec`.
+  A `:` command-line verb stays text because it is not a key, and so does a
+  spec naming `mod`, because the alias is the user's.
+- A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
+  does: the label without the chip's fill or padding, in the lane's colour,
+  so a highlighted row's keys follow the highlight.
+- A key named inside a sentence (a notice, a confirmation, a refusal) keeps
+  the keymap's lowercase spelling from `palette::render_binding`, since that
+  is what a user types into a keymap file.
+
+Hardcoded hints name the shipped key. A user rebinding does not change the
+empty-state hint's `ctrl+k` or a module menu's hint; the palette, keybinding
+rows, tooltips and the timeseries footer and menu read the live keymap.
 
 ## Per-tile command and find lines
 

@@ -3440,7 +3440,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // already reads by.
                         let (text, suffix) = if draft.values().is_some() {
                             (
-                                "VALUES — space ticks · ctrl+a all shown · ctrl+x none",
+                                "VALUES — `space` ticks · `ctrl+a` all shown · `ctrl+x` none",
                                 "members",
                             )
                         } else {
@@ -3457,7 +3457,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 .debug_selector(move || {
                                     format!("objectdialog-section-{suffix}-{field_key}")
                                 })
-                                .child(text)
+                                .child(kbd::marked(text))
                                 .into_any_element(),
                         );
                     }
@@ -4015,22 +4015,23 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 }
 
 /// The small-caps text and selector suffix for the section header that opens an ordered
-/// list's own items or its available catalogue. `own` distinguishes Views' own columns
+/// list's own items or its available catalogue. Backtick-quoted runs are keys, painted
+/// as `Kbd` chips by `kbd::marked`. `own` distinguishes Views' own columns
 /// from the rest of its dataset's; Groupings' `dimensions` has no catalogue at all
 /// (`groupings.rs`'s own module doc), so only the first arm there is ever reached.
 fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
     match (domain, own) {
         (Domain::Views, true) => (
-            "COLUMNS — space hides · shift+j / shift+k reorder · x removes",
+            "COLUMNS — `space` hides · `shift+j` / `shift+k` reorder · `x` removes",
             "members",
         ),
-        (Domain::Views, false) => ("AVAILABLE — space adds", "available"),
+        (Domain::Views, false) => ("AVAILABLE — `space` adds", "available"),
         (Domain::Groupings, _) => (
-            "DIMENSIONS — space includes · shift+j / shift+k reorder",
+            "DIMENSIONS — `space` includes · `shift+j` / `shift+k` reorder",
             "members",
         ),
-        (Domain::Scopes, true) => ("DIMENSIONS — enter opens values · x drops", "members"),
-        (Domain::Scopes, false) => ("AVAILABLE — enter picks values", "available"),
+        (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
+        (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
         // None of Schema, Sources or Colours has an `OrderedList` field
         // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
         // module docs — every field on any of the three is a plain

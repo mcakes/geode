@@ -51,8 +51,9 @@ fn diag_version_for_section(section: Section, v: geode_shell::diagnostics::DiagV
 }
 
 /// Header text computed once per section change, keeping formatting out of paint.
+/// Backtick-quoted runs are keys, painted as chips by `kbd::marked`.
 fn header_text_for(section: Section) -> SharedString {
-    format!("diagnostics · {} · [ ] to switch", section.name()).into()
+    format!("diagnostics · {} · `[` `]` to switch", section.name()).into()
 }
 
 /// Tile title computed once per section change and shared with the tile list
@@ -597,7 +598,7 @@ impl gpui::Render for DiagnosticsTile {
         // Paint the shared stack marker first in the header.
         header = header
             .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
-            .child(self.header_text.clone());
+            .child(geode_shell::shell::kbd::marked(&self.header_text));
         // Expose the active filter, including one restored from a session.
         if !self.filter.is_empty() {
             header = header.child(

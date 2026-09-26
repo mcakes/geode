@@ -3880,7 +3880,30 @@ run_mutation "kbd: the palette's binding column paints its keys" \
   crates/geode-shell/src/palette.rs \
   '            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());' \
   '            let binding = crate::shell::kbd::binding(&[]);' \
-  geode-shell pending_keys_and_palette_bindings_paint_as_kbd
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+# The status strip's pending keys and the which-key overlay's
+# continuations are separate routes: each one painting nothing leaves its
+# own chip (`kbd:q`, `kbd:w`) missing while the other still paints.
+run_mutation "kbd: the status strip paints the pending keys" \
+  crates/geode-shell/src/shell/status.rs \
+  '        bar = bar.left(super::kbd::binding(pending));' \
+  '        bar = bar.left(super::kbd::binding(&[]));' \
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+run_mutation "kbd: the which-key overlay paints each continuation key" \
+  crates/geode-shell/src/shell/whichkey.rs \
+  '                .child(super::kbd::chip(keystroke))' \
+  '                .child(div())' \
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+# Hint lines name keys between backticks; dropping the key runs leaves the
+# empty workspace's hint without its `ctrl+k` chip.
+run_mutation "kbd: a marked hint line paints its backticked keys" \
+  crates/geode-shell/src/shell/kbd.rs \
+  '                    return Some(self::spec(part));' \
+  '                    return None;' \
+  geode-shell an_empty_workspace_hint_paints_its_keys_as_kbd
 
 # A module menu's `:` verb is not a key: parsing `:upload` as one would
 # paint a chip reading `:upload`'s last segment instead of the verb.

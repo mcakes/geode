@@ -45,7 +45,8 @@ pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 
 /// What a tile with no slots paints in place of the chart. Names the two
 /// keys that end the state, per the design guide's empty-state rule.
-pub(crate) const EMPTY_HINT: &str = "no series — a adds one, x composes";
+/// Backtick-quoted runs are keys, painted as chips by `kbd::marked`.
+pub(crate) const EMPTY_HINT: &str = "no series — `a` adds one, `x` composes";
 
 /// The swatch beside a chip's label, in pixels at the design rem.
 const SWATCH: f32 = 8.0;
@@ -171,8 +172,9 @@ const FOOTER_HINTS: &[(&str, &str, &str)] = &[
     ("timeseries::percentiles", "p", "percentiles"),
 ];
 
-/// One footer hint: the verb's keys, then its word.
-pub(crate) type FooterHint = (Vec<Keystroke>, &'static str);
+/// One footer hint: the verb's keys, then its word — every word but the
+/// last already carries its ` ·` separator, so paint formats nothing.
+pub(crate) type FooterHint = (Vec<Keystroke>, SharedString);
 
 pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
     let empty = Vec::new();
@@ -180,13 +182,20 @@ pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
         .try_global::<Chords>()
         .map(|c| c.0.as_slice())
         .unwrap_or(&empty);
+    let last = FOOTER_HINTS.len() - 1;
     FOOTER_HINTS
         .iter()
-        .map(|(action, shipped, word)| {
+        .enumerate()
+        .map(|(i, (action, shipped, word))| {
             let keys = chord_for(bindings, action).unwrap_or_else(|| {
                 parse_binding(shipped, Modifiers::NONE).expect("shipped footer keys are valid")
             });
-            (keys, *word)
+            let word = if i == last {
+                SharedString::new_static(word)
+            } else {
+                format!("{word} ·").into()
+            };
+            (keys, word)
         })
         .collect()
 }
@@ -464,7 +473,6 @@ pub(crate) fn render_expr_field(f: &ExprField, theme: &Theme) -> impl IntoElemen
 }
 
 pub(crate) fn render_footer(hints: &[FooterHint], theme: &Theme) -> impl IntoElement {
-    let last = hints.len().saturating_sub(1);
     h_flex()
         .w_full()
         .h(scale::design(FOOTER_HEIGHT))
@@ -476,14 +484,11 @@ pub(crate) fn render_footer(hints: &[FooterHint], theme: &Theme) -> impl IntoEle
         .border_t_1()
         .border_color(theme.border)
         .overflow_hidden()
-        .children(hints.iter().enumerate().map(|(i, (keys, word))| {
-            let word: SharedString = if i == last {
-                SharedString::new_static(word)
-            } else {
-                format!("{word} ·").into()
-            };
-            kbd::hint(keys, word)
-        }))
+        .children(
+            hints
+                .iter()
+                .map(|(keys, word)| kbd::hint(keys, word.clone())),
+        )
 }
 
 /// Empty-chart guidance with Add and Compose buttons. Each button dispatches
@@ -522,7 +527,7 @@ pub(crate) fn render_empty(
         .justify_center()
         .gap_2()
         .text_color(theme.muted_foreground)
-        .child(EMPTY_HINT)
+        .child(kbd::marked(EMPTY_HINT))
         .child(buttons)
 }
 

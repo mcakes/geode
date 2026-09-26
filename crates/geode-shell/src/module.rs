@@ -458,7 +458,9 @@ pub mod placeholder {
                 .justify_center()
                 .gap_1()
                 .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
-                .child("double-click or ctrl+k → Add a tile");
+                .child(crate::shell::kbd::marked(
+                    "double-click or `ctrl+k` → Add a tile",
+                ));
             div()
                 .size_full()
                 .flex()

@@ -319,7 +319,7 @@ pub(crate) fn render_menu(
                 // (or its `:` verb).
                 let reason = match enabled {
                     Err(r) => div().child(*r).into_any_element(),
-                    Ok(()) => geode_shell::shell::kbd::spec(hint),
+                    Ok(()) => geode_shell::shell::kbd::menu_spec(hint, theme.muted_foreground),
                 };
                 // A choice row carries a tick or a same-width blank
                 // ahead of its title, so the group's titles align
