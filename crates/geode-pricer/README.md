@@ -69,6 +69,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the shorthand as the row's find key and paints only a package's template
   token. A package's template is a name, not a table: loading a sheet never
   fails on a name the configured set lacks.
+- `TemplateSet::from_doc_over` keeps the last valid definition per name.
+  An entry dropped with an error keeps the previous set's definition of
+  its name, in the entry's own position. A name absent from the document
+  is removed.
 - A sheet built by `Sheet::new` or `from_rows` carries the builtin template
   set. `PricerTile::adopt_templates` is the only place a tile's sheet gets
   the factory's configured set; it runs wherever a sheet is installed (open,

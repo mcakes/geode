@@ -420,8 +420,11 @@ error diagnostic at its path while the rest load. An entry is bad when its
 name is invalid or reserved, it is not a table, `legs` is missing or has
 fewer than two legs, a leg is not a table, a `weight` is zero or not an
 integer, a `strike` or `expiry` is below 1 or above the number of legs,
-`kind` is not `"C"` or `"P"`, or the strike or expiry numbers skip one (a
-template using strikes 1 and 3 has no strike 2). Unknown keys, on the entry
+`kind` is not `"C"` or `"P"` (either case), or the strike or expiry numbers skip one (a
+template using strikes 1 and 3 has no strike 2). A dropped entry whose
+name had a definition keeps that previous definition, with a warning: the
+running one on a reload and the built-in one at startup, so a typo in a
+desk `RR` never makes `RR` disappear. Unknown keys, on the entry
 or on a leg, warn and are ignored. Two spellings of one name in the same
 merged document keep the later entry, in the earlier one's position, with a
 warning.

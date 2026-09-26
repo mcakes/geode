@@ -1,8 +1,8 @@
 //! What the shell hosts (line-pricer spec §8.1): the [`TileContent`]
 //! wrapper over a [`PricerTile`], and the factory that builds them. The
 //! factory carries the data handle, the loaded views, the template
-//! tables, the pricing settings, the sheet store and the set of sheet names open across its
-//! tiles (spec §7.4) — the shell sees none of them.
+//! tables, the pricing settings, the sheet store and the set of sheet
+//! names open across its tiles (spec §7.4) — the shell sees none of them.
 
 use crate::core::storage::PRICER_SHEETS_DATASET;
 use crate::core::template::TemplateSet;
@@ -460,8 +460,9 @@ impl PricerFactory {
 
     /// A reload (planning decision 20): the new views, template tables and
     /// live pricing settings, then every open tile adopts the tables,
-    /// re-resolves its view and restarts its timer. The pricer's name and presence are the running data
-    /// engine's and change only with a restart (`[pricing] adapter`).
+    /// re-resolves its view and restarts its timer. The pricer's name and
+    /// presence are the running data engine's and change only with a
+    /// restart (`[pricing] adapter`).
     pub fn reload(
         &self,
         views: Views,
@@ -496,6 +497,22 @@ impl PricerFactory {
             .names()
             .map(str::to_string)
             .collect()
+    }
+
+    /// The loaded template names, in doc order.
+    pub fn template_names(&self) -> Vec<String> {
+        self.shared
+            .templates
+            .borrow()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    /// The running template set: what a reload's bad entries fall back to
+    /// (`TemplateSet::from_doc_over`).
+    pub fn templates(&self) -> Arc<TemplateSet> {
+        self.shared.templates.borrow().clone()
     }
 
     pub fn settings(&self) -> PricerSettings {

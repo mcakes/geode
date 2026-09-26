@@ -137,7 +137,8 @@ pub fn data_setup(
     };
     let (pricer_views, view_diags) = pricer_views_from_config(config);
     diagnostics.extend(view_diags);
-    let (pricer_templates, template_diags) = pricer_templates_from_config(config);
+    let (pricer_templates, template_diags) =
+        pricer_templates_from_config(config, &TemplateSet::builtin());
     diagnostics.extend(template_diags);
     let (refresh, refresh_diag) = pricing_refresh_from_config(config);
     diagnostics.extend(refresh_diag);
@@ -313,19 +314,24 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
 
 /// The `pricer_templates` doc, or the built-in set when no layer has one
 /// (the builtin layer always does in the app; a test config may not).
-pub fn pricer_templates_from_config(config: &Config) -> (TemplateSet, Vec<Diagnostic>) {
+/// A bad entry keeps `previous`'s definition of its name (keep-last-valid,
+/// per name): the builtin set at startup, the running set on a reload.
+pub fn pricer_templates_from_config(
+    config: &Config,
+    previous: &TemplateSet,
+) -> (TemplateSet, Vec<Diagnostic>) {
     match config.doc(PRICER_TEMPLATES_DOC) {
-        Some(doc) => TemplateSet::from_doc(doc),
+        Some(doc) => TemplateSet::from_doc_over(doc, previous),
         None => (TemplateSet::builtin(), Vec::new()),
     }
 }
 
 /// Exactly what the pricer reads out of a config: the merged
-/// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh` value and the resolved
-/// stale threshold. Two equal keys resolve to the same views and settings,
-/// so the reload observer skips a reload whose key is unchanged — a theme
-/// or keymap edit must not restart every tile's refresh timer or repeat a
-/// bad value's warning.
+/// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh`
+/// value and the resolved stale threshold. Two equal keys resolve to the
+/// same views and settings, so the reload observer skips a reload whose
+/// key is unchanged — a theme or keymap edit must not restart every tile's
+/// refresh timer or repeat a bad value's warning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
@@ -785,7 +791,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 *last_key.borrow_mut() = Some(key);
                 let (views, diags) = pricer_views_from_config(config);
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
-                let (templates, template_diags) = pricer_templates_from_config(config);
+                // A bad entry keeps the running definition of its name.
+                let (templates, template_diags) =
+                    pricer_templates_from_config(config, &pricer.templates());
                 let mut diags = diags;
                 diags.extend(template_diags);
                 diags.extend(refresh_diag);
@@ -1553,7 +1561,7 @@ role = "key"
             desk: None,
             user: None,
         });
-        let (set, diags) = pricer_templates_from_config(&config);
+        let (set, diags) = pricer_templates_from_config(&config, &TemplateSet::builtin());
         assert!(diags.is_empty());
         assert_eq!(set, TemplateSet::builtin());
         assert_eq!(set.iter().count(), 7, "the seven built-ins");
@@ -1575,7 +1583,7 @@ role = "key"
             )
             .unwrap(),
         ]);
-        let (set, diags) = pricer_templates_from_config(&config);
+        let (set, diags) = pricer_templates_from_config(&config, &TemplateSet::builtin());
         assert!(set.resolve("CONDOR").is_some());
         assert!(set.resolve("RR").is_some(), "the built-ins stay");
         assert!(set.resolve("BAD").is_none());
@@ -1636,6 +1644,112 @@ role = "key"
         });
         vcx.run_until_parked();
         assert_eq!(bridge.pricer.view_names(), vec!["slim"]);
+    }
+
+    /// A desk `pricer_templates` layer: a `CONDOR` and a broken `RR`
+    /// (`weight = 0`), over the builtin seven.
+    fn desk_templates() -> Vec<LayerDoc> {
+        vec![
+            LayerDoc::builtin(PRICER_TEMPLATES_DOC, geode_pricer::core::BUILTIN_TEMPLATES).unwrap(),
+            LayerDoc::builtin(
+                PRICER_TEMPLATES_DOC,
+                "[RR]\nlegs = [ { weight = 0, strike = 1, kind = \"P\" }, \
+                 { weight = 1, strike = 2, kind = \"C\" } ]\n\
+                 [CONDOR]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, \
+                 { weight = -1, strike = 2, kind = \"C\" }, \
+                 { weight = -1, strike = 3, kind = \"C\" }, \
+                 { weight = 1, strike = 4, kind = \"C\" } ]\n",
+            )
+            .unwrap(),
+        ]
+    }
+
+    /// The reload observer hands the factory the configured templates,
+    /// and a broken entry keeps the running definition of its name.
+    #[gpui::test]
+    fn a_config_reload_hands_the_pricer_factory_its_templates(cx: &mut gpui::TestAppContext) {
+        let mut builtin = vec![LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap()];
+        builtin.extend(desk_templates());
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin,
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        assert!(
+            !bridge.pricer.template_names().contains(&"CONDOR".into()),
+            "fixture: built with the builtin set"
+        );
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            let frame = shell.read(cx).frame().clone();
+            frame.update(cx, |f, cx| {
+                f.note_config_reloaded();
+                cx.notify();
+            });
+        });
+        vcx.run_until_parked();
+        let names = bridge.pricer.template_names();
+        assert!(names.contains(&"CONDOR".into()), "{names:?}");
+        assert!(
+            names.contains(&"RR".into()),
+            "the broken RR keeps the running one: {names:?}"
+        );
+    }
+
+    /// At startup the configured templates reach the factory, and a broken
+    /// entry falls back to the builtin definition of its name.
+    #[gpui::test]
+    fn startup_hands_the_pricer_factory_its_templates(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let mut builtin = vec![
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n").unwrap(),
+        ];
+        builtin.extend(desk_templates());
+        let config = Config::load(&ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("t.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        assert!(
+            setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("keeping the previous definition")),
+            "{:?}",
+            setup.diagnostics
+        );
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let names = bridge.pricer.template_names();
+        bridge.handle.shutdown();
+        assert!(names.contains(&"CONDOR".into()), "{names:?}");
+        assert_eq!(
+            bridge.pricer.templates().resolve("RR"),
+            TemplateSet::builtin().resolve("RR"),
+            "the broken RR falls back to the builtin one"
+        );
     }
 
     /// A reload that changes nothing the pricer reads (a theme, keymap or

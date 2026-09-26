@@ -16766,6 +16766,38 @@ run_mutation "pricer shorthand: the unknown-type list trails a space" \
   '            format!("unknown type '"'"'{}'"'"': {} ", type_tok.text, names.join(" ")),' \
   geode-pricer every_error_names_the_offending_offset
 
+# Keep-last-valid per name: a bad entry keeps the previous definition.
+# Mutated, a typo in a desk `RR` makes RR vanish everywhere.
+run_mutation "pricer templates: a bad entry drops the previous definition" \
+  crates/geode-pricer/src/core/template.rs \
+  '                None => match previous.resolve(&upper) {' \
+  '                None => match None::<&TemplateDef> {' \
+  geode-pricer a_bad_entry_keeps_the_previous_definition_and_an_absent_one_is_removed
+
+# The reload observer must hand the factory the configured set.
+run_mutation "pricer app: a reload hands the factory the builtin templates" \
+  crates/geode-app/src/bridge.rs \
+  '            };
+            pricer.reload(views, templates, refresh, stale_after, cx);' \
+  '            };
+            let _ = templates;
+            pricer.reload(views, TemplateSet::builtin(), refresh, stale_after, cx);' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_templates
+
+# On a reload, "previous" is the running set, not an empty one.
+run_mutation "pricer app: a reload's bad entry has no previous to keep" \
+  crates/geode-app/src/bridge.rs \
+  '                    pricer_templates_from_config(config, &pricer.templates());' \
+  '                    pricer_templates_from_config(config, &TemplateSet::default());' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_templates
+
+# Startup must build the factory from the configured set.
+run_mutation "pricer app: startup hands the factory the builtin templates" \
+  crates/geode-app/src/bridge.rs \
+  '        setup.pricer_templates.clone(),' \
+  '        TemplateSet::builtin(),' \
+  geode-app startup_hands_the_pricer_factory_its_templates
+
 # The reload key must see the templates doc, or an edit to it never
 # reaches the pricer.
 run_mutation "pricer config key: templates are not part of the key" \

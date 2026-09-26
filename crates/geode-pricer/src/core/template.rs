@@ -171,6 +171,20 @@ impl TemplateSet {
     /// this is layer-override semantics for names TOML itself cannot fold
     /// together.
     pub fn from_doc(doc: &MergedDoc) -> (TemplateSet, Vec<Diagnostic>) {
+        TemplateSet::from_doc_over(doc, &TemplateSet::default())
+    }
+
+    /// [`from_doc`](Self::from_doc), keeping the last valid state per
+    /// name: an entry dropped with an Error keeps `previous`'s definition
+    /// of that name, if it has one, in the entry's doc-order position,
+    /// with a Warning at the entry's path. A name absent from `doc` is
+    /// removed as usual. `previous` is the running set on a reload and
+    /// the builtin set at startup, so a bad desk `RR` falls back to the
+    /// builtin one instead of disappearing.
+    pub fn from_doc_over(
+        doc: &MergedDoc,
+        previous: &TemplateSet,
+    ) -> (TemplateSet, Vec<Diagnostic>) {
         let mut out = TemplateSet::default();
         let mut diags = Vec::new();
         // Upper-cased name -> (its position in `out.defs`, the spelling on
@@ -202,79 +216,99 @@ impl TemplateSet {
                     continue;
                 }
             };
-            let Some(table) = value.as_table() else {
-                diags.push(report(Severity::Error, "", "not a table; dropped".into()));
-                continue;
-            };
-            for key in table.keys().filter(|k| *k != "legs") {
-                diags.push(report(
-                    Severity::Warning,
-                    key,
-                    format!("unknown key '{key}' ignored"),
-                ));
-            }
-            let Some(raw) = table.get("legs").and_then(|v| v.as_array()) else {
-                diags.push(report(
-                    Severity::Error,
-                    "legs",
-                    "missing 'legs' array; dropped".into(),
-                ));
-                continue;
-            };
-            let mut legs = Vec::with_capacity(raw.len());
-            let mut bad = false;
-            for (i, leg) in raw.iter().enumerate() {
-                match read_leg(leg, raw.len()) {
-                    Ok((spec, unknown)) => {
-                        for key in unknown {
-                            diags.push(report(
-                                Severity::Warning,
-                                &format!("legs.{i}.{key}"),
-                                format!("unknown key '{key}' ignored"),
-                            ));
+            // `None`: the entry was dropped with an Error.
+            let read: Option<TemplateDef> = 'entry: {
+                let Some(table) = value.as_table() else {
+                    diags.push(report(Severity::Error, "", "not a table; dropped".into()));
+                    break 'entry None;
+                };
+                for key in table.keys().filter(|k| *k != "legs") {
+                    diags.push(report(
+                        Severity::Warning,
+                        key,
+                        format!("unknown key '{key}' ignored"),
+                    ));
+                }
+                let Some(raw) = table.get("legs").and_then(|v| v.as_array()) else {
+                    diags.push(report(
+                        Severity::Error,
+                        "legs",
+                        "missing 'legs' array; dropped".into(),
+                    ));
+                    break 'entry None;
+                };
+                let mut legs = Vec::with_capacity(raw.len());
+                let mut bad = false;
+                for (i, leg) in raw.iter().enumerate() {
+                    match read_leg(leg, raw.len()) {
+                        Ok((spec, unknown)) => {
+                            for key in unknown {
+                                diags.push(report(
+                                    Severity::Warning,
+                                    &format!("legs.{i}.{key}"),
+                                    format!("unknown key '{key}' ignored"),
+                                ));
+                            }
+                            legs.push(spec);
                         }
-                        legs.push(spec);
-                    }
-                    Err((key, m)) => {
-                        let suffix = match key {
-                            Some(k) => format!("legs.{i}.{k}"),
-                            None => format!("legs.{i}"),
-                        };
-                        diags.push(report(Severity::Error, &suffix, format!("{m}; dropped")));
-                        bad = true;
-                        break;
+                        Err((key, m)) => {
+                            let suffix = match key {
+                                Some(k) => format!("legs.{i}.{k}"),
+                                None => format!("legs.{i}"),
+                            };
+                            diags.push(report(Severity::Error, &suffix, format!("{m}; dropped")));
+                            bad = true;
+                            break;
+                        }
                     }
                 }
-            }
-            if bad {
-                continue;
-            }
-            if legs.len() < 2 {
-                diags.push(report(
-                    Severity::Error,
-                    "legs",
-                    "needs at least two legs; dropped".into(),
-                ));
-                continue;
-            }
-            let strikes = legs.iter().map(|l| l.strike + 1).max().unwrap_or(0);
-            let expiries = legs.iter().map(|l| l.expiry + 1).max().unwrap_or(0);
-            let covers = |n: usize, used: &dyn Fn(&LegSpec) -> usize| {
-                (0..n).all(|k| legs.iter().any(|l| used(l) == k))
+                if bad {
+                    break 'entry None;
+                }
+                if legs.len() < 2 {
+                    diags.push(report(
+                        Severity::Error,
+                        "legs",
+                        "needs at least two legs; dropped".into(),
+                    ));
+                    break 'entry None;
+                }
+                let strikes = legs.iter().map(|l| l.strike + 1).max().unwrap_or(0);
+                let expiries = legs.iter().map(|l| l.expiry + 1).max().unwrap_or(0);
+                let covers = |n: usize, used: &dyn Fn(&LegSpec) -> usize| {
+                    (0..n).all(|k| legs.iter().any(|l| used(l) == k))
+                };
+                if !covers(strikes, &|l| l.strike) || !covers(expiries, &|l| l.expiry) {
+                    diags.push(report(
+                        Severity::Error,
+                        "legs",
+                        "strike and expiry numbers must run 1, 2, … with no gap; dropped".into(),
+                    ));
+                    break 'entry None;
+                }
+                Some(TemplateDef {
+                    name: upper.clone(),
+                    legs,
+                    strikes,
+                    expiries,
+                })
             };
-            if !covers(strikes, &|l| l.strike) || !covers(expiries, &|l| l.expiry) {
-                diags.push(report(
-                    Severity::Error,
-                    "legs",
-                    "strike and expiry numbers must run 1, 2, … with no gap; dropped".into(),
-                ));
-                continue;
-            }
-            let def = TemplateDef {
-                name: upper.clone(),
-                legs,
-                strikes,
-                expiries,
+            // Keep-last-valid, per name: a bad entry keeps the name's
+            // previous definition rather than vanishing (the merge
+            // replaced the lower layer's whole entry with this one).
+            let def = match read {
+                Some(def) => def,
+                None => match previous.resolve(&upper) {
+                    Some(kept) => {
+                        diags.push(report(
+                            Severity::Warning,
+                            "",
+                            "keeping the previous definition".into(),
+                        ));
+                        kept.clone()
+                    }
+                    None => continue,
+                },
             };
             if let Some((idx, earlier)) = seen.get(&upper) {
                 diags.push(Diagnostic {
@@ -401,6 +435,64 @@ mod tests {
             PRICER_TEMPLATES_DOC,
             &[doc],
         ))
+    }
+
+    /// Keep-last-valid, per name: a bad `RR` keeps the previous `RR` in
+    /// its own doc-order slot; a doc with no `RR` removes it.
+    #[test]
+    fn a_bad_entry_keeps_the_previous_definition_and_an_absent_one_is_removed() {
+        use geode_core::config::{LayerDoc, Severity, merge_docs};
+        let previous = TemplateSet::builtin();
+        let doc = |toml: &str| {
+            merge_docs(
+                PRICER_TEMPLATES_DOC,
+                &[LayerDoc::builtin(PRICER_TEMPLATES_DOC, toml).unwrap()],
+            )
+        };
+        let bad = doc(
+            "[CS]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, { weight = -1, strike = 2, kind = \"C\" } ]\n\
+             [RR]\nlegs = [ { weight = 0, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n\
+             [PS]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = -1, strike = 2, kind = \"P\" } ]\n",
+        );
+        let (s, diags) = TemplateSet::from_doc_over(&bad, &previous);
+        let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["CS", "RR", "PS"],
+            "the kept RR takes its entry's slot"
+        );
+        assert_eq!(s.resolve("RR"), previous.resolve("RR"));
+        let errors: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        let warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags:?}");
+        assert_eq!(warnings.len(), 1, "{diags:?}");
+        assert!(
+            warnings[0]
+                .message
+                .contains("keeping the previous definition"),
+            "{diags:?}"
+        );
+        assert_eq!(warnings[0].path.as_deref(), Some("pricer_templates.RR"));
+
+        // Without a previous RR, the bad one is simply dropped.
+        let (s, _) = TemplateSet::from_doc(&bad);
+        assert!(s.resolve("RR").is_none());
+
+        // Absent from the doc: removed, whatever the previous set held.
+        let (s, diags) = TemplateSet::from_doc_over(
+            &doc(
+                "[CS]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, { weight = -1, strike = 2, kind = \"C\" } ]\n",
+            ),
+            &previous,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(s.resolve("RR").is_none());
     }
 
     #[test]

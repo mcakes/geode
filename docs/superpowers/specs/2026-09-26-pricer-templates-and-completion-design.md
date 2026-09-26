@@ -70,9 +70,14 @@ legs = [
 ### 2.2 Validation
 
 Each entry is checked on its own. A bad entry is skipped with a
-diagnostic under `pricer_templates.<NAME>`, and the rest still load. A
-reload that fails validation entirely keeps the last valid set (the
-configuration guide's rule).
+diagnostic under `pricer_templates.<NAME>`, and the rest still load.
+Keep-last-valid applies per name. An entry dropped with an error keeps the
+previous definition of that name, if there is one, in the entry's own
+doc-order position, and adds a warning at the entry's path ("keeping the
+previous definition"). "Previous" is the running set on a reload and the
+builtin set at startup. A layer's whole-entry replacement therefore
+cannot make a name such as `RR` vanish because of a typo. A name absent
+from the merged document is removed as normal.
 
 - **Name:** 1 to 8 characters, a letter first, then letters or digits.
   Stored and matched upper-case. `C`, `P` and `CUSTOM` are reserved.
