@@ -20910,8 +20910,10 @@ run_mutation "timeseries completion: a row click inserts the candidate" \
 # A press on the list surface must not let the shell root take focus.
 run_mutation "timeseries completion: a list press keeps the keyboard in the field" \
   crates/geode-timeseries/src/popup.rs \
-  '        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());' \
-  '        ;' \
+  '        // popup, and the shell root from taking focus on a press here.
+        .occlude();' \
+  '        // popup, and the shell root from taking focus on a press here.
+        ;' \
   geode-timeseries clicking_a_candidate_inserts_it_and_typing_continues
 
 # Nothing loaded: the one muted line naming `a`.

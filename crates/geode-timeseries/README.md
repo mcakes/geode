@@ -119,8 +119,8 @@ goes through `set_value`, which emits no Change, so the cached range moves
 over the written name and repeated Tab cycles the same list. The first Tab
 after a caret move re-ranks at the live caret. Enter expands a unique inexact
 name before resolving. A row press writes the same way, stops propagation,
-and the list surface prevents the default focus move, so the field keeps the
-keyboard.
+and the list surface occludes, so the shell root (which focuses only a hovered
+hitbox) never takes the keyboard from the field.
 
 ## Color and menu contracts
 

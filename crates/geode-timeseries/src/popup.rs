@@ -756,8 +756,9 @@ pub(crate) fn render_picker(
 ///
 /// A row press writes that name at the caret through `expr_pick`, the
 /// same write `tab` makes. The press never leaves the popup: rows stop
-/// propagation, and the surface prevents the default focus move, so the
-/// shell root's `track_focus` cannot take the keyboard from the field.
+/// propagation, and the surface occludes, so no hitbox below it — the
+/// shell root's `track_focus` among them, which focuses only a hovered
+/// hitbox — is hovered, and nothing takes the keyboard from the field.
 pub(crate) fn render_expr_list(
     f: &ExprField,
     tile: &Entity<TimeseriesTile>,
@@ -772,9 +773,9 @@ pub(crate) fn render_expr_list(
     let hover = row_paint(theme).hover;
     let mut list = popover_surface(cx)
         .debug_selector(move || format!("ts-expr-list-{tile_id}"))
-        // Keep the chart below from receiving pointer hits through the popup.
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
+        // Keep the chart below from receiving pointer hits through the
+        // popup, and the shell root from taking focus on a press here.
+        .occlude();
     if c.nothing_loaded() {
         list = list.child(
             empty_row(theme, EXPR_NOTHING_LOADED)
