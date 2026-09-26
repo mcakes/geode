@@ -54,8 +54,8 @@ const LABEL_WIDTH: f32 = 32.0;
 /// Tab actions here so the container can switch its two date fields.
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 
-/// Range keyboard hint; numeric presets are available until date editing starts.
-const RANGE_HINT: &str = "1–7 preset · tab switches · enter commits";
+/// Range keyboard hint showing that presets are typed as their chip labels.
+const RANGE_HINT: &str = "type a preset (3m, 1y) · tab switches · enter commits";
 
 /// Mutually exclusive transient state. Series and Menu add their popup pair
 /// to normal-mode context. Picker, Expr, Range, and Colour use insert routing;
@@ -196,8 +196,12 @@ pub(crate) struct RangePopup {
     /// Commit refusal displayed below the fields while the popup remains open.
     pub error: Option<SharedString>,
     /// Set by a field key that changes state or by pointer segment selection.
-    /// Disables bare-digit presets for the rest of this popup session.
+    /// Disables keyboard presets for the rest of this popup session.
     pub edited: bool,
+    /// Leading digit of a preset label, waiting for its unit. Set only while
+    /// keyboard presets are available; matching chips remain filled.
+    /// Non-chord keys outside the label grammar and segment clicks clear it.
+    pub prefix: Option<u8>,
     /// The frequency in force, mirrored from the model at open and on
     /// every chip click so the frequency row paints the tick without
     /// reading the model in `render`.
@@ -244,6 +248,7 @@ impl RangePopup {
     ) {
         self.active = which;
         self.edited = true;
+        self.prefix = None;
         self.active_field_mut().select(segment);
         self.reprepare(which, tile_id);
     }
@@ -255,12 +260,19 @@ impl RangePopup {
         }
     }
 
-    /// Whether bare 1–7 can select a preset. Once a field changes or a segment
-    /// is clicked, digits edit dates for the remainder of the session. An in-progress
-    /// number also owns its next digit, so preset shortcuts cannot interrupt typing.
-    /// Reopen the popup to restore keyboard preset shortcuts.
+    /// Whether a bare digit starts a preset label such as `3m`. Once a field
+    /// changes or a segment is clicked, digits edit dates for the rest of the
+    /// session, so preset prefixes cannot steal the first digit of a year.
+    /// Pending date digits also retain ownership of subsequent digits.
+    /// Reopen the popup to restore keyboard presets.
     pub(crate) fn digit_is_preset(&self) -> bool {
         !self.edited && !self.active_field().typing()
+    }
+
+    /// Whether `preset`'s chip paints lit: a label is being typed and
+    /// this preset is one it could still become.
+    pub(crate) fn candidate(&self, preset: Preset) -> bool {
+        self.prefix.is_some_and(|d| preset.starts_with(d))
     }
 }
 
@@ -820,12 +832,24 @@ pub(crate) fn render_range(
         .px(scale::design(ROW_INSET))
         .gap_1()
         .items_center();
-    // All preset chips share one theme-derived paint and pointer-state set,
-    // avoiding repeated contrast calculations within this render.
-    let chip = chip_paint(theme, Tone::Neutral);
-    let states = control::for_chip(theme, &chip, theme.popover);
+    // Share theme-derived paint and pointer states to avoid per-chip contrast
+    // calculations. All chips are filled until a prefix narrows the candidates;
+    // derive bare paint only while a prefix is pending.
+    let filled = chip_paint(theme, Tone::Neutral);
+    let filled_states = control::for_chip(theme, &filled, theme.popover);
+    let bare = p.prefix.map(|_| {
+        let mut bare = chip_paint(theme, Tone::Neutral);
+        bare.fill = None;
+        bare.text = theme.muted_foreground;
+        let states = control::for_chip(theme, &bare, theme.popover);
+        (bare, states)
+    });
     for (i, preset) in Preset::ALL.into_iter().enumerate() {
         let word = preset.as_str();
+        let (chip, states) = match &bare {
+            Some((bare, bare_states)) if !p.candidate(preset) => (bare, *bare_states),
+            _ => (&filled, filled_states),
+        };
         presets = presets.child(
             div()
                 .id(ElementId::NamedInteger(

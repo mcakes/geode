@@ -65,6 +65,24 @@ cargo bench -p geode-timeseries
   component makes by itself (a swatch pick) is blurred by the one closer
   before the element is dropped.
 
+## Range editor
+
+Type a preset as labelled (`1w`, `1m`, `3m`, `6m`, `1y`, `2y`, `5y`). The
+leading bare digit narrows the chips; a second digit replaces it, and a matching
+unit commits immediately, including with Shift. Invalid digits or units refuse
+inline. While a label is pending, Enter refuses and Escape or Backspace clears
+the label; the next Escape closes the editor. Other non-chord keys clear the
+label before normal date routing.
+
+A field key that changes state, or a segment click, makes subsequent digits
+edit dates until the popup reopens. Tab and ineffective field keys leave
+keyboard presets available. Preset chips remain clickable in either mode.
+Enter without a pending label commits the fields as an absolute range, even
+if unchanged; validation failures keep the draft open. Relative presets use
+UTC calendar arithmetic and remain relative in sessions. Absolute ranges store
+inclusive UTC dates; reopening them retains their stored dates despite as-of
+clipping of queries.
+
 ## Colour and menu contracts
 
 The action menu's `Colour…` opens the picker for the selected slot. Palette

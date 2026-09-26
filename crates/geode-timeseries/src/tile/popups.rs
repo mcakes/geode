@@ -484,17 +484,19 @@ impl TimeseriesTile {
             focus,
             error: None,
             edited: false,
+            prefix: None,
             frequency: self.model.frequency(),
         }));
         self.notice = None;
         cx.notify();
     }
 
-    /// Handle keys at the range popup's focused container, before the shell
-    /// listener. A handled key stops propagation to avoid dispatching it twice.
-    /// Use the shared datefield router; chords fall through for shell actions.
-    /// Tab and Shift+Tab switch fields. Insert-mode keymap actions provide the
-    /// same commit, cancel, and step operations as this listener.
+    /// Handle keys at the focused range container before the shell listener.
+    /// Returning true stops propagation and prevents duplicate dispatch.
+    /// Typed presets run before Tab and the shared datefield router, so a
+    /// pending label owns Enter and Escape. Chords fall through for shell
+    /// actions. Tab and Shift+Tab switch fields without editing either date.
+    /// Insert-mode actions share the commit, cancel, and step operations.
     pub(crate) fn range_key(
         &mut self,
         event: &KeyDownEvent,
@@ -506,6 +508,9 @@ impl TimeseriesTile {
         }
         let modifiers = event.keystroke.modifiers;
         let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        if !chord && self.preset_key(event.keystroke.key.as_str(), modifiers.shift, window, cx) {
+            return true;
+        }
         if !chord && event.keystroke.key.as_str() == "tab" {
             if let Some(Popup::Range(r)) = &mut self.popup {
                 r.switch();
@@ -526,23 +531,102 @@ impl TimeseriesTile {
                 self.commit_range(window, cx);
             }
             FieldKey::Cancel => self.close_popup_with_window(window, cx),
-            // Preset digits are active only while `digit_is_preset` permits them;
-            // otherwise digits edit the selected date segment.
-            FieldKey::Digit(d)
-                if matches!(&self.popup, Some(Popup::Range(r)) if r.digit_is_preset())
-                    && Preset::digit(d).is_some() =>
-            {
-                let preset = Preset::digit(d).expect("just checked");
-                self.write_range(Range::Relative(preset), window, cx);
-            }
             other => self.apply_range_key(other, cx),
         }
         true
     }
 
-    /// One key onto the active field. A keystroke that moves the field
-    /// answers a refusal about a date that is no longer on screen — the
-    /// expression field's own rule.
+    /// Consume a typed preset while keyboard presets are available. A bare
+    /// digit starts or replaces the prefix; a matching w/m/y unit commits it.
+    /// Shifted units also match. Invalid leading digits clear the prefix and
+    /// refuse inline; an invalid w/m/y unit retains the prefix for correction.
+    ///
+    /// Pending Backspace or Escape clears the label without closing. Pending
+    /// Enter refuses inline instead of committing dates. Other non-chord keys
+    /// clear the label and continue through field routing. Chords bypass this
+    /// handler. See `RangePopup::digit_is_preset` for date-editing ownership.
+    fn preset_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(Popup::Range(r)) = &mut self.popup else {
+            return false;
+        };
+        let mut chars = key.chars();
+        // One character, lower-cased: a shifted unit (`M`, or the
+        // macOS form `m` with shift held) still completes the label.
+        let single = match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c.to_ascii_lowercase()),
+            _ => None,
+        };
+        if !shift
+            && let Some(d) = single.and_then(|c| c.to_digit(10))
+            && r.digit_is_preset()
+        {
+            let d = d as u8;
+            if Preset::any_starts_with(d) {
+                r.prefix = Some(d);
+                r.error = None;
+            } else {
+                r.prefix = None;
+                r.error = Some(format!("no preset starts with {d} — {}", Preset::WORDS).into());
+            }
+            cx.notify();
+            return true;
+        }
+        let Some(d) = r.prefix else {
+            return false;
+        };
+        let candidates = || {
+            Preset::ALL
+                .into_iter()
+                .filter(|p| p.starts_with(d))
+                .map(Preset::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (single, key) {
+            (Some(unit @ ('w' | 'm' | 'y')), _) => match Preset::typed(d, unit) {
+                Some(preset) => {
+                    // A refusal (the point cap) keeps the popup open on
+                    // its reason; the label was finished, so it is no
+                    // longer pending.
+                    if !self.write_range(Range::Relative(preset), window, cx)
+                        && let Some(Popup::Range(r)) = &mut self.popup
+                    {
+                        r.prefix = None;
+                    }
+                }
+                None => {
+                    r.error = Some(format!("no preset {d}{unit} — {}", candidates()).into());
+                    cx.notify();
+                }
+            },
+            (_, "backspace" | "escape") => {
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+            }
+            (_, "enter") => {
+                r.error = Some(format!("finish the preset — {}", candidates()).into());
+                cx.notify();
+            }
+            _ => {
+                // Clear the pending label and its refusal before normal field routing.
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Apply a key to the active date and clear its inline refusal, including
+    /// when the field reports no state change.
     pub(super) fn apply_range_key(&mut self, key: FieldKey, cx: &mut Context<Self>) {
         let id = self.id.0;
         if let Some(Popup::Range(r)) = &mut self.popup {
@@ -572,8 +656,7 @@ impl TimeseriesTile {
         }
     }
 
-    /// A click on a preset chip — the mouse form of the digit, and the
-    /// same door.
+    /// Commit a clicked preset, including after the draft enters date-editing mode.
     pub(crate) fn range_preset_clicked(
         &mut self,
         preset: Preset,
@@ -637,7 +720,7 @@ impl TimeseriesTile {
         }
     }
 
-    /// Validate and apply ranges from Enter, preset digits, and preset clicks.
+    /// Validate and apply ranges from date Enter, typed labels, and preset clicks.
     /// Success closes and applies model flags; a refusal stays inline with the
     /// editor open.
     pub(super) fn write_range(

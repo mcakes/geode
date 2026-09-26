@@ -229,6 +229,19 @@ Modified presses and subsequent presses in a multi-click do not start chart
 drags, leaving those gestures available to the shell. Right presses focus the
 tile before its context menu handles keys.
 
+An unedited range popup accepts preset labels as printed on its chips:
+`3` then `m` selects `3m`, matching `:range 3m`. A bare digit highlights the
+presets it could start and waits for `w`, `m`, or `y`; shifted units also work.
+An unsupported digit, invalid digit/unit pair, or Enter before the unit shows
+an inline refusal. Backspace or Escape clears a pending digit; another Escape
+closes the popup. Completing a preset applies it and closes the popup unless
+range validation refuses it.
+
+Moving or stepping a date segment, or clicking one, makes later digits edit
+the date. A key that changes nothing does not switch to date entry, and Tab
+alone only switches fields. Closing and reopening with `r` restores preset
+entry. Frequency chips still apply immediately without committing draft dates.
+
 A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolute
 `#rrggbb`. Palette and named colours follow the theme. Absolute colours receive
 no theme or contrast adjustment. Sessions store them as lowercase six-digit
