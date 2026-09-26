@@ -371,11 +371,24 @@ impl BlotterTile {
             // selection gesture or not — must never clear one out from
             // under a shift+click or drag that just started it.
             TableEvent::SelectRow(row) => {
-                this.with_delegate(cx, |d| {
+                // `set_selected_row` (`sync_cursor`, below) re-emits this
+                // same event unconditionally, row unchanged or not — and
+                // a live snapshot can call it too, on every tick, with
+                // the cursor's own row. Returning early when the row is
+                // already where the cursor is breaks that echo without a
+                // guard elsewhere, and keeps a live tick from scrolling a
+                // sideways-scrolled view back to the cursor's column.
+                let moved = this.with_delegate(cx, |d| {
                     let len = d.shown.len();
+                    if (*row).min(len.saturating_sub(1)) == d.cursor.row {
+                        return false;
+                    }
                     d.cursor.to_row(*row, len);
+                    true
                 });
-                this.sync_cursor(cx);
+                if moved {
+                    this.sync_cursor(cx);
+                }
             }
             // A double-click anywhere on a row is `space` on it. The
             // table selects the row before emitting this, so the cursor
@@ -961,17 +974,11 @@ impl BlotterTile {
         self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
-            // `set_selected_row` unconditionally emits `TableEvent::
-            // SelectRow`, and that event's own handler calls back into
-            // `sync_cursor` (so a mouse `SelectRow` re-resolves the
-            // selection too, Task 6) — calling it again on a row the
-            // table already has selected would re-emit and recurse
-            // forever rather than settling. The guard makes the round
-            // trip terminate after one bounce: the second `sync_cursor`
-            // finds the row unchanged and stops.
-            if t.selected_row() != Some(row) {
-                t.set_selected_row(row, cx);
-            }
+            // Unconditional, as before this door existed: it also clears
+            // `right_clicked_row`, and `TableEvent::SelectRow`'s own
+            // handler is what keeps its unconditional re-emit from
+            // recursing (its early return on an unchanged row).
+            t.set_selected_row(row, cx);
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
         });
@@ -2802,6 +2809,57 @@ mod tests {
         assert_eq!((sel, cursor), (false, (2, 1)));
     }
 
+    /// A drag whose press landed outside every cell and gutter (the
+    /// header strip stands in for a scrollbar thumb, a header column
+    /// reorder, a tile-split divider, or another tile's own text
+    /// selection — anything that can hold the primary button down while
+    /// the pointer later crosses this table) must never start or move a
+    /// selection just because a later move happens to pass over a cell.
+    #[gpui::test]
+    fn a_drag_that_never_pressed_a_cell_selects_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let outside = centre(&mut cx, "blotter-header-7");
+        let over = centre(&mut cx, "blotter-cell-1-2");
+        cx.simulate_mouse_down(outside, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(over, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::none());
+        let (sel, cursor) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), (d.cursor.row, d.cursor.col))
+        });
+        assert_eq!(
+            (sel, cursor),
+            (false, (0, 0)),
+            "the press never landed on a cell or gutter, so a move over one starts nothing"
+        );
+    }
+
+    /// A drag's selection kind is decided once, by where the press
+    /// landed — a press on the gutter starts `Rows`, and dragging on from
+    /// there across ordinary cells must not flip it to `Block`.
+    #[gpui::test]
+    fn a_gutter_drag_stays_rows_after_leaving_the_gutter(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let from = centre(&mut cx, "blotter-gutter-0");
+        let to = centre(&mut cx, "blotter-cell-2-2");
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows), (SelectKind::Rows, 0..3));
+    }
+
     /// A gutter press means `Rows`, not `Block` — the same distinction
     /// `V`/`v` draw with the keyboard — reached the same way a plain
     /// cell's does: through `on_ui_settings`'s production route
@@ -4316,6 +4374,55 @@ mod tests {
             shown_rows(&h, &cx),
             vec![0, 1, 3, 2],
             "L1 opened once and stayed open"
+        );
+    }
+
+    /// The cell's own press listener (grid selection spec §5) fires for
+    /// every left press, a double-click's first press included; a plain
+    /// press always clears any live selection, so it leaves none behind
+    /// here either — there was none to clear, but the toggle itself must
+    /// not have started one.
+    #[gpui::test]
+    fn a_double_click_that_toggles_a_row_leaves_no_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened once");
+        assert!(
+            !h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_some()),
+            "a double-click toggles the row; it never starts a selection"
+        );
+    }
+
+    /// Likewise for the chevron's own press, underneath its `on_click`.
+    #[gpui::test]
+    fn a_chevron_click_leaves_no_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            !h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_some()),
+            "the chevron toggles the row; it never starts a selection"
         );
     }
 

@@ -20836,6 +20836,13 @@ run_mutation "blotter selection: a shift press starts a selection" \
   geode-blotter \
   shift_click_extends_a_block_from_the_cursor
 
+run_mutation "blotter selection: a drag without a recorded press selects nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '            let Some(started_on_gutter) = d.drag_origin else {' \
+  '            let Some(started_on_gutter) = d.drag_origin.or(Some(gutter)) else {' \
+  geode-blotter \
+  a_drag_that_never_pressed_a_cell_selects_nothing
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

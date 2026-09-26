@@ -25,7 +25,7 @@ use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, SharedString, Stateful, TextAlign, Window, div, px,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, Window, div, px,
 };
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -180,8 +180,26 @@ pub struct BlotterDelegate {
     /// pixel, not per cell) never re-emits — the tile's `pointer` handler
     /// would otherwise re-run `start_selection`'s no-op-if-already-live
     /// branch and move the cursor to where it already is, harmlessly but
-    /// on every frame of a held drag.
+    /// on every frame of a held drag. Stale once a drag ends without a
+    /// mouse-up any cell caught (see `drag_origin`), but harmless: a
+    /// mismatched value only ever costs one extra emission.
     drag_last: Option<(usize, usize)>,
+    /// Whether the primary button is currently down because of a press
+    /// this delegate's own cell or gutter caught, and if so, which of the
+    /// two it was (`true` for the gutter). `None` outside such a press —
+    /// including while some other element owns the drag (a scrollbar
+    /// thumb, a header column reorder, a tile-split divider, a text
+    /// selection started in another tile) — so `render_td`'s move handler
+    /// can tell "the button is down over a cell" apart from "the button
+    /// is down because of a press that started somewhere else and is now
+    /// passing over a cell", and emit `CellPointer::Drag` only for the
+    /// former. Set by a cell/gutter's own mouse-down; cleared by a mouse
+    /// release anywhere (gpui dispatches every registered mouse listener
+    /// for every mouse event, hit or not — each one's own hit check, not
+    /// tree position, decides whether it fires — so a cell's own
+    /// `on_mouse_up`/`on_mouse_up_out` pair sees every release exactly
+    /// once regardless of where it lands).
+    drag_origin: Option<bool>,
     /// The chevron's pointer states, memoised behind every colour the
     /// derivation reads (`control::ControlInputs` is that key by
     /// construction). `control_paint` costs three `Hsla -> Rgb`
@@ -246,6 +264,7 @@ impl BlotterDelegate {
             theme_inputs: None,
             chevron: None,
             drag_last: None,
+            drag_origin: None,
         }
     }
 
@@ -910,6 +929,89 @@ impl BlotterDelegate {
             .and_then(|p| p.columns.get(col))
             .is_some_and(|c| c.kind == ColumnKind::Measure)
     }
+
+    /// Wires a cell's or its gutter's mouse-selection gestures (spec §5)
+    /// onto `el`: a press (plain, or shift-extending) and, only while
+    /// the primary button has stayed down since a press that landed on
+    /// a cell or gutter, a drag. `gutter` fixes what kind that press (and
+    /// every drag it goes on to arm) means — `true` for the gutter's own
+    /// call, `false` for the cell's — and is carried into every `Drag`
+    /// this element emits verbatim: the selection a drag makes is decided
+    /// by where it started, not by whatever cell the pointer is over now.
+    ///
+    /// None of the four listeners stop propagation: the row's own
+    /// `SelectRow`/tile-focus press must still arrive, and a fast
+    /// double-click still reaches gpui's own click-count tracking.
+    fn wire_pointer(
+        el: Div,
+        cx: &Context<TableState<Self>>,
+        row_ix: usize,
+        col_ix: usize,
+        gutter: bool,
+    ) -> Div {
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                d.drag_last = Some((row_ix, col_ix));
+                // The gutter is a child of this cell, so a press on it
+                // reaches this handler too, bubbling after the gutter's
+                // own — `get_or_insert` keeps that repeat from
+                // overwriting the gutter's `true` with this call's
+                // `false`; on an ordinary cell press, nothing set it
+                // first, so it still lands here.
+                d.drag_origin.get_or_insert(gutter);
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col: col_ix,
+                    shift: e.modifiers.shift,
+                    gutter,
+                });
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+            if e.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let d = this.delegate_mut();
+            // No press recorded here means the button came down over
+            // something else — a scrollbar thumb, a header column
+            // reorder, a tile-split divider, another tile's own text
+            // selection — and is only now passing over this cell; such a
+            // drag must never start or extend a selection.
+            let Some(started_on_gutter) = d.drag_origin else {
+                return;
+            };
+            if d.drag_last == Some((row_ix, col_ix)) {
+                return;
+            }
+            d.drag_last = Some((row_ix, col_ix));
+            cx.emit(CellPointer::Drag {
+                row: row_ix,
+                col: col_ix,
+                gutter: started_on_gutter,
+            });
+        }))
+        // A release anywhere ends the drag this cell or gutter may have
+        // armed. gpui dispatches every registered mouse listener for
+        // every mouse event regardless of hit position — each listener's
+        // own hit check (not tree position) decides whether it fires —
+        // so between a bubble `on_mouse_up` (release lands here) and a
+        // capture `on_mouse_up_out` (release lands anywhere else), this
+        // element sees every release exactly once.
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.delegate_mut().drag_origin = None;
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.delegate_mut().drag_origin = None;
+            }),
+        )
+    }
 }
 
 impl TableDelegate for BlotterDelegate {
@@ -1147,7 +1249,7 @@ impl TableDelegate for BlotterDelegate {
             .and_then(|p| p.columns.get(col_ix))
             .map(|c| c.kind);
         let colour = self.colour_kind(col_ix);
-        let mut el = div()
+        let el = div()
             .size_full()
             .flex()
             .items_center()
@@ -1160,41 +1262,8 @@ impl TableDelegate for BlotterDelegate {
             // (the closure is dropped unevaluated, pinned release,
             // `gpui-pre-0.3.5/src/elements/div.rs`), so this costs
             // nothing on the render thread in release.
-            .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
-            // Every selection gesture the mouse can make on a cell (spec
-            // §5): a press (plain, or shift-extending) and a drag while
-            // the primary button stays down. Neither stops propagation —
-            // the row's own `SelectRow`/tile-focus press must still
-            // arrive — and neither mutates the delegate beyond
-            // `drag_last`, the emitted `CellPointer` doing the rest
-            // through the tile's `pointer` handler.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                    this.delegate_mut().drag_last = Some((row_ix, col_ix));
-                    cx.emit(CellPointer::Press {
-                        row: row_ix,
-                        col: col_ix,
-                        shift: e.modifiers.shift,
-                        gutter: false,
-                    });
-                }),
-            )
-            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                if e.pressed_button != Some(MouseButton::Left) {
-                    return;
-                }
-                let d = this.delegate_mut();
-                if d.drag_last == Some((row_ix, col_ix)) {
-                    return;
-                }
-                d.drag_last = Some((row_ix, col_ix));
-                cx.emit(CellPointer::Drag {
-                    row: row_ix,
-                    col: col_ix,
-                    gutter: false,
-                });
-            }))
+            .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"));
+        let mut el = Self::wire_pointer(el, cx, row_ix, col_ix, false)
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
             .when(in_block, |el| el.bg(theme.selection.opacity(0.35)))
             .when(is_cursor, |el| {
@@ -1241,53 +1310,19 @@ impl TableDelegate for BlotterDelegate {
                     .cloned()
                     .unwrap_or_default();
                 let on_cursor_row = self.cursor.row == row_ix;
-                el = el.child(
-                    div()
-                        .flex()
-                        .flex_shrink_0()
-                        .justify_end()
-                        .w(px(self.gutter_px()))
-                        .pr(px(GUTTER_GAP_PX))
-                        .mr(indent)
-                        .text_color(if on_cursor_row { fg } else { muted })
-                        .debug_selector(|| format!("blotter-gutter-{row_ix}"))
-                        // A gutter press means "rows" the way the cell's
-                        // own press means "block" — otherwise the same
-                        // doors as the cell's. The gutter is a child of
-                        // this cell, so a press here reaches the cell's
-                        // own handler too, bubbling after this one; the
-                        // cell's repeat is harmless (Task 6 rules: a
-                        // second press only ever re-moves the cursor to
-                        // where this press already put it).
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                                this.delegate_mut().drag_last = Some((row_ix, col_ix));
-                                cx.emit(CellPointer::Press {
-                                    row: row_ix,
-                                    col: col_ix,
-                                    shift: e.modifiers.shift,
-                                    gutter: true,
-                                });
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                            if e.pressed_button != Some(MouseButton::Left) {
-                                return;
-                            }
-                            let d = this.delegate_mut();
-                            if d.drag_last == Some((row_ix, col_ix)) {
-                                return;
-                            }
-                            d.drag_last = Some((row_ix, col_ix));
-                            cx.emit(CellPointer::Drag {
-                                row: row_ix,
-                                col: col_ix,
-                                gutter: true,
-                            });
-                        }))
-                        .child(text),
-                );
+                // A gutter press means "rows" the way a cell's own means
+                // "block" — otherwise wired through the same door as the
+                // cell (`wire_pointer`, `gutter: true`).
+                let gutter_el = div()
+                    .flex()
+                    .flex_shrink_0()
+                    .justify_end()
+                    .w(px(self.gutter_px()))
+                    .pr(px(GUTTER_GAP_PX))
+                    .mr(indent)
+                    .text_color(if on_cursor_row { fg } else { muted })
+                    .debug_selector(|| format!("blotter-gutter-{row_ix}"));
+                el = el.child(Self::wire_pointer(gutter_el, cx, row_ix, col_ix, true).child(text));
             } else {
                 el = el.pl(indent);
             }
