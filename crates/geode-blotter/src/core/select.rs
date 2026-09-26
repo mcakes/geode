@@ -6,15 +6,24 @@
 
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
-use geode_core::grid::selection::{Accumulator, Resolved, describe, top_most};
+use geode_core::grid::selection::{Accumulator, Resolved, StatPart, describe, top_most};
 use geode_core::snapshot::Snapshot;
+
+/// One selected measure column's summary. `col` is its display index
+/// in `plan.columns`, which the tile paints the group's colors from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnSummary {
+    pub col: usize,
+    pub label: String,
+    pub parts: Vec<StatPart>,
+}
 
 pub fn summarize(
     snapshot: &Snapshot,
     plan: &ColumnPlan,
     shown: &[u32],
     resolved: &Resolved,
-) -> Vec<(String, String)> {
+) -> Vec<ColumnSummary> {
     let end = resolved.rows.end.min(shown.len());
     let start = resolved.rows.start.min(end);
     let rows: Vec<usize> = shown[start..end].iter().map(|&r| r as usize).collect();
@@ -48,10 +57,11 @@ pub fn summarize(
                     acc.add(snapshot.f64_at(idx, r), additive);
                 }
             }
-            (
-                column.label.clone(),
-                describe(&acc.finish(), &column.format, extremes),
-            )
+            ColumnSummary {
+                col: c,
+                label: column.label.clone(),
+                parts: describe(&acc.finish(), &column.format, extremes),
+            }
         })
         .collect()
 }
@@ -59,6 +69,23 @@ pub fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each summary as `(label, "Σ 5.00 · μ 5.00 · n 1")`, for the tests
+    /// that pin the text.
+    fn lines(summaries: Vec<ColumnSummary>) -> Vec<(String, String)> {
+        summaries
+            .into_iter()
+            .map(|c| {
+                let text = c
+                    .parts
+                    .iter()
+                    .map(|p| format!("{} {}", p.stat.symbol(), p.text))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                (c.label, text)
+            })
+            .collect()
+    }
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::grid::selection::{SelectKind, resolve};
@@ -137,7 +164,7 @@ mod tests {
         let delta = plan.position_of("delta01").unwrap();
         // L1 and SPX selected (display 1..3).
         let r = resolve(SelectKind::Rows, (1, 0), (2, 0), plan.columns.len());
-        let s = summarize(&snap, &plan, &shown, &r);
+        let s = lines(summarize(&snap, &plan, &shown, &r));
         let (_, text) = s
             .iter()
             .find(|(l, _)| l == &plan.columns[delta].label)
@@ -151,7 +178,7 @@ mod tests {
         let det = plan.position_of("det").unwrap();
         // L1 and L2 at depth 1 (display rows 1 and 3, with SPX between).
         let r = resolve(SelectKind::Rows, (1, 0), (3, 0), plan.columns.len());
-        let s = summarize(&snap, &plan, &shown, &r);
+        let s = lines(summarize(&snap, &plan, &shown, &r));
         let (_, text) = s
             .iter()
             .find(|(l, _)| l == &plan.columns[det].label)
@@ -168,7 +195,7 @@ mod tests {
             (rows.1, 0),
             plan.columns.len(),
         );
-        let s = summarize(&snap, &plan, &shown, &r);
+        let s = lines(summarize(&snap, &plan, &shown, &r));
         s.into_iter()
             .find(|(l, _)| l == &plan.columns[at].label)
             .unwrap()
@@ -207,7 +234,7 @@ mod tests {
         let (snap, plan, shown) = fixture();
         let delta = plan.position_of("delta01").unwrap();
         let r = resolve(SelectKind::Block, (1, 0), (3, delta), plan.columns.len());
-        let s = summarize(&snap, &plan, &shown, &r);
+        let s = lines(summarize(&snap, &plan, &shown, &r));
         assert_eq!(s.len(), 1, "the tree column is not numeric: {s:?}");
         assert!(
             s[0].1.contains("min") && s[0].1.contains("max"),

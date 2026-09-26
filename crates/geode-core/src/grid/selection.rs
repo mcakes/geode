@@ -6,6 +6,7 @@
 //! is no longer displayed resolves to `None` and the tile clears the
 //! selection rather than guessing a neighbour.
 
+use crate::format::Sign;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +192,43 @@ impl Accumulator {
 pub const UNSUMMABLE_MARK: char = '‡';
 pub const UNSUMMABLE_LEGEND: &str = "‡ this column does not add up";
 
-/// The footer text for one column (spec §3.3), formatted with that
+/// One statistic of a column's footer summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stat {
+    Sum,
+    Mean,
+    Count,
+    Min,
+    Max,
+}
+
+impl Stat {
+    /// The footer's name for the statistic, painted beside its value.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Stat::Sum => "Σ",
+            Stat::Mean => "μ",
+            Stat::Count => "n",
+            Stat::Min => "min",
+            Stat::Max => "max",
+        }
+    }
+}
+
+/// One formatted statistic. `sign` is set only on a total (`Σ`, `μ`),
+/// the values a grid paints by sign, so the footer can paint them the
+/// way the column's own cells paint the same number; a count or an
+/// extreme carries `None`. `refused` marks a `Σ` whose text is a refusal
+/// mark (`—†`, `—‡`) rather than a number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatPart {
+    pub stat: Stat,
+    pub text: String,
+    pub sign: Option<Sign>,
+    pub refused: bool,
+}
+
+/// The footer summary for one column (spec §3.3), formatted with that
 /// column's own `ColumnFormat`. `extremes` adds `min`/`max` (a selection
 /// covering a single numeric column); an unsummable column always shows
 /// them, since they are all it has to say.
@@ -205,31 +242,59 @@ pub fn describe(
     agg: &ColumnAggregate,
     format: &crate::view::ColumnFormat,
     extremes: bool,
-) -> String {
+) -> Vec<StatPart> {
     use crate::format::format_number;
-    let f = |v: f64| format_number(v, format).text;
-    let mut parts: Vec<String> = Vec::new();
+    let value = |stat: Stat, v: f64, signed: bool| {
+        let f = format_number(v, format);
+        StatPart {
+            stat,
+            text: f.text,
+            sign: signed.then_some(f.sign),
+            refused: false,
+        }
+    };
+    let refusal = |mark: char| StatPart {
+        stat: Stat::Sum,
+        text: format!("—{mark}"),
+        sign: None,
+        refused: true,
+    };
+    let mut parts: Vec<StatPart> = Vec::new();
     if agg.unsummable {
-        parts.push(format!("Σ —{UNSUMMABLE_MARK}"));
+        parts.push(refusal(UNSUMMABLE_MARK));
     } else if agg.non_additive {
-        parts.push("Σ —†".into());
+        parts.push(refusal('†'));
     } else if let (Some(s), Some(m)) = (agg.sum, agg.mean) {
-        parts.push(format!("Σ {}", f(s)));
-        parts.push(format!("μ {}", f(m)));
+        parts.push(value(Stat::Sum, s, true));
+        parts.push(value(Stat::Mean, m, true));
     }
-    parts.push(format!("n {}", agg.count));
+    parts.push(StatPart {
+        stat: Stat::Count,
+        text: agg.count.to_string(),
+        sign: None,
+        refused: false,
+    });
     if (extremes || agg.unsummable)
         && let (Some(lo), Some(hi)) = (agg.min, agg.max)
     {
-        parts.push(format!("min {}", f(lo)));
-        parts.push(format!("max {}", f(hi)));
+        parts.push(value(Stat::Min, lo, false));
+        parts.push(value(Stat::Max, hi, false));
     }
-    parts.join(" · ")
+    parts
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parts as one line, for the tests that pin their text.
+    fn joined(parts: &[StatPart]) -> String {
+        parts
+            .iter()
+            .map(|p| format!("{} {}", p.stat.symbol(), p.text))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
 
     #[test]
     fn rows_span_anchor_to_cursor_either_way_and_every_column() {
@@ -374,7 +439,7 @@ mod tests {
         assert!(g.unsummable);
         assert_eq!((g.sum, g.mean), (None, None));
         assert_eq!(
-            describe(&g, &ColumnFormat::MEASURE, false),
+            joined(&describe(&g, &ColumnFormat::MEASURE, false)),
             "Σ —‡ · n 2 · min 4.00 · max 5.00"
         );
     }
@@ -393,16 +458,42 @@ mod tests {
         a.add(Some(2000.0), true);
         let f = ColumnFormat::MEASURE;
         assert_eq!(
-            describe(&a.finish(), &f, false),
+            joined(&describe(&a.finish(), &f, false)),
             "Σ 3,000.00 · μ 1,500.00 · n 2"
         );
         assert_eq!(
-            describe(&a.finish(), &f, true),
+            joined(&describe(&a.finish(), &f, true)),
             "Σ 3,000.00 · μ 1,500.00 · n 2 · min 1,000.00 · max 2,000.00"
         );
         let mut b = Accumulator::default();
         b.add(Some(1.0), false);
-        assert_eq!(describe(&b.finish(), &f, false), "Σ —† · n 1");
-        assert_eq!(describe(&Accumulator::default().finish(), &f, false), "n 0");
+        assert_eq!(joined(&describe(&b.finish(), &f, false)), "Σ —† · n 1");
+        assert_eq!(
+            joined(&describe(&Accumulator::default().finish(), &f, false)),
+            "n 0"
+        );
+    }
+
+    #[test]
+    fn only_totals_carry_a_sign_and_a_refusal_is_marked() {
+        let f = crate::view::ColumnFormat::MEASURE;
+        let mut a = Accumulator::default();
+        a.add(Some(-3.0), true);
+        a.add(Some(-1.0), true);
+        let parts = describe(&a.finish(), &f, true);
+        let sign_of = |stat: Stat| parts.iter().find(|p| p.stat == stat).unwrap().sign;
+        assert_eq!(sign_of(Stat::Sum), Some(Sign::Negative));
+        assert_eq!(sign_of(Stat::Mean), Some(Sign::Negative));
+        assert_eq!(sign_of(Stat::Count), None);
+        assert_eq!(sign_of(Stat::Min), None, "an extreme paints plain");
+        assert!(parts.iter().all(|p| !p.refused));
+
+        let mut b = Accumulator::unsummable();
+        b.add(Some(2.0), true);
+        let refused = &describe(&b.finish(), &f, false)[0];
+        assert_eq!(
+            (refused.stat, refused.refused, refused.sign),
+            (Stat::Sum, true, None)
+        );
     }
 }

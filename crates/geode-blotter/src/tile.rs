@@ -1665,6 +1665,11 @@ impl gpui::Render for BlotterTile {
         {
             self.refresh_asof_chip(clock);
         }
+        // The footer strip's colors, memoized per summary and theme the
+        // way the table's own header resolves them (a compare per frame).
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().ensure_summary_paint(cx.theme());
+        });
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
@@ -1842,12 +1847,14 @@ impl gpui::Render for BlotterTile {
             .border_t_1()
             .border_color(theme.border)
             .child(div().child(format!("{} rows", delegate.shown.len())))
-            .when(!delegate.summary.is_empty(), |f| {
-                f.child(aggregates::strip(&delegate.summary, theme))
+            .when(delegate.selection_extent.is_some(), |f| {
+                f.child(aggregates::strip(
+                    delegate.selection_extent.as_ref(),
+                    &delegate.summary,
+                    &delegate.summary_paint,
+                    theme,
+                ))
             });
-        if let Some(extent) = &delegate.selection_extent {
-            footer = footer.child(div().child(extent.clone()));
-        }
         // The dagger legend also covers a selection summary that carries
         // one: a per-row cell can be plain while the group it is folded
         // into is not (e.g. a determined-non-additive column at depth 1).
@@ -2857,11 +2864,11 @@ mod tests {
         );
     }
 
-    /// A selection over no measure column shows its extent instead of a
-    /// summary, prepared when the selection changes (render only reads
-    /// it) and gone when the selection clears.
+    /// Every live selection leads the footer with its extent — with or
+    /// without a measure to summarise — prepared when the selection
+    /// changes (render only reads it) and gone when the selection clears.
     #[gpui::test]
-    fn a_selection_without_measures_prepares_its_extent(cx: &mut gpui::TestAppContext) {
+    fn a_selection_prepares_its_extent(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
         act(&h, &mut cx, "blotter::visual_block"); // the tree column only
         act(&h, &mut cx, "blotter::down");
@@ -2871,7 +2878,9 @@ mod tests {
                 (d.summary.is_empty(), d.selection_extent.clone())
             })
         };
-        assert_eq!(extent(&mut cx), (true, Some("2 × 1 selected".into())));
+        assert_eq!(extent(&mut cx), (true, Some("2 rows × 1 col".into())));
+        act(&h, &mut cx, "blotter::right"); // into delta01: now summarised
+        assert_eq!(extent(&mut cx), (false, Some("2 rows × 2 cols".into())));
         act(&h, &mut cx, "blotter::escape");
         assert_eq!(extent(&mut cx), (true, None));
     }
@@ -3091,7 +3100,8 @@ mod tests {
             .iter()
             .find(|c| c.label.as_ref() == "delta01")
             .expect("delta01 summarised");
-        assert!(delta.text.starts_with("Σ 5.00"), "{}", delta.text);
+        let sum = &delta.parts[0];
+        assert_eq!((sum.stat, sum.text.as_ref()), ("Σ", "5.00"), "{delta:?}");
     }
 
     #[gpui::test]

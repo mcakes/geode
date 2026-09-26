@@ -21277,12 +21277,54 @@ run_mutation "blotter selection: the retired visual id renames to visual_rows" \
   geode-blotter \
   a_user_binding_on_the_retired_visual_id_binds_visual_rows
 
-run_mutation "blotter selection: the extent is prepared with the summary" \
+run_mutation "blotter selection: every live selection prepares its extent" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(r) if self.summary.is_empty() => {' \
-  '            Some(r) if false => {' \
+  '        self.selection_extent = resolved.as_ref().map(|r| {' \
+  '        self.selection_extent = resolved.as_ref().filter(|_| self.summary.is_empty()).map(|r| {' \
   geode-blotter \
-  a_selection_without_measures_prepares_its_extent
+  a_selection_prepares_its_extent
+
+# The footer's totals paint as the column's signed cells do: a sign
+# column's negative total in bearish. Crossed, a short position's Σ
+# reads as a gain.
+run_mutation "blotter selection: a sign column's footer total takes the cells' sign colors" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    negative: theme.chart_bearish,' \
+  '                    negative: theme.chart_bullish,' \
+  geode-blotter \
+  a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary
+
+# A named column's footer label takes the header's color, not muted.
+run_mutation "blotter selection: a named column's footer label takes its header color" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        label: Some(r.base),' \
+  '                        label: None,' \
+  geode-blotter \
+  a_named_column_paints_its_footer_group_like_its_header_and_cells
+
+# The paint memo rebuilds only when the summary or the theme moved.
+run_mutation "blotter selection: a steady footer resolves no colors" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if self.summary_paint_stamp == Some((self.summary_generation, signature)) {' \
+  '        if false {' \
+  geode-blotter \
+  a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary
+
+# A refusal mark is muted; only a signed total takes a sign color.
+run_mutation "aggregates: a refusal mark paints muted" \
+  crates/geode-shell/src/shell/aggregates.rs \
+  '        if part.refused {' \
+  '        if false {' \
+  geode-shell \
+  a_total_takes_its_sign_color_and_other_values_stay_plain
+
+# Only a total carries a sign; an extreme paints plain.
+run_mutation "grid selection: only totals carry a sign" \
+  crates/geode-core/src/grid/selection.rs \
+  '        parts.push(value(Stat::Min, lo, false));' \
+  '        parts.push(value(Stat::Min, lo, true));' \
+  geode-core \
+  only_totals_carry_a_sign_and_a_refusal_is_marked
 
 run_mutation "blotter selection: a shift press starts a selection" \
   crates/geode-blotter/src/tile.rs \

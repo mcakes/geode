@@ -19,7 +19,7 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
-use geode_shell::shell::aggregates::AggregateCell;
+use geode_shell::shell::aggregates::{AggregateCell, AggregatePart, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
@@ -98,10 +98,19 @@ pub struct BlotterDelegate {
     /// The footer's per-column aggregates over `resolved`, rebuilt
     /// alongside it.
     pub summary: Vec<AggregateCell>,
-    /// The footer's `"{rows} × {cols} selected"` readout, shown when a
-    /// live selection covers no measure column (so `summary` is empty);
-    /// `None` otherwise. Prepared with `summary` so render formats
-    /// nothing.
+    /// The `plan.columns` index each `summary` group was taken from —
+    /// what `ensure_summary_paint` resolves its colors against.
+    summary_cols: Vec<usize>,
+    /// Bumped whenever `summary` is rebuilt, so the paint memo knows the
+    /// groups it colored are stale.
+    summary_generation: u64,
+    /// Each `summary` group's colors, index-aligned with it; rebuilt by
+    /// `ensure_summary_paint` only when the summary or the theme moved.
+    pub summary_paint: Vec<CellPaint>,
+    summary_paint_stamp: Option<(u64, [Hsla; 28])>,
+    /// The footer's `"{rows} rows × {cols} cols"` readout, leading the
+    /// strip while a selection is live; `None` otherwise. Prepared with
+    /// `summary` so render formats nothing.
     pub selection_extent: Option<SharedString>,
     /// Whether any `summary` cell refuses a total with `†` / `‡`, so
     /// render shows each legend without scanning the strings per frame.
@@ -255,6 +264,10 @@ impl BlotterDelegate {
             selection: None,
             resolved: None,
             summary: Vec::new(),
+            summary_cols: Vec::new(),
+            summary_generation: 0,
+            summary_paint: Vec::new(),
+            summary_paint_stamp: None,
             selection_extent: None,
             summary_non_additive: false,
             summary_unsummable: false,
@@ -361,6 +374,47 @@ impl BlotterDelegate {
                 ));
             }
         }
+    }
+
+    /// Resolve each footer summary group's colors against `theme`: the
+    /// label takes the column's header color (a named color's base) and a
+    /// total takes what that column's signed cell would paint — a named
+    /// color's sign variant, `sign`'s bullish/bearish, or the foreground
+    /// for an uncolored column. Rebuilt only when the summary was rebuilt
+    /// or the theme moved, so the footer's per-frame cost is one compare.
+    /// Called from the tile's render, like `render_th`'s own lookup: it
+    /// writes nothing but this memo.
+    pub fn ensure_summary_paint(&mut self, theme: &Theme) {
+        let signature = theme_signature(theme);
+        if self.summary_paint_stamp == Some((self.summary_generation, signature)) {
+            return;
+        }
+        let cols = std::mem::take(&mut self.summary_cols);
+        let paint = cols
+            .iter()
+            .map(|&c| match self.colour_kind(c) {
+                Some(ColourKind::Named) => match self.themed_cell_colour(c, theme) {
+                    Some(r) => CellPaint {
+                        label: Some(r.base),
+                        positive: r.positive,
+                        negative: r.negative,
+                        zero: r.base,
+                    },
+                    // An unknown name paints as the foreground, as its
+                    // cells do.
+                    None => CellPaint::plain(theme),
+                },
+                Some(ColourKind::Sign) => CellPaint {
+                    positive: theme.chart_bullish,
+                    negative: theme.chart_bearish,
+                    ..CellPaint::plain(theme)
+                },
+                Some(ColourKind::Plain) | None => CellPaint::plain(theme),
+            })
+            .collect();
+        self.summary_cols = cols;
+        self.summary_paint = paint;
+        self.summary_paint_stamp = Some((self.summary_generation, signature));
     }
 
     /// The chevron's pointer states for `theme`, re-derived only when one
@@ -540,27 +594,41 @@ impl BlotterDelegate {
                 r.rows.start
             };
         }
-        self.summary = match (&resolved, &self.snapshot, &self.plan) {
-            (Some(r), Some(snapshot), Some(plan)) => summarize(snapshot, plan, &self.shown, r)
-                .into_iter()
-                .map(|(label, text)| AggregateCell {
-                    label: label.into(),
-                    text: text.into(),
-                })
-                .collect(),
+        let summaries = match (&resolved, &self.snapshot, &self.plan) {
+            (Some(r), Some(snapshot), Some(plan)) => summarize(snapshot, plan, &self.shown, r),
             _ => Vec::new(),
         };
-        self.selection_extent = match &resolved {
-            Some(r) if self.summary.is_empty() => {
-                Some(format!("{} × {} selected", r.rows.len(), r.cols.len()).into())
-            }
-            _ => None,
+        let refuses = |mark: char| {
+            summaries
+                .iter()
+                .flat_map(|c| &c.parts)
+                .any(|p| p.refused && p.text.contains(mark))
         };
-        self.summary_non_additive = self.summary.iter().any(|c| c.text.contains('†'));
-        self.summary_unsummable = self
-            .summary
-            .iter()
-            .any(|c| c.text.contains(UNSUMMABLE_MARK));
+        self.summary_non_additive = refuses('†');
+        self.summary_unsummable = refuses(UNSUMMABLE_MARK);
+        self.summary_cols = summaries.iter().map(|c| c.col).collect();
+        self.summary = summaries
+            .into_iter()
+            .map(|c| AggregateCell {
+                label: c.label.into(),
+                parts: c
+                    .parts
+                    .into_iter()
+                    .map(|p| AggregatePart {
+                        stat: p.stat.symbol(),
+                        text: p.text.into(),
+                        sign: p.sign,
+                        refused: p.refused,
+                    })
+                    .collect(),
+            })
+            .collect();
+        self.summary_generation = self.summary_generation.wrapping_add(1);
+        self.selection_extent = resolved.as_ref().map(|r| {
+            let (rows, cols) = (r.rows.len(), r.cols.len());
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            format!("{rows} row{} × {cols} col{}", plural(rows), plural(cols)).into()
+        });
         self.resolved = resolved;
     }
 
@@ -2467,6 +2535,80 @@ mod tests {
         assert_eq!(resolved.for_sign(sign_at(&d, 1)), resolved.positive);
         assert_eq!(resolved.for_sign(sign_at(&d, 2)), resolved.negative);
         assert_eq!(resolved.for_sign(sign_at(&d, 0)), resolved.base);
+    }
+
+    /// Rows 1..=2 of a one-measure view (`L1` +5, `L2` −5) selected, so
+    /// the footer carries one group for `delta01` at plan column 1.
+    fn summary_fixture(view_text: &str, colours: NamedColours) -> BlotterDelegate {
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snapshot = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1"), s("L2")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(0.0), Some(5.0), Some(-5.0)]),
+                ),
+            ],
+            1,
+        ));
+        let mut d = BlotterDelegate::new();
+        d.set_colours(Arc::new(colours));
+        d.apply_snapshot(snapshot, &view, &["lhu".to_string()]);
+        d.cursor.row = 1;
+        d.start_selection(SelectKind::Rows);
+        d.cursor.row = 2;
+        d.refresh_selection();
+        assert_eq!(d.summary.len(), 1, "one measure group");
+        d
+    }
+
+    /// The footer group of a named-color column takes the header's color
+    /// for its label and the cells' sign variants for its totals.
+    #[test]
+    fn a_named_column_paints_its_footer_group_like_its_header_and_cells() {
+        let mut colours = NamedColours::default();
+        colours.insert("delta".into(), Definition::token(Token::Info).tinted());
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
+        let mut d = summary_fixture(text, colours);
+        let theme = Theme::default();
+        d.ensure_summary_paint(&theme);
+        let resolved = d.themed_cell_colour(1, &theme).expect("a named column");
+        let paint = d.summary_paint[0];
+        assert_eq!(paint.label, Some(resolved.base), "the header's color");
+        assert_eq!(paint.positive, resolved.positive);
+        assert_eq!(paint.negative, resolved.negative);
+        assert_eq!(paint.zero, resolved.base);
+    }
+
+    /// A `sign` column's totals take the cells' bullish/bearish; its label
+    /// stays muted, as its header is uncolored. The memo rebuilds only
+    /// when the summary does.
+    #[test]
+    fn a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary() {
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"sign\" }\n";
+        let mut d = summary_fixture(text, NamedColours::default());
+        let theme = Theme::default();
+        d.ensure_summary_paint(&theme);
+        let paint = d.summary_paint[0];
+        assert_eq!(paint.label, None);
+        assert_eq!(
+            (paint.positive, paint.negative, paint.zero),
+            (theme.chart_bullish, theme.chart_bearish, theme.foreground)
+        );
+        // Poison the memo: an unchanged summary and theme must not rebuild.
+        d.summary_paint.clear();
+        d.ensure_summary_paint(&theme);
+        assert!(
+            d.summary_paint.is_empty(),
+            "a steady footer resolves nothing"
+        );
+        d.refresh_selection();
+        d.ensure_summary_paint(&theme);
+        assert_eq!(d.summary_paint.len(), 1, "a rebuilt summary repaints");
     }
 
     /// I-1 (Part 2c final review): the theme -> `Anchors`/`Tokens`
