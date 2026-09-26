@@ -1443,10 +1443,30 @@ run_mutation "egress: a write error answers Err" \
 
 run_mutation "egress: an adapter error answers Err naming the target" \
   crates/geode-data/src/egress.rs \
-  '            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
-  '            .map_err(|e| e.to_string());' \
+  '            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
+  '            Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+# A transport panic must fail its own upload, not the worker. Mutated, it
+# unwinds past `answer`, so the job is never answered and the dropped
+# receiver strands every queued upload.
+run_mutation "egress: a panicking transport is contained" \
+  crates/geode-data/src/egress.rs \
+  '        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };' \
+  '        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  geode-data \
+  a_panicking_transport_answers_the_upload_and_keeps_the_worker
 
 run_mutation "egress: queue full answers Err" \
   crates/geode-data/src/egress.rs \
@@ -17926,9 +17946,19 @@ run_mutation "egress: an unknown target answers Err" \
 run_mutation "egress: uploads to one target run in submission order" \
   crates/geode-data/src/egress.rs \
   '    while let Ok(job) = jobs.recv() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        // A transport is foreign code, so a panic here is a failure of this
+        // upload rather than of the worker. Uncontained it would unwind past
+        // `answer`, breaking the one-answer-per-upload contract, drop the
+        // receiver, and strand every queued job unanswered.
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,
@@ -17947,9 +17977,15 @@ run_mutation "egress: uploads to one target run in submission order" \
             batch.push(more);
         }
         for job in batch.into_iter().rev() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,

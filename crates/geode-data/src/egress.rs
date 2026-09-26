@@ -138,9 +138,19 @@ fn answer(
 
 fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: EventSink) {
     while let Ok(job) = jobs.recv() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '{name}': {e}"));
+        // A transport is foreign code, so a panic here is a failure of this
+        // upload rather than of the worker. Uncontained it would unwind past
+        // `answer`, breaking the one-answer-per-upload contract, drop the
+        // receiver, and strand every queued job unanswered.
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '{name}': {e}")),
+            Err(payload) => Err(format!(
+                "egress '{name}': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,
@@ -618,6 +628,77 @@ mod tests {
         assert_eq!(
             next_upload(&rx).result,
             Err("egress 'sophis': stopped".into())
+        );
+        assert_silent(&rx);
+    }
+
+    /// The message a [`PanickingEgress`] transport panics with. A constant so
+    /// the assertion and the panic that produced it cannot drift apart.
+    const UPLOAD_PANIC: &str = "the transport fell over";
+
+    /// An egress whose `upload` PANICS rather than answering `Err` — the
+    /// failure a real transport has that a `Result` does not describe. The
+    /// boundary is only observable through the panic it contains, so the
+    /// fixture has to be the thing that panics.
+    struct PanickingEgress {
+        panics_left: usize,
+    }
+
+    impl Egress for PanickingEgress {
+        fn upload(&mut self, _target: &str, _bytes: Vec<u8>) -> Result<(), AdapterError> {
+            if self.panics_left > 0 {
+                self.panics_left -= 1;
+                panic!("{UPLOAD_PANIC}");
+            }
+            Ok(())
+        }
+    }
+
+    struct PanicAdapter {
+        egress: Mutex<Option<Box<dyn Egress>>>,
+    }
+
+    impl Adapter for PanicAdapter {
+        fn name(&self) -> &'static str {
+            "panic"
+        }
+        fn subscription(&self) -> Option<Box<dyn Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn Egress>> {
+            self.egress.lock().unwrap().take()
+        }
+    }
+
+    #[test]
+    fn a_panicking_transport_answers_the_upload_and_keeps_the_worker() {
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(PanicAdapter {
+            egress: Mutex::new(Some(Box::new(PanickingEgress { panics_left: 1 }))),
+        }));
+        let (sink, rx) = event_sink();
+        let workers = EgressWorkers::spawn(
+            &[spec("panic", &[(DIVIDEND, "panic/{key}")])],
+            &adapters,
+            sink,
+        );
+        let documents = documents();
+
+        workers.upload(params(1, TARGET, DIVIDEND, "K0"), &documents);
+        let first = next_upload(&rx);
+        let message = first.result.expect_err("a panicking transport is an error");
+        assert!(
+            message.contains(UPLOAD_PANIC),
+            "the answer carries the panic payload: {message}"
+        );
+        assert_silent(&rx);
+
+        workers.upload(params(2, TARGET, DIVIDEND, "K1"), &documents);
+        let second = next_upload(&rx);
+        assert_eq!(
+            second.result,
+            Ok(()),
+            "the worker survived, so the next upload succeeds"
         );
         assert_silent(&rx);
     }
