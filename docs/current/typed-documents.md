@@ -103,7 +103,10 @@ Presentation has two separate precedence rules:
    view definition, dataset presentation, then view presentation.
 
 View definitions nest numeric format keys under `format`; presentation
-column tables put them beside `label` and `width`. Dataset presentation
+column tables put them beside `label` and `width`. The color key is `color`.
+The old spelling `colour` is still read when `color` is absent, with a warning
+at the old key; beside `color` it is ignored with a warning. The dialogs write
+`color`. Dataset presentation
 applies only to selected columns owned by that dataset. Ownership searches
 the primary dataset first, then joins in declaration order. Unknown datasets
 or columns warn and are skipped.
@@ -177,14 +180,14 @@ comparisons, membership, boolean operators, and parentheses. Parsing is
 schema-free; statements, comments, functions, and subqueries are outside its
 grammar. Quoted strings escape internal quotes by doubling them.
 
-## Colours and numeric formatting
+## Colors and numeric formatting
 
 [`NamedColours`](../../crates/geode-core/src/colour/mod.rs) reads a hue or a
 semantic theme token per name. Supplying both or neither, an invalid name,
 an invalid hue, or an unknown token drops the definition with an error.
-`none` and `sign` are reserved for column colour modes, and a name starting
-with `#` is reserved because `#rrggbb` spells an absolute colour where a name
-is also accepted (a timeseries slot's colour). Hue values range
+`none` and `sign` are reserved for column color modes, and a name starting
+with `#` is reserved because `#rrggbb` spells an absolute color where a name
+is also accepted (a timeseries slot's color). Hue values range
 from 0 through 360, with 360 normalized to zero. Invalid string tones warn
 and fall back to normal; a tone beside a token warns and is ignored.
 Malformed `tint_sign` warns and becomes false.
@@ -193,7 +196,7 @@ Hues interpolate between theme anchors in OKLCH, then seek a 3:1 contrast
 ratio against the theme background by moving lightness toward the theme
 foreground. This is a target, not a guarantee for arbitrary themes: if the
 available lightness path never reaches that contrast, its endpoint is
-returned. Untinted semantic tokens retain their exact theme colour. Sign
+returned. Untinted semantic tokens retain their exact theme color. Sign
 tinting applies contrast adjustment to all three variants, including zero.
 
 [`format_number`](../../crates/geode-core/src/format.rs) scales, rounds, then

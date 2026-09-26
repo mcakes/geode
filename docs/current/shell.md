@@ -339,7 +339,7 @@ notification ordering, and restart requirements.
 ## Presentation rules
 
 Shared builders own repeated shell presentation: semantic chips, list rows,
-control interaction states, colours, and the rem-based geometry scale. Use
+control interaction states, colors, and the rem-based geometry scale. Use
 stable domain-derived element IDs. Stateful inputs, lists, and tables are
 created once and retained rather than rebuilt during render.
 

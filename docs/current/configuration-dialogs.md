@@ -1,6 +1,6 @@
 # Configuration dialogs
 
-The object dialogs edit Views, Groupings, Scopes, Sources, and Colours, and
+The object dialogs edit Views, Groupings, Scopes, Sources, and Colors, and
 inspect Schema. They share a pure draft model and a GPUI adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
@@ -89,7 +89,7 @@ groups changed fields and renders whole named objects for those destinations.
 | Groupings | `groupings.toml`; numbered slot containing an array of dimensions |
 | Scopes | `scopes.toml`; saved dimension selections, text, and expression |
 | Sources | `sources.toml`; source definition, requiring restart for ingestion changes |
-| Colours | `colours.toml`; hue/tone or semantic token, with optional sign tinting |
+| Colors | `colors.toml`; hue/tone or semantic token, with optional sign tinting |
 
 Editing an inherited definition copies the entire object to the user layer.
 The dialog announces this fork and the revert operation. Future lower-layer

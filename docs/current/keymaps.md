@@ -44,7 +44,13 @@ sorting puts `"mod+h"` last, so its action wins that tie.
 
 Malformed entries, predicates, key sequences, and non-string actions produce
 error diagnostics and are skipped. Unknown action IDs produce warnings and are
-skipped; `"none"` is accepted without registration. Startup can use the remaining
+skipped; `"none"` is accepted without registration. An action's owner may
+register a retired ID with `ActionRegistry::register_rename` (`config::colours`
+→ `config::colors`, `timeseries::colour` → `timeseries::color`,
+`timeseries::pick_colour` → `timeseries::pick_color`). A binding naming a
+retired ID binds the current action and warns with both IDs, so an existing
+user keymap keeps working until the file is edited; the dialogs write only the
+current ID. Startup can use the remaining
 compiled bindings. On reload, compilation errors participate in the shell's
 last-good acceptance gate; see [reload](configuration.md#hot-reload).
 

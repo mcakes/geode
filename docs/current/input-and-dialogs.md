@@ -148,7 +148,7 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
   A `:` command-line verb stays text because it is not a key, and so does a
   spec naming `mod`, because the alias is the user's.
 - A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
-  does: the label without the chip's fill or padding, in the lane's colour,
+  does: the label without the chip's fill or padding, in the lane's color,
   so a highlighted row's keys follow the highlight.
 - A key named inside a sentence (a notice, a confirmation, a refusal) keeps
   the keymap's lowercase spelling from `palette::render_binding`, since that
