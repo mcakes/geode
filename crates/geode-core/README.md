@@ -20,7 +20,7 @@ Reader defaults, partial validation, and presentation rules are described in
 |---|---|
 | `config` | Builtin → Desk → User TOML loading, recursive merging with whole-object exceptions, and path provenance. File loading collects diagnostics; typed readers validate separately. `load_views` applies dataset and view presentation without rewriting definitions. TOML key order is preserved. |
 | `schema` | Dataset families (`measures`, `document`, `series`), columns, roles, grains, and family-specific validation. Readers may retain corrected objects with diagnostics. Grain `Ord` reads coarse < fine. |
-| `scope` | Dimension selections, text, expressions, and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. |
+| `scope` | Dimension selections, text, expressions, and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. `Expr::conjuncts` splits an expression into its top-level `and` terms and `Expr::from_conjuncts` rebuilds a left-folded chain from them, which is how the toolbar edits one term at a time. |
 | `scopes` | Saved scopes (`scopes.toml`). |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |

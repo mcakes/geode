@@ -621,6 +621,7 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
     })
 }
 
+mod addfilter;
 mod asof;
 mod chrome_and_dialogs;
 mod commandline;

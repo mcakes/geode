@@ -25,6 +25,7 @@ impl ShellView {
         // Palette toggles are recognized ahead of command-line key ownership;
         // close that prompt first so only the new surface owns input.
         self.close_stack_list(cx);
+        self.close_add_filter_menu(cx);
         // Pending matcher state cannot survive an overlay with separate key
         // routing, or later shell keys could complete an abandoned sequence.
         self.matcher.cancel();

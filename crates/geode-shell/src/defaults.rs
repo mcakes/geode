@@ -319,6 +319,21 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Set scope expression…",
         "Frame",
     );
+    // Join a new expression to the current one with `and` (the toolbar's
+    // add-a-filter menu reaches the same action), and drop the whole
+    // expression layer undoably. Neither has a default chord.
+    action(
+        reg,
+        "frame::add_expression",
+        "Add scope expression…",
+        "Frame",
+    );
+    action(
+        reg,
+        "frame::clear_expression",
+        "Clear scope expression",
+        "Frame",
+    );
     // Choose a log target and level, then submit Diagnostics::request_level.
     action(reg, "log::level", "Set log level…", "Diagnostics");
     // Profiler-feature actions (the `profiling` feature — gpui's own

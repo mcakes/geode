@@ -105,7 +105,7 @@ fn clicking_the_expression_chip_opens_the_dialog_and_typing_lands(cx: &mut gpui:
     });
     vcx.run_until_parked();
     let chip = vcx
-        .debug_bounds("scope-expr-chip")
+        .debug_bounds("scope-expr-chip-0")
         .expect("the expression chip paints");
     vcx.simulate_click(chip.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
