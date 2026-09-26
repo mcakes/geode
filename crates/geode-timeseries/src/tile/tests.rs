@@ -1148,7 +1148,7 @@ fn series_verbs_act_on_the_selection_or_a_named_series(cx: &mut gpui::TestAppCon
     // The cursor is on VIX@demo_rest, the last added.
     h.command(&mut vcx, "yaxis right").unwrap();
     h.command(&mut vcx, "rule SPX.close mean").unwrap();
-    h.command(&mut vcx, "colour VIX 4").unwrap();
+    h.command(&mut vcx, "color VIX 4").unwrap();
     let m = h.model(&vcx);
     assert_eq!(m.slots()[2].axis, Axis::Right, "the selection");
     assert!(matches!(
@@ -1176,7 +1176,7 @@ fn series_verbs_act_on_the_selection_or_a_named_series(cx: &mut gpui::TestAppCon
     assert_eq!(h.model(&vcx).slots().len(), 3);
     h.command(&mut vcx, "clear").unwrap();
     assert_eq!(
-        h.command(&mut vcx, "colour 2").unwrap_err(),
+        h.command(&mut vcx, "color 2").unwrap_err(),
         "select a series or name one"
     );
 }
