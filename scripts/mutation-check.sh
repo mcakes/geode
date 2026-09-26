@@ -62,6 +62,16 @@
 # now prints AMBIG for the entries it does select, and still mutates the
 # first match.
 #
+# It also checks the sixth-argument test filter, which nothing checked before:
+# an entry whose filter matches no test still prints `caught`, because the
+# script clears the filter and falls back to the whole crate suite, so the
+# verdict comes from an unrelated test. `FILTER` is a filter that matches
+# nothing; `FILTERx N` matches several with none of them named exactly, so the
+# intended test never runs; `FILTER? N` names a real test that shares its name
+# with siblings, which is only slower and is reported as a warning. libtest's
+# `--exact` cannot be used instead: it matches the full `module::path::fn`,
+# and every filter here is a bare function name, so it would match nothing.
+#
 # With a substring, only entries whose name contains it are run — for
 # iterating on the entries you just added. Always finish with an unfiltered
 # run; a filtered one proves nothing about the rest. The unfiltered run is
@@ -211,7 +221,9 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    printf '%s\0%s\0%s\0' "$name" "$file" "$from" >> "$anchors"
+    # Five fields per entry, not three: the filter is the field that makes a
+    # `caught` verdict mean anything, and nothing checked it before.
+    printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
@@ -18692,16 +18704,55 @@ if (( anchors_only )); then
   # Non-zero on any finding so this can gate a merge (MIN-2 of its own
   # review); "nothing selected" is reported as such, never as a pass.
   python3 - "$anchors" <<'PY' || exit 1
-import sys, pathlib
+import pathlib, re, sys
+
 raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
 fields = raw.split(b"\0")[:-1] if raw else []
-entries = [tuple(f.decode() for f in fields[i:i + 3]) for i in range(0, len(fields), 3)]
+entries = [tuple(f.decode() for f in fields[i:i + 5]) for i in range(0, len(fields), 5)]
 if not entries:
     print("checked 0 anchors (nothing selected)")
     sys.exit(1)
+
+FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+
+_fn_cache = {}
+
+
+def test_fns(pkg):
+    """Names of test-attributed functions in a package.
+
+    A filter is what cargo is handed, and cargo matches a substring against
+    the test's path. Matching against every `fn` would let a filter naming a
+    plain helper pass, so only functions carrying a `test` attribute count.
+    """
+    if pkg in _fn_cache:
+        return _fn_cache[pkg]
+    names = set()
+    for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        saw_test_attr = False
+        for line in lines:
+            stripped = line.strip()
+            declared = FN_DECL.match(stripped)
+            if declared:
+                if saw_test_attr:
+                    names.add(declared.group(1))
+                saw_test_attr = False
+            elif stripped.startswith("#["):
+                if "test" in stripped:
+                    saw_test_attr = True
+            elif stripped and not stripped.startswith("//"):
+                saw_test_attr = False
+    _fn_cache[pkg] = names
+    return names
+
+
 texts = {}
-stale = ambiguous = 0
-for name, file, anchor in entries:
+stale = ambiguous = bad_filters = loose = 0
+for name, file, anchor, pkg, filt in entries:
     if file not in texts:
         try:
             texts[file] = pathlib.Path(file).read_text()
@@ -18719,7 +18770,27 @@ for name, file, anchor in entries:
     elif hits > 1:
         ambiguous += 1
         print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
-print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous")
-sys.exit(1 if stale or ambiguous else 0)
+    if not filt:
+        continue
+    matched = sorted(n for n in test_fns(pkg) if filt in n)
+    if not matched:
+        bad_filters += 1
+        print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
+    elif len(matched) > 1 and filt not in matched:
+        # The named test never runs, so the verdict comes from whatever else
+        # the substring caught — the overlapping-defences lie this harness
+        # exists to prevent.
+        bad_filters += 1
+        print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
+    elif len(matched) > 1:
+        # The named test does run; the siblings only make the entry slower and
+        # make "which test caught it" unanswerable.
+        loose += 1
+        print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
+
+print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
+if loose:
+    print(f"  {loose} loose filters (the named test runs, siblings run with it)")
+sys.exit(1 if stale or ambiguous or bad_filters else 0)
 PY
 fi
