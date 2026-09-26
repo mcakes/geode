@@ -1472,6 +1472,27 @@ impl MarketDataTile {
                 }
             }
         }
+        // A republish at the SAME source time is invisible in the `update
+        // HH:MM` badge, because the base carries that time too. Say so.
+        // Only when no policy notice already speaks for this delivery: a
+        // `Replace` disclosure of lost work outranks this one.
+        if moved
+            && draft.is_behind()
+            && notice.is_none()
+            && let Some(delivered) = &base
+            && draft
+                .base
+                .as_ref()
+                .is_some_and(|held| held.as_of == delivered.as_of)
+        {
+            notice = Some(
+                format!(
+                    "republished at {} — :rebase or :revert",
+                    local_hhmm(&delivered.as_of, self.clock)
+                )
+                .into(),
+            );
+        }
         // Retain the outgoing snapshot only when it is the draft's actual base and the
         // new state still needs it. Restored drafts may have no delivered base; never
         // pin their newest-snapshot fallback as if it were that base.
@@ -4640,11 +4661,15 @@ mod tests {
     }
 
     fn provenance(as_of: &str) -> Provenance {
+        provenance_gen(as_of, 7)
+    }
+
+    fn provenance_gen(as_of: &str, generation: i64) -> Provenance {
         Provenance {
             datasets: vec![Freshness {
                 dataset: "cvi_params".into(),
                 as_of: Some(as_of.into()),
-                generation: Some(7),
+                generation: Some(generation),
             }],
             as_of_request: None,
         }
@@ -8710,6 +8735,65 @@ deleted = true
         assert!(
             chips.iter().any(|c| c == &format!("update {local}")),
             "{chips:?}"
+        );
+    }
+
+    /// A corrected republish keeps its source time and takes a new store
+    /// generation. Before the base was a pair, `on_delivered` saw no change,
+    /// `apply_snapshot` installed the new grid anyway, and this edit — keyed
+    /// by grid position — landed on whatever node now held that column.
+    #[gpui::test]
+    fn a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(&TERMS, &NODES, provenance_gen(BASE, 7))),
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        // The SAME source time, a new generation, and a document whose
+        // columns have moved: one term dropped, so every axis column shifts.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(
+                &["2026-11-20"],
+                &NODES,
+                provenance_gen(BASE, 8),
+            )),
+        );
+
+        let (state, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().rows.len(),
+                t.model().rows[0].cells[0].clone(),
+                t.notice().map(str::to_string),
+            )
+        });
+        assert!(
+            matches!(
+                state,
+                DraftState::Behind { ref newer }
+                    if newer.as_of == BASE && newer.generation == Some(8)
+            ),
+            "a same-time republish must be Behind, got {state:?}"
+        );
+        assert_eq!(rows, 2, "still painting the base generation's two terms");
+        assert_eq!(cell.text.to_string(), "0.50", "the edit is still its own");
+        assert!(cell.edited);
+        assert!(
+            notice.is_some_and(|n| n.contains("republished")),
+            "the badge's time is the base's own, so the notice must say what moved"
         );
     }
 
