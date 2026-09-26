@@ -68,6 +68,7 @@ delivery, not applied to a window.
 |---|---|
 | Query, series, distinct, catalog, price | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
+| Local-write outcome (saved, save failed, forgotten, forget failed) | One entry per dataset/batch shared by all four; the latest replaces. The writer serializes a document's publishes and forgets, so the latest outcome describes what the store holds. Kept apart from that batch's publication entry. |
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
 | Health / poll result | Latest entry per event kind and source. |
@@ -100,6 +101,11 @@ recent-publication history. Local autosave skips those frame updates. The
 history timestamp is event arrival time, not source freshness. Although the
 mailbox retains the book union, the bridge currently records its count;
 frame invalidation is by dataset or document batch, not individual book.
+
+Local-write outcomes are not yet routed to a tile; the bridge logs them.
+A forgotten document also requests a watched catalog refresh, because a
+forget changes the catalog without a publication. Their failures already
+reach diagnostics as error diagnostics.
 
 Catalog refresh permits one active request and coalesces follow-up demand.
 Only the active key/tag releases that slot. Refusal or error retains demand

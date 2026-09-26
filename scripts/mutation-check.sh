@@ -18735,6 +18735,115 @@ run_mutation "mdedit: the value editor keeps the cell's alignment" \
   '                    .text_align(TextAlign::Left)' \
   geode-marketdata the_editor_keeps_the_value_right_aligned
 
+# ---- Local documents: forget, local-write outcomes, local retention -------
+
+# A forget deletes the document's whole history, not just what is live: an
+# archive left behind is still readable through as-of, and a summary or
+# provenance row left behind keeps the forgotten sheet in the catalog.
+run_mutation "forget: archived generations survive" \
+  crates/geode-data/src/store/document.rs \
+  '        &format!("delete from \"{}\" where batch = ?", tables.archive),' \
+  '        &format!("delete from \"{}\" where false and batch = ?", tables.archive),' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: the generation summary keeps the forgotten document" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from generations where dataset = ? and batch = ?",' \
+  '        "delete from generations where false and dataset = ? and batch = ?",' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: file_generations keeps the forgotten document" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_generations where dataset = ? and batch = ?",' \
+  '        "delete from file_generations where false and dataset = ? and batch = ?",' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: file_books rows are orphaned" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_books where file_id in \' \
+  '        "delete from file_books where false and file_id in \' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: the dictionary still offers the forgotten key" \
+  crates/geode-data/src/store/document.rs \
+  '    for col in ddl::categorical_columns(ds) {
+        ddl::refresh_enum(conn, dataset, col, &tables.live, &tables.archive)?;
+    }
+    crate::store::commit_transaction(tx)?;
+    Ok(deleted)' \
+  '    crate::store::commit_transaction(tx)?;
+    Ok(deleted)' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+# The runner refuses a non-local forget itself: `ForgetJob` is a public door
+# onto the writer, and a feed's history is never a forget.
+run_mutation "runner: a non-local dataset can be forgotten" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Some(ds) if !ds.local => failed(format!(' \
+  '        Some(ds) if false && !ds.local => failed(format!(' \
+  geode-data a_forget_of_a_non_local_or_undeclared_dataset_fails_and_deletes_nothing
+
+run_mutation "service: a forget to a non-local dataset is queued" \
+  crates/geode-data/src/service.rs \
+  '            Some(ds) if !ds.local => Some("not a local dataset".to_string()),' \
+  '            Some(ds) if false && !ds.local => Some("not a local dataset".to_string()),' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+run_mutation "service: a forget with the wrong key arity is queued" \
+  crates/geode-data/src/service.rs \
+  '            Some(ds) if forget.key.len() != ds.key.len() => Some(format!(' \
+  '            Some(ds) if false && forget.key.len() != ds.key.len() => Some(format!(' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+# Local archives are bounded after each local publish; feeds are not swept
+# by that path (their retention is a separate, unwired decision).
+run_mutation "runner: local publishes are never swept" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if published && dataset.local {' \
+  '    if false && published && dataset.local {' \
+  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+
+run_mutation "runner: a feed publish is swept as if local" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if published && dataset.local {' \
+  '    if published {' \
+  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+
+# The writer's answer rides beside `Published`/the diagnostic: without it the
+# sheet that saved can never learn its save was stored or refused.
+run_mutation "service: a local publish sends no LocalPublished" \
+  crates/geode-data/src/service.rs \
+  '                    let local = (source == LOCAL_SOURCE).then(|| DataEvent::LocalPublished {' \
+  '                    let local = (source == "never").then(|| DataEvent::LocalPublished {' \
+  geode-data a_local_publish_reports_local_published_beside_published
+
+run_mutation "service: a failed local publish sends no LocalPublishFailed" \
+  crates/geode-data/src/service.rs \
+  '                        let answered = sink(DataEvent::LocalPublishFailed {
+                            dataset,
+                            batch,
+                            reason,
+                        });' \
+  '                        let answered = { let _ = (dataset, batch, reason); true };' \
+  geode-data a_failed_local_publish_reports_local_publish_failed_beside_the_diagnostic
+
+# Local-write outcomes share one mailbox key per document, apart from that
+# document's `Published` entry.
+run_mutation "mailbox: a local-write outcome merges into Published" \
+  crates/geode-app/src/events.rs \
+  '            Key::Local(dataset.clone(), batch.clone())' \
+  '            Key::Published(dataset.clone(), batch.clone())' \
+  geode-app local_write_outcomes_keep_the_latest_per_document_apart_from_published
+
+run_mutation "bridge: a forgotten document leaves a watched catalog stale" \
+  crates/geode-app/src/bridge.rs \
+  '                        diagnostics.update(cx, |d, cx| {
+                            d.request_catalog_refresh();
+                            if d.pending_catalog_request() {' \
+  '                        diagnostics.update(cx, |d, cx| {
+                            if d.pending_catalog_request() {' \
+  geode-app a_forgotten_document_rereads_a_watched_catalog
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

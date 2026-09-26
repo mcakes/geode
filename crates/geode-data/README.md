@@ -44,7 +44,7 @@ for capacity, coalescing, and worker shutdown behavior.
 | Module | Holds |
 |---|---|
 | `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `severity_rank` wins). |
-| `handle` | `DataHandle` and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload. |
+| `handle` | `DataHandle` and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload, a local publish, and a local forget. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
@@ -93,8 +93,21 @@ often tripped:
   partitions. As-of selection and retention break source-time ties by the
   greatest generation ID so corrected republishes win consistently.
 - Live/archive retention has a transactional storage API but no production
-  scheduler. Series retention runs inside append transactions. See the
+  scheduler for measure or feed-published document datasets. Local datasets
+  are swept on the writer after each local publish, to
+  `LOCAL_KEEP_GENERATIONS` (200) archived generations per document. Series
+  retention runs inside append transactions. See the
   [maintenance contract](../../docs/current/data-path.md#retention-and-maintenance).
+- Only a `local = true` dataset can be written or forgotten from the app.
+  `forget_document` deletes a document's rows, generation summary and
+  provenance in one transaction and runs only on the ingest writer, in the
+  same FIFO as document publishes, so a forget queued after a save of the
+  same key deletes that save too. Refusals are error diagnostics; nothing
+  runs.
+- A local publish answers `LocalPublished`/`LocalPublishFailed` and a forget
+  answers `Forgotten`/`ForgetFailed`, addressed by dataset and document key
+  (there is no requester key), in addition to `Published` and the error
+  diagnostics every consumer already reads.
 - Discovery compares path, size, and source time, not CSV contents. Glob and
   CSV metadata errors are currently skipped, so an empty poll does not prove
   path accessibility. Adapter queue admission likewise does not acknowledge

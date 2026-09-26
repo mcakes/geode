@@ -293,8 +293,28 @@ the call. Checkpointing is a separate operation that can also stall writes.
 `SweepReport::oldest_remaining` covers only the swept archive tables; it does
 not promise complete history across all grains and partitions.
 
-The application does not schedule live/archive sweeps automatically; the API
-is currently called by tests. This applies to measure and document archives.
+The application does not schedule live/archive sweeps for measure datasets or
+feed-published documents; the API is called only by tests for those. Local
+documents (`local = true`) are the exception: after each successful local
+publish, the ingest writer sweeps that dataset to 200 archived generations per
+document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most 201), with no
+age limit. The sweep runs after the publish committed and its outcome was sent,
+so a sweep failure is logged and never turns a stored save into a failed one;
+the next local publish sweeps again. Evicted generations keep their
+`file_generations` provenance rows, as every sweep does.
+
+**Forgetting a local document.** `DataHandle::forget(LocalForget)` deletes one
+document's whole history: its live and archived rows, its generation summary
+rows, and its `file_generations`/`file_books` provenance, in one writer
+transaction, then rebuilds the dataset's categorical dictionaries. The service
+refuses a dataset that is not `local` or a key of the wrong arity with an error
+diagnostic and queues nothing; the runner refuses a non-local dataset again,
+since `ForgetJob` is a public door onto the writer. An accepted forget joins
+the documents FIFO, so it runs after every publish queued before it,
+including a save of the same key. It answers `DataEvent::Forgotten`, also
+for a key that held nothing, or `DataEvent::ForgetFailed` beside an error
+diagnostic. A forget has no progress or health lane.
+
 Series retention is separate and runs for the affected `(source, identity)`
 pair inside each append transaction. See
 [`retention.rs`](../../crates/geode-data/src/store/retention.rs) and
@@ -329,7 +349,10 @@ load lane: document keys for parsed documents, raw topics for parse failures,
 and `identity@source` for fetches. A message that parses, validates, and stamps
 successfully clears an earlier failure under its raw topic; publication then
 reports under the document key. Local document writes have no configured
-source-health lane. Load entries have no eviction policy, and unresolved
+source-health lane. Instead, a local publish also answers its writer by
+dataset and document key: `DataEvent::LocalPublished` with the generation ID
+beside `Published`, or `DataEvent::LocalPublishFailed` with the reason beside
+the error diagnostic. Load entries have no eviction policy, and unresolved
 raw-topic failures have no fixed cap; memory can grow with distinct names.
 
 At startup, persisted unhealthy file generations seed the load lane. An
@@ -365,8 +388,9 @@ to the report time if adding the interval overflows.
 ## Limits and verification
 
 - The demo database is not automatically migrated after schema changes.
-- Historical as-of depends on retained generations. Measure and document
-  archives currently have no automatic retention sweep.
+- Historical as-of depends on retained generations. Measure and feed-published
+  document archives currently have no automatic retention sweep; local
+  documents keep 200 archived generations each.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.

@@ -9,7 +9,9 @@ use crate::health::{Health, severity_rank};
 use crate::ingest::fetch::{FetchOutcome, FetchOutcomeSink, FetchWork, FetchWorker};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
-use crate::ingest::{DocumentJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob};
+use crate::ingest::{
+    DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink, SeriesJob,
+};
 use crate::pricing::{PriceSink, PricerConfig, PricingWorker};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
@@ -124,6 +126,47 @@ pub enum DataEvent {
     /// Upload result, addressed by the requesting tile's key. Every
     /// admitted upload request answers exactly one.
     Upload(UploadOutcome),
+    /// A local publish (`DataHandle::publish`) was stored as generation
+    /// `gen_id` of document `batch`. Sent beside, not instead of, that
+    /// publish's `Published`: this one answers the writer (addressed by
+    /// dataset and document key, since a publish carries no requester key),
+    /// `Published` invalidates readers.
+    LocalPublished {
+        dataset: String,
+        batch: String,
+        gen_id: i64,
+    },
+    /// A local publish that stored nothing, with the reason. Sent beside the
+    /// error `Diagnostics` the failure also produces.
+    LocalPublishFailed {
+        dataset: String,
+        batch: String,
+        reason: String,
+    },
+    /// A local forget (`DataHandle::forget`) deleted document `batch` and its
+    /// whole history. A forget of a key nothing held also answers this.
+    Forgotten {
+        dataset: String,
+        batch: String,
+    },
+    /// A local forget that deleted nothing, with the reason; beside an error
+    /// `Diagnostics`. A forget refused at the service (a dataset that is not
+    /// local, a key of the wrong arity) answers only the diagnostic: it never
+    /// reached the writer and names no document.
+    ForgetFailed {
+        dataset: String,
+        batch: String,
+        reason: String,
+    },
+}
+
+/// Forget one document of a `local = true` dataset: every generation, live
+/// and archived, is deleted on the ingest writer, in order with publishes.
+/// `key` is the document key's parts, as `DocumentRows::key` holds them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalForget {
+    pub dataset: String,
+    pub key: Vec<String>,
 }
 
 /// Nonblocking delivery into the caller's latest-state mailbox. `false` means
@@ -722,12 +765,22 @@ impl DataService {
                         "published {dataset}/{batch} gen {gen_id}: {} book(s), {rows} row(s)",
                         books.len(),
                     );
+                    let local = (source == LOCAL_SOURCE).then(|| DataEvent::LocalPublished {
+                        dataset: dataset.clone(),
+                        batch: batch.clone(),
+                        gen_id,
+                    });
                     let delivered = sink(DataEvent::Published {
                         dataset,
                         batch: batch.clone(),
                         gen_id,
                         books,
                     });
+                    // The writer's own answer; `Published` above stays the readers' one.
+                    let delivered = match local {
+                        Some(event) => sink(event) && delivered,
+                        None => delivered,
+                    };
                     // Local document writes have no configured source-health lane.
                     if source == LOCAL_SOURCE {
                         let _ = sink(DataEvent::LoadEnded);
@@ -784,8 +837,13 @@ impl DataService {
                             message: format!("local publish of {dataset}/{batch} failed: {reason}"),
                             path: None,
                         }]));
+                        let answered = sink(DataEvent::LocalPublishFailed {
+                            dataset,
+                            batch,
+                            reason,
+                        });
                         let _ = sink(DataEvent::LoadEnded);
-                        return delivered;
+                        return delivered && answered;
                     }
                     // Key health by source name and record this failure in its load lane.
                     let health_delivered = health_tracker.report_load_and_emit(
@@ -879,6 +937,38 @@ impl DataService {
                     });
                     let _ = sink(DataEvent::LoadEnded);
                     delivered && health_delivered
+                }
+                // A forget is a local write: no health lane and no progress (it
+                // announced no Started), so no LoadEnded either.
+                IngestEvent::Forgotten {
+                    dataset,
+                    batch,
+                    rows,
+                } => {
+                    tracing::info!(
+                        target: "geode::ingest",
+                        "forgot {dataset}/{batch}: {rows} row(s) deleted",
+                    );
+                    sink(DataEvent::Forgotten { dataset, batch })
+                }
+                IngestEvent::ForgetFailed {
+                    dataset,
+                    batch,
+                    reason,
+                } => {
+                    log_ingest_failure(&dataset, &batch, &reason);
+                    let delivered = sink(DataEvent::Diagnostics(vec![Diagnostic {
+                        severity: Severity::Error,
+                        layer: None,
+                        file: None,
+                        message: format!("forgetting {dataset}/{batch} failed: {reason}"),
+                        path: None,
+                    }]));
+                    sink(DataEvent::ForgetFailed {
+                        dataset,
+                        batch,
+                        reason,
+                    }) && delivered
                 }
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
@@ -1465,6 +1555,43 @@ impl DataService {
         });
     }
 
+    /// Forget one document of a local dataset. Anything else — a dataset not
+    /// declared `local = true`, or a key whose arity is not the dataset's —
+    /// is refused with an error diagnostic and nothing is queued. Accepted,
+    /// the forget joins the ingest runner's documents FIFO behind every
+    /// publish already queued, and answers `Forgotten` or `ForgetFailed`.
+    pub fn forget(&self, forget: LocalForget) {
+        let refusal = match self.config.schema.dataset(&forget.dataset) {
+            Some(ds) if !ds.local => Some("not a local dataset".to_string()),
+            None => Some("not a local dataset".to_string()),
+            Some(ds) if forget.key.len() != ds.key.len() => Some(format!(
+                "key has {} part(s), the dataset's has {}",
+                forget.key.len(),
+                ds.key.len()
+            )),
+            Some(_) => None,
+        };
+        if let Some(why) = refusal {
+            tracing::warn!(
+                target: "geode::ingest",
+                "refused a forget in '{}': {why}",
+                forget.dataset
+            );
+            let _ = (self.sink)(DataEvent::Diagnostics(vec![Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: format!("refused a forget in '{}': {why}", forget.dataset),
+                path: None,
+            }]));
+            return;
+        }
+        self.ingest.submit_forget(ForgetJob {
+            batch: geode_core::document::join_key(&forget.key),
+            dataset: forget.dataset,
+        });
+    }
+
     /// Cap the series request before compilation, then submit it through the
     /// shared pool for per-key supersession and cancellation. A cap refusal names
     /// the frequency and span; results arrive as DataEvent::Series.
@@ -2016,6 +2143,72 @@ mod tests {
             }
         }
         assert!(saw_diagnostic && saw_ended);
+    }
+
+    /// A local publish answers its own outcome by dataset and batch —
+    /// `LocalPublished` with the generation — beside the `Published`
+    /// invalidation every publish sends, so the tile that saved can clear
+    /// its dirty mark without diagnostics losing its publication record.
+    #[test]
+    fn a_local_publish_reports_local_published_beside_published() {
+        let (_d, service, rx) = local_service();
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("s", &[1]),
+        });
+        let mut published = None;
+        let mut local = None;
+        while published.is_none() || local.is_none() {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("an event") {
+                DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    ..
+                } => published = Some((dataset, batch, gen_id)),
+                DataEvent::LocalPublished {
+                    dataset,
+                    batch,
+                    gen_id,
+                } => local = Some((dataset, batch, gen_id)),
+                DataEvent::LocalPublishFailed { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        let local = local.unwrap();
+        assert_eq!((local.0.as_str(), local.1.as_str()), ("sheets", "s"));
+        assert_eq!(Some(local), published);
+    }
+
+    #[test]
+    fn a_failed_local_publish_reports_local_publish_failed_beside_the_diagnostic() {
+        let (_d, service, rx) = local_service();
+        service.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("s", &[]),
+        });
+        let mut diagnostic = false;
+        let mut failed = None;
+        while !diagnostic || failed.is_none() {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("an event") {
+                DataEvent::Diagnostics(d) => {
+                    diagnostic |= d.iter().any(|d| {
+                        d.severity == Severity::Error
+                            && d.message.contains("local publish of sheets/s failed")
+                    })
+                }
+                DataEvent::LocalPublishFailed {
+                    dataset,
+                    batch,
+                    reason,
+                } => failed = Some((dataset, batch, reason)),
+                DataEvent::LocalPublished { .. } => panic!("an empty document was stored"),
+                _ => {}
+            }
+        }
+        let (dataset, batch, reason) = failed.unwrap();
+        assert_eq!((dataset.as_str(), batch.as_str()), ("sheets", "s"));
+        assert!(reason.contains("document has no rows"), "{reason}");
     }
 
     #[test]

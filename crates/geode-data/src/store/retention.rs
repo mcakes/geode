@@ -2,8 +2,9 @@
 //! generations, so a busy book cannot evict a quiet book's history.
 //!
 //! Sweeps accept [`TablePair`] values: one per grain for measure datasets,
-//! or the single document pair. The storage API supports both families, but
-//! the application does not schedule these sweeps automatically.
+//! or the single document pair. The storage API supports both families; the
+//! application schedules sweeps only for local document datasets, on the
+//! ingest writer after each local publish (`ingest::LOCAL_KEEP_GENERATIONS`).
 
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, TablePair, table_pairs};

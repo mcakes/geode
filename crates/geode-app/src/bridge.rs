@@ -914,6 +914,40 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             }
                         });
                     }
+                    // Local-write answers (a save stored or refused, a document
+                    // forgotten or not). Not routed to a tile yet: their consumer is
+                    // the line pricer's sheet store, which is wired to the data tier
+                    // separately. Every failure already reached diagnostics as an
+                    // error `Diagnostics` event, and a save's `Published` is handled
+                    // above, so dropping these loses nothing shown today.
+                    DataEvent::LocalPublished { dataset, batch, gen_id } => {
+                        tracing::debug!(
+                            target: "geode::ingest",
+                            "local save of {dataset}/{batch} stored as gen {gen_id} (not routed yet)"
+                        );
+                    }
+                    DataEvent::LocalPublishFailed { dataset, batch, .. }
+                    | DataEvent::ForgetFailed { dataset, batch, .. } => {
+                        tracing::debug!(
+                            target: "geode::ingest",
+                            "local write to {dataset}/{batch} failed (not routed yet; see diagnostics)"
+                        );
+                    }
+                    // A forget changes what the database holds without a
+                    // `Published`, so a watched catalog is refreshed here or it
+                    // would keep listing the forgotten document.
+                    DataEvent::Forgotten { dataset, batch } => {
+                        tracing::debug!(
+                            target: "geode::ingest",
+                            "forgot {dataset}/{batch} (not routed yet)"
+                        );
+                        diagnostics.update(cx, |d, cx| {
+                            d.request_catalog_refresh();
+                            if d.pending_catalog_request() {
+                                cx.notify();
+                            }
+                        });
+                    }
                     // Route pricing to the keyed occupant; the shell discards absent recipients.
                     DataEvent::Price(outcome) => {
                         shell.update(cx, |s, cx| {
@@ -3318,6 +3352,36 @@ role = "key"
             diagnostics.read_with(&vcx, |d, _| d.catalog.as_ref().unwrap().threads),
             8
         );
+    }
+
+    /// A forget changes what the database holds without any `Published`,
+    /// so the bridge must re-read a watched catalog on `Forgotten` or the
+    /// diagnostics tile keeps listing the deleted document.
+    #[gpui::test]
+    fn a_forgotten_document_rereads_a_watched_catalog(cx: &mut gpui::TestAppContext) {
+        let f = catalog_fixture(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let shell = f.window.root(&mut vcx).unwrap().read_with(&vcx, |r, _| {
+            r.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let first = next_catalog(&f);
+        answer_catalog(&f, &first, 4);
+        vcx.run_until_parked();
+        assert!(f.requests.try_recv().is_err(), "no demand yet");
+        f.events
+            .try_send(DataEvent::Forgotten {
+                dataset: "sheets".into(),
+                batch: "a".into(),
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        next_catalog(&f);
     }
 
     #[gpui::test]

@@ -30,6 +30,15 @@ enum Key {
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.
     Upload(QueryKey, u64),
+    /// One key per document for every local-write outcome — saved, save
+    /// failed, forgotten, forget failed — latest wins. The writer runs one
+    /// FIFO of publishes and forgets, so the last outcome for a document
+    /// describes what the store now holds, which is all its one consumer
+    /// (the document's writer) acts on. Separate keys per outcome kind would
+    /// be worse: a replaced entry keeps its first position, so a save,
+    /// forget and save again could be delivered as save then forget,
+    /// reporting gone a document that exists.
+    Local(String, String),
     Published(String, String),
     Fetched(String, String, bool),
     Load,
@@ -48,6 +57,12 @@ fn key(event: &DataEvent) -> Key {
         DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
+        }
+        DataEvent::LocalPublished { dataset, batch, .. }
+        | DataEvent::LocalPublishFailed { dataset, batch, .. }
+        | DataEvent::Forgotten { dataset, batch }
+        | DataEvent::ForgetFailed { dataset, batch, .. } => {
+            Key::Local(dataset.clone(), batch.clone())
         }
         DataEvent::SeriesFetched {
             source,
@@ -293,6 +308,47 @@ mod tests {
             rx.recv().await.unwrap(),
             DataEvent::Upload(o) if o.tag == 2 && o.result == Ok(())
         ));
+    }
+
+    #[gpui::test]
+    async fn local_write_outcomes_keep_the_latest_per_document_apart_from_published() {
+        // One document's saves and forgets coalesce to the latest outcome;
+        // another document's outcome and the `Published` invalidation of the
+        // same document are never merged into it.
+        let (tx, rx) = channel();
+        let published = |batch: &str, gen_id| DataEvent::LocalPublished {
+            dataset: "sheets".into(),
+            batch: batch.into(),
+            gen_id,
+        };
+        tx.try_send(published("a", 1)).unwrap();
+        tx.try_send(DataEvent::Published {
+            dataset: "sheets".into(),
+            batch: "a".into(),
+            gen_id: 1,
+            books: vec![None],
+        })
+        .unwrap();
+        tx.try_send(published("b", 2)).unwrap();
+        tx.try_send(DataEvent::Forgotten {
+            dataset: "sheets".into(),
+            batch: "a".into(),
+        })
+        .unwrap();
+        drop(tx);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Forgotten { batch, .. } if batch == "a"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Published { batch, .. } if batch == "a"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::LocalPublished { batch, gen_id: 2, .. } if batch == "b"
+        ));
+        assert!(rx.recv().await.is_err());
     }
 
     #[gpui::test]

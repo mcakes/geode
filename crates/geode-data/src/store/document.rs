@@ -270,6 +270,69 @@ pub fn publish_document(
     })
 }
 
+/// Forget one document: delete every live and archived row of `batch`, its
+/// generation summary rows and its provenance (`file_generations` and their
+/// `file_books`), in one transaction, then rebuild the dataset's categorical
+/// dictionaries so the forgotten key is no longer offered. Returns the
+/// payload rows deleted (live plus archive); a batch nothing holds deletes
+/// nothing and is not an error.
+///
+/// All or nothing: a failure part-way rolls back, so a forget can never
+/// leave rows with no summary (unreachable through as-of) or a summary with
+/// no rows (a generation `assert_generations_match_tables` rejects).
+///
+/// Only the ingest writer may call this, serialized with publication — a
+/// publish of the same key interleaved inside the transaction would be
+/// half-deleted. Whether the dataset may be forgotten at all (only `local`
+/// ones) is the caller's gate; this refuses only a non-document dataset,
+/// whose batches are files, not documents.
+pub fn forget_document(store: &Store, ds: &DatasetSpec, batch: &str) -> Result<usize, StoreError> {
+    if !ds.is_document() {
+        return Err(StoreError::Document(format!(
+            "dataset '{}' is not a document dataset; only a document can be forgotten",
+            ds.name
+        )));
+    }
+    let tables = TablePair::for_document(&ds.name);
+    let tx = crate::store::begin_transaction(store.writer())?;
+    let conn = &tx;
+    let run = |sql: &str, params: &[&dyn duckdb::ToSql]| -> Result<usize, StoreError> {
+        conn.execute(sql, params).map_err(|source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        })
+    };
+    let dataset = ds.name.as_str();
+    let mut deleted = run(
+        &format!("delete from \"{}\" where batch = ?", tables.live),
+        &[&batch],
+    )?;
+    deleted += run(
+        &format!("delete from \"{}\" where batch = ?", tables.archive),
+        &[&batch],
+    )?;
+    run(
+        "delete from generations where dataset = ? and batch = ?",
+        &[&dataset, &batch],
+    )?;
+    // `file_books` before `file_generations`: its rows are found through
+    // the provenance rows about to be deleted.
+    run(
+        "delete from file_books where file_id in \
+         (select file_id from file_generations where dataset = ? and batch = ?)",
+        &[&dataset, &batch],
+    )?;
+    run(
+        "delete from file_generations where dataset = ? and batch = ?",
+        &[&dataset, &batch],
+    )?;
+    for col in ddl::categorical_columns(ds) {
+        ddl::refresh_enum(conn, dataset, col, &tables.live, &tables.archive)?;
+    }
+    crate::store::commit_transaction(tx)?;
+    Ok(deleted)
+}
+
 fn cell(col: &Column, i: usize) -> duckdb::types::Value {
     match col {
         Column::F64(v) => duckdb::types::Value::Double(v[i]),
@@ -772,6 +835,109 @@ mod tests {
             "cvi_params",
             &crate::store::ddl::history_of("cvi_params", &ds),
         );
+    }
+
+    fn count(store: &Store, sql: &str) -> i64 {
+        store.writer().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Forgetting one key removes its whole history — live rows, archived
+    /// generations, the generation summary and the provenance rows — and
+    /// leaves every other document of the dataset exactly as it was. The
+    /// catalog is read through the real builder, so a stray `generations`
+    /// or `file_generations` row would surface as a partition that still
+    /// lists the forgotten sheet.
+    #[test]
+    fn forget_removes_one_document_and_its_history_and_nothing_else() {
+        use crate::store::ddl::tests_support::{local_dataset, sheet_rows};
+        let (_d, store, ds) = fixture_for(local_dataset());
+        let publish_sheet = |sheet: &str, qty: &[i64], at: &str| {
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: geode_core::pricing::LOCAL_SOURCE,
+                    rows: &sheet_rows(sheet, qty),
+                    source_time: ts(at),
+                    received_at: ts(at),
+                    bytes: 0,
+                },
+            )
+            .unwrap()
+        };
+        publish_sheet("gone", &[1, 2], "2026-09-12T14:00:00Z");
+        publish_sheet("gone", &[3, 4, 5], "2026-09-12T14:01:00Z");
+        let kept = publish_sheet("kept", &[9], "2026-09-12T14:02:00Z");
+
+        let deleted = forget_document(&store, &ds, "gone").unwrap();
+        assert_eq!(deleted, 5, "three live rows and two archived rows");
+
+        for sql in [
+            "select count(*) from sheets_document_live where batch = 'gone'",
+            "select count(*) from sheets_document_archive where batch = 'gone'",
+            "select count(*) from generations where dataset = 'sheets' and batch = 'gone'",
+            "select count(*) from file_generations where dataset = 'sheets' and batch = 'gone'",
+        ] {
+            assert_eq!(count(&store, sql), 0, "{sql}");
+        }
+        // Every `file_books` row left belongs to a surviving generation.
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from file_books \
+                 where file_id not in (select file_id from file_generations)"
+            ),
+            0
+        );
+        assert_eq!(count(&store, "select count(*) from file_books"), 1);
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from sheets_document_live where batch = 'kept'"
+            ),
+            1
+        );
+        // The dictionary no longer offers the forgotten key.
+        assert_eq!(
+            count(
+                &store,
+                "select count(*) from (select unnest(enum_range(NULL::sheets_sheet_enum)) v) \
+                 where v = 'gone'"
+            ),
+            0
+        );
+        assert_generations_match_tables(
+            store.writer(),
+            "sheets",
+            &crate::store::ddl::history_of("sheets", &ds),
+        );
+        let schema = geode_core::schema::SchemaSpec {
+            datasets: vec![ds.clone()],
+        };
+        let catalog = crate::query::catalog::build_catalog(
+            store.writer(),
+            &schema,
+            &crate::query::as_of::AsOf::Live,
+        )
+        .unwrap();
+        let partitions: Vec<(&str, Vec<i64>)> = catalog.datasets[0]
+            .partitions
+            .iter()
+            .map(|p| {
+                (
+                    p.batch.as_str(),
+                    p.generations.iter().map(|g| g.gen_id).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(partitions, vec![("kept", vec![kept.gen_id])]);
+
+        // Forgetting a key nothing holds deletes nothing and is not an error.
+        assert_eq!(forget_document(&store, &ds, "never").unwrap(), 0);
+        // Forgetting the last document leaves an empty dictionary, not an
+        // error: the ENUM rebuild over zero values must still succeed.
+        assert_eq!(forget_document(&store, &ds, "kept").unwrap(), 1);
+        assert_eq!(count(&store, "select count(*) from generations"), 0);
     }
 
     #[test]
