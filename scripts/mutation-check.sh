@@ -15710,14 +15710,16 @@ run_mutation "grouping: the readout click opens the picker" \
 
 # `open_shell_dialog_with_key`'s `prevent_default`: without it the shell
 # root's bubble-phase focus grab takes the field's focus back on the same
-# mouse-down and typing after any chip click goes nowhere.
+# mouse-down and typing after any chip click goes nowhere. The detector
+# is an expression term chip's click: the `+` menu's rows stop
+# propagation themselves, so the `+` path no longer depends on this.
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
     // Dialog state is installed before this call so synchronization can choose its' \
   '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
-  the_pick_chip_is_always_present_and_its_menu_opens_the_picker
+  a_terms_body_edits_that_term_alone
 
 # ---- tile picker (2026-09-19): a placeholder's double-click and
 # `tile::add` / `mod+n` over the same choice dialog ----------------------
