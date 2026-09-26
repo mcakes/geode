@@ -10812,8 +10812,8 @@ run_mutation "colours: to_table omits the hue under a token" \
 # 2c §6.1: reserved names are taken on Colours alone.
 run_mutation "objectdialog: reserved colour names are taken" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.reserved_names().contains(&name) {' \
-  '        if false && self.reserved_names().contains(&name) {' \
+  '        self.reserved_names().contains(&name)' \
+  '        false' \
   geode-shell \
   reserved_names_are_taken
 
@@ -18747,18 +18747,64 @@ run_mutation "colours: a name starting with '#' is reserved" \
 
 # A featured swatch maps back to the theme-following colour it was built
 # from; mutated, every pick is absolute and stops following the theme.
-run_mutation "timeseries colour picker: a featured exact match keeps its palette or named colour" \
+run_mutation "timeseries colour picker: a featured match keeps its palette or named colour" \
   crates/geode-timeseries/src/core/rgb.rs \
-  '    match featured.iter().find(|(f, _)| *f == h) {' \
-  '    match featured.iter().find(|_| false) {' \
+  '        .filter(|(f, _)| within_a_step(*f, picked))' \
+  '        .filter(|_| false)' \
   geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
 
 # Anything off the featured row is absolute, not the nearest featured one.
 run_mutation "timeseries colour picker: a non-featured pick is Custom" \
   crates/geode-timeseries/src/core/rgb.rs \
-  '        None => Colour::Custom(Rgb8::from_hsla(h)),' \
+  '        None => Colour::Custom(picked),' \
   '        None => Colour::Palette(0),' \
   geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# The component's hex field truncates: a featured colour read back one
+# step low on a channel is still that colour. Exact matching turns it
+# absolute and a shade off.
+run_mutation "timeseries colour picker: a featured match tolerates one step" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) <= 1)' \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) == 0)' \
+  geode-timeseries a_pick_one_step_off_a_featured_colour_is_that_colour
+
+# Two featured colours in reach: the nearer wins, the first on a tie.
+run_mutation "timeseries colour picker: the nearest featured colour wins" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        .min_by_key(|(f, _)| distance(*f, picked));' \
+  '        .max_by_key(|(f, _)| distance(*f, picked));' \
+  geode-timeseries the_nearest_featured_colour_wins_then_the_first
+
+# A pick of what the target already paints changes nothing: `enter` on
+# the untouched hex field must not rewrite a named colour.
+run_mutation "timeseries colour picker: a pick of the painted colour is a no-op" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
+  '        if false {' \
+  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+
+# The pick context outlives the popup: the hex field's `enter` closes the
+# popover before its commit arrives.
+run_mutation "timeseries colour picker: the pick context survives the close" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
+  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+
+# The Colours dialog refuses a `#` name up front...
+run_mutation "colours dialog: a name starting with '#' is reserved" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || false' \
+  geode-shell reserved_names_are_taken
+
+# ...and only the Colours dialog.
+run_mutation "colours dialog: the '#' reservation is the colours domain's alone" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (true && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  geode-shell reserved_names_are_taken
 
 # `#rrggbb` is exactly six digits: short, long and alpha forms are refused.
 run_mutation "timeseries colour picker: hex parse refuses the wrong length" \

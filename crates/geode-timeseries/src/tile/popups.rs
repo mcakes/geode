@@ -993,10 +993,28 @@ impl TimeseriesTile {
     /// `Change` lands after the popover it came from has closed. A
     /// target that has since gone takes nothing: the pick has nowhere
     /// to land.
+    ///
+    /// A pick within a step of what the target already paints is no
+    /// change at all (`within_a_step`): `enter` on the component's
+    /// untouched hex field hands back the painted colour truncated, and
+    /// that must leave a theme-following colour theme-following.
     pub(super) fn colour_picked(&mut self, h: Hsla, cx: &mut Context<Self>) {
         let Some(pick) = &self.pick_context else {
             return;
         };
+        let Some(current) = self
+            .model
+            .slots()
+            .iter()
+            .find(|s| s.number == pick.target)
+            .map(|s| s.colour.clone())
+        else {
+            return;
+        };
+        let painted = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme())(&current);
+        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {
+            return;
+        }
         let colour = colour_from_pick(h, &pick.featured);
         if let Ok(changed) = self.model.set_colour(pick.target, colour) {
             self.apply_changed(changed, cx);

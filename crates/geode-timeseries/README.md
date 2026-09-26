@@ -17,7 +17,7 @@ Current behavior and rationale:
 | `tile::data` | Deliveries, the fetch of waiting pairs, the query, and flip-barrier staging and promotion. |
 | `tile::popups` | Opening, keying, committing, and closing the six popups (the colour picker is gpui-component's, bridged by two subscriptions), plus the chip, swatch, and frequency-chip doors. |
 | `tile::pointer` | The chart surface's wheel, drag-pan, and split-drag gestures over the chart's own hit-test. |
-| `popup` | Popup state and painting: series list, add picker, expression editor, range editor, and action menu, whose list rows share one row shell. |
+| `popup` | Popup state and painting: series list, add picker, expression editor, range editor, and action menu, whose list rows share one row shell; the colour picker's state (gpui-component paints it). |
 | `header` | Prepared chips and controls, the `⋯` button, and the empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
@@ -51,6 +51,12 @@ cargo bench -p geode-timeseries
   `:colour`. The target and featured colours it writes against (`PickContext`)
   outlive the popup, because the hex field's `enter` closes the popover
   before its commit arrives.
+- A pick is compared in 8-bit channels with a one-step tolerance
+  (`core::within_a_step`), because the component's hex field truncates. A pick
+  within a step of what the target already paints changes nothing, and one
+  within a step of a featured colour is that colour. Slider steps apply live,
+  so Escape or a click outside closes the picker and keeps any slider change
+  already applied.
 - The picker is an insert popup: `holds_focus` asks whether the picker's
   focus handle contains the focused element, so the hex field and swatches
   keep the keyboard away from the tile's single-key commands. A close the

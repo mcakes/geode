@@ -51,15 +51,36 @@ impl Rgb8 {
     }
 }
 
-/// What a colour the picker answered with means for the slot. A
-/// featured swatch hands back exactly the `Hsla` it was built from, so an
-/// exact match is that entry's own `Palette` or `Named` colour — which
-/// keeps following the theme. Anything else (a palette-grid swatch, a
-/// slider, a typed hex) is an absolute [`Colour::Custom`].
+/// Whether two colours are the same to within one 8-bit step on every
+/// channel. The picker's hex field TRUNCATES each channel where
+/// [`Rgb8::from_hsla`] rounds, so a colour read back through that field
+/// can come back one step low; a tolerance of one absorbs that and
+/// nothing a trader could tell apart.
+pub fn within_a_step(a: Rgb8, b: Rgb8) -> bool {
+    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) <= 1)
+}
+
+fn distance(a: Rgb8, b: Rgb8) -> u32 {
+    a.0.iter().zip(b.0).map(|(x, y)| x.abs_diff(y) as u32).sum()
+}
+
+/// What a colour the picker answered with means for the slot. A pick
+/// within a step ([`within_a_step`]) of a featured entry is that entry's
+/// own `Palette` or `Named` colour — which keeps following the theme —
+/// the nearest such entry, the first on a tie. Anything else (a
+/// palette-grid swatch, a slider, a typed hex) is an absolute
+/// [`Colour::Custom`]. A grid swatch that happens to equal a featured
+/// colour is therefore read as that featured colour.
 pub fn colour_from_pick(h: Hsla, featured: &[(Hsla, Colour)]) -> Colour {
-    match featured.iter().find(|(f, _)| *f == h) {
+    let picked = Rgb8::from_hsla(h);
+    let nearest = featured
+        .iter()
+        .map(|(f, colour)| (Rgb8::from_hsla(*f), colour))
+        .filter(|(f, _)| within_a_step(*f, picked))
+        .min_by_key(|(f, _)| distance(*f, picked));
+    match nearest {
         Some((_, colour)) => colour.clone(),
-        None => Colour::Custom(Rgb8::from_hsla(h)),
+        None => Colour::Custom(picked),
     }
 }
 
@@ -126,5 +147,44 @@ mod tests {
             Colour::Custom(Rgb8::from_hsla(p0)),
             "nothing featured: every pick is absolute"
         );
+    }
+
+    /// The component's hex field truncates where this crate rounds, so a
+    /// featured colour read back through it can land one step low on any
+    /// channel; that is still the featured colour. Two steps is not.
+    #[test]
+    fn a_pick_one_step_off_a_featured_colour_is_that_colour() {
+        let base = Rgb8([0x68, 0x98, 0xce]);
+        let featured = vec![(base.to_hsla(), Colour::Palette(0))];
+        let one_low = Rgb8([0x67, 0x97, 0xcd]).to_hsla();
+        assert_eq!(colour_from_pick(one_low, &featured), Colour::Palette(0));
+        let one_high = Rgb8([0x69, 0x98, 0xce]).to_hsla();
+        assert_eq!(colour_from_pick(one_high, &featured), Colour::Palette(0));
+        let two_low = Rgb8([0x66, 0x98, 0xce]);
+        assert_eq!(
+            colour_from_pick(two_low.to_hsla(), &featured),
+            Colour::Custom(two_low)
+        );
+        assert!(within_a_step(base, Rgb8([0x67, 0x99, 0xce])));
+        assert!(!within_a_step(base, Rgb8([0x68, 0x98, 0xd0])));
+    }
+
+    /// Two featured colours inside the tolerance: the nearer wins, and
+    /// on a tie the earlier one.
+    #[test]
+    fn the_nearest_featured_colour_wins_then_the_first() {
+        let a = Rgb8([10, 10, 10]);
+        let b = Rgb8([11, 11, 11]);
+        let featured = vec![
+            (a.to_hsla(), Colour::Palette(0)),
+            (b.to_hsla(), Colour::Palette(1)),
+        ];
+        assert_eq!(colour_from_pick(b.to_hsla(), &featured), Colour::Palette(1));
+        assert_eq!(colour_from_pick(a.to_hsla(), &featured), Colour::Palette(0));
+        let tied = vec![
+            (b.to_hsla(), Colour::Palette(2)),
+            (b.to_hsla(), Colour::Palette(3)),
+        ];
+        assert_eq!(colour_from_pick(b.to_hsla(), &tied), Colour::Palette(2));
     }
 }

@@ -3,16 +3,19 @@
 //! the expression field ([`Popup::Expr`], §9.7) and the range dialog
 //! ([`Popup::Range`], §9.8), the action menu ([`Popup::Menu`]) and the
 //! colour picker ([`Popup::Colour`] — gpui-component's own, which this
-//! module does not paint; it also holds the keyboard).
+//! module does not paint).
 //!
-//! **Three of the four hold the keyboard.** The picker's and the
-//! expression field's `InputState`s are tile-owned and focused, and the
+//! **Four of the six hold the keyboard.** The add picker's and the
+//! expression field's `InputState`s are tile-owned and focused, the
 //! range dialog owns a bare [`gpui::FocusHandle`] with its two date
-//! fields' keys on it; all three put the tile's key context into
-//! `insert` mode — and all three are why
+//! fields' keys on it, and the colour picker's popover and hex field
+//! sit under the component state's handle; all four put the tile's key
+//! context into `insert` mode — and all four are why
 //! `TimeseriesTile::close_popup_with_window` is the ONE closer: a
 //! focused handle dropped without a blur leaves `Window::focused`
-//! pointing at nothing for the rest of the session (CLAUDE.md).
+//! pointing at nothing for the rest of the session (CLAUDE.md). The
+//! series list and the action menu hold no field and keep the tile's
+//! own keyboard.
 //!
 //! **One popup at a time, and it is prepared, never formatted.** The
 //! list's rows are built in the tile's `rebuild_chrome` — the same door

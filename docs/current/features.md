@@ -190,17 +190,24 @@ the chip's right-click menu) opens gpui-component's colour picker on the
 cursor slot's chip, where its swatch button stands in for the chip's swatch.
 The row has no key of its own; `:colour` is the keyboard route. The picker's
 featured row shows the five palette colours and then every `[colours]` name,
-each resolved when the picker opens. Picking one of those keeps the
-theme-following colour. Every other choice (the palette grid, the HSLA
-sliders, or a hex typed and entered) becomes absolute, with alpha dropped.
-Swatch and hex choices commit and close the picker. Slider steps commit live
-and leave it open. Escape and a click outside close it without a change. The
-picker always writes to the slot it was opened on, even if the cursor moves
+each resolved when the picker opens. A pick within one 8-bit step per channel
+of a featured colour is read as that colour (the nearest, and the first on a
+tie) and keeps following the theme. The tolerance exists because the
+component's hex field truncates each channel. This means a palette-grid
+swatch that happens to match a featured colour, or a `[colours]` name that
+resolves to a palette entry's colour, is read as the featured entry. A pick
+within a step of the colour the slot already paints changes nothing, so
+Enter on the untouched hex field keeps a palette or named colour. Every other
+choice (the palette grid, the HSLA sliders, or a hex typed and entered)
+becomes absolute, with alpha dropped. Swatch and hex choices commit and close
+the picker. Slider steps commit live and leave it open. Escape or a click
+outside closes the picker; a slider change already applied stays. The picker
+always writes to the slot it was opened on, even if the cursor moves
 meanwhile. Removing that slot closes the picker. While the picker holds the
 keyboard, the tile reports insert mode, so typing in the hex field never
-reaches the tile's single-key commands. A pick first matches exact colours in
-the featured row, so a `[colours]` name that resolves to the same colour as a
-palette entry is read as that palette entry.
+reaches the tile's single-key commands. Each slider step rebuilds the chart
+model and clears its path cache. That is inside the frame budget at daily and
+hourly sizes but not at the 500,000-point cap (see the measurement log).
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,

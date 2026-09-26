@@ -2739,6 +2739,54 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
     assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
 }
 
+/// The component writes its hex field by TRUNCATING each channel, so
+/// the seeded text can sit one step below the colour the slot paints.
+/// `enter` on that untouched text must not turn a theme-following
+/// colour into an absolute one a shade off.
+#[gpui::test]
+fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+}
+
+/// A pick that is (to a step) the colour the slot already paints
+/// changes nothing — even where a featured entry also matches it. Here
+/// the slot names a colour since deleted from `[colours]`, so it paints
+/// palette colour 1; `enter` on the untouched field keeps the name
+/// rather than rewriting it as `Palette(0)`.
+#[gpui::test]
+fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.factory.set_colours(NamedColours::default());
+    h.draw(&mut vcx);
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+}
+
 #[gpui::test]
 fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);

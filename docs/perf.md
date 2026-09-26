@@ -1811,3 +1811,39 @@ The deterministic `publication_bursts_query_only_base_and_join_consumers` test d
 `catalog_bursts_keep_one_read_and_one_follow_up` drives the production bridge with a test data handle: one visibility request, then 128 publications, draining UI notifications after each publication while withholding the first catalog reply. The bridge emits **two catalog requests total** (initial plus one follow-up), versus **129 attempted submissions** under the former per-notification behavior. With the initial request removed from the wire and its reply withheld, the old path fills the 64-slot request queue with catalog reads and refuses the remaining 64 submissions. The new path leaves **zero additional catalog requests ahead of an ordinary control request**, which is accepted immediately; the already-running catalog read can still delay service-thread work. Subsequent portions of the test exercise another publication during the follow-up and an unchanged completion.
 
 These are deterministic submission/backlog counts, not SQL execution or elapsed query latency measurements. Catalog construction remains synchronous on the service thread, and sustained publications can keep one read active continuously. The change bounds amplification and outstanding work; it does not cap the cost of a single catalog read.
+
+
+### Timeseries colour picker: one slider step (2026-09-26)
+
+A slider drag in the colour picker commits on every step, and each commit
+takes the `:colour` path: `Model::set_colour` then `apply_changed`, then
+`rebuild_chrome`. A colour is resolved into the chart model, so each step
+builds a new `ChartModel` and bumps its `version`, which clears
+`geode-chart`'s path and chrome caches. The next frame then re-decimates
+every slot.
+
+Measured with a throwaway `#[gpui::test]` in release (`cargo test --release`,
+removed after the run), on Apple M5 Pro with rustc 1.96.0. The fixture is the
+crate's tile harness, headless: four visible source slots, one delivered
+`SeriesResult` of `n` hourly buckets per slot, and the picker open on slot 4.
+Each step is one `ColorPickerState::update_color`, which is what a slider step
+calls. `VisualTestContext::update` draws the dirtied window before it returns,
+so the "step" figure includes the component's own update, the tile's
+rebuild, and one headless frame after the cache flush. That frame is not a
+real GPU frame. Median of 30 steps:
+
+| n (buckets × 4 slots) | step (update + frame) | tile tail alone | frame with a notify and no version bump |
+|---|---:|---:|---:|
+| 365 | 2.81 ms | — | 2.40 ms |
+| 8,760 | 5.09 ms | — | 3.10 ms |
+| 100,000 | 15.3 ms | — | 5.16 ms |
+| 500,000 | 51.2 ms | 0.33 ms | 4.10 ms |
+
+`chart::build` alone at 500,000 × 4 is 0.28 ms, in line with the 259 µs
+Criterion reference. The tile's whole `set_colour` + `apply_changed` tail is
+0.33 ms. The step's cost is the first frame after the `version` bump:
+re-decimating four 500,000-point slots with the path cache cleared, about
+47 ms of the 51 ms. At the daily and hourly sizes the demo uses, a step is
+well inside the 8 ms budget. At 100,000 points or more it is over budget for a
+live drag. This is a colour-only change invalidating cached geometry. It is
+not a cost of the picker itself.

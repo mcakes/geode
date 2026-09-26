@@ -62,7 +62,9 @@ use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{Preset, Range, chart, colour_from_pick, menu, request, resolve, session};
+use crate::core::{
+    Preset, Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+};
 use crate::header::{self, HeaderModel};
 use crate::popup::{
     ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
