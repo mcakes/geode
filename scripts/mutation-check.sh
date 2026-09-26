@@ -9407,6 +9407,15 @@ run_mutation "schema: a document value may be a date or text" \
   '                    ColumnType::F64 | ColumnType::I64' \
   geode-core a_document_value_may_be_a_date_or_text
 
+# A version stamp is a document header. Mutated, it becomes a familyless
+# dataset that reaches apply_schema and every dataset pick list.
+run_mutation "schema: a config_version stamp is not a dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if ds_name == "config_version" {' \
+  '            if false {' \
+  geode-core \
+  a_datasets_config_version_header_is_not_a_spurious_diagnostic
+
 # Minor 7: a declared-but-absent axis column is a message, not a panic --
 # and not a silently skipped check either. `continue` would let a document
 # whose axis the dataset does not declare pass validation and reach the

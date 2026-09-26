@@ -217,6 +217,15 @@ impl SchemaSpec {
         let mut out = SchemaSpec::default();
         let mut diags = Vec::new();
         for (ds_name, ds_value) in &doc.value {
+            // A document header, not a dataset. Without this skip the integer
+            // becomes a familyless, columnless `DatasetSpec` named
+            // `config_version`: the columnless check drops only documents, so
+            // it survives, reaches `apply_schema`, and appears in every
+            // dataset pick list — and the configuration that avoids it is the
+            // one `load_layer` warns about, since an absent stamp warns too.
+            if ds_name == "config_version" {
+                continue;
+            }
             let family = match ds_value.get("family").and_then(|v| v.as_str()) {
                 None => Family::Measures,
                 Some(s) => match Family::parse(s) {
@@ -1111,6 +1120,24 @@ grain = "underlying_pair"
 source_name = "CrossGamma02"
 required = false
 "#;
+
+    #[test]
+    fn a_datasets_config_version_header_is_not_a_spurious_diagnostic() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
+        assert!(
+            diags.is_empty(),
+            "config_version is a document header, not a dataset: {diags:?}"
+        );
+        assert_eq!(
+            schema
+                .datasets
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["risk_snapshot"],
+            "a version stamp must not mint a dataset"
+        );
+    }
 
     #[test]
     fn parses_columns_with_grain_and_source_names() {
