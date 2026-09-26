@@ -728,7 +728,9 @@ mod width_tests {
             | ColumnKind::Rho => fmt(-1_234_567.89),
             // Representative text values for the width check.
             ColumnKind::Underlying => "SX5E".into(),
-            ColumnKind::Expiry => "20DEC26".into(),
+            // The cell reads `20DEC26`, but `i` edits it in the date field,
+            // which paints `YYYY-MM-DD` inside the same width.
+            ColumnKind::Expiry => "2026-12-20".into(),
             ColumnKind::Type => "C".into(),
             ColumnKind::BarrierType => "DO".into(),
             ColumnKind::PricedAt => "23:59:59".into(),

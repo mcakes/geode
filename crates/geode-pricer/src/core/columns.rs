@@ -133,7 +133,7 @@ pub static COLUMNS: [ColumnDef; 17] = [
         true,
         EveryLine,
         TEXT,
-        72.0,
+        88.0,
     ),
     def(
         "strike",
