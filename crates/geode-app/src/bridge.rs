@@ -1783,6 +1783,70 @@ role = "key"
         );
     }
 
+    /// A key answering an armed `:rm` confirm is the confirm's alone: `j`
+    /// cancels it and does not then reach the shell as a cursor move (the
+    /// confirm has just given up the keyboard, so the shell would read the
+    /// tile as in normal mode).
+    #[gpui::test]
+    fn a_key_answering_the_rm_confirm_reaches_nothing_else(cx: &mut gpui::TestAppContext) {
+        use geode_pricer::store::SheetStore as _;
+        let (handle, _rx) = DataHandle::for_tests();
+        let store = MemorySheetStore::default();
+        store.set_known(vec!["x".into()]);
+        let pricer = Rc::new(PricerFactory::new(
+            handle,
+            Rc::new(store.clone()),
+            Views::builtin(),
+            PricerSettings::default(),
+        ));
+        let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer, "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        // `enter` left the next line's entry field open.
+        vcx.simulate_input("-3 SPX Z26 5100 C");
+        vcx.simulate_keystrokes("enter");
+        vcx.simulate_keystrokes("escape");
+        vcx.simulate_keystrokes("k");
+        vcx.run_until_parked();
+        let cursor = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| t.serialize().get("cursor").cloned())
+        };
+        let before = cursor(&vcx);
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        assert_ne!(cursor(&vcx), before, "fixture: `j` moves the cursor");
+        vcx.simulate_keystrokes("k");
+        vcx.run_until_parked();
+        assert_eq!(cursor(&vcx), before, "fixture: `k` moves it back");
+
+        run_command(&mut vcx, &tile, "rm x");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        assert!(store.forgets().is_empty(), "`j` is not `y`");
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t
+                .key_context()
+                .get("mode")
+                .unwrap_or("")
+                .to_string()),
+            "normal",
+            "`j` cancelled the confirm"
+        );
+        assert_eq!(
+            cursor(&vcx),
+            before,
+            "the confirm's `j` also moved the cursor"
+        );
+    }
+
     type PricerTiles = Rc<RefCell<Vec<Entity<geode_pricer::tile::PricerTile>>>>;
 
     /// Forwards to the pricer factory exactly as `main`'s handle does and

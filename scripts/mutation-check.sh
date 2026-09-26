@@ -19567,7 +19567,7 @@ run_mutation "runner: the local sweep keeps fewer than the bound" \
   crates/geode-data/src/ingest/runner.rs \
   '        keep_generations: Some(LOCAL_KEEP_GENERATIONS),' \
   '        keep_generations: Some(LOCAL_KEEP_GENERATIONS - 1),' \
-  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
 
 run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
   crates/geode-pricer/src/tile.rs \
@@ -19586,7 +19586,7 @@ run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
                             cx.stop_propagation();' \
   '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
-  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+  geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
 # the tile's cancel closes the entry field.
