@@ -1830,9 +1830,9 @@ mod tests {
 
         // Columns 1..3: a named colour, `sign`, and a name the doc lacks.
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                    [[t.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n\
-                    [[t.columns]]\nname = \"gamma01\"\nformat = { colour = \"sign\" }\n\
-                    [[t.columns]]\nname = \"vega01\"\nformat = { colour = \"ghost\" }\n";
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n\
+                    [[t.columns]]\nname = \"gamma01\"\nformat = { color = \"sign\" }\n\
+                    [[t.columns]]\nname = \"vega01\"\nformat = { color = \"ghost\" }\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let view = ViewSpec::from_doc(&doc).0.remove(0);
         let snapshot = Arc::new(Snapshot::for_tests(
@@ -1923,7 +1923,7 @@ mod tests {
             Definition::token(Token::Foreground).tinted(),
         );
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                    [[t.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n";
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let view = ViewSpec::from_doc(&doc).0.remove(0);
         let snapshot = Arc::new(Snapshot::for_tests(
@@ -2034,7 +2034,7 @@ mod tests {
             "view_presentation",
             &[LayerDoc::builtin(
                 "view_presentation",
-                "[t.columns.delta01]\nlabel = \"Δ\"\nwidth = 90\ncolour = \"delta\"\n",
+                "[t.columns.delta01]\nlabel = \"Δ\"\nwidth = 90\ncolor = \"delta\"\n",
             )
             .unwrap()],
         );

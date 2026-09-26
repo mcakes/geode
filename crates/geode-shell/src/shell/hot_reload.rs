@@ -175,13 +175,13 @@ impl ShellView {
             let groupings_changed =
                 changed("groupings") || changed("datasets") || changed("dimensions");
             let scopes_changed = changed("scopes") || changed("datasets") || changed("dimensions");
-            // Presentation, dimensions, and named colours all affect the views or
+            // Presentation, dimensions, and named colors all affect the views or
             // factory settings refreshed by the app's `ConfigReloaded` handler.
             let views_changed = changed("views")
                 || changed("view_presentation")
                 || changed("dataset_presentation")
                 || changed("dimensions")
-                || changed("colours");
+                || changed(geode_core::config::COLORS_DOC);
             // Dimension picker columns depend on dataset columns and derived dimensions.
             let pickable_changed = changed("datasets") || changed("dimensions");
             // Compare with the data engine's startup inputs so reverting a change

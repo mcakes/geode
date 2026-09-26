@@ -35,10 +35,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::axis_prev", "Cycle series axis back"),
     ("timeseries::split_shrink", "Shrink the upper pane"),
     ("timeseries::split_grow", "Grow the upper pane"),
-    ("timeseries::colour", "Cycle series colour"),
+    ("timeseries::color", "Cycle series color"),
     // Registered without a default binding. The menu and palette open the
-    // picker; :colour supplies the direct keyboard route to the same colour model.
-    ("timeseries::pick_colour", "Pick series colour…"),
+    // picker; :color supplies the direct keyboard route to the same color model.
+    ("timeseries::pick_color", "Pick series color…"),
     ("timeseries::rule", "Cycle bucket rule"),
     ("timeseries::remove", "Remove series"),
     ("timeseries::edit", "Edit expression…"),
@@ -68,6 +68,13 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::insert_down", "Down"),
 ];
 
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("timeseries::colour", "timeseries::color"),
+    ("timeseries::pick_colour", "timeseries::pick_color"),
+];
+
 /// The module's keymap fragment. Every predicate is a plain conjunction
 /// whose first identifier is `timeseries`, this factory's only context —
 /// `keymap::fragments::check_fragment` refuses anything else, and a
@@ -87,7 +94,7 @@ context = "timeseries && mode == normal"
 "shift+y" = "timeseries::axis_prev"
 "[" = "timeseries::split_shrink"
 "]" = "timeseries::split_grow"
-"c" = "timeseries::colour"
+"c" = "timeseries::color"
 "b" = "timeseries::rule"
 "d" = "timeseries::remove"
 "e" = "timeseries::edit"
@@ -251,7 +258,7 @@ impl TimeseriesFactory {
     }
 
     /// A reloaded `colours` doc: every open tile resolves its named
-    /// colours from the new set on its next chrome rebuild. A fresh
+    /// colors from the new set on its next chrome rebuild. A fresh
     /// `Arc` every time, like the blotter's.
     pub fn set_colours(&self, colours: NamedColours) {
         *self.colours.borrow_mut() = Arc::new(colours);
@@ -270,6 +277,9 @@ impl ModuleFactory for TimeseriesFactory {
                 title: (*title).to_string(),
                 category: "Timeseries".to_string(),
             });
+        }
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
         }
     }
 
@@ -303,5 +313,44 @@ impl ModuleFactory for TimeseriesFactory {
             view: entity.clone().into(),
             content: Box::new(TimeseriesContent { tile: entity }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::config::{Layer, LayerDoc, Severity};
+
+    /// A user keymap written before the rename names `timeseries::colour`:
+    /// through this factory's real registration it still binds, to the
+    /// current id, with a warning naming both.
+    #[test]
+    fn a_user_binding_naming_an_old_color_action_binds_the_new_id() {
+        let (data, _rx) = DataHandle::for_tests();
+        let factory = TimeseriesFactory::new(data, NamedColours::default());
+        let mut registry = ActionRegistry::default();
+        factory.register_actions(&mut registry);
+        let user = LayerDoc {
+            layer: Layer::User,
+            name: "keymap".into(),
+            file: "user/keymap.toml".into(),
+            table: "[[bindings]]\ncontext = \"timeseries\"\n[bindings.keys]\n\
+                    \"q\" = \"timeseries::colour\"\n\"w\" = \"timeseries::pick_colour\"\n"
+                .parse()
+                .unwrap(),
+        };
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &[user],
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        let bound: Vec<&str> = keymap
+            .bindings()
+            .iter()
+            .map(|b| b.action.0.as_str())
+            .collect();
+        assert_eq!(bound, vec!["timeseries::color", "timeseries::pick_color"]);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(diags.iter().all(|d| d.severity == Severity::Warning));
     }
 }

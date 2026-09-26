@@ -151,7 +151,7 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
 /// Build openers, cursor-slot operations, `Frequency…` (the frequency menu's
 /// opener), display toggles, and view reset in fixed order. Empty tiles keep
 /// their slot section disabled. Bucket rules require a source and expression
-/// editing requires an expression; Colour opens a picker while Cycle colour
+/// editing requires an expression; Color opens a picker while Cycle color
 /// advances through the palette.
 pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     let m = i.model;
@@ -181,8 +181,8 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
         none,
     ));
     out.push(action("timeseries::axis_next", "Cycle axis", none));
-    out.push(action("timeseries::colour", "Cycle colour", none));
-    out.push(action("timeseries::pick_colour", "Colour…", none));
+    out.push(action("timeseries::color", "Cycle color", none));
+    out.push(action("timeseries::pick_color", "Color…", none));
     out.push(action(
         "timeseries::rule",
         "Cycle bucket rule",
@@ -412,8 +412,8 @@ mod tests {
                 "[no series]",
                 "Hide",
                 "Cycle axis",
-                "Cycle colour",
-                "Colour…",
+                "Cycle color",
+                "Color…",
                 "Cycle bucket rule",
                 "Edit expression…",
                 "Remove",
@@ -427,8 +427,8 @@ mod tests {
         for id in [
             "timeseries::toggle_visible",
             "timeseries::axis_next",
-            "timeseries::colour",
-            "timeseries::pick_colour",
+            "timeseries::color",
+            "timeseries::pick_color",
             "timeseries::rule",
             "timeseries::edit",
             "timeseries::remove",

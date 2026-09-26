@@ -4767,7 +4767,7 @@ mod tests {
     #[gpui::test]
     fn a_delivered_snapshot_hands_the_delegate_the_tiles_colours(cx: &mut gpui::TestAppContext) {
         let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                    [[tree.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n";
+                    [[tree.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let mut colours = NamedColours::default();
         colours.insert(

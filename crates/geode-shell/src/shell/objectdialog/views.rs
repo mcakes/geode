@@ -476,7 +476,7 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
         }
         if effective.colour != below_format.colour {
             if let Some(v) = &item.presentation.colour {
-                t["colour"] = toml_edit::value(colour_key(v));
+                t["color"] = toml_edit::value(color_key(v));
             }
         }
         if effective.scale != below_format.scale {
@@ -682,7 +682,7 @@ pub(super) fn scale_key(s: Scale) -> &'static str {
 
 /// `colour`'s written spelling: the two built-ins, or a name into
 /// `colours.toml` verbatim.
-pub(super) fn colour_key(c: &Colour) -> String {
+pub(super) fn color_key(c: &Colour) -> String {
     match c {
         Colour::None => "none".to_string(),
         Colour::Sign => "sign".to_string(),
@@ -779,7 +779,7 @@ pub const COLUMN_KEYS: [&str; 7] = [
     "precision",
     "thousands",
     "negative",
-    "colour",
+    "color",
 ];
 
 /// The value `width` takes when the column has none of its own — a real
@@ -801,25 +801,25 @@ const MAX_WIDTH: i64 = 2000;
 /// rather than unset placeholders. The writer later omits values equal to its inherited
 /// baseline.
 ///
-/// Named colours follow the built-in choices. Preserve an unknown configured colour as
+/// Named colors follow the built-in choices. Preserve an unknown configured color as
 /// an extra option so the current value remains visible and repairable.
-pub fn column_fields(item: &ListItem, colours: &[String], dest: Destination) -> Vec<Field> {
+pub fn column_fields(item: &ListItem, colors: &[String], dest: Destination) -> Vec<Field> {
     let p = &item.presentation;
     let effective = kind_default(item).with(p);
 
-    let mut colour_options: Vec<String> = geode_core::colour::RESERVED_NAMES
+    let mut color_options: Vec<String> = geode_core::colour::RESERVED_NAMES
         .iter()
         .map(|name| (*name).to_string())
         .collect();
-    colour_options.extend(
-        colours
+    color_options.extend(
+        colors
             .iter()
             .filter(|name| !geode_core::colour::RESERVED_NAMES.contains(&name.as_str()))
             .cloned(),
     );
-    let current_colour = colour_key(&effective.colour);
-    if !colour_options.contains(&current_colour) {
-        colour_options.push(current_colour.clone());
+    let current_color = color_key(&effective.colour);
+    if !color_options.contains(&current_color) {
+        color_options.push(current_color.clone());
     }
 
     let fields = vec![
@@ -859,7 +859,7 @@ pub fn column_fields(item: &ListItem, colours: &[String], dest: Destination) -> 
             negative_key(effective.negative),
             dest,
         ),
-        choice_row("colour", "Colour", colour_options, current_colour, dest),
+        choice_row("color", "Color", color_options, current_color, dest),
     ];
     // [`COLUMN_KEYS`] is the statement of record for what this stage
     // edits and in what order; the literal above is what a reader
@@ -997,9 +997,9 @@ pub fn fold_into(
                     item.presentation.negative = Some(negative);
                 }
             }
-            ("colour", FieldKind::Choice { options, selected }) => {
-                if let Some(colour) = options.get(*selected).map(|key| colour_from_key(key)) {
-                    item.presentation.colour = Some(colour);
+            ("color", FieldKind::Choice { options, selected }) => {
+                if let Some(color) = options.get(*selected).map(|key| color_from_key(key)) {
+                    item.presentation.colour = Some(color);
                 }
             }
             // A key this fold does not know, or a field whose kind is not
@@ -1063,11 +1063,11 @@ pub(super) fn negative_from_key(key: &str) -> Option<Negative> {
     }
 }
 
-/// [`colour_key`]'s inverse. Total, unlike the other two: every string
+/// [`color_key`]'s inverse. Total, unlike the other two: every string
 /// that is not one of the two built-in spellings IS a name into
 /// `colours.toml`, which is exactly what the reader
 /// (`ColumnPresentation::parse_format_keys`) does with it.
-pub(super) fn colour_from_key(key: &str) -> Colour {
+pub(super) fn color_from_key(key: &str) -> Colour {
     match key {
         "none" => Colour::None,
         "sign" => Colour::Sign,
@@ -1164,9 +1164,7 @@ pub fn column_help(key: &str) -> &'static str {
         "precision" => "Decimal places shown, 0 to 12",
         "thousands" => "Group digits with thousands separators",
         "negative" => "How a negative paints: a leading minus, or parentheses",
-        "colour" => {
-            "none paints in the foreground, sign colours by sign, or a name from colours.toml"
-        }
+        "color" => "none paints in the foreground, sign colors by sign, or a name from colors.toml",
         _ => "",
     }
 }
@@ -1959,7 +1957,7 @@ role = "value"
     /// not emit legacy top-level hidden or width entries.
     #[test]
     fn the_writer_emits_only_keys_that_differ_from_the_desk() {
-        // desk: npv has scale k, precision 2; the trader sets precision 0 and a colour, and hides book.
+        // desk: npv has scale k, precision 2; the trader sets precision 0 and a color, and hides book.
         let config = config_with_view(
             "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n[[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
         );
@@ -1973,7 +1971,7 @@ role = "value"
         let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
         assert!(text.contains("[tree.columns.npv]"), "{text}");
         assert!(
-            text.contains("precision = 0") && text.contains("colour = \"delta\""),
+            text.contains("precision = 0") && text.contains("color = \"delta\""),
             "{text}"
         );
         assert!(
@@ -2292,7 +2290,7 @@ role = "value"
             matches!(&by("negative").kind, FieldKind::Choice { options, selected } if options[*selected] == "minus")
         );
         assert!(
-            matches!(&by("colour").kind, FieldKind::Choice { options, selected }
+            matches!(&by("color").kind, FieldKind::Choice { options, selected }
                 if options == &["none", "sign", "delta", "gamma"] && options[*selected] == "delta")
         );
     }
@@ -2323,7 +2321,7 @@ role = "value"
                         wrap: false,
                     }
                 }
-                "colour" => {
+                "color" => {
                     f.kind = FieldKind::Choice {
                         options: vec!["none".into(), "sign".into()],
                         selected: 1,
@@ -2480,7 +2478,7 @@ role = "value"
 
         let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
         assert!(text.contains("scale = \"k\""), "{text}");
-        for untouched in ["precision", "thousands", "negative", "colour"] {
+        for untouched in ["precision", "thousands", "negative", "color"] {
             assert!(
                 !text.contains(untouched),
                 "{untouched} is the measure default the desk never declared: {text}"

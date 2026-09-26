@@ -31,6 +31,10 @@ pub struct ActionDef {
 #[derive(Debug, Default)]
 pub struct ActionRegistry {
     actions: BTreeMap<ActionId, ActionDef>,
+    /// Retired ids mapped to their current id. Keymap documents written
+    /// before a rename still name the old id; [`Self::renamed`] lets the
+    /// keymap builder bind them to the current action with a warning.
+    renames: BTreeMap<ActionId, ActionId>,
     /// Shared FNV-1a hash-to-id map for crash reporting. The panic hook can
     /// retain this Arc independently of the registry. Registrations update the
     /// shared map; the application registers its actions during startup.
@@ -48,6 +52,26 @@ impl ActionRegistry {
             .insert(fnv1a(&def.id.0), def.id.0.clone());
         self.actions.insert(def.id.clone(), def);
         Ok(())
+    }
+
+    /// Record that `old` was renamed to `new`. The owner of an action
+    /// registers its renames beside the action itself. Refuses an `old` that
+    /// is itself a registered action, or one already renamed.
+    pub fn register_rename(&mut self, old: &str, new: &str) -> Result<(), String> {
+        let old = ActionId(old.to_string());
+        if self.actions.contains_key(&old) {
+            return Err(format!("'{old}' is a registered action, not a retired id"));
+        }
+        if self.renames.contains_key(&old) {
+            return Err(format!("action '{old}' renamed twice"));
+        }
+        self.renames.insert(old, ActionId(new.to_string()));
+        Ok(())
+    }
+
+    /// The current id for a retired one, when the current id is registered.
+    pub fn renamed(&self, old: &ActionId) -> Option<&ActionId> {
+        self.renames.get(old).filter(|new| self.contains(new))
     }
 
     pub fn get(&self, id: &ActionId) -> Option<&ActionDef> {
@@ -113,6 +137,23 @@ mod tests {
         let err = reg.register(def("a::b", "Second")).unwrap_err();
         assert!(err.contains("a::b"));
         assert_eq!(reg.get(&ActionId("a::b".into())).unwrap().title, "First");
+    }
+
+    /// A retired id resolves only while its successor is registered, and a
+    /// live id can never be declared retired.
+    #[test]
+    fn a_rename_resolves_to_a_registered_successor() {
+        let mut reg = ActionRegistry::default();
+        reg.register_rename("a::colour", "a::color").unwrap();
+        assert_eq!(reg.renamed(&ActionId("a::colour".into())), None);
+        reg.register(def("a::color", "Color")).unwrap();
+        assert_eq!(
+            reg.renamed(&ActionId("a::colour".into())),
+            Some(&ActionId("a::color".into()))
+        );
+        assert!(reg.register_rename("a::colour", "a::other").is_err());
+        assert!(reg.register_rename("a::color", "a::x").is_err());
+        assert!(!reg.contains(&ActionId("a::colour".into())));
     }
 
     #[test]

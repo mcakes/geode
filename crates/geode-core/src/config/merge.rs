@@ -26,8 +26,8 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "sources"
         | "egress"
         | "dimensions" => Some(1),
-        // One complete definition per colour name.
-        "colours" => Some(1),
+        // One complete definition per color name.
+        "colors" => Some(1),
         // One complete definition per pricer view name.
         "pricer_views" => Some(1),
         // One complete override entry per name.

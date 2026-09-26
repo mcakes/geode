@@ -490,7 +490,7 @@ impl TimeseriesTile {
                     | "toggle_visible"
                     | "axis_next"
                     | "axis_prev"
-                    | "colour"
+                    | "color"
                     | "rule"
                     | "remove"
                     | "edit"
@@ -521,7 +521,7 @@ impl TimeseriesTile {
             "axis_prev" => self.model.cycle_axis(false, n),
             "split_shrink" => self.model.step_split(false, n),
             "split_grow" => self.model.step_split(true, n),
-            "colour" => self.model.cycle_colour(),
+            "color" => self.model.cycle_colour(),
             "rule" => self.model.cycle_rule(),
             "remove" => self.remove_at_cursor(),
             "density" => self.model.toggle_density(),
@@ -536,7 +536,7 @@ impl TimeseriesTile {
             // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "range_custom" | "freq" | "list_down"
             | "list_up" | "list_close" | "commit" | "cancel" | "insert_up" | "insert_down"
-            | "menu" | "menu_pick" | "pick_colour" => {
+            | "menu" | "menu_pick" | "pick_color" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -651,7 +651,7 @@ impl TimeseriesTile {
     }
 
     /// `1`..`5` is a palette index, `#rrggbb` an absolute colour,
-    /// anything else a `[colours]` name (`commands::colour_arg`).
+    /// anything else a `[colors]` name (`commands::colour_arg`).
     fn colour_named(&self, name: &str) -> Result<Colour, String> {
         let colours = self.colours.borrow();
         commands::colour_arg(name, |n| colours.get(n).is_some())
@@ -1065,7 +1065,7 @@ impl Render for TimeseriesTile {
                         .child(
                             ColorPicker::new(&c.picker)
                                 .featured_colors(c.swatches.clone())
-                                .accessibility_label(SharedString::new_static("Series colour"))
+                                .accessibility_label(SharedString::new_static("Series color"))
                                 .xsmall(),
                         )
                         .into_any_element(),

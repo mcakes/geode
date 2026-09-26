@@ -7153,7 +7153,7 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
 /// does.
 fn services_with_colours() -> ShellServices {
     let mut services = test_services();
-    let colours = LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap();
+    let colours = LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap();
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
@@ -7172,7 +7172,7 @@ fn services_with_colours() -> ShellServices {
 fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     assert!(cx.debug_bounds("objectdialog-swatch-delta").is_some());
     cx.simulate_keystrokes("n");
     cx.simulate_input("sign");
@@ -7207,7 +7207,7 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
     // a builtin source's does.
     assert!(cx.debug_bounds("objectdialog-confirm").is_none());
     flush_config_write(&mut cx);
-    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    let written = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
     assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }
 
@@ -7219,7 +7219,7 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
 fn ticking_tint_by_sign_paints_the_two_variant_swatches(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     cx.simulate_keystrokes("enter"); // delta
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-swatch-header").is_some());
@@ -7251,7 +7251,7 @@ fn ticking_tint_by_sign_paints_the_two_variant_swatches(cx: &mut gpui::TestAppCo
         "in sign order: − base +"
     );
     flush_config_write(&mut cx);
-    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    let written = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
     assert!(
         written.contains("[delta]\nhue = 240\ntint_sign = true"),
         "{written}"
@@ -7268,7 +7268,7 @@ fn ticking_tint_by_sign_paints_the_two_variant_swatches(cx: &mut gpui::TestAppCo
 fn a_double_click_on_a_value_row_is_i(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     cx.simulate_keystrokes("enter"); // delta
     cx.run_until_parked();
     let token = cx
@@ -7490,7 +7490,7 @@ fn a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field(
 fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     cx.simulate_keystrokes("enter"); // delta
     cx.run_until_parked();
     let hue = |cx: &gpui::VisualTestContext| {
@@ -7517,7 +7517,7 @@ fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::Tes
     cx.run_until_parked();
     assert_eq!(hue(&cx), 240, "shift+click steps back");
     flush_config_write(&mut cx);
-    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    let written = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
     assert!(
         written.contains("[delta]\nhue = 240"),
         "the chip went through the write path: {written}"
@@ -7577,7 +7577,7 @@ fn i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     cx.simulate_keystrokes("enter"); // delta
     cx.run_until_parked();
     cx.simulate_keystrokes("j j"); // hue → tone → token
@@ -7638,7 +7638,7 @@ fn i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option(
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("copied 'delta'"), "{notice}");
     flush_config_write(&mut cx);
-    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    let written = std::fs::read_to_string(dir.path().join("colors.toml")).unwrap();
     assert!(written.contains("token = \"danger\""), "{written}");
 }
 
@@ -7649,7 +7649,7 @@ fn i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option(
 fn tab_completes_and_escape_cancels_a_choice_field(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     // All Colours rows are stops in this fixture. Two j presses reach Token, whose i
     // command opens its choice typeahead.
     cx.simulate_keystrokes("enter j j i");
@@ -7819,7 +7819,7 @@ fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
 fn i_and_n_have_buttons_that_do_what_their_keys_do(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
-        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colors");
     let n = cx
         .debug_bounds("objectdialog-action-n")
         .expect("browse offers n as a button");
@@ -9183,7 +9183,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
             "dimensions",
         ),
         ("config::scopes", services_with_a_saved_scope, "dimensions"),
-        ("config::colours", services_with_colours, "token"),
+        ("config::colors", services_with_colours, "token"),
         ("config::schema", services_with_schema, "columns.book"),
     ];
     for (action, services, expected) in cases {

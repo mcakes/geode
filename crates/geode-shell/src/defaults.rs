@@ -221,8 +221,10 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "config::schema", "Edit schema…", "Configuration");
     // Edit ingest sources, grouped by dataset.
     action(reg, "config::sources", "Edit sources…", "Configuration");
-    // Edit named colours shared by column presentation and chart series.
-    action(reg, "config::colours", "Edit colours…", "Configuration");
+    // Edit named colors shared by column presentation and chart series.
+    action(reg, "config::colors", "Edit colors…", "Configuration");
+    reg.register_rename("config::colours", "config::colors")
+        .expect("a retired id is never a registered one");
     // Open the user configuration directory in the OS file manager for edits
     // outside the dialogs. The title omits an ellipsis because this opens a folder.
     action(
@@ -528,6 +530,27 @@ mod tests {
         );
         // The builtin document contains the complete shell binding set.
         assert!(keymap.bindings().len() >= 39);
+    }
+
+    /// A user binding to the old `config::colours` id still opens the Colors
+    /// dialog: it binds `config::colors`, with a warning naming both ids.
+    #[test]
+    fn a_user_binding_to_the_old_colours_action_binds_config_colors() {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let user = LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".into(),
+            file: "user/keymap.toml".into(),
+            table: "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+shift+k\" = \"config::colours\"\n"
+                .parse()
+                .unwrap(),
+        };
+        let (keymap, diags) = build_keymap(&[user], default_mod(), &reg);
+        assert_eq!(keymap.bindings().len(), 1, "{diags:?}");
+        assert_eq!(keymap.bindings()[0].action.0, "config::colors");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("config::colours"), "{diags:?}");
     }
 
     #[test]

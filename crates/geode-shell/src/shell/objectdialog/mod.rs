@@ -53,9 +53,9 @@ pub enum Domain {
     Schema,
     /// The ingest feeds, one object per source.
     Sources,
-    /// The shared colour vocabulary a column's `colour` field and a chart series can
-    /// name — one object per named colour, a hue (with its tone) or a theme token.
-    Colours,
+    /// The shared color vocabulary a column's `colour` field and a chart series can
+    /// name — one object per named color, a hue (with its tone) or a theme token.
+    Colors,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -161,7 +161,7 @@ impl Domain {
             Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
-            Domain::Colours => colours::DOC,
+            Domain::Colors => colours::DOC,
         }
     }
 
@@ -173,7 +173,7 @@ impl Domain {
             Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
-            Domain::Colours => "Colours",
+            Domain::Colors => "Colors",
         }
     }
 
@@ -187,7 +187,7 @@ impl Domain {
             Domain::Scopes => "saved",
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
-            Domain::Colours => "colours",
+            Domain::Colors => "colors",
         }
     }
 
@@ -201,7 +201,7 @@ impl Domain {
             Domain::Scopes => scopes::summary,
             Domain::Schema => schema::summary,
             Domain::Sources => sources::summary,
-            Domain::Colours => colours::summary,
+            Domain::Colors => colours::summary,
         }
     }
 
@@ -216,7 +216,7 @@ impl Domain {
             | Domain::Scopes
             | Domain::Schema
             | Domain::Sources
-            | Domain::Colours => None,
+            | Domain::Colors => None,
         }
     }
 
@@ -226,7 +226,7 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours => {
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colors => {
                 None
             }
         }
@@ -257,7 +257,7 @@ impl Domain {
             | Domain::Groupings
             | Domain::Scopes
             | Domain::Schema
-            | Domain::Colours => None,
+            | Domain::Colors => None,
         }
     }
 
@@ -275,25 +275,25 @@ impl Domain {
         )
     }
 
-    /// Names reserved by syntax outside the domain's own document. Colours excludes
+    /// Names reserved by syntax outside the domain's own document. Colors excludes
     /// `none` and `sign`, which already mean built-in formatting choices. Scopes
     /// excludes the `save_current` action name to avoid ambiguous palette dispatch.
     /// Other domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
-            Domain::Colours => &geode_core::colour::RESERVED_NAMES,
+            Domain::Colors => &geode_core::colour::RESERVED_NAMES,
             Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
 
     /// Whether `name` is reserved in this domain: one of [`Self::reserved_names`],
-    /// or — for colours only — any name starting with `#`, which spells an
-    /// absolute `#rrggbb` colour wherever a colour name is also read
+    /// or — for colors only — any name starting with `#`, which spells an
+    /// absolute `#rrggbb` color wherever a color name is also read
     /// (`geode_core::colour::RESERVED_PREFIX`; the reader drops such a name too).
     pub fn is_reserved(self, name: &str) -> bool {
         self.reserved_names().contains(&name)
-            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))
+            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))
     }
 
     /// Whether a name is already present in a definition, fixed roster, or user
@@ -617,11 +617,11 @@ impl Destination {
             (Destination::Presentation, Domain::Sources) => {
                 unreachable!("Sources has no Presentation-destined fields")
             }
-            // Colours joins the same list: `colours.rs`'s module doc has
+            // Colors joins the same list: `colours.rs`'s module doc has
             // the reasoning (every field is `Destination::Doc`, there is
-            // no presentation overlay for a shared colour).
-            (Destination::Presentation, Domain::Colours) => {
-                unreachable!("Colours has no Presentation-destined fields")
+            // no presentation overlay for a shared color).
+            (Destination::Presentation, Domain::Colors) => {
+                unreachable!("Colors has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -2576,18 +2576,18 @@ impl Domain {
             Domain::Sources => sources::help(key),
             Domain::Groupings => groupings::help(key),
             Domain::Scopes => scopes::help(key),
-            Domain::Colours => colours::help(key),
+            Domain::Colors => colours::help(key),
             Domain::Schema => schema::help(key),
         }
     }
 
     /// Whether a text field permits typed editing. Sources permits its supported
     /// free-text settings; Scopes permits text and expression; Views and Schema permit
-    /// column label and width. Groupings' slot stays read-only, and Colours has no text
+    /// column label and width. Groupings' slot stays read-only, and Colors has no text
     /// field. Numeric and choice entry use their own field paths.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Groupings | Domain::Colours => {
+            Domain::Groupings | Domain::Colors => {
                 let _ = key;
                 false
             }
@@ -2602,10 +2602,10 @@ impl Domain {
     /// committing.
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
-            // Colours joins for the same reason `text_editable` gives
+            // Colors joins for the same reason `text_editable` gives
             // it no `true` above: no `Text` row for this door to ever
             // be called on.
-            Domain::Groupings | Domain::Colours => {
+            Domain::Groupings | Domain::Colors => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
@@ -2631,7 +2631,7 @@ impl Domain {
             Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
-            Domain::Colours => colours::fields(config, object),
+            Domain::Colors => colours::fields(config, object),
         }
     }
 
@@ -2648,7 +2648,7 @@ impl Domain {
             | Domain::Groupings
             | Domain::Schema
             | Domain::Sources
-            | Domain::Colours => self.fields(config, None),
+            | Domain::Colors => self.fields(config, None),
         }
     }
 
@@ -2716,7 +2716,7 @@ impl Domain {
             Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
-            Domain::Colours => colours::to_table(draft, dest),
+            Domain::Colors => colours::to_table(draft, dest),
         }
     }
 
@@ -2729,7 +2729,7 @@ impl Domain {
             Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
-            Domain::Colours => colours::validate(draft, config),
+            Domain::Colors => colours::validate(draft, config),
         }
     }
 }
@@ -4249,7 +4249,7 @@ mod tests {
             selected: 0,
         });
         assert_eq!(
-            draft.selected_vocabulary(Domain::Colours),
+            draft.selected_vocabulary(Domain::Colors),
             RowVocabulary::StepsAndTypes
         );
     }

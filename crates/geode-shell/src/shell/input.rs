@@ -173,8 +173,8 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "config::sources" {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
-        } else if action.0 == "config::colours" {
-            objectdialog::render::open(self, objectdialog::Domain::Colours, window, cx);
+        } else if action.0 == "config::colors" {
+            objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

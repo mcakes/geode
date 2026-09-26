@@ -44,16 +44,16 @@ pub fn to_table(model: &Model) -> Table {
             }
             match &s.colour {
                 Colour::Palette(i) => {
-                    r.insert("colour".into(), Value::Integer(*i as i64));
+                    r.insert("color".into(), Value::Integer(*i as i64));
                 }
                 Colour::Named(n) => {
-                    r.insert("colour".into(), Value::String(n.clone()));
+                    r.insert("color".into(), Value::String(n.clone()));
                 }
                 // `#rrggbb`: a `[colours]` name can never start with `#`
                 // (`geode_core::colour::RESERVED_PREFIX`), so the string
                 // form stays unambiguous.
                 Colour::Custom(c) => {
-                    r.insert("colour".into(), Value::String(c.hex()));
+                    r.insert("color".into(), Value::String(c.hex()));
                 }
             }
             if s.axis != Axis::Left {
@@ -236,7 +236,9 @@ pub fn from_table(
 }
 
 fn apply_look(m: &mut Model, number: u8, r: &Table) {
-    match r.get("colour") {
+    // `colour` is the key's spelling before the rename; the next save
+    // rewrites it as `color`.
+    match r.get("color").or_else(|| r.get("colour")) {
         Some(Value::Integer(i))
             if (0..geode_chart::core::palette::Palette::LEN as i64).contains(i) =>
         {
@@ -341,7 +343,7 @@ mod tests {
         let t = to_table(&m);
         let slots = t["slots"].as_array().unwrap();
         assert_eq!(
-            slots[0].as_table().unwrap()["colour"].as_str(),
+            slots[0].as_table().unwrap()["color"].as_str(),
             Some("#ff8800")
         );
         let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
@@ -364,6 +366,38 @@ mod tests {
             Colour::Palette(0),
             "malformed hex is neither a colour nor a name"
         );
+    }
+
+    /// A session saved before the key was renamed still says `colour`: it is
+    /// read, `color` wins beside it, and the next save writes `color` only.
+    #[test]
+    fn the_old_colour_key_is_read_and_rewritten_as_color() {
+        let text = r##"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            colour = "#00ff00"
+            [[slots]]
+            number = 2
+            kind = "source"
+            identity = "VIX"
+            source = "demo_kdb"
+            colour = 4
+            color = 2
+        "##;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(
+            back.slots()[0].colour,
+            Colour::Custom(crate::core::Rgb8([0x00, 0xff, 0x00]))
+        );
+        assert_eq!(back.slots()[1].colour, Colour::Palette(2));
+        let saved = to_table(&back);
+        let first = saved["slots"].as_array().unwrap()[0].as_table().unwrap();
+        assert_eq!(first["color"].as_str(), Some("#00ff00"));
+        assert!(first.get("colour").is_none());
     }
 
     #[test]

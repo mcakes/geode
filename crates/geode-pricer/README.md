@@ -171,7 +171,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   before every `refresh`, keyed by row count, placeholder, relative cursor
   row, and mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
-- `paint` prepares grid-row and action-menu text colours and tests their
+- `paint` prepares grid-row and action-menu text colors and tests their
   contrast across every bundled theme. Row text is checked against its base,
   hover, and selection backgrounds; menu text against popover and enabled
   highlight backgrounds. This sweep does not cover every header or typeahead
