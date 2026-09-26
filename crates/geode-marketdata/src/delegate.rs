@@ -197,13 +197,27 @@ impl MatrixDelegate {
     /// attribute cannot paint or route keys differently). A tile that
     /// has been dropped paints nothing — the caller falls back to the
     /// cell's own text — since there is nothing left to route a key to.
+    ///
+    /// The text `Input` paints without its own chrome and aligned as the
+    /// cell's text is (`align`), so opening an editor leaves the value
+    /// where it stood: the component's default is a left-aligned field
+    /// inset by its own padding and border over its own background, which
+    /// jumped a right-aligned number across the cell and hid the cell's
+    /// draft fill. The cursor border already frames the cell being edited.
     fn render_editor(
         &mut self,
         editor: &DelegateEditor,
+        align: TextAlign,
         theme: &Theme,
     ) -> Option<gpui::AnyElement> {
         match &editor.paint {
-            DelegateEditorPaint::Text(state) => Some(Input::new(state).into_any_element()),
+            DelegateEditorPaint::Text(state) => Some(
+                Input::new(state)
+                    .appearance(false)
+                    .px_0()
+                    .text_align(align)
+                    .into_any_element(),
+            ),
             DelegateEditorPaint::Date { paint, focus } => {
                 let tile = self.tile.upgrade()?;
                 self.tones.refresh(theme);
@@ -380,7 +394,7 @@ impl TableDelegate for MatrixDelegate {
             let editor = self
                 .editor_at(row_ix, col_ix)
                 .cloned()
-                .and_then(|e| self.render_editor(&e, theme));
+                .and_then(|e| self.render_editor(&e, TextAlign::Left, theme));
             let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
             let el = div()
                 .size_full()
@@ -450,7 +464,7 @@ impl TableDelegate for MatrixDelegate {
         let editor = self
             .editor_at(row_ix, col_ix)
             .cloned()
-            .and_then(|e| self.render_editor(&e, theme));
+            .and_then(|e| self.render_editor(&e, TextAlign::Right, theme));
         // The choice popup hangs under THIS cell when it is the one being
         // edited (dividend spec §4.4): a zero-size absolute child at the
         // cell's bottom-left is the anchor `render_choice`'s `TopLeft`

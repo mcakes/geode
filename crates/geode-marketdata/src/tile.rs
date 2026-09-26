@@ -6511,6 +6511,43 @@ mod tests {
         );
     }
 
+    /// Opening the editor leaves a value where it stood: the cell's text
+    /// is right-aligned, so the editor's must end at the same right edge,
+    /// not start at the left behind the `Input`'s own padding.
+    #[gpui::test]
+    fn the_editor_keeps_the_value_right_aligned(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "right", Some(2));
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        let slot = vcx
+            .debug_bounds("marketdata-editor-1-3")
+            .expect("the editor paints in the cursor cell");
+        let text = h.tile.read_with(&vcx, |t, cx| {
+            let Some(Editing {
+                state: EditorState::Text(input),
+                ..
+            }) = &t.editor
+            else {
+                panic!("a value cell opens a text editor");
+            };
+            let input = input.read(cx);
+            assert!(!input.value().is_empty(), "the edited cell holds a value");
+            input
+                .range_to_bounds(&(0..input.value().len()))
+                .expect("the value is laid out")
+        });
+        assert!(
+            (slot.right() - text.right()).abs() <= gpui::px(1.),
+            "the value ends at the cell's right edge ({:?}), as the painted \
+             cell's does, not at {:?}",
+            slot.right(),
+            text.right()
+        );
+    }
+
     /// The `as_of` mutation + `open_flip` a scope-bar as-of change makes,
     /// in one update block — the shell's own frame observer is registered
     /// before any occupant's, so this really is the order a panel sees.

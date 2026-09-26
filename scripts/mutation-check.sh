@@ -18726,6 +18726,15 @@ run_mutation "pricer bridge: start carries the startup pricer key" \
   '        pricer_key: None,' \
   geode-app start_builds_a_timeseries_factory_beside_the_blotters
 
+# The in-cell editor takes the cell's alignment. Mutated to the Input's
+# default left alignment, a right-aligned value jumps across the cell the
+# moment `i` opens it; every other editor test still passes.
+run_mutation "mdedit: the value editor keeps the cell's alignment" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                    .text_align(align)' \
+  '                    .text_align(TextAlign::Left)' \
+  geode-marketdata the_editor_keeps_the_value_right_aligned
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
