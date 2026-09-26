@@ -1,14 +1,15 @@
-//! The entry field's pure half (line-pricer spec §8.4): where `o` and
-//! `shift+o` land (planning decision 12), where the next placeholder
-//! opens after a successful `enter`, and the `up`/`down` history.
+//! The entry bar's pure half (line-pricer spec §8.4, entry-bar spec §4):
+//! where `o` (always below) and `p`/`shift+p` land, where the next line
+//! lands after a successful `enter`, the bar's target label, and the
+//! `up`/`down` history.
 
-use crate::core::sheet::{Place, RowSpec, Sheet};
+use crate::core::sheet::{Place, RowKind, RowSpec, Sheet};
 
 /// Where a new row lands relative to the cursor row. `row` is a flat row
-/// index; `None` is an empty sheet (or no cursor).
+/// index; `None` (no cursor row) lands at the end of the sheet.
 pub fn place_for(sheet: &Sheet, row: Option<usize>, below: bool) -> Place {
     let Some(row) = row else {
-        return Place::Root { at: 0 };
+        return Place::Root { at: sheet.len() };
     };
     if let Some(p) = sheet.parent(row) {
         let leg = row - p - 1;
@@ -41,7 +42,7 @@ fn span(spec: &RowSpec) -> usize {
     }
 }
 
-/// The placeholder after `inserted` landed at `place`, so a book of lines
+/// The place after `inserted` landed at `place`, so a book of lines
 /// is typed without another `o` (spec §8.4). A package at a leg place is
 /// refused by `apply`, so that pair answers `place` unchanged.
 pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
@@ -54,6 +55,41 @@ pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
             leg: leg + 1,
         },
         (p @ Place::Leg { .. }, RowSpec::Package { .. }) => p,
+    }
+}
+
+/// A row as the bar's label names it: its shorthand, or its template
+/// token when the shorthand is empty or spans several lines (a custom
+/// package's legs, one per line).
+fn describe(sheet: &Sheet, row: usize) -> String {
+    let text = sheet.shorthand(row);
+    if !text.is_empty() && !text.contains('\n') {
+        return text;
+    }
+    match sheet.kind(row) {
+        RowKind::Package { template } => template.token().to_string(),
+        _ => text,
+    }
+}
+
+/// Where the entry bar's `enter` lands, as its muted label (entry-bar
+/// spec §4.2). Computed from the place alone, so the label and the insert
+/// can never disagree.
+pub fn target_label(sheet: &Sheet, place: Place) -> String {
+    match place {
+        // The bar always passes `below = true`, so `Root { at: 0 }`
+        // reaches here only on an empty sheet, where "at end" is true.
+        Place::Root { at } if at == 0 || at >= sheet.len() => "at end".to_string(),
+        Place::Root { at } => {
+            let before = at - 1;
+            let root = sheet.parent(before).unwrap_or(before);
+            format!("after {}", describe(sheet, root))
+        }
+        Place::Leg { package, leg: 0 } => match sheet.kind(package) {
+            RowKind::Package { template } => format!("into {}", template.token()),
+            _ => format!("into {}", describe(sheet, package)),
+        },
+        Place::Leg { package, leg } => format!("after {}", describe(sheet, package + leg)),
     }
 }
 
@@ -92,12 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn o_lands_after_the_cursor_row_and_shift_o_before_it() {
+    fn a_place_lands_after_the_cursor_row_or_before_it() {
         let s = sheet();
         assert_eq!(
             place_for(&s, None, true),
-            Place::Root { at: 0 },
-            "an empty sheet"
+            Place::Root { at: 5 },
+            "no cursor row: the end"
         );
         assert_eq!(place_for(&s, Some(0), true), Place::Root { at: 1 });
         assert_eq!(place_for(&s, Some(0), false), Place::Root { at: 0 });
@@ -127,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn the_next_placeholder_follows_what_was_just_inserted() {
+    fn the_next_place_follows_what_was_just_inserted() {
         let one = parse("SPX Z26 5000 C").unwrap();
         let cs = parse("SPX Z26 4800/5200 CS").unwrap();
         assert_eq!(
@@ -159,6 +195,63 @@ mod tests {
             ],
             "newest id first; A's repeat collapses into the newest; legs never appear"
         );
+    }
+
+    #[test]
+    fn with_no_cursor_row_a_line_lands_at_the_end() {
+        let s = sheet();
+        assert_eq!(place_for(&s, None, true), Place::Root { at: 5 });
+        let empty = Sheet::new("t");
+        assert_eq!(place_for(&empty, None, true), Place::Root { at: 0 });
+    }
+
+    /// [A, P(L1, L2), B] — flat rows 0..5.
+    #[test]
+    fn the_label_names_where_enter_lands() {
+        let s = sheet();
+        assert_eq!(target_label(&s, Place::Root { at: 5 }), "at end");
+        assert_eq!(
+            target_label(&s, Place::Root { at: 1 }),
+            format!("after {}", s.shorthand(0))
+        );
+        assert_eq!(
+            target_label(&s, Place::Root { at: 4 }),
+            format!("after {}", s.shorthand(1)),
+            "a root after a package names the package, not its last leg"
+        );
+        assert_eq!(
+            target_label(&s, Place::Leg { package: 1, leg: 0 }),
+            "into CS"
+        );
+        assert_eq!(
+            target_label(&s, Place::Leg { package: 1, leg: 2 }),
+            format!("after {}", s.shorthand(3))
+        );
+        assert_eq!(
+            target_label(&Sheet::new("t"), Place::Root { at: 0 }),
+            "at end"
+        );
+    }
+
+    #[test]
+    fn a_custom_package_is_named_by_its_token_in_the_label() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
+        s.apply(crate::core::Edit::Group {
+            first: 0,
+            count: 2,
+            template: crate::core::Template::Custom,
+            id: None,
+        })
+        .unwrap();
+        assert_eq!(target_label(&s, Place::Root { at: 3 }), "at end");
+        s.apply(crate::core::Edit::Insert {
+            place: Place::Root { at: 3 },
+            rows: vec![parse("SPX Z26 3000 P").unwrap()],
+        })
+        .unwrap();
+        assert_eq!(target_label(&s, Place::Root { at: 3 }), "after CUSTOM");
     }
 
     #[test]

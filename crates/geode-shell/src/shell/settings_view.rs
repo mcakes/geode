@@ -47,7 +47,7 @@ use super::keybindings_view::{highlighted_text, split_label_indices};
 
 /// Which setting a row edits — the row's stable identity (what click
 /// handlers are keyed by, mirroring how keybindings rows are keyed by
-/// `ActionId` rather than list position) and what [`apply_setting`]
+/// `ActionId` rather than list position) and what `apply_setting`
 /// dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingId {
@@ -74,7 +74,7 @@ pub struct SettingRow {
 
 /// Build rows from plain inputs in fixed order: Theme, Font size, Find style, Line
 /// numbers, Add tile direction, and Default series source. The source row always
-/// includes `(none)`, even with no configured sources. [`rows_for`] supplies the live
+/// includes `(none)`, even with no configured sources. `rows_for` supplies the live
 /// shell values.
 ///
 /// An unknown active theme falls back to index zero. An unavailable default source
@@ -305,7 +305,7 @@ pub fn filtered_position(
 /// What one keystroke does to this dialog — decided by [`route`] from
 /// the mode, the query and the keystroke alone, so the whole key
 /// vocabulary is a pure table a unit test can walk without a window.
-/// [`handle_key`] only applies the answer.
+/// `handle_key` only applies the answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
     /// Move the selection within the filtered list.
@@ -544,7 +544,7 @@ const WIDTH: f32 = 640.0;
 
 /// [`derive_rows`] over the live shell state — the one place the pure row
 /// model meets `ShellView`. Called fresh on every render ([`build`]) and
-/// every keystroke ([`handle_key`]); rows are never cached, so a step's
+/// every keystroke (`handle_key`); rows are never cached, so a step's
 /// effect (or a config hot reload's) is visible on the very next derive.
 ///
 /// Fetch-source options come from `SeriesSettings`, shared with timeseries
@@ -770,7 +770,7 @@ fn on_row_clicked(
     cx.notify();
 }
 
-/// Select the value chip's row and step through [`step`] and [`apply_setting`], the
+/// Select the value chip's row and step through [`step`] and `apply_setting`, the
 /// same path as keyboard stepping. `forward` is `!shift`.
 fn on_value_chip_clicked(
     shell: &mut ShellView,

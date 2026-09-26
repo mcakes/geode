@@ -872,7 +872,7 @@ pub fn to_string_pretty(
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
-/// Replace `path` via [`crate::config_write::write_file`]: create the parent
+/// Replace `path` via `crate::config_write::write_file`: create the parent
 /// if needed, write a unique sibling temporary file, sync it, and rename it.
 /// Concurrent readers see a complete old or new file. The directory is not
 /// fsynced, so system-failure durability is best-effort; errors may leave a

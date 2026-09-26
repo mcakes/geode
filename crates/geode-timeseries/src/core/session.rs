@@ -1,8 +1,8 @@
-//! `TileState` in `session.toml` (spec §9.11): slots (kind, color, axis,
-//! visible, rule; an expression by its TEXT), range, frequency, axis
-//! mode, split, density, percentiles. Not the view, not slot state.
-//! `from_table` heals a hostile table rather than refusing it, like
-//! `Tree::from_parts`; every drop is a notice the tile shows once.
+//! Session serialization for slots (kind, color, axis, visibility, rule,
+//! expression text), range, frequency, axis mode, split, density, and percentiles.
+//! Viewport bounds and transient slot state are not saved. `from_table` repairs
+//! malformed input where possible and reports discarded data through notices
+//! the tile shows once.
 //!
 //! A table without `version = 2` may name slots by handle (`s3`) in
 //! expression text. Restoring it rewrites each handle to a name: a

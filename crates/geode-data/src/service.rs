@@ -3450,7 +3450,9 @@ mod tests {
     }
 
     /// Query two live documents with different source times. Each must report
-    /// its own selected generation rather than the dataset's minimum time.
+    /// its own selected generation rather than the dataset's minimum time —
+    /// and, since the fixture publishes SPX.Z again after NDX.Z, each must
+    /// report its own generation ID rather than the dataset's maximum.
     #[test]
     fn a_live_document_request_reports_its_own_documents_freshness() {
         let (_dir, svc, rx) = document_service();
@@ -3470,6 +3472,7 @@ mod tests {
             Some(ts("2026-09-12T14:05:00Z").to_rfc3339().as_str()),
             "SPX.Z's own live generation, not NDX.Z's staler one"
         );
+        let spx_generation = spx.provenance().datasets[0].generation;
 
         svc.document(&DocumentParams {
             key: QueryKey(5),
@@ -3485,6 +3488,18 @@ mod tests {
             ndx.provenance().datasets[0].as_of.as_deref(),
             Some(ts("2026-09-12T14:03:00Z").to_rfc3339().as_str()),
             "NDX.Z's own generation, not SPX.Z's newer one"
+        );
+        let ndx_generation = ndx.provenance().datasets[0].generation;
+
+        // NDX.Z was published before the third publish (SPX.Z's second), so
+        // a dataset-wide maximum would answer with SPX.Z's newest generation
+        // for NDX.Z too. The fixture's single document could not catch that:
+        // this pair is what tells the two apart.
+        assert!(spx_generation.is_some() && ndx_generation.is_some());
+        assert_ne!(spx_generation, ndx_generation);
+        assert!(
+            ndx_generation < spx_generation,
+            "NDX.Z's own generation, not the dataset's newest"
         );
         svc.shutdown();
     }

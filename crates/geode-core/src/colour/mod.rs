@@ -348,7 +348,7 @@ pub struct Tokens {
     pub chart: [Rgb; 5],
     pub bullish: Rgb,
     pub bearish: Rgb,
-    /// The theme's own background — not a [`Token`] a `colours.toml`
+    /// The theme's own background — not a [`Token`] a `colors.toml`
     /// definition can name (there is no `token = "background"`); it is
     /// the surface [`readable_on`] measures every generated `Base::Hue`
     /// against.

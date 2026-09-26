@@ -1,28 +1,18 @@
-//! The as-of selector and the historical indicator (Phase 4a §3.6,
-//! §3.11; rewritten as-of dialog spec 2026-09-20 §5): the real
-//! key-dispatch pipeline through `frame::as_of` (`mod+t`), the ranked
-//! row list and the Custom field, `frame::live`/`frame::as_of_undo` —
-//! plus the window-wide warning stripe and the status-bar segment that
-//! must paint if and only if the frame is historical (spec §4.5:
-//! nothing on screen may look live when it is not).
+//! The as-of selector and historical indicators through real key dispatch:
+//! `frame::as_of` (`mod+t`), ranked presets, the Custom field, and
+//! `frame::live`/`frame::as_of_undo`. The window warning stripe and status segment must
+//! appear exactly while the frame is historical.
 //!
-//! `mod+t` is dispatched here as the literal `alt-t` — `test_services()`
-//! builds its keymap with `default_mod()` (spec §3.1: Alt), the same
-//! convention every other `mod+`-bound e2e test in this crate follows
-//! (see `scopebar.rs`'s `typing_in_the_field_...` test's own comment).
+//! `test_services()` uses `default_mod()` (Alt), so these tests dispatch `mod+t` as
+//! literal `alt-t`.
 
 use super::*;
 use crate::frame::Publish;
 use geode_core::query::AsOf;
 
-/// Hovering the status bar's AS OF segment (Task 4, spec §5.1) names the
-/// same `frame::as_of` chord the toolbar's own AS OF badge does — the
-/// keyboard twin to "click it to reopen the as-of selector". As-of dialog
-/// Part 3 (2026-09-20) replaced the free-text grammar this test used to
-/// type through (`"14:05"` + `enter`) with the ranked-list model: `enter`
-/// alone on an empty field commits the highlighted row, which is always
-/// the first business-day preset on open — still a historical instant,
-/// which is all this test needs to make the segment paint.
+/// Hovering the historical status segment shows `frame::as_of`'s chord. Enter on the
+/// selector's empty query commits its highlighted business-day preset, giving this test
+/// a historical frame whose segment can be hovered.
 #[gpui::test]
 fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -46,20 +36,14 @@ fn hovering_the_status_as_of_segment_names_the_selector_chord(cx: &mut gpui::Tes
         vcx.debug_bounds("tip-status-as-of-chord-mod+t").is_some()
             || vcx.debug_bounds("tip-status-as-of-chord-alt+t").is_some()
     );
-    // Final review, spec §5.1: the title is the full resolved timestamp
-    // (`ScopeBarModel::as_of_full`), not the elided `"AS OF … · Return to
-    // live in the palette"` segment text — the width comparison lives on
-    // the scope-bar badge's own test below, since the segment's OWN text
-    // is longer than the bare timestamp and so is not the shorter side
-    // here.
+    // The tooltip uses the full resolved timestamp (`ScopeBarModel::as_of_full`). The
+    // badge test below compares widths; this status segment's own text can be longer
+    // than the timestamp.
     assert!(vcx.debug_bounds("tip-status-as-of-title").is_some());
 }
 
-/// Task 3 (tooltips): hovering the AS OF badge names its full text
-/// (`ScopeBarModel::as_of_badge`) and `frame::as_of`'s chord — the
-/// selector that reopens the very dialog that set it. Unlike the sibling
-/// test above, this one never opens the dialog at all — it sets the
-/// frame's as-of directly — so it is untouched by Part 3's rewrite.
+/// Hovering the AS OF badge shows the full timestamp and the chord for reopening the
+/// selector. This fixture sets the frame's as-of directly.
 #[gpui::test]
 fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -101,10 +85,8 @@ fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppConte
             || vcx.debug_bounds("tip-scope-asof-chord-alt+t").is_some(),
         "the tooltip must name frame::as_of's chord"
     );
-    // Final review, spec §5.1: the title is the FULL resolved timestamp
-    // (`ScopeBarModel::as_of_full`), not the elided badge text — wider,
-    // since it always carries the date and seconds the badge itself
-    // elides away.
+    // The full timestamp includes the date and seconds elided from the badge, so its
+    // tooltip title is wider.
     let title = vcx
         .debug_bounds("tip-scope-asof-title")
         .expect("tooltip title painted");
@@ -255,9 +237,8 @@ fn a_row_click_commits_it(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     vcx.run_until_parked();
-    // The CLICKED row's own instant, not just "some" `At(_)` — proves the
-    // click committed the row it landed on, not merely the highlighted
-    // one at open (minor, review round 2).
+    // Assert the clicked row's exact instant: merely reaching `At(_)` would also pass
+    // if the initially highlighted row were committed.
     let mut clicked = state_of(&shell, &vcx);
     assert!(clicked.set_highlighted(1), "row 1 must exist to click it");
     let expected = clicked.commit().unwrap();
@@ -304,17 +285,9 @@ fn the_footer_swaps_to_the_fields_keys_while_it_is_open(cx: &mut gpui::TestAppCo
     let _ = shell;
 }
 
-/// Review round 2, finding 1 (Critical): before the fix, `tab` cleared
-/// `AsOfState::query` but left the shared `Input` showing the stale
-/// typed text — nothing wrote it back, since `dialog::sync_dialog_text`
-/// had no as-of arm. `escape` then closed the field without touching
-/// the query either way, so `enter`'s own `set_query(&live)` re-fed the
-/// STALE "eod" text from the field, re-filtering the list back down to
-/// the EOD presets and committing "EOD T-1" regardless of where `down`
-/// had actually moved the highlight. With the fix, `tab` reconciles the
-/// field to empty immediately (the key-path seam every modal's handler
-/// already runs through, `input.rs`), so `down` moves a genuinely
-/// unfiltered list and `enter` commits whatever row is under it.
+/// Tab clears the query in both `AsOfState` and the shared `Input`. Subsequent
+/// navigation must traverse the unfiltered list, and Enter must commit its highlighted
+/// row without reapplying stale input text.
 #[gpui::test]
 fn tab_then_escape_then_down_then_enter_commits_the_highlighted_row(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
@@ -339,13 +312,10 @@ fn tab_then_escape_then_down_then_enter_commits_the_highlighted_row(cx: &mut gpu
     assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
 }
 
-/// Review round 2, finding 2 (Important): `route` answers `None` both
-/// for a chord AND for any other key it does not recognize, so a bare
-/// unrecognized key (here, `x`) used to fall through exactly like a
-/// chord does — reaching the shared, still-focused `Input` as typing,
-/// re-filtering the list and hiding the Custom row out from under its
-/// own open field. The fix checks the chord case first and swallows
-/// every other unrouted key instead of leaving it unclaimed.
+/// An unrecognized bare key while Custom is open must be claimed without reaching the
+/// shared input. `route` also returns `None` for chords, so the handler must
+/// distinguish chords that can fall through from bare keys that would silently refilter
+/// the list.
 #[gpui::test]
 fn a_bare_key_the_field_does_not_own_is_swallowed_while_it_is_open(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
@@ -365,19 +335,9 @@ fn a_bare_key_the_field_does_not_own_is_swallowed_while_it_is_open(cx: &mut gpui
     );
 }
 
-/// Review round 2, finding 3 (Important): keyboard navigation past the
-/// visible window must scroll the highlight into view, not just move an
-/// off-screen index. Checked directly on `ScrollHandle::offset()` — a
-/// `list_bounds.intersects(&row_bounds)` check (the palette's own
-/// scroll-follow proof, `palette.rs`'s `arrow_down_past_visible_rows_...`)
-/// is trivially true here on an UNBOUNDED list (every child's bounds sit
-/// inside its own unbounded parent's by construction, scrolled or not),
-/// so it would pass even with no `max_h`/`track_scroll` at all — proven
-/// by temporarily removing both during this fix's own RED pass, which
-/// left that assertion green. The offset is the one signal that can
-/// actually fail: it moves only if the list is both height-capped (so
-/// there is a `max_offset` to move within) and tracked (so
-/// `scroll_to_item` has a handle to act on).
+/// Navigation beyond the visible rows must scroll the highlight into view. Assert
+/// `ScrollHandle::offset()`: row intersection with an unbounded parent would pass even
+/// without a height cap or tracked scrolling, while a changed offset requires both.
 #[gpui::test]
 fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -433,10 +393,8 @@ fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::Test
          having changed"
     );
 
-    // Review round 2 re-review, finding 3a: `as_of_scroll` lives on
-    // `ShellView` and keeps its offset across close/reopen — a fresh
-    // open must reset it to the top, not silently keep whatever the
-    // last session scrolled to.
+    // The scroll handle survives closing the dialog; reopening must reset its offset to
+    // the top.
     vcx.simulate_keystrokes("escape");
     vcx.simulate_keystrokes("alt-t");
     vcx.update(|window, cx| {
@@ -451,10 +409,8 @@ fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::Test
          the previous session's offset"
     );
 
-    // Review round 2 re-review, finding 3b: typing a filter re-ranks and
-    // resets the highlight to 0 (`AsOfState::rerank`) — the scroll must
-    // follow it back to the top too, the same seam the sibling dialogs'
-    // query-change arms already drive their own scroll handles from.
+    // Filtering reranks the rows and resets the highlight to zero. Scrolling must
+    // follow that reset.
     vcx.simulate_keystrokes(&vec!["ctrl-d"; 15].join(" "));
     vcx.update(|window, cx| {
         window.refresh();
@@ -496,9 +452,8 @@ fn nav_past_the_visible_rows_scrolls_the_highlight_into_view(cx: &mut gpui::Test
     );
 }
 
-/// Review round 2, finding 5 (ruled in): a publish landing while the
-/// dialog is open must show up in its row list — parity with the old
-/// `cached_presets` (spec §5.1) — without a close/reopen.
+/// A publish arriving while the dialog is open must appear in its rows without
+/// reopening the dialog.
 #[gpui::test]
 fn a_publish_while_open_adds_a_new_row(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
@@ -531,14 +486,8 @@ fn a_publish_while_open_adds_a_new_row(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Final whole-branch review, finding M-10: `refresh`'s identity restore
-/// (review round 2 re-review, finding 3) can land the SAME highlighted
-/// row at a very different painted index — new, newer publishes rank
-/// ABOVE it — so the scroll must follow it there the same way the other
-/// three seams that move the highlight already do (`input.rs`'s
-/// query-change arm, `handle_key`'s `tab` and nav arms), or a trader
-/// scrolled down to a publish loses sight of it the moment a fresher one
-/// lands.
+/// Refreshing preserves the highlighted publish's identity. Newer publishes can move it
+/// to a different index, so the viewport must follow the restored highlight.
 #[gpui::test]
 fn a_publish_below_the_fold_scrolls_the_highlight_into_view(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -614,10 +563,8 @@ fn a_publish_below_the_fold_scrolls_the_highlight_into_view(cx: &mut gpui::TestA
     );
 }
 
-/// The dialog's own tests deleted `frame::live`/`frame::as_of_undo`'s one
-/// window test along with the free-text grammar it used to type through
-/// (Part 3's rewrite) — these two palette-only actions are otherwise
-/// untouched by this dialog and still need a real key-dispatch proof.
+/// Exercise the palette-only `frame::live` and `frame::as_of_undo` actions through real
+/// key dispatch, independently of the selector's preset and Custom field paths.
 #[gpui::test]
 fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
@@ -641,24 +588,10 @@ fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
     assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), pinned);
 }
 
-/// Final whole-branch review, finding I-1: the Custom row's segment
-/// click callback now calls `dialog::sync_dialog_text` after selecting
-/// the segment, the same reconciliation seam every other `AsOfState`
-/// mutation goes through. Proves the click selects the right segment,
-/// the keyboard still reaches the field afterward, and the shared
-/// `Input` still holds window focus. NOTE: this does not reproduce a
-/// live regression — verified by deliberately reverting the fix and
-/// re-running this test, which stayed green, because `dialog::
-/// render_modal`'s panel already calls `cx.stop_propagation()` on every
-/// mouse-down anywhere inside an already-open modal, which blocks gpui's
-/// default track-focus grab (the "+" chip's mechanism, CLAUDE.md's
-/// `open_shell_dialog` precedent) before it can ever reach the shell
-/// root — that mechanism only bites the mouse-down that OPENS a dialog,
-/// before a modal panel exists to intercept it. The fix is still correct
-/// hygiene (every other mutation site in this file reconciles on its own
-/// seam; a segment select had none), so it stays; this test locks in the
-/// resulting behaviour rather than catching a regression that does not
-/// reproduce here.
+/// Clicking a Custom-field segment selects it, preserves input focus, and allows
+/// subsequent typing. This establishes the visible contract but does not isolate
+/// `sync_dialog_text`: the modal panel also stops mouse-down propagation and already
+/// prevents focus theft.
 #[gpui::test]
 fn clicking_a_segment_selects_it_and_the_field_still_hears_the_keyboard(
     cx: &mut gpui::TestAppContext,
@@ -698,16 +631,9 @@ fn clicking_a_segment_selects_it_and_the_field_still_hears_the_keyboard(
     );
 }
 
-/// Final whole-branch review, finding I-1's second half: the
-/// `sync_dialog_text` hoist out of the `field().is_none()` arm — a body
-/// click on the Custom row while its field is ALREADY open resyncs too,
-/// not just the click that opens it. Same note as the segment-click test
-/// above: this does not reproduce a live regression in this codebase
-/// (the modal panel's own `stop_propagation()` already prevents a click
-/// anywhere inside it from stealing window focus, verified by reverting
-/// the hoist and re-running this test, which stayed green) — kept for
-/// the same "every mutation seam reconciles the same way" consistency,
-/// not because a bug reproduces without it.
+/// Clicking the Custom row while its field is already open preserves focus and typing.
+/// As in the segment-click test, modal mouse-down handling also protects focus, so this
+/// test cannot establish whether a redundant sync call ran.
 #[gpui::test]
 fn clicking_the_custom_rows_body_while_open_keeps_the_field_focused(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
@@ -739,10 +665,8 @@ fn clicking_the_custom_rows_body_while_open_keeps_the_field_focused(cx: &mut gpu
     );
 }
 
-/// Toolbar restyle (2026-09-19, option A): the AS OF chip leads the bar
-/// as its own segment — the warning tint is on the chip alone, not
-/// across the whole readout — with a hairline after it, and clicking it
-/// opens the as-of selector, the mouse form of `frame::as_of`.
+/// The AS OF chip forms a separate leading segment with its own warning tint and
+/// trailing separator. Clicking it opens the selector, matching `frame::as_of`.
 #[gpui::test]
 fn the_as_of_chip_leads_the_bar_and_opens_the_selector(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());

@@ -45,8 +45,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
     ("pricer::escape", "Clear find and dismissible notice"),
-    ("pricer::add_below", "Add line below…"),
-    ("pricer::add_above", "Add line above…"),
+    ("pricer::add_below", "Add lines…"),
     ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),
     ("pricer::undo", "Undo"),
@@ -128,7 +127,6 @@ context = "pricer && mode == normal"
 "shift+n" = "pricer::find_prev"
 "escape" = "pricer::escape"
 "o" = "pricer::add_below"
-"shift+o" = "pricer::add_above"
 "i" = "pricer::edit"
 "enter" = "pricer::edit"
 "d d" = "pricer::delete"
@@ -376,9 +374,9 @@ fn catalog_sheets(d: &Diagnostics) -> Vec<String> {
 pub struct PricerFactory {
     data: DataHandle,
     shared: Rc<Shared>,
-    /// Whether the diagnostics observer seeding the store's known names
-    /// (planning decision 12) exists; the first `create` makes it — every
-    /// tile is handed the one app-wide `Diagnostics`.
+    /// Whether the shared diagnostics catalog is already observed for known
+    /// sheet names. The first `create` installs the observer; subsequent tiles
+    /// use the same app-wide `Diagnostics` entity and subscription.
     catalog_watched: Cell<bool>,
 }
 
@@ -726,5 +724,11 @@ mod tests {
             Some("pricer::insert_up_big")
         );
         assert_eq!(resolve(".", "menu").as_deref(), Some("pricer::menu_close"));
+    }
+
+    #[test]
+    fn shift_o_is_unbound_and_add_above_is_gone() {
+        assert!(!DEFAULT_KEYMAP.contains("shift+o"));
+        assert!(!ACTIONS.iter().any(|(id, _)| *id == "pricer::add_above"));
     }
 }

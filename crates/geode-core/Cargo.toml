@@ -8,51 +8,29 @@ publish.workspace = true
 bench = false
 
 [features]
-# Fixture builders for downstream crates' tests. `Snapshot::for_tests`
-# exists so that Arrow stays an implementation detail of `snapshot.rs`:
-# without it, every crate that wants a `Snapshot` fixture would have to
-# name Arrow types, which is exactly what that module promises nobody
-# outside it does. `config::test_support::config_from` (Phase 4b Task 2)
-# is the same idea for `Config`: a fixture built from one builtin doc,
-# with no desk/user directory on disk, for downstream crates' tests that
-# need a real `Config` rather than a bare `MergedDoc`.
+# Fixture builders for downstream tests. `Snapshot::for_tests` accepts plain
+# Rust values so fixtures need no Arrow dependency. `config::test_support::
+# config_from` builds a real Config from one builtin document without disk I/O.
 test-support = []
 
 [dependencies]
-# `preserve_order`: a dataset's declared columns keep the schema's
-# declaration order (spec §3.3's `categorical_columns`/`dimensions_at`
-# read that order — a picker or interned-ENUM list in TOML order is what
-# a trader expects, not an alphabetical shuffle). `indexmap` is already
-# in the dependency graph (via `arrow-json`), so this adds no new crate.
-#
-# This feature is workspace-wide, not geode-core-local: Cargo unifies
-# features across every crate that resolves to the same `toml` version
-# (confirmed with `cargo tree -e features -i toml@1.1.4`, geode-core's
-# fix report), so `geode-shell` and `geode-app`'s own `toml::Table`s are
-# also IndexMaps in file order now, not BTreeMaps in sorted order. Kept
-# on anyway (the schema behaviour above is worth it) — every consumer of
-# a `toml::Table`/`toml::Value::Table` in `geode-shell`/`geode-app`/
-# `geode-core::config` was audited for order-dependence; the one real
-# case (`keymap::build`'s ambiguous-alias tie-break) now sorts by
-# spelling explicitly instead of relying on the table's own iteration
-# order. See the fix report for the full audit.
+# Preserve schema declaration order for columns, pickers, and categorical lists.
+# Cargo unifies this feature for consumers of the same TOML package, including
+# geode-shell and geode-app. Consumers requiring a different order must sort
+# explicitly; keymap alias tie-breaking sorts by spelling.
 toml = { version = "1.1.4", features = ["preserve_order"] }
 # Must match the version duckdb-rs re-exports, or `RecordBatch` here and
 # `RecordBatch` there are different types. Check with
 # `cargo tree -p geode-data -i arrow` before bumping.
 arrow = "58.4.0"
 chrono = "0.4.42"
-# The IANA zone database, for `[time] zone` (as-of dialog spec §3): the
-# one crate in the workspace that names a `Tz`; everything else reaches
-# a zone through `clock::Clock`.
+# IANA zone data for the configured display clock. Other crates use `clock::Clock`
+# without depending on chrono-tz or naming its `Tz` type.
 chrono-tz = "0.10"
-# The machine's own zone NAME (chrono uses this crate internally for
-# `Local`, which `clock::Clock::machine` replaces — `Local` is banned
-# workspace-wide by `clock::tests::no_crate_uses_chrono_local`).
+# Look up the machine's IANA zone name for `Clock::machine`. Display code uses
+# Clock rather than chrono's machine-local clock; a source scan enforces this.
 iana-time-zone = "0.1"
-# `source_config::SourceSpec::batch_of`/`from_doc` compile and apply the
-# user-supplied `batch_pattern` (spec §4.3). Same version geode-data used
-# before this reader moved here (Phase 4c §2.2).
+# Compile and apply source filename `batch_pattern` expressions in source_config.
 regex = "1.11.1"
 # `scopes::scope_to_table` writes the TOML table `persist_scope_to_user_config`
 # (geode-shell) merges into the user layer's `scopes.toml` — `toml_edit`

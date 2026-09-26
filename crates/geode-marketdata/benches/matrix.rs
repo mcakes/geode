@@ -13,7 +13,7 @@ use geode_core::document::Value;
 use geode_core::schema::ColumnType;
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::ColumnFormat;
-use geode_marketdata::core::draft::Draft;
+use geode_marketdata::core::draft::{DocumentBase, Draft};
 use geode_marketdata::core::matrix::MatrixModel;
 use geode_marketdata::core::spec::{
     CVI, Columns, HeaderAttr, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
@@ -21,6 +21,15 @@ use geode_marketdata::core::spec::{
 use std::hint::black_box;
 
 const BASE: &str = "2026-09-12T14:00:00Z";
+
+/// The base every edit in these benches is stamped against — one
+/// generation, so no measurement includes a `Behind` transition.
+fn base() -> DocumentBase {
+    DocumentBase {
+        as_of: BASE.to_string(),
+        generation: Some(7),
+    }
+}
 
 fn meta(name: &str, attribution: Attribution) -> ColumnMeta {
     ColumnMeta {
@@ -36,7 +45,7 @@ fn provenance() -> Provenance {
         datasets: vec![Freshness {
             dataset: "cvi_params".into(),
             as_of: Some(BASE.into()),
-            generation: 7,
+            generation: Some(7),
         }],
         as_of_request: None,
     }
@@ -236,7 +245,7 @@ fn bench(c: &mut Criterion) {
             cell,
             (labels.0.to_string(), labels.1.to_string()),
             Value::F64(i as f64),
-            BASE,
+            &base(),
         );
     }
     g.bench_function("draft_rebase_1000_edits", |b| {
@@ -254,7 +263,7 @@ fn bench(c: &mut Criterion) {
         pivot_cell,
         (pivot_labels.0.to_string(), pivot_labels.1.to_string()),
         Value::F64(42.0),
-        BASE,
+        &base(),
     );
     let mut pivot_patched =
         MatrixModel::build(&sketch, &CVI, &pivot_draft).expect("a full grid, edit painted");
@@ -277,7 +286,7 @@ fn bench(c: &mut Criterion) {
         flat_cell,
         (flat_labels.0.to_string(), flat_labels.1.to_string()),
         Value::F64(7.0),
-        BASE,
+        &base(),
     );
     let mut flat_patched =
         MatrixModel::build(&flat, &SCHEDULE, &flat_draft).expect("a flat document, edit painted");
@@ -299,7 +308,7 @@ fn bench(c: &mut Criterion) {
     let mut rows_draft = Draft::default();
     for i in 0..100 {
         let anchor = model.rows[i * 100].label.to_string();
-        rows_draft.insert_row(format!("new-{}", i + 1), Some(anchor), BASE);
+        rows_draft.insert_row(format!("new-{}", i + 1), Some(anchor), &base());
     }
     g.bench_function("model_build_values_10000x5_100_rows_spliced", |b| {
         b.iter(|| {
@@ -319,12 +328,12 @@ fn bench(c: &mut Criterion) {
             cell,
             (labels.0.to_string(), labels.1.to_string()),
             Value::F64(i as f64),
-            BASE,
+            &base(),
         );
     }
     for i in 0..100 {
         let anchor = model.rows[i * 100].label.to_string();
-        mixed_draft.insert_row(format!("new-{}", i + 1), Some(anchor), BASE);
+        mixed_draft.insert_row(format!("new-{}", i + 1), Some(anchor), &base());
     }
     g.bench_function("draft_rebase_1000_edits_100_rows", |b| {
         b.iter(|| black_box(mixed_draft.rebase(&model)))

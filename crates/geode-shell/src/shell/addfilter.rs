@@ -1,27 +1,15 @@
-//! The scope bar's "Add a filter" menu: the `+` verb opens it, anchored
-//! under the glyph, with one row per way of narrowing the frame —
-//! "Dimension…" (`frame::pick`, the dimension picker) and "Expression…"
-//! (`frame::add_expression`, the expression dialog in add mode). Each row
-//! shows its action's live binding, if any, through [`kbd::menu_binding`].
+//! The scope bar's menu for adding dimension and expression filters.
 //!
-//! Shell-owned transient state, in the stack-member list's mould
-//! ([`super::stacklist`]): the pure [`AddFilterMenu`] and its [`step`]
-//! rule, rows prepared when the menu opens (never in render), and
-//! [`render`] painting from them. `j`/`k`/`up`/`down` move, `enter`
-//! commits, `escape` closes (`input.rs`'s key branch); a row click
-//! commits and a click anywhere else closes (`render.rs`'s click catcher).
-//! A commit dispatches the row's action, so the menu is the mouse door
-//! onto the same two actions the palette lists, never a third path.
+//! The `+` control opens the menu below its glyph. Rows show live bindings
+//! through [`kbd::menu_binding`]. `j`/`k`/`up`/`down` move the selection;
+//! Enter or a row click dispatches that row's shell action. Escape or a
+//! click outside closes the menu.
 //!
-//! Why not gpui-component's `PopupMenu`/`DropdownMenu` (pinned 0.6.2):
-//! their items dispatch gpui `Action`s and label them from gpui's own
-//! keymap, while the shell's actions are string `ActionId`s resolved
-//! against its own keymap, so neither the commit nor the key label would
-//! go through the shell's doors. `PopupMenu` also takes focus and binds
-//! only `up`/`down` in its own key context, leaving `j`/`k` to a second
-//! route. The painting follows `PopupMenu`'s geometry and tokens instead:
-//! the popover surface, 26 px rows, the accent highlight, and the key
-//! lane coloured with the row.
+//! [`AddFilterMenu`] owns pure state and [`step`] owns navigation. Rows are
+//! prepared when the menu opens; [`render`] only paints them. The menu uses
+//! the shell's `ActionId` registry and keymap for dispatch and binding labels.
+//! It shares the component menu's popover surface, accent highlight, and key
+//! lane styling.
 
 use gpui::prelude::*;
 use gpui::{

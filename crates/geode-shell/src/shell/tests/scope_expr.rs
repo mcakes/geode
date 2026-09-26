@@ -1,8 +1,6 @@
-//! The scope expression dialog (command-line locality spec §4.1): the
-//! palette door, a commit through `Frame::set_scope` (so undo sees it),
-//! the inline parse error, the empty commit that clears, the expression
-//! chip's click (typing after the click must land — the mouse-opened
-//! dialog rule), and focus returning to the text field.
+//! Scope-expression integration: opening from the palette, committing through
+//! `Frame::set_scope` for undo support, parse errors, empty-expression clearing, chip
+//! clicks, and restoring focus to the text field.
 
 use super::*;
 use geode_core::scope::{Scope, parse_expr};

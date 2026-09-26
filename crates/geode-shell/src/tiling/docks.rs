@@ -49,7 +49,7 @@ pub const DOCK_MAX_SIZE: f32 = 0.50;
 ///
 /// Invariant: a dock tree never has a fullscreen tile — fullscreen is a
 /// main-tree concept (`mod+f` is a claimed no-op while a dock holds focus),
-/// and [`Dock::from_parts`] clears any fullscreen a hostile session file
+/// and `Dock::from_parts` clears any fullscreen a hostile session file
 /// smuggles in (the session layer warns; this just enforces).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Dock {

@@ -1,34 +1,14 @@
-//! Chrome geometry on the rem scale (design-guide audit, 2026-09-19).
+//! Chrome geometry scaled with the window's rem size.
 //!
-//! Every length in Geode's chrome was authored in pixels at the
-//! [`crate::fontsize::FontSize::Medium`] rem of 12 px — dialog widths,
-//! row heights, the status bar, the sidebar rail, chip radii. Text and
-//! the `p_2`/`gap_3` helpers follow `window.rem_size()` when the trader
-//! steps the font size, but a literal `px(44.)` does not, so `Large`
-//! grew the rows inside a container still sized for `Medium` and `Small`
-//! left it half empty — the design guide's "larger rows inside a stale
-//! measurement" case, and the same drift for every fixed-height strip.
+//! Design lengths are expressed in pixels at [`DESIGN_REM`], the
+//! [`crate::fontsize::FontSize::Medium`] size. [`design`] converts them to
+//! `Rems`, keeping container dimensions proportional to text when the font
+//! size changes. [`design_px`] resolves the same length to pixels for window
+//! geometry calculations.
 //!
-//! [`design`] is the one translation: a length spelled as the pixel
-//! value it was tuned at, resolved as `Rems` so it follows the rem with
-//! everything else. At `Medium` it is pixel-identical to the literal it
-//! replaced; at the other two it scales in the same ratio the text does,
-//! which is what keeps a row's content and its container in step.
-//! [`design_px`] is the same translation for the paths that do pixel
-//! arithmetic on window geometry (the tile surface in `render`, the
-//! command line's absolute strip), where a `Rems` cannot be handed in.
-//!
-//! What stays `px`: the tile rectangles from the pure tiling layout (they
-//! ARE window pixels), one-device-pixel hairlines and the 2 px divider,
-//! the drag-hit tolerance and the drag ghost (a bare outline, no text),
-//! the overlay shadow, gpui-component's own `TITLE_BAR_HEIGHT` (its
-//! constant, not ours), and table column widths: the blotter's because a
-//! view's `width = 120` is a pixel contract in the config
-//! (`view_presentation.toml`), and the market-data panel's
-//! (`LABEL_WIDTH`/`CELL_WIDTH`) because `TableDelegate::column` is
-//! answered with no window in hand — a known gap, so at `Large` a panel
-//! cell's text grows inside a column that did not (the fix is a rem
-//! handed to the delegate on each render plus a `refresh`, deferred).
+//! Use actual pixels for tiling rectangles, hairlines, divider hit areas,
+//! and other geometry independent of text size. Configured table column
+//! widths also remain pixel values.
 
 use gpui::{Pixels, Rems, rems};
 

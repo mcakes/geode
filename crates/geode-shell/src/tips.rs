@@ -1,34 +1,16 @@
-//! Tooltips (spec 2026-09-17 §5.1): what a hover says about a mouse
-//! affordance that has a keyboard twin — the title, the chord that does
-//! the same thing (from the LIVE keymap, so a trader's rebinding shows),
-//! and an optional detail line. Pure above the render section; the
-//! render helper builds the [`TipModel`] only inside the hover closure,
-//! never per frame.
+//! Tooltips show a title, the action's chord from the live keymap, and an
+//! optional detail line. The hover closure resolves [`TipModel`] when the
+//! tooltip opens, so rebinding an action updates its displayed chord.
 //!
-//! Attaching a tooltip allocates nothing of OURS per render — the model
-//! owns every string as a `SharedString` and every literal call site
-//! spells its title/selector through `SharedString::new_static` — while
-//! gpui's own `.tooltip()` plumbing (`Rc::new` of the builder at attach,
-//! plus the hover-check closures and boxed mouse listeners at paint,
-//! roughly eight small objects per stateful element per paint) is the
-//! same unavoidable cost every `on_mouse_down` in this crate already
-//! pays; an idle window draws no frame and pays nothing of either kind.
-//! Nor does this module decide the hover delay: it inherits gpui's own
-//! `DEFAULT_TOOLTIP_SHOW_DELAY` (500 ms) and sets nothing — what it
-//! decides is the content shape (title, chord, detail) and the chip
-//! formatting. And [`render_tip`] itself is built once per hover, not
-//! once per frame — but the element tree it returns is re-rendered by
-//! gpui on every frame the tooltip stays shown, which is why its own
-//! `debug_selector` closures must stay lazy (formatted only when a debug
-//! build's selector lookup actually calls them, never eagerly at
-//! `render_tip`'s own call site) rather than `format!`ed ahead of the
-//! closure the way an earlier cut of this file did.
+//! Call sites retain dynamic strings as `SharedString`s or pass literals
+//! through [`tip`]. Attaching a tooltip performs no string formatting in
+//! this module; GPUI still allocates its event and tooltip closures. The
+//! shown tooltip can render again each frame, so debug selectors remain
+//! lazy too. Hover timing uses GPUI's default delay.
 //!
-//! `Chords` is the second gpui global in the workspace, beside
-//! `linenumbers::UiSettings`, for the same reason: a module (the
-//! market-data tile's `⋯` button) has no path to `ShellView` and needs
-//! the keymap's bindings to name its own chord. The shell writes it at
-//! startup and after every keymap rebuild; modules only read it.
+//! The shell publishes [`Chords`] at startup and after keymap rebuilds.
+//! Modules read this global to label their own controls without accessing
+//! `ShellView`.
 
 use std::sync::Arc;
 
@@ -88,27 +70,13 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, h_flex, tooltip::Tooltip, v_flex};
 
-/// The tooltip closure for a site whose name and action id are
-/// literals. The model is resolved INSIDE the closure — on hover, never
-/// per frame. `try_global`: a module test fixture that never installed
-/// `Chords` paints a chord-less tooltip rather than panicking.
+/// Build a tooltip closure from a literal title, full selector (such as
+/// `"tip-sidebar-profile"`), and optional action id. Resolve the model on
+/// hover. If a test fixture has no [`Chords`] global, omit the chord.
 ///
-/// `selector` is the FULL, already-prefixed selector (`"tip-sidebar-
-/// profile"`, not `"sidebar-profile"`) — fix round 1: this function used
-/// to `format!("tip-{site}")` every call, and since `.tooltip(tips::
-/// tip(..))` is invoked inline in a render path, that `format!` ran once
-/// per chip per render rather than once per hover (charter: per-frame
-/// heap churn is a defect).
-///
-/// `selector` and `title` are both `&'static str`, built via
-/// `SharedString::new_static` rather than `.into()` — fix round 2: a
-/// literal is always spelled through `new_static`, never `.into()`
-/// (`From<&str>` inlines ≤ 23 bytes and heap-allocates above, so a site
-/// must not depend on a title's length to stay allocation-free; this
-/// crate's own impossible-chip title is 75 bytes and its selector is 25,
-/// both well past the inline cap). Every `tip()` caller passes literals
-/// (the sidebar's consts, the profile icon, the impossible chip); a
-/// caller with an owned title uses [`tip_with`] instead.
+/// Use `SharedString::new_static` for both literals so attachment avoids a
+/// string allocation regardless of their length. Callers with retained
+/// dynamic titles or selectors use [`tip_with`].
 pub fn tip(
     selector: &'static str,
     title: &'static str,
@@ -132,17 +100,10 @@ pub fn tip(
     }
 }
 
-/// As [`tip`], for a site whose selector and title are built at render
-/// time (`"tip-scope-chip-{column}"`) rather than being `&'static`. Both
-/// arrive as `SharedString`s the caller already holds (a model field
-/// built once in `build_model`/equivalent, not `format!`ed here) —
-/// fix round 1: this function used to take `site: String`/`action:
-/// Option<String>` and both `format!("tip-{site}")` and `title.into()`
-/// itself fresh every call; every action id in this codebase is a
-/// literal, so `Option<&'static str>` is the honest type and there is
-/// nothing left to build here but a clone (a refcount bump, or an
-/// inline-string copy for anything under `SmolStr`'s cap) of what the
-/// caller already owns.
+/// Build a tooltip closure from a retained title and full selector.
+/// Callers prepare dynamic strings when their model changes and pass clones
+/// here, avoiding formatting or string allocation in the render path.
+/// Action ids remain static; the model is resolved on hover as in [`tip`].
 pub fn tip_with(
     selector: SharedString,
     title: SharedString,
@@ -156,6 +117,32 @@ pub fn tip_with(
             .map(|c| c.0.as_slice())
             .unwrap_or(&empty);
         let model = TipModel::resolve(title.clone(), action, detail.clone(), bindings);
+        Tooltip::element({
+            let selector = selector.clone();
+            move |_window, cx| render_tip(&model, selector.clone(), cx)
+        })
+        .build(window, cx)
+    }
+}
+
+/// Build a tooltip closure whose chord is a fixed key the surface owns rather than a
+/// keymap action, such as a modal's Escape. `key` uses the footer hints' keystroke
+/// spelling; an unparsable spelling shows the title without a chord.
+pub fn tip_key(
+    selector: &'static str,
+    title: &'static str,
+    key: &'static str,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let title = SharedString::new_static(title);
+    let selector = SharedString::new_static(selector);
+    move |window, cx| {
+        let model = TipModel {
+            title: title.clone(),
+            chord: crate::keymap::parse_keystroke(key, crate::keymap::Modifiers::NONE)
+                .ok()
+                .map(|ks| vec![ks]),
+            detail: None,
+        };
         Tooltip::element({
             let selector = selector.clone();
             move |_window, cx| render_tip(&model, selector.clone(), cx)

@@ -1,7 +1,5 @@
-//! Shared test scaffolding for `ShellView`'s test suite (moved out of
-//! `shell/mod.rs`, Task 0 part 2 — a pure move). Each seam below is one
-//! test file, in the order the tests used to sit in the single file;
-//! helpers used by more than one seam live here as `pub(super) fn`.
+//! Shared fixtures for `ShellView` integration tests. Submodules cover individual shell
+//! behaviors; helpers used across test files live here with `pub(super)` visibility.
 
 use super::*;
 use crate::actions::ActionId;
@@ -14,19 +12,12 @@ use crate::tiling::{DockSide, Rect};
 use geode_core::config::{ConfigSources, Layer, LayerDoc};
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, div, px};
 use gpui_component::{Root, TITLE_BAR_HEIGHT};
-// `WindowExt` and (since Task 4) `Focusable` are already brought in by
-// `use super::*` (top-of-file imports in `shell/mod.rs`) — needed by
-// `handle_key_down`'s dialog guard and `filter_is_focused`/
-// `dialog_filter_is_focused`'s `.focus_handle(cx)` calls below,
-// respectively.
+// `use super::*` imports `WindowExt` and `Focusable` from `shell/mod.rs`. Dialog guards
+// and the focus helpers below use those traits.
 
-/// The test layer every shell fixture stacks on `BUILTIN_KEYMAP`: the
-/// shipped keymap has no create-a-tile chord any more (spec 2026-09-08
-/// add-tile §3.1 — tiles are added by kind from the palette), so the
-/// ~80 tests that say `ctrl-v`/`ctrl-h` keep meaning "add a recorder
-/// tile, side by side / below" through these two bindings. They are
-/// exactly the shape a desk keymap would ship (`tile::add_<kind>_*`),
-/// not a private test-only action.
+/// Fixture bindings layered over `BUILTIN_KEYMAP`: `ctrl+v` and `ctrl+h` add recorder
+/// tiles horizontally and vertically. They use the same kind-specific actions a desk
+/// keymap can bind; these chords are absent from the builtin keymap.
 pub(super) const TEST_ADD_KEYMAP: &str = "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"ctrl+v\" = \"tile::add_rec_horizontal\"\n\"ctrl+h\" = \"tile::add_rec_vertical\"\n";
 
 /// `BUILTIN_KEYMAP` + [`TEST_ADD_KEYMAP`] + `extra`, built clean.
@@ -34,12 +25,9 @@ pub(super) fn test_keymap(registry: &ActionRegistry, extra: &[LayerDoc]) -> crat
     test_keymap_with_fragments(registry, &[], extra)
 }
 
-/// [`test_keymap`] with a roster's keymap fragments spliced in at the
-/// point `main.rs` splices them (market-data documents §8.4) — above the
-/// compiled-in docs, below everything a trader edits. Every fixture here
-/// goes through this call with an empty fragment list, so the identity
-/// case is exercised by the whole suite and only a fragment test has to
-/// name it.
+/// Build the test keymap with module fragments between compiled-in docs and editable
+/// config layers, matching application startup order. Fixtures without fragments
+/// exercise the empty-fragment case.
 pub(super) fn test_keymap_with_fragments(
     registry: &ActionRegistry,
     fragments: &[LayerDoc],
@@ -70,14 +58,10 @@ pub(super) fn test_services_with_log() -> (
     (services, log)
 }
 
-/// The shell fixtures' one roster: a `RecordingFactory` of kind "rec" —
-/// the kind [`TEST_ADD_KEYMAP`]'s `ctrl+v`/`ctrl+h` add, so a shell
-/// built here really can add a tile twice and get two tiles (an add
-/// onto a *placeholder* fills it in place, spec 2026-09-08 add-tile
-/// §4.2, so a roster with no "rec" would collapse every second add into
-/// the first tile). There is no default kind (§7.1): a tile created by
-/// some *other* path — a direct `Workspaces::split_active`, or a session
-/// record naming a kind nothing registered — is a placeholder.
+/// The shared roster registers the "rec" factory used by the fixture add bindings.
+/// Adding to a placeholder fills it in place, so a real factory is necessary before a
+/// second add can create another tile. There is no default kind: bare splits and
+/// unknown restored kinds remain placeholders.
 fn services_with_rec_roster() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
@@ -87,11 +71,9 @@ fn services_with_rec_roster() -> (
     (services, log, focus)
 }
 
-/// The default bindings the fixture recorder ships when asked to
-/// (market-data documents §8.4): `q` in its own `rec` context, so a
-/// hosting test can prove a key bound by nothing but the *module* reaches
-/// the module — `TEST_ADD_KEYMAP` and the shell's own `BUILTIN_KEYMAP`
-/// bind nothing to `q`, in any context.
+/// An optional recorder fragment binds `q` in the module's `rec` context. Neither the
+/// shell nor the fixture add layer binds that key, letting tests prove a module's own
+/// binding reaches its occupant.
 pub(super) const REC_FRAGMENT: &str =
     "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"q\" = \"rec::noop\"\n";
 
@@ -114,13 +96,9 @@ pub(super) fn services_with_a_module_fragment(
     (services, log)
 }
 
-/// The fixture for insert mode (market-data spec §8.6): the recorder's
-/// own fragment, in the exact shape the market-data panel's will take —
-/// one table per mode, so the two vocabularies cannot bleed into each
-/// other. `i` opens the tile-owned input (and with it insert mode), `j`
-/// is the normal-mode motion that must NOT fire while a trader is typing
-/// in it, and `escape`/`enter` are the only two keys the module claims
-/// back while it does.
+/// Recorder insert-mode bindings use separate context tables for normal and insert
+/// modes. `i` opens an input; `j` moves only in normal mode; Escape and Enter remain
+/// module commands while typing.
 pub(super) const REC_INSERT_FRAGMENT: &str = "\
 [[bindings]]
 context = \"rec && mode == normal\"
@@ -223,16 +201,11 @@ fn services_with_rec_roster_shipping(
     // columns` then returns empty and the loop is a no-op, but the path
     // itself still runs on every test built from this fixture.
     register_pick_actions(&mut registry, &crate::shell::pickable_columns(&config));
-    // Same reasoning as `register_pick_actions` just above, for the
-    // `scope::<name>` actions (Phase 4a §3.11) — exercised here even
-    // though this config has no `[scopes]` doc, so `crate::shell::
-    // saved_scopes` returns empty and the loop is a no-op, but the
-    // startup-ordering path itself still runs on every test built from
-    // this fixture.
+    // Register saved-scope actions in startup order. This config has no scopes, so the
+    // loop is empty while still exercising the common construction path.
     register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
-    // The add rows for the recorder kind the shell tests use (spec
-    // 2026-09-08 add-tile §3.2) — `main.rs` registers these from the
-    // roster's kinds in this same slot, before `build_keymap`.
+    // Register recorder add actions from the roster before building the keymap,
+    // matching application startup.
     crate::defaults::register_add_actions(&mut registry, &["rec"]);
     let mut recorder = crate::module::recording::RecordingFactory::new("rec");
     recorder.fragment = fragment;
@@ -245,12 +218,8 @@ fn services_with_rec_roster_shipping(
     // orders it — a binding into the module's own context is what
     // `services_with_recorder`'s extra layer needs to resolve.
     roster.register_actions(&mut registry);
-    // And the modules' fragments are collected right after, from the
-    // finished roster, in `main.rs`'s own order (§8.4).
-    // Not asserted clean here: one fixture below ships a fragment that
-    // is MEANT to have a binding dropped. The callers assert what they
-    // expect instead (`services_with_a_module_fragment` clean, the
-    // dropping fixture exactly one error).
+    // Collect fragments from the finished roster. Callers assert their diagnostics
+    // because one fixture intentionally includes a binding that must be dropped.
     let (keymap_fragments, keymap_fragment_diagnostics) = roster.keymap_fragments();
     let mod_alias = default_mod();
     let keymap = test_keymap_with_fragments(&registry, &keymap_fragments, &[]);
@@ -280,10 +249,8 @@ fn services_with_rec_roster_shipping(
     (services, log, last_focus, input)
 }
 
-/// [`test_services`] plus a binding into the recording module's own key
-/// context, so a key can be seen to reach an occupant. The roster is the
-/// same one every fixture here builds — a "rec" factory and no default
-/// kind (spec 2026-09-08 add-tile §7.1).
+/// The shared services with a binding into the recording module's own context, used to
+/// verify occupant dispatch. The roster contains "rec" and has no default kind.
 pub(super) fn services_with_recorder() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
@@ -376,15 +343,9 @@ pub(super) fn shell_of(
     })
 }
 
-/// Dispatch `action` through `ShellView::dispatch` directly — the same
-/// route `dialog_test_shell_in`'s own preamble uses to open the
-/// keybinding/settings/object dialogs, reused here for a palette-only
-/// action with no keymap binding of its own (`frame::pick_book`,
-/// `scope::save_current`, …) rather than driving the palette's own
-/// filter-and-enter dance for no benefit over calling the one method
-/// every dispatch route already funnels through. Hoisted here (review
-/// finding) after `shell::tests::picker` and `shell::tests::objectdialog`
-/// each carried an identical private copy.
+/// Dispatch an action through `ShellView::dispatch`, the common path for keymap,
+/// palette, and dialog actions. Tests of palette-only actions can use it to isolate
+/// action handling from palette filtering.
 pub(super) fn dispatch_action(
     shell: &Entity<ShellView>,
     action: &str,
@@ -397,11 +358,8 @@ pub(super) fn dispatch_action(
     });
 }
 
-/// Shared scaffolding for the dock e2e tests below (dock-regions task):
-/// open a window over a fresh `ShellView`, draw once so the key
-/// dispatch tree exists, and hand back the visual context plus the
-/// downcast shell entity — the exact setup every other e2e test here
-/// builds inline.
+/// Open a fresh shell window, draw to install the key-dispatch tree, and return the
+/// visual context and shell entity for dock tests.
 pub(super) fn dock_test_shell(
     cx: &mut gpui::TestAppContext,
 ) -> (gpui::VisualTestContext, Entity<ShellView>) {
@@ -560,8 +518,7 @@ pub(super) fn dialog_filter_is_focused(
             .is_focused(window)
     })
 }
-/// Does the scope bar's live text field (Task 4, spec §3.11) currently
-/// hold focus?
+/// Whether the scope bar's live text field currently holds focus.
 pub(super) fn filter_is_focused(
     shell: &Entity<ShellView>,
     cx: &mut gpui::VisualTestContext,
@@ -575,12 +532,8 @@ pub(super) fn filter_is_focused(
             .is_focused(window)
     })
 }
-/// Layers a test-only `"g g"` sequence binding on top of the builtin
-/// keymap (spec §3.4: sequence bindings), so the status bar's
-/// pending-keystroke display (Task 4) has something real to show. The
-/// builtin keymap has no sequence bindings anymore (move-tile went
-/// direct to `ctrl+alt+arrows`), so this isolated binding is the way
-/// tests exercise a pending keystroke at all.
+/// Add a test-only `g g` sequence so pending-keystroke and which-key tests have a
+/// sequence to exercise. The builtin keymap has none.
 pub(super) fn test_services_with_gg_binding() -> ShellServices {
     let mut services = test_services();
     services
@@ -602,15 +555,9 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
     services.keymap = test_keymap(&services.registry, &[user_doc]);
     services
 }
-/// `apply_reload` is `ShellView`'s real config-hot-reload apply path
-/// (Task 1c-1); the watcher task is just what schedules calling it —
-/// gpui's test executor never advances its simulated clock on
-/// `run_until_parked` (confirmed against the pinned rev's
-/// `TestScheduler::run`, which is a plain `while step() {}` with no
-/// clock advancement), so there's no practical way to drive a ~500ms
-/// polling loop through a `#[gpui::test]`. These tests call
-/// `apply_reload` directly through the real entity instead — still a
-/// real-entity test, exercising the exact method the watcher calls.
+/// Call the real `apply_reload` path through the shell entity. The test executor's
+/// `run_until_parked` does not advance its virtual clock, so direct application
+/// isolates reload behavior from the polling timer.
 pub(super) fn config_with_mod(mod_key: &str) -> Config {
     Config::load(&ConfigSources {
         builtin: vec![

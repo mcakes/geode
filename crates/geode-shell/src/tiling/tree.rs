@@ -406,14 +406,9 @@ impl Tree {
                 // Share the same insertion rule as ID-addressed edge drops.
                 self.root = Some(insert_beside(root, focused, new, orientation, true));
             }
-            // Degenerate: root present but nothing focused. Live verbs
-            // keep focused Some whenever root is Some, and restore heals
-            // it (`Dock::from_parts` / `Workspace::from_parts` refocus
-            // the first tile) — but if some future path reconstructs this
-            // state anyway, the never-discard invariant above must hold.
-            // Recorded choice: insert at the first tree-order leaf
-            // (equivalent to focus-then-split), rather than dropping the
-            // id or panicking.
+            // A nonempty tree without focus still needs an insertion point.
+            // Use the first leaf, preserving both the existing tiles and the new
+            // ID. Normal actions and session restoration maintain focus already.
             (Some(root), None) => {
                 let mut leaves = Vec::new();
                 collect_leaves(&root, &mut leaves);
@@ -538,6 +533,13 @@ impl Tree {
         out
     }
 
+    /// The number of slots [`Tree::layout`] paints when no tile is
+    /// fullscreen: one per leaf and one per stack (only its active member
+    /// shows). Counted without allocating, so render may ask every frame.
+    pub fn slot_count(&self) -> usize {
+        self.root.as_ref().map_or(0, count_slots)
+    }
+
     /// The geometric neighbor of the focused tile in `dir`, per the visible
     /// layout: nearest facing edge within EPS, positive perpendicular
     /// overlap, ties broken by larger overlap.
@@ -640,7 +642,7 @@ impl Tree {
     /// found, returns false.
     ///
     /// Never partially applies: both new ratios are computed first, and if
-    /// either would drop below [`MIN_RATIO`] nothing changes and this
+    /// either would drop below `MIN_RATIO` nothing changes and this
     /// returns false.
     pub fn move_divider(&mut self, dir: Direction, delta: f32) -> bool {
         let Some(focused) = self.focused else {
@@ -1140,6 +1142,15 @@ fn remove_leaf(node: Node, target: TileId, done: &mut bool) -> Option<Node> {
     }
 }
 
+/// [`layout_node`]'s slot rule without the geometry: must emit exactly one
+/// count wherever `layout_node` pushes one rect.
+fn count_slots(node: &Node) -> usize {
+    match node {
+        Node::Leaf(_) | Node::Stack { .. } => 1,
+        Node::Split { children, .. } => children.iter().map(count_slots).sum(),
+    }
+}
+
 fn layout_node(node: &Node, rect: Rect, out: &mut Vec<(TileId, Rect)>) {
     match node {
         Node::Leaf(id) => out.push((*id, rect)),
@@ -1220,6 +1231,25 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn slot_count_matches_the_unmaximised_layout() {
+        let mut t = Tree::default();
+        assert_eq!(t.slot_count(), 0);
+        t.split(TileId(1), Orientation::Horizontal);
+        t.split(TileId(2), Orientation::Horizontal);
+        t.split(TileId(3), Orientation::Vertical);
+        assert!(t.stack_after(TileId(3), TileId(4)));
+        assert_eq!(t.tiles().len(), 4);
+        assert_eq!(t.slot_count(), 3);
+        assert_eq!(t.slot_count(), t.layout(Rect::UNIT).len());
+        t.toggle_fullscreen();
+        assert_eq!(
+            t.slot_count(),
+            3,
+            "the count ignores fullscreen; layout's fullscreen filter is the caller's"
+        );
     }
 
     #[test]
@@ -1940,10 +1970,8 @@ mod tests {
 
     #[test]
     fn close_nested_tile_focuses_tree_order_neighbor() {
-        // Using the 2x2 grid fixture: tiles in tree order are [1, 4, 2, 3]
-        // Close tile 1 (at index 0): should focus tile 4 (at new index 0, which was 1)
-        // This shows the neighbor rule applies to nested leaves where old behavior
-        // would have also focused the first leaf, but now we follow tree order.
+        // Closing the first leaf in the nested grid selects the next leaf in
+        // tree order: tile 4 moves from index 1 to index 0.
         let mut tree = grid(); // tiles: [1, 4, 2, 3], focused: 1
         tree.close(); // closes tile 1 at index 0
         assert_eq!(tree.tiles(), vec![TileId(4), TileId(2), TileId(3)]);

@@ -109,10 +109,10 @@ registers the concrete CVI and dividend kinds.
 delivery or structural edit. Ordinary cell commits patch it when possible;
 editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base identified by the document's source time.
-The default Hold policy retains the base snapshot when available after a
-document with a different source time arrives. `:auto` selects how later
-deliveries resolve such a transition:
+Edits live in a `Draft` over a base identified by the document's source time
+**and the store generation the read named**. The default Hold policy retains
+the base snapshot when available after a document with a different generation
+arrives. `:auto` selects how later deliveries resolve such a transition:
 
 | Policy | Effect on unsent edits |
 |---|---|
@@ -121,7 +121,7 @@ deliveries resolve such a transition:
 | Replace | Discard edits and report how much unsent work was replaced |
 
 Changing policy does not retroactively apply it to a held delivery. Redelivery
-of the same source time does not trigger it, and the first usable delivery
+of the same generation does not trigger it, and the first usable delivery
 after session restoration uses Hold. If the saved base is unavailable, a
 restored Behind draft paints the delivered grid while withholding unresolved
 cell edits. Automatic rebase also holds when the
@@ -129,10 +129,21 @@ incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
 
-Source time is not an immutable generation id: a historical delivery can also
-put the draft Behind, while different contents republished with the same time
-are indistinguishable to this transition logic. Returning to the base time
-restores Editing. The module supports numeric, date, text, and closed-choice
+A base is a generation, not an instant. A historical delivery puts the draft
+Behind, and so does a corrected republish at the same source time: the
+generation differs even when the time does not. Such a delivery always produces
+a notice naming the republish, because the `update HH:MM` badge and the
+source-time chip both carry the base's own time and would otherwise report
+nothing new — held, the notice offers `:rebase` and `:revert`; automatically
+rebased, it says the edits were moved, since nothing is left pending. A
+disclosure the policy already made, of replaced or dropped work, outranks it.
+Returning to the base generation, or a redelivery of the same one, is not a
+republish and says nothing. A document read names its generation under both
+live and historical as-of, so an open draft normally has one; where nothing
+named it — a session file written before the generation was saved — the
+comparison falls back to source time alone, which cannot see a republish.
+
+The module supports numeric, date, text, and closed-choice
 cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
@@ -188,9 +199,11 @@ notice naming it and leaves the visible draft alone. Session restoration also
 restores nonempty drafts as Editing; upload status and echo tracking are not
 saved.
 
-A Sent draft compares the next delivered generation with a different source
-time against the submitted document. Comparison ignores row order and minted
-row labels, compares attributes, and allows one ULP for floating-point values.
+A Sent draft compares the next delivered generation against the submitted
+document once that generation differs from the base — a different source time,
+or the same time at a different store generation. Comparison ignores row order
+and minted row labels, compares attributes, and allows one ULP for
+floating-point values.
 Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
 the next edit. This is a content match, without an upstream correlation id.
 
@@ -252,6 +265,27 @@ expression ordering and no cycle to refuse. A name that fits more than one
 series, including a pair loaded twice under two rules, is refused rather than
 resolved to either. A long expression's chip label is cut to 24 characters
 ending in `…`.
+
+The expression field (`x`, or `e` on an expression) completes loaded series
+names, the only names an expression may reference. The name at the caret is
+the run the expression tokenizer reads as one reference (an identity with an
+optional `@source`), so `SPX.close/VI` completes `VI`; a caret just before a
+name's first character is in that name, and a caret in a number offers
+nothing. Loaded names that name exactly one series are ranked against
+it with the `:` line's matcher; an empty name (an empty field, or after an
+operator, a parenthesis or a space) offers every one. The list hangs under the
+field over the chart, showing at most eight rows that scroll with the lit row;
+with nothing loaded it says so and names `a`. Tab writes the lit name over the
+name at the caret and repeated Tab cycles the same list; Shift+Tab cycles
+back, and a first Shift+Tab writes the last. The lit row is the name last
+written. A row click writes that name the same way and leaves the keyboard in
+the field. Enter first writes in a typed name that is not exact but matches
+exactly one loaded name, then commits; with several matches it commits the
+text as typed and the resolver names the unknown reference, and the list is
+re-ranked against the expanded text. Each completion is one edit in the
+field's undo history. A caret moved without typing, including after a Tab,
+re-ranks on the next Tab, not before; the list itself shows the ranking from
+the last edit. A change of the desk's default source relabels an open list.
 
 A tile's session table is written with `version = 2`. A table without it
 may name series in expression text by slot handle (`s3`), and restore
@@ -377,8 +411,8 @@ not. See the [measurement log](../perf.md) for conditions and timings.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
-allowing the market-data panel and as-of dialog to share behavior without
-depending on each other.
+allowing the market-data panel, pricer expiry editor, timeseries date editor,
+and as-of dialog to share behavior without depending on each other.
 
 ## Diagnostics
 
@@ -458,16 +492,24 @@ largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
-row, so roots share one leading edge and legs sit one step in; the entry row
-opens at the depth it will land at. A long tree label or text cell ends in
-`…`; a number never truncates. Cell text is floored to the readable ratio on
-the row's own ground and on the table's hover and selected-row grounds.
+row, so roots share one leading edge and legs sit one step in. Column 0
+carries structure only: the depth indent, the chevron slot and a package's
+template token (`CS`, `CUSTOM`); a line or leg has no tag. Find (`/`, `n`,
+`N`) still matches each row's full shorthand, which no column paints. A long
+text cell ends in `…`; a number never truncates. Cell text is
+floored to the readable ratio on the row's own ground and on the table's
+hover and selected-row grounds.
+
+The entry bar sits between the header and the column headers. A muted label
+names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
+parse error or a refused insert keeps the text and shows the reason under
+the field in danger text; any edit clears it. "Add lines…" from the palette
+while the bar is open keeps its text and place and focuses its field again.
 
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
 Lines, packages, and an open package's legs are numbered in painted order —
-the index `NG` jumps to. The entry placeholder is blank and does not shift the
-numbers below it, since no motion lands on it. Relative mode shows distance
+the index `NG` jumps to. Relative mode shows distance
 from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
@@ -481,7 +523,7 @@ Normal-mode keys:
 
 | Keys | Effect |
 |---|---|
-| `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
+| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `escape` closes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -504,8 +546,9 @@ the same reason.
 
 The underlying, type, and barrier-type cells edit through a typeahead. The
 underlying list offers the sheet's own underlyings and also takes free text.
-Ranking is a case-insensitive subsequence match, so the top-ranked option is
-only a guess: `enter` commits the highlighted underlying only when the query
+Ranking is the shared fuzzy match (see
+[input and dialogs](input-and-dialogs.md#filtering-choice-and-movement)), so
+the top-ranked option is only a guess: `enter` commits the highlighted underlying only when the query
 equals it (in any case) or the highlight was moved with `up`/`down` or a row
 click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
@@ -534,14 +577,17 @@ edit, and an empty shift on an inherited shift stays inherited. An explicit
 shift is a change from inherited to own even when it equals the inherited
 value.
 
-Open editors and the entry field paint no field chrome: no background, border,
+Open editors paint no field chrome: no background, border,
 radius, or horizontal padding. Their text sits where the cell's text sat
 (numbers right-aligned, text left) at the row's height, and the cell's cursor
 border is the only frame. The date field's segments are flush.
 
-A grid click cancels an editor or entry field before acting on the painted
-row's identity. Removing an entry placeholder therefore cannot redirect the
-click to a neighboring row. Clicking the placeholder itself only closes it.
+A grid click closes an open editor or the entry bar, then acts on the row it
+hit. Closing the bar moves the table up on screen, so a double-click whose
+first press closed it edits the line that press hit, not the row that slid
+under the pointer; the hand-off lasts for the next press only. A chevron
+press that closes the bar hands off the same way, so the cursor stays on the
+package it toggled.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 
@@ -567,9 +613,10 @@ tile holds:
   the other sheet (`loading…` until it answers). If that sheet has a save
   still queued, the read waits for the save's answer before it is sent:
   reads and saves run on different lanes, so an earlier read could return
-  the generation before the save. A restored tile waits the same way. Undo history, open packages,
-  the cursor, and the save state stay with the sheet left behind, and pricing
-  in flight for it is cancelled. A sheet open in another tile is refused
+  the generation before the save. A restored tile waits the same way. Switching
+  sheets clears undo history, package expansion, cursor, and per-sheet save
+  state, and cancels pricing in flight for the outgoing sheet. A sheet open in
+  another tile is refused
   (`sheet 'x' is open in another tile`). The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place.
@@ -685,9 +732,9 @@ latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already
 queued. An empty sheet publishes nothing.
 
-Quitting the app saves every unsaved sheet at once, before the data service is
-told to stop, and the writer runs the app's queued saves and removals before
-it exits.
+Quitting the app attempts to queue every unsaved sheet before stopping the data
+service. The writer drains queued local saves and removals, subject to the
+request-capacity and quit-time limits below.
 
 If a sheet's document fails to load (its rows do not decode, or the store
 answers with an error), the tile shows an empty fallback and the save slot
@@ -712,7 +759,8 @@ saved). A new tile takes the next free `untitled-N` name, skipping names open
 in another tile, known documents, and names with a save still queued.
 **Known limitation:** before the first catalog arrives a new tile can pick an
 `untitled-N` that already has a document this session has not seen; its first
-save adds a generation to that document (history is kept, nothing is lost).
+save adds a generation to that document, replacing its live contents. Previous
+generations remain available only within the retention limit.
 
 **Known limitations** of storage:
 

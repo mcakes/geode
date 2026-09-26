@@ -47,14 +47,15 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
+use crate::core::complete::{Write, expand_unique};
 use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{
-    Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+    Range, Rgb8, chart, color_from_pick, menu, request, resolve, session, within_a_step,
 };
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
+    ColorPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
     PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
     render_series_popup,
 };
@@ -89,7 +90,7 @@ struct ChartKey {
     /// Read by `Model::label` for a slot whose source is not the default.
     default_source: Option<String>,
     /// The two inputs to `color_fn`: a slot's color is resolved INTO
-    /// the chart model, so a theme change or a reloaded `colours.toml`
+    /// the chart model, so a theme change or a reloaded `colors.toml`
     /// (a fresh `Arc`, which is what `set_colours` swaps in) is a chart
     /// change.
     theme: [Hsla; 28],
@@ -199,6 +200,10 @@ impl TimeseriesTile {
         // (an `@source` is shown only when it is NOT the default), so a
         // settings change is a chrome change even with no slot touched.
         cx.observe_global::<SeriesSettings>(|this, cx| {
+            // The default source decides which labels are bare, so an open
+            // expression field's list is relabelled rather than left
+            // offering a name that no longer resolves.
+            this.refresh_expr_completion(cx);
             this.rebuild_chrome(cx);
             cx.notify();
         })
@@ -1081,7 +1086,7 @@ impl Render for TimeseriesTile {
                     target,
                     div()
                         .debug_selector(move || {
-                            format!("timeseries-colour-picker-{tile_id}-{target}")
+                            format!("timeseries-color-picker-{tile_id}-{target}")
                         })
                         .child(
                             ColorPicker::new(&c.picker)
@@ -1095,7 +1100,7 @@ impl Render for TimeseriesTile {
             _ => None,
         };
         let expr_field = match self.popup.as_ref() {
-            Some(Popup::Expr(f)) => Some(header::render_expr_field(f, theme)),
+            Some(Popup::Expr(f)) => Some(header::render_expr_field(f, &tile, tile_id, cx)),
             _ => None,
         };
         let header = div()

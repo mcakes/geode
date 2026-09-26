@@ -1,28 +1,14 @@
-//! Degradation vocabulary (spec §5.7). Data problems are never modal and
-//! never fatal: a failed load leaves live untouched and degrades this
-//! file's health.
+//! Shared source-health states for ingestion and diagnostics. A failed load
+//! leaves the last good generation live and records its failure reason.
 //!
-//! **`Ord` is variant order, which is severity order — but a rollup
-//! must NOT use it.** Once two values share a variant the derive falls
-//! through to comparing the `reason` STRING, and two simultaneous
-//! `Degraded`s are ordinary (a malformed sentinel from discovery, a
-//! carried-dimension violation from a publish), so `max`/`>` picks
-//! whichever reason sorts later and silently drops the other finding.
-//! That was Phase 4b's NEW-5, and this doc's earlier wording ("Ord is
-//! severity order so a rollup can take the worst") is what invited it.
-//! Roll up with an explicit rank over the variants —
-//! `geode_data::health::severity_rank` is the one in use — and keep
-//! the derive for what it is fit for: sorting a list of states for
-//! display, and the equality half.
+//! Variants are declared in increasing severity, but derived `Ord` also compares
+//! reason strings within a variant. Health rollups must compare explicit severity
+//! ranks and preserve simultaneous findings; taking `max` over `Health` values
+//! would choose one reason by lexical order. The data layer uses its internal
+//! `health::severity_rank` for this purpose.
 //!
-//! Lives in `geode-core` (Phase 4b Task 4), not `geode-data`, for the
-//! same reason `Scope`/`AsOf`/`QueryKey` do (`geode_core::query`'s own
-//! module doc): `geode_shell::diagnostics::SourceState` carries a
-//! `Health`, and `shell` and `data` may never depend on each other
-//! (CLAUDE.md) — so this sits below both. `geode_data::health`
-//! re-exports this type under its old path so every existing
-//! `geode_data::health::Health` / `crate::health::Health` reference in
-//! that crate keeps compiling unchanged.
+//! This type lives below both the shell and data crates so diagnostics can carry
+//! health without a dependency between those crates.
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Health {
@@ -83,12 +69,8 @@ impl Health {
 mod tests {
     use super::*;
 
-    /// Variant order is severity order — which is all this proves, and
-    /// all the derive is fit for (see the module doc: a ROLLUP must use
-    /// an explicit rank, because the derive orders two same-variant
-    /// values by their `reason` text). Renamed from
-    /// `health_orders_by_severity_so_rollups_take_the_worst`, whose name
-    /// blessed exactly the reading that produced Phase 4b's NEW-5.
+    /// Variants sort in severity order. This does not establish a valid rollup:
+    /// same-variant values also compare their reason text.
     #[test]
     fn variants_are_declared_in_severity_order() {
         let mut states = [

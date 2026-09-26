@@ -1,9 +1,7 @@
-//! The grouping picker (2026-09-19): the toolbar readout's click, the
-//! `frame::grouping` chord (`mod+g`, dispatched here as the literal
-//! `alt-g` — `test_services()` builds its keymap with `default_mod()`,
-//! the same convention `asof.rs` follows), typeahead + `enter`, the
-//! digit jump, a row click, and the two "nothing happens" arms: an
-//! empty slot's digit, and a query that matches nothing.
+//! Grouping-picker integration: toolbar clicks, `frame::grouping` (`mod+g`), typeahead,
+//! digit navigation, and row clicks. Empty-slot digits and unmatched queries leave the
+//! grouping unchanged. The fixture's default modifier is Alt, so the chord is
+//! dispatched as `alt-g`.
 
 use super::*;
 use geode_core::groupings::GroupingSlots;
@@ -279,11 +277,8 @@ fn hovering_the_readout_names_the_chord(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Toolbar restyle (2026-09-19, option A): the grouping readout reads
-/// as a dropdown trigger — a trailing chevron — and stays visibly
-/// "open" while the picker it owns is up (design guide: a control that
-/// owns a popup remains pressed until it closes), returning to rest
-/// when the picker is dismissed.
+/// The grouping trigger paints a trailing chevron and remains visibly pressed while its
+/// picker is open, returning to rest on dismissal.
 #[gpui::test]
 fn the_readout_paints_a_chevron_and_reads_open_while_the_picker_is_up(
     cx: &mut gpui::TestAppContext,

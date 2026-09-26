@@ -1,5 +1,5 @@
-//! The scope bar: undo/redo chords (Task 3). Task 4 extends this file
-//! with the painted bar itself.
+//! Scope-bar rendering, undo and redo, input sessions, chord dispatch, and focus
+//! restoration.
 
 use super::*;
 use crate::shell::objectdialog;
@@ -16,18 +16,9 @@ fn book_scope(book: &str) -> Scope {
     }
 }
 
-/// `mod+z`/`mod+shift+z` (spec §3.6) dispatched here as literal
-/// `ctrl-z`/`ctrl-shift-z` — a non-default alias, proving the bindings
-/// aren't hardcoded to `alt`. Built directly with `Modifiers::CTRL`
-/// rather than through `mod_alias_from_config`: config no longer offers
-/// this alias at all (Task 4b, Phase 4a user ruling — `keymap.mod =
-/// "ctrl"` is refused as invalid config), so this helper feeds the raw
-/// `Modifiers` value straight to `build_keymap`, the same way
-/// `defaults.rs`'s own `resolve` test helper exercises the matcher
-/// directly. The config carries no `[keymap] mod` doc at all (an earlier
-/// version of this helper loaded one, redundantly, since it was never
-/// run through `mod_alias_from_config`) — an empty config proves the
-/// point just as well.
+/// Build the keymap with raw `Modifiers::CTRL` to prove `mod+z` and `mod+shift+z` are
+/// not hardcoded to Alt. This bypasses config parsing deliberately: `ctrl` is not an
+/// accepted configured alias, but the matcher accepts a supplied modifier value.
 fn test_services_with_ctrl_alias() -> ShellServices {
     let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
     let mut registry = ActionRegistry::default();
@@ -94,10 +85,7 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_the_scope(cx: &mut gpui::TestAppContext
 fn typing_in_the_field_sets_the_frame_text_per_keystroke_and_enter_blurs(
     cx: &mut gpui::TestAppContext,
 ) {
-    // `test_services()` builds its keymap with `default_mod()` (spec
-    // §3.1: Alt) — `test_services_with_ctrl_alias` above exists precisely
-    // because that default is Alt, not Ctrl, so `mod+/` resolves to
-    // `alt+/` here.
+    // The fixture uses `default_mod()` (Alt), so `mod+/` resolves to `alt+/`.
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     // `InputState`'s own `Focus`/`Blur` events fire from the focus-path
@@ -183,14 +171,8 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    // Pre-focus state: text = "old", pushed onto undo by the ordinary
-    // (non-session) `set_text` path. A first cut of the escape fix (fix
-    // round 1, Finding 1) let a *second*, spurious entry bury this one:
-    // it called `end_scope_session` first and reverted through the
-    // ordinary `set_text`, which runs outside the session and so pushed
-    // the just-typed, now-abandoned "new" scope too — leaving the
-    // session's own coalesced entry (this "old" scope) buried
-    // underneath it. A single `undo_scope` then resurrected "new".
+    // Set the pre-session text through the normal history path. Canceling the later
+    // editing session must not push the abandoned text as another undo entry.
     frame.update(&mut vcx, |f, cx| {
         if f.set_text(Some("old".into())) {
             cx.notify();
@@ -212,16 +194,9 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
         "escape must restore the pre-focus text"
     );
 
-    // Phase 4b M2: the session coalesced its one entry (the pre-focus
-    // "old" scope, recorded on the session's first divergence, when
-    // typing started) rather than pushing a second one for the abandoned
-    // "new" — and since the session ends exactly where it began (Escape
-    // reverted all the way back to "old"), `end_scope_session` pops that
-    // now-pointless entry back off. So a single `undo_scope` walks
-    // straight past the whole focus/type/escape episode to the scope
-    // from before "old" was ever set — "new" never appears anywhere in
-    // the history, and neither does a phantom step that would have
-    // landed back on "old" (a value no-op) for nothing.
+    // Escape restores the session's original scope and removes its now-redundant undo
+    // entry. One undo must skip the whole canceled editing session, with neither the
+    // abandoned value nor a no-op step in history.
     assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
     assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
 
@@ -257,10 +232,8 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
 }
 
-/// The `save` chip (scope-save spec's amendment) is withdrawn while the
-/// frame's scope is empty — nothing to save — and appears the moment it
-/// isn't; clicking it opens the Scopes dialog's naming prompt seeded
-/// from the frame, the mouse form of `scope::save_current`.
+/// The save chip appears only for a nonempty frame scope. Clicking it opens naming
+/// seeded from the frame, matching `scope::save_current`.
 #[gpui::test]
 fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -299,9 +272,8 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
             .map(|d| d.naming_seed.clone())),
         Some(objectdialog::NameSeed::FromFrame)
     );
-    // The naming field keeps the focus the open gave it through the rest
-    // of the mouse-down (`open_shell_dialog_with_key`'s `prevent_default`,
-    // grouping-picker work 2026-09-19) — the same defect the `+` chip had.
+    // The naming field retains focus through the opening mouse-down because the dialog
+    // helper prevents the default focus transfer.
     vcx.simulate_input("eu");
     vcx.run_until_parked();
     assert_eq!(
@@ -413,10 +385,8 @@ fn services_with_saved_scope() -> ShellServices {
     }
 }
 
-/// F4 (final fix wave, whole-branch review): spec §3.11's `scope::<name>`
-/// action per saved scope, built the same way `frame::pick_<column>` is
-/// (`defaults::register_scope_actions`, dispatched in `input.rs` by
-/// stripping the `scope::` prefix).
+/// Each saved scope has a `scope::<name>` action registered by `register_scope_actions`
+/// and dispatched through the shell's scope-action path.
 #[gpui::test]
 fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_saved_scope());
@@ -439,11 +409,8 @@ fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// A chord typed into the focused text field still dispatches its shell
-/// binding (user ruling 2026-09-12: "when focused on a text field, key
-/// bindings with modifier keys should still work — `ctrl+k`, `ctrl+,`").
-/// A shift-only keystroke is typing, never a chord: `shift+d` is `D` in
-/// the field, not `workspace::duplicate_horizontal`.
+/// Chords still dispatch from the focused text field. Shift alone remains typing:
+/// `shift+d` enters `D` instead of duplicating the workspace tile.
 #[gpui::test]
 fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
     cx: &mut gpui::TestAppContext,
@@ -616,12 +583,8 @@ fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppCont
     );
 }
 
-/// A dialog launched from the focused text field hands focus back to
-/// the field when it closes (user ruling 2026-09-12: "if I'm focused on
-/// the text field, launch a dialog, and dismiss it with Esc, I'd expect
-/// focus to return to the text field"). A dialog launched from the shell
-/// root still returns to the root (`settings_open_opens_the_modal` and
-/// friends pin that half).
+/// Closing a dialog restores focus to the surface that launched it. A dialog opened
+/// from the scope field returns there; root-launched dialogs are covered separately.
 #[gpui::test]
 fn a_dialog_opened_from_the_field_returns_focus_to_it_when_closed(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -708,12 +671,9 @@ fn a_dialog_opened_through_the_palette_from_the_field_returns_focus_to_the_field
     );
 }
 
-/// Toolbar restyle (2026-09-19, option A): a selection chip's `×` is
-/// painted INSIDE the chip's own frame — one control with two hit zones
-/// — rather than as a sibling equidistant from the chips on either side
-/// of it. Clicking the `×` drops the dimension and, because the glyph
-/// occludes the body's hitbox, does NOT also open the picker the body's
-/// mouse-down would.
+/// The selection chip contains its close glyph within the same frame. Clicking the
+/// glyph removes the dimension without also opening the picker through the chip body's
+/// handler.
 #[gpui::test]
 fn the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker(
     cx: &mut gpui::TestAppContext,
@@ -776,10 +736,8 @@ fn the_bar_divides_grouping_from_scope_with_a_hairline(cx: &mut gpui::TestAppCon
     );
 }
 
-/// The text layer is shown by the field itself, which mirrors the
-/// frame's text while unfocused; the `text "…"` chip that used to repeat
-/// it is gone. The field's own clear glyph drops the text layer through
-/// the same subscription typing uses.
+/// The unfocused scope field mirrors the frame's text. Its clear glyph drops the text
+/// layer through the same subscription used for typing.
 #[gpui::test]
 fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -817,4 +775,80 @@ fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui:
         frame.read_with(&vcx, |f, _| !f.scope().dimensions.is_empty()),
         "only the text layer went"
     );
+}
+
+/// Press at `at` and drag a few pixels with the left button held, the
+/// gesture `TitleBar` turns into a window move: its bubble-phase
+/// mouse-down arms a move and its next mouse move calls
+/// `start_window_move`, which the test platform leaves `unimplemented!`
+/// — so a press the title bar still sees panics here.
+fn press_and_drag(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::default());
+    vcx.simulate_mouse_move(
+        at + gpui::point(gpui::px(6.), gpui::px(0.)),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::default(),
+    );
+    vcx.simulate_mouse_up(
+        at + gpui::point(gpui::px(6.), gpui::px(0.)),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    vcx.run_until_parked();
+}
+
+/// A point on bare title-bar space: left of the grouping readout, level
+/// with the scope field.
+fn bare_title_bar(vcx: &mut gpui::VisualTestContext) -> gpui::Point<gpui::Pixels> {
+    let field = vcx.debug_bounds("scope-field").expect("field painted");
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    gpui::point(readout.left() - gpui::px(24.), field.center().y)
+}
+
+/// A drag that starts on a title-bar control belongs to the control —
+/// text selection in the field, nothing on a chip or verb — never to the
+/// window: each control occludes the title bar's drag surface. Nor may
+/// the press leave the title bar's move armed: a control whose press
+/// opens an occluding popup hides the drag and the release from the
+/// title bar, and an armed move then fires on the next plain hover over
+/// bare title-bar space.
+#[gpui::test]
+fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(book_scope("BK000"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+
+    for selector in [
+        "scope-field",
+        "scope-chip-book",
+        "scope-pick-chip",
+        "scope-grouping",
+    ] {
+        let bounds = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} painted"));
+        press_and_drag(&mut vcx, bounds.center());
+        // Close whatever the press opened before the next control.
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        let bare = bare_title_bar(&mut vcx);
+        vcx.simulate_mouse_move(bare, None, gpui::Modifiers::default());
+        vcx.run_until_parked();
+    }
+}
+
+/// The probe above is live: the same drag from bare title-bar space
+/// does reach `start_window_move`.
+#[gpui::test]
+#[should_panic(expected = "not implemented")]
+fn dragging_from_bare_title_bar_space_moves_the_window(cx: &mut gpui::TestAppContext) {
+    let (_window, mut vcx) = open_shell(cx, test_services());
+    vcx.run_until_parked();
+    let bare = bare_title_bar(&mut vcx);
+    press_and_drag(&mut vcx, bare);
 }

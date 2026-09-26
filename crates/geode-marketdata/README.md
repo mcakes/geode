@@ -11,7 +11,8 @@ any other key cancels and is consumed. The frame and painted generation must
 both be live, and the tile allows only one outstanding upload.
 
 Transport success marks an unchanged Editing draft Sent. A later document
-generation is compared separately: a matching echo clears the draft, while a
+generation — a different source time, or the same time at a different store
+generation — is compared separately: a matching echo clears the draft, while a
 different echo retains it over its base. Switching underlying gives up that
 draft's echo check; an outstanding outcome for another underlying is only a
 notice. Request admission and transport success do not establish publication.
@@ -24,7 +25,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
-| `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. |
+| `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. `DocumentBase` (source time and store generation) is the base a delivery is compared against. |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |

@@ -16,10 +16,11 @@ Keyboard ownership, palette, completion, choices, and frame-picker contracts:
 
 ## Layout
 
-The crate is split into pure cores, tested without a window, and the gpui
-surfaces that consume them.
+State and configuration helpers are separated from window integration.
+Many helpers have pure models tested without a window; some also publish
+GPUI globals or provide rendering helpers.
 
-**Pure cores (no gpui)**
+**State, configuration, and shared helpers**
 
 | Module | Holds |
 |---|---|
@@ -36,7 +37,7 @@ surfaces that consume them.
 | `perf` | The always-compiled frame-time histogram. |
 | `defaults` | The builtin action set and keymap, the Builtin config layer. |
 
-**gpui surfaces**
+**Window integration**
 
 | Module | Holds |
 |---|---|
@@ -56,7 +57,7 @@ wide and module visible.
 - `test-support` exposes `module::recording` and a few accessors outside
   `#[cfg(test)]`, so the module crates' tests can host a recorded
   neighbour. CI checks `cargo check -p geode-shell --features test-support
-  --all-targets` because nothing else keeps that configuration building.
+  --all-targets` to cover the public hosting-test configuration.
 - `profiling` turns on gpui's own profiler (frame and input-latency
   histograms, the debug overlay, hang detection) and the two shell actions
   that surface it. Enabled through `geode-app`'s same-named feature.
@@ -85,6 +86,10 @@ change most often hits:
   `prevent_default` inside that door.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
   the only thing that moves focus or writes the shared `Input`.
+- A multi-screen dialog registers its back step with `dialog::set_back`.
+  The title row paints the Back button only while the step is available, and
+  the step must be the transition Escape's back step runs, so pointer and key
+  cannot leave different screens.
 - Object edit stages select rows with row commands or nested editors through
   `Draft::is_cursor_stop`. Motion uses `move_selection`; resets use
   `settle_selection`. Lists with no eligible row retain the keyboard selection,

@@ -1746,6 +1746,63 @@ role = "key"
         );
     }
 
+    /// "Add lines…" committed from the shell palette while the bar is open
+    /// leaves the bar, its text, and focus in its field. The palette's
+    /// commit returns focus to the shell root before it dispatches, so an
+    /// open bar that kept only its text would read `mode == insert`
+    /// without holding focus, and a shifted letter would reach a shell
+    /// binding (`shift+d` is `workspace::duplicate_horizontal`).
+    #[gpui::test]
+    fn a_palette_add_on_an_open_bar_keeps_typing_in_its_field(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let count = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().filter(|x| *x == h).count()
+        };
+        vcx.simulate_keystrokes("o");
+        vcx.simulate_input("SPX ");
+        vcx.run_until_parked();
+        assert_eq!(count("pricer::add_below"), 1, "fixture: `o` opened the bar");
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(count("palette::toggle"), 1, "fixture: the palette opened");
+        vcx.simulate_input("Add lines");
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            count("pricer::add_below"),
+            2,
+            "fixture: the palette dispatched the add"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.run_until_parked();
+        assert_eq!(
+            count("workspace::duplicate_horizontal"),
+            0,
+            "a capital typed after the palette add ran a shell binding"
+        );
+        assert_eq!(
+            tile.read_with(&vcx, |t, cx| t.entry_text(cx)).as_deref(),
+            Some("SPX D"),
+            "the text kept and the capital appended"
+        );
+    }
+
     /// The expiry's date field is insert focus for the shell too, though
     /// it is not a text input: a shifted letter typed into it is no shell
     /// binding (`shift+d` is `workspace::duplicate_horizontal`), digits

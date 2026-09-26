@@ -10,6 +10,7 @@ use crate::tile::{LOADING, PricerTile};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
+use geode_shell::fonts;
 use geode_shell::module::StackHandle;
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
@@ -17,8 +18,11 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div};
-use gpui_component::{Theme, h_flex};
+use gpui::{
+    ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div, relative,
+};
+use gpui_component::input::{Input, InputState};
+use gpui_component::{Theme, h_flex, v_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
@@ -240,7 +244,7 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
                     .child(n),
             )
         })
-        // The armed `:rm` confirm (planning decision 14): the question in
+        // The armed `:rm` confirm: the question in
         // the primary text tone — a decision awaiting the trader, not a
         // warning — on the element that holds the keyboard while it
         // stands. Its `on_key_down` sits on the focused element and so
@@ -345,6 +349,63 @@ pub(crate) fn render_footer(text: Option<&SharedString>, theme: &Theme) -> impl 
         .text_color(chip_paint(theme, Tone::DangerText).text)
         .debug_selector(|| "pricer-footer".into())
         .children(text.cloned())
+}
+
+/// The entry bar (entry-bar spec §4) between the header and the table:
+/// where `enter` lands, muted, then a one-line borderless field, and a
+/// refused `enter`'s reason under it in danger text. The reason sits
+/// beside the text that caused it rather than in the footer, as the
+/// timeseries expression strip does.
+pub(crate) fn render_entry_bar(
+    input: &Entity<InputState>,
+    label: &SharedString,
+    error: Option<&SharedString>,
+    theme: &Theme,
+) -> impl IntoElement {
+    let danger = chip_paint(theme, Tone::DangerText).text;
+    v_flex()
+        .w_full()
+        .px_2()
+        .py_1()
+        .gap_0p5()
+        .border_b_1()
+        .border_color(theme.border)
+        .debug_selector(|| "pricer-entry".into())
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .max_w(relative(0.4))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .debug_selector(|| "pricer-entry-label".into())
+                        .child(label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(fonts::MONO)
+                        .debug_selector(|| "pricer-entry-field".into())
+                        .child(Input::new(input).appearance(false).w_full()),
+                ),
+        )
+        .when_some(error.cloned(), |el, e| {
+            el.child(
+                div()
+                    .text_xs()
+                    .text_color(danger)
+                    .debug_selector(|| "pricer-entry-error".into())
+                    .child(e),
+            )
+        })
 }
 
 #[cfg(test)]

@@ -1,14 +1,9 @@
-//! The "add tile" direction setting (`[tiles] add`, spec
-//! `2026-09-08-geode-add-tile-design.md` §5) and the pure resolution
-//! rule every add goes through (§4.1). Mirrors `vimfind::FindStyle`'s
-//! shape exactly — `ALL`/`label`/`config_value`/`from_value`/
-//! `from_config` plus a `persist_to_user_config` sibling — so the
-//! settings row, startup resolution and hot reload ride the paths font
-//! size and find style already do. `persist_to_user_config` arrived as
-//! the seventh copy of that read-modify-write and went through the
-//! Phase 4c `config_write` door on the merge that brought the two
-//! branches together — it is `config_write::edit`'s caller now, like
-//! every other keyed persist in this crate.
+//! The `[tiles] add` setting and add-tile placement rule.
+//!
+//! Settings, startup, and reload use [`AddDirection`] to resolve explicit
+//! horizontal or vertical placement and automatic placement along the
+//! focused tile's longer side. Persistence uses [`crate::config_write::edit`]
+//! to update only the user-layer setting.
 
 use std::path::Path;
 
@@ -17,9 +12,8 @@ use toml_edit::{Item, Table, value};
 
 use crate::tiling::{Orientation, Rect};
 
-/// Where an add lands when the palette row or chord did not say (spec
-/// §2, §5): to the right, below, or along the focused tile's longer
-/// side.
+/// Where an add lands when its palette row or chord leaves direction
+/// unspecified: to the right, below, or along the focused tile's longer side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AddDirection {
     Horizontal,
@@ -69,7 +63,7 @@ impl AddDirection {
             .unwrap_or_default()
     }
 
-    /// The one placement rule (spec §4.1): an explicit direction wins;
+    /// An explicit direction wins;
     /// else `Horizontal`/`Vertical` as set; else `Auto` reads the focused
     /// tile's rect and splits along its longer side (`w >= h` → side by
     /// side). No rect — nothing focused, nothing painted yet — means
@@ -89,21 +83,13 @@ impl AddDirection {
     }
 }
 
-/// Write `[tiles] add` into `<user_dir>/app.toml`, preserving every
-/// other table, key and comment — the same toml_edit + atomic-write
-/// contract as [`crate::vimfind::persist_to_user_config`] (see
-/// [`crate::theme::persist_to_user_config`]'s doc comment for the
-/// failure-mode reasoning: a missing file is created with
-/// `config_version = 1`, an unparseable file is left untouched and
-/// reported as `Err`).
+/// Write `[tiles] add` into the user `app.toml` through
+/// [`crate::config_write::edit`]. Unrelated tables, keys, and comments are
+/// preserved. Missing files are created with `config_version = 1`;
+/// unparseable files are left untouched and return `Err`.
 ///
-/// Migrated to [`crate::config_write::edit`] when the add-tile work met
-/// the Phase 4c foundation branch: this arrived as the seventh
-/// hand-rolled copy of that read-modify-write, and `config_write` is the
-/// one door that copy was always headed for. The behaviour is
-/// unchanged — `edit` owns the read-or-create, the parse-or-refuse and
-/// the `config_version = 1` on create that this function used to spell
-/// out itself.
+/// This performs blocking filesystem I/O; UI callers submit it to the
+/// configuration write queue on the background executor.
 pub fn persist_to_user_config(user_dir: &Path, direction: AddDirection) -> Result<(), String> {
     crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
         if !doc.get("tiles").is_some_and(Item::is_table_like) {

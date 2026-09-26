@@ -15,14 +15,9 @@
 use super::docks::DockSide;
 use super::tree::{DividerAddress, Node, Orientation, Rect, Tree};
 
-/// Width of a divider's hit strip, in the caller's units (pixels in the
-/// shell), centered on the boundary — ±4px of grab area on either side.
-/// Recorded choice from the approved design's 6–8px range: 8px, the
-/// generous end, because Geode's dividers are otherwise only the 2px gutter
-/// between tile borders and precision-hunting a 6px target on a trading
-/// desk's 4K monitor is exactly the kind of friction the mouse path exists
-/// to avoid (precedent: Zed's pane handles use 4px + a painted 1px divider;
-/// gpui-component's use 1px + 4px padding each side = 9px).
+/// Width of a divider's hit strip in the caller's units (pixels in the
+/// shell), centered on the boundary. The grab area extends beyond the
+/// visible gutter so dragging does not require hitting a narrow line.
 pub const DIVIDER_HIT_WIDTH: f32 = 8.0;
 
 /// One grabbable divider inside a tree: the hit rect (a strip

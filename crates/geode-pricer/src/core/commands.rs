@@ -1,7 +1,6 @@
-//! The tile's `:` vocabulary (line-pricer spec §8.6), pure: parse and
-//! completion. Every verb changes only this tile: `:e`, `:new`, `:name`
-//! and `:rm` (spec §7.4) move this tile's own sheet or, for `:rm`, a
-//! sheet no tile holds — never another tile's.
+//! Pure parsing and completion for the tile's `:` commands. `:e`, `:new`,
+//! and `:name` change this tile's sheet; `:rm` removes a stored sheet only
+//! when no tile holds it. No command changes another tile's sheet.
 
 use crate::core::sheet::Refresh;
 use geode_core::source_config::parse_duration;

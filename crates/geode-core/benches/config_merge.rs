@@ -1,17 +1,11 @@
-//! `Config::from_docs` — the merge half of the loader (spec §7.1).
+//! Measure in-memory configuration merging through `Config::from_docs`.
+//! Configuration dialog edits update the user-layer documents, re-merge them,
+//! and apply the result through hot reload, so merge cost contributes to UI
+//! response latency.
 //!
-//! Phase 4c's config dialogs apply a field edit **instantly**: the edited
-//! object is written into the in-memory user-layer `LayerDoc`, the whole
-//! set is re-merged, and the result goes through the same
-//! `hot_reload::apply_reload` the watcher uses. That puts this merge in
-//! the keystroke path, where PHILOSOPHY's <8 ms pure-UI budget applies —
-//! so it is measured rather than assumed.
-//!
-//! The fixture is the real demo desk (`examples/demo-config`, the largest
-//! config this repo ships: a 7.8 KB `datasets.toml` and a 6.8 KB
-//! `views.toml`) as the builtin layer, with a user-layer `views.toml` and
-//! `view_presentation.toml` on top — the exact shape a trader editing a
-//! view has.
+//! The fixture layers demo configuration with user view and presentation edits.
+//! It excludes the shell's builtin keymap and measures only this subset; the
+//! shell_cores benchmark covers merging the full application layer.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::config::{Config, Layer, LayerDoc};
@@ -31,16 +25,9 @@ fn docs() -> Vec<LayerDoc> {
         LayerDoc::builtin("dimensions", DIMENSIONS).unwrap(),
         LayerDoc::builtin("groupings", GROUPINGS).unwrap(),
         LayerDoc::builtin("views", VIEWS).unwrap(),
-        // A saved scope, which the demo desk does not ship but a real
-        // user layer routinely carries.
-        //
-        // The `keymap` doc — by far the largest in the config model — is
-        // NOT here, and its absence made this an underestimate. It lives
-        // as a Rust const in `geode-shell`, which `geode-core` must not
-        // depend on (the layering runs the other way), so the
-        // keymap-inclusive merge is measured in `geode-shell`'s own
-        // `shell_cores` bench (`config_edit/flush_merge_full_layer`)
-        // instead. That is the number `docs/perf.md` reports for a flush.
+        // A saved scope supplements the demo documents. The builtin keymap lives
+        // in geode-shell, which cannot be a dependency of geode-core; its cost is
+        // covered by shell_cores/config_edit/flush_merge_full_layer.
         LayerDoc::builtin("scopes", SCOPES).unwrap(),
     ];
     // The two user-layer docs a Views edit actually writes.

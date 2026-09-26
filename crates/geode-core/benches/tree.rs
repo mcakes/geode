@@ -1,7 +1,6 @@
-//! `TreeIndex::build` at the three result shapes `docs/perf.md` records
-//! for the blotter's tree view: 133 rows (bounded to depth 2), 136,868
-//! (scoped to three books, all depths) and 729,466 (unscoped). The build
-//! runs on the query worker, so this is what §7.1's handoff pays.
+//! Measure `TreeIndex::build` on synthetic rollup results of approximately
+//! 133, 137,000, and 729,000 rows. Construction happens on the query worker
+//! before snapshot delivery. See `docs/perf.md` for recorded timings.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -19,7 +18,7 @@ fn dim(name: &str) -> ColumnMeta {
 }
 
 /// A three-level tree with `l1` first-level nodes, `l2` under each, and
-/// `l3` under each of those, rows emitted depth-first by level (the
+/// `l3` under each of those, rows emitted in increasing depth (the
 /// compiler's order) with siblings interleaved as a declared sort would.
 fn shape(l1: usize, l2: usize, l3: usize) -> Snapshot {
     let mut lhu: Vec<Option<String>> = vec![None];

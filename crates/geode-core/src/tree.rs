@@ -1,32 +1,21 @@
-//! The parent/child structure of a rollup result (Phase 3 spec §5.5).
+//! Parent/child index for a rollup result, built once in
+//! `Snapshot::from_batches` on the query worker and shared with the snapshot.
+//! Construction stays off the render path because it visits the whole result.
 //!
-//! Built once, on the query worker, inside `Snapshot::from_batches`:
-//! for a 729k-row result the build costs tens of milliseconds, which is
-//! the whole §7.1 budget if it ran on the render thread. Immutable and
-//! `Arc`-shared with the snapshot it describes.
+//! Rows are bucketed by depth before parent lookup. Each grouping prefix is
+//! hashed into a per-depth table; collisions are checked against the actual
+//! prefix. Children occupy contiguous ranges in one index array, preserving
+//! input row order among siblings even when those rows were interleaved.
 //!
-//! The compiler orders by `row_depth` first, so a parent always precedes
-//! its children. Within a depth the order is the view's declared sort,
-//! then the grouping columns — so siblings are **not** contiguous when a
-//! sort is declared, and nothing here assumes they are. Each row's
-//! grouping prefix is hashed into a per-depth table and its parent looked
-//! up in the table for the depth above; children are then laid out in CSR
-//! form in row order, which makes a declared sort the default sibling
-//! order for free. Equality is on the cell text under either encoding,
-//! with NULL as its own token, so a blanked ENUM value (P2 §3.6) is a
-//! distinct key rather than a collision — and nothing depends on how
-//! DuckDB collates an ENUM.
+//! Grouping columns are resolved once as dictionary codes, text, or absent.
+//! NULL and absent values share a distinct token. Dictionary equality relies
+//! on one code per value within the column, preserved when snapshot construction
+//! concatenates batches with a shared dictionary. Different dictionary contents
+//! use Arrow's fallback concatenation, whose codes are not guaranteed canonical.
 //!
-//! Spec §5.5 asks for dictionary codes where present, strings under
-//! as-of: each grouping column is resolved once, in [`TreeIndex::build`],
-//! into an enum tagging it dictionary-encoded, plain text, or absent, and
-//! the hash/equality below key a dictionary column on its per-row code
-//! rather than resolving the string per cell. One snapshot carries one
-//! encoding per column, so code equality implies value equality within
-//! it — that identity is exactly what `snapshot.rs`'s
-//! `concat_preserving_dictionaries` shared-dictionary fast path
-//! guarantees (its own doc records the fallback path that would break
-//! it).
+//! Rows without a matching parent increment the unplaced count and attach to
+//! the first root when one exists. A result without a depth column treats every
+//! row as a root.
 
 use crate::snapshot::{DictCodes, Snapshot};
 use std::collections::HashMap;
@@ -211,11 +200,9 @@ impl TreeIndex {
     }
 }
 
-/// FNV-1a over the first `k` grouping cells of `row`. A NULL cell hashes
-/// a token no string or code can produce; an absent column is NULL
-/// everywhere. A dictionary column feeds its per-row code, tagged
-/// distinctly from a string's bytes so a code and a string can never
-/// collide across a row that mixes encodings (spec §5.5).
+/// FNV-1a over the first `k` grouping cells. NULL/absent, dictionary code,
+/// and text use distinct type tags. Hashes only select candidate parents;
+/// prefix equality resolves collisions.
 fn prefix_hash(snapshot: &Snapshot, cols: &[Col], row: usize, k: usize) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -282,7 +269,7 @@ mod tests {
     /// lhu > underlying > position, three levels, rows sorted by depth
     /// only. Siblings are deliberately interleaved within a depth: L1's
     /// children are rows 3 and 5, L2's are 4 and 6. This is what a
-    /// declared `sort` produces (Phase 3 §5.5).
+    /// declared `sort` produces.
     fn interleaved(dict: bool) -> Snapshot {
         let lhu = vec![
             None,
@@ -382,10 +369,8 @@ mod tests {
 
     #[test]
     fn a_row_whose_parent_is_missing_attaches_to_the_root_and_is_counted() {
-        // A stale ENUM blanks a value the row carries at a finer level
-        // (P2 §3.6): the child's prefix names an lhu no depth-1 row has.
-        // Silently dropping it would hide a real position; hiding the
-        // count would hide that anything went wrong.
+        // A child names an lhu absent from the depth-1 rows. Keep the position
+        // under a root and report it as unplaced instead of dropping it silently.
         let snap = Snapshot::for_tests(
             vec![
                 (

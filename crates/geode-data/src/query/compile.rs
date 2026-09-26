@@ -44,6 +44,13 @@ pub struct CompiledQuery {
     /// the data's age, not the requested instant: equal requested timestamps
     /// can conceal inputs whose actual generations differ by weeks.
     pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
+    /// The generation a historical read resolved, when exactly one names it.
+    /// A document request pins one partition and therefore one generation
+    /// (see `query::document`'s `gen_id = N` predicate); a view request
+    /// resolves one generation per partition, which no scalar names, so it
+    /// stays `None`. A live read leaves it `None` too: the store answers
+    /// that from the catalog, which the plan does not carry.
+    pub resolved_generation: Option<i64>,
 }
 
 fn quoted(cols: &[String]) -> Vec<String> {
@@ -915,6 +922,7 @@ pub(crate) fn compile_view_with_cache(
         columns,
         stalest_input,
         resolved_as_of,
+        resolved_generation: None,
     })
 }
 

@@ -1,13 +1,16 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
 //! state or I/O. Count, pending keys, configuration messages, diagnostics, ingestion,
-//! and historical-time indicators occupy the left region; the active theme name
-//! occupies the right. Workspace indicators belong to the sidebar. StatusBar supplies
+//! and historical-time indicators occupy the left region. The right region is the
+//! view-state section: the fullscreen indicator, then the active theme name.
+//! Workspace indicators belong to the sidebar. StatusBar supplies
 //! the status_bar and status_bar_border theme tokens.
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, progress::Progress,
+};
 
 use super::chip;
 use super::control::{self, PointerStates as _};
@@ -16,8 +19,8 @@ use crate::diagnostics::IngestActivity;
 use crate::fonts;
 use crate::keymap::Keystroke;
 
-/// Height of the status bar, in pixels at the design rem (spec target:
-/// ~26px; `shell::scale`). Layout arithmetic reads it through
+/// Height of the status bar, in pixels at the design rem (`shell::scale`).
+/// Layout arithmetic reads it through
 /// [`height`] so the bar follows the font size with its own text.
 pub const HEIGHT: f32 = 26.0;
 
@@ -27,14 +30,38 @@ pub fn height(window: &Window) -> f32 {
     scale::design_px(HEIGHT, window.rem_size())
 }
 
+/// The fullscreen segment's text for `hidden` other tiles. The common
+/// counts are literals so an idle repaint of a maximised tile formats
+/// nothing.
+pub fn fullscreen_label(hidden: usize) -> SharedString {
+    const LABELS: [&str; 10] = [
+        "fullscreen",
+        "fullscreen · 1 hidden",
+        "fullscreen · 2 hidden",
+        "fullscreen · 3 hidden",
+        "fullscreen · 4 hidden",
+        "fullscreen · 5 hidden",
+        "fullscreen · 6 hidden",
+        "fullscreen · 7 hidden",
+        "fullscreen · 8 hidden",
+        "fullscreen · 9 hidden",
+    ];
+    match LABELS.get(hidden) {
+        Some(label) => SharedString::new_static(label),
+        None => format!("fullscreen · {hidden} hidden").into(),
+    }
+}
+
 /// Render optional status segments in order: count, nonempty pending keys, reload
 /// failure, write failure, restart requirement, shell notice, diagnostics summary,
-/// ingestion activity, and historical time. Configuration errors use danger, restart
+/// ingestion activity, and historical time on the left; fullscreen, then the theme
+/// name, on the right. The fullscreen segment shows while a main-tree tile is
+/// maximised, carrying the number of tiles it hides; clicking it restores the
+/// layout through the supplied callback. Configuration errors use danger, restart
 /// and diagnostics use warning, and ordinary notices are muted. Diagnostics clicks
 /// invoke the supplied callback. The historical badge requires both the shortened and
-/// full timestamps; its tooltip shows the full timestamp. Theme name appears on the
-/// right. Inputs remain separate because callers already hold these values
-/// independently.
+/// full timestamps; its tooltip shows the full timestamp. Inputs remain separate
+/// because callers already hold these values independently.
 #[allow(clippy::too_many_arguments)]
 pub fn status_bar(
     pending: &[Keystroke],
@@ -49,6 +76,10 @@ pub fn status_bar(
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
     // the bar's top edge. None hides both.
     ingest: Option<&IngestActivity>,
+    // Other tiles hidden by a fullscreen main-tree tile; None while nothing is
+    // fullscreen.
+    fullscreen_hidden: Option<usize>,
+    on_fullscreen_click: impl Fn(&mut Window, &mut App) + 'static,
     as_of: Option<&str>,
     // Full resolved historical timestamp for the badge tooltip. Supply alongside as_of,
     // whose shortened text is painted and repeated in the tooltip detail.
@@ -110,9 +141,8 @@ pub fn status_bar(
     }
     if let Some(message) = diagnostics_summary {
         bar = bar.left(
-            // The one clickable segment on the bar takes pointer states
-            // (`control::PointerStates`, a bare glyph's) with a little
-            // horizontal padding so the hover box has a shape.
+            // The diagnostics segment uses the shared bare-control pointer
+            // states and horizontal padding to define its hover area.
             div()
                 .id("diagnostics-summary")
                 .px_1()
@@ -172,6 +202,39 @@ pub fn status_bar(
         );
     }
 
+    if let Some(hidden) = fullscreen_hidden {
+        // The right region is the view-state section: how the window is
+        // being shown, beside the theme it is painted in. Muted, like the
+        // notice: maximising is a layout the trader chose, not a fault.
+        // Clickable like the diagnostics summary; the tooltip names the
+        // key, resolved on hover rather than per frame.
+        bar = bar.right(
+            h_flex()
+                .id("status-fullscreen")
+                .gap_1()
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(theme.muted_foreground)
+                .pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.status_bar,
+                    theme.muted_foreground,
+                ))
+                .debug_selector(|| "status-fullscreen".to_string())
+                .child(Icon::new(IconName::Maximize).xsmall())
+                .child(fullscreen_label(hidden))
+                .tooltip(crate::tips::tip(
+                    "tip-status-fullscreen",
+                    "Restore the layout",
+                    Some("workspace::fullscreen_tile"),
+                    Some(SharedString::new_static("click to restore")),
+                ))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_fullscreen_click(window, cx);
+                }),
+        );
+    }
     let bar = bar.right(
         div()
             .text_color(theme.muted_foreground)

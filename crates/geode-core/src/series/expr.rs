@@ -1,4 +1,4 @@
-//! The expression language (timeseries spec §7, ruling 8): arithmetic
+//! The expression language: arithmetic
 //! over named series, nothing else. A hand-written recursive-descent
 //! parser, pure; the resolved tree names slots only, so an identity
 //! never reaches the compiler as text. A reference is a series name —
@@ -52,7 +52,7 @@ pub struct ParseError {
     pub message: String,
 }
 
-/// The boundary, said where a trader would cross it (spec §7).
+/// Error text describing the supported arithmetic grammar.
 pub const ARITHMETIC_ONLY: &str = "arithmetic only: + - * / and parentheses";
 
 /// The deepest a unary-minus/parenthesis nest may go before `parse`
@@ -84,15 +84,20 @@ enum Token {
     RParen,
 }
 
-fn is_ident_start(c: char) -> bool {
+/// A character that can open a reference's identity. Public so a name
+/// completer draws the same word boundaries the tokenizer does.
+pub fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-fn is_ident_char(c: char) -> bool {
+/// A character that can continue a reference's identity (`SPX.close`).
+pub fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '.'
 }
 
-fn is_source_char(c: char) -> bool {
+/// A character of the `@source` part after an identity. `-` is one only
+/// there; before the `@` it is subtraction.
+pub fn is_source_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 

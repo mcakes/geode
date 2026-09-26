@@ -166,8 +166,12 @@ impl<'a> Catalog<'a> {
 
     /// The newest generation recorded, or 0 when nothing has loaded.
     ///
-    /// Read-only: freshness reporting asks this on every query, and must
-    /// not burn an id to answer.
+    /// Read-only, and read once: `ensure_gen_id_sequence` asks
+    /// it at `ensure_tables` to place the ID sequence above recorded
+    /// history, which must not consume an id to do. It aggregates the whole
+    /// catalog and names no dataset or partition, so it is not an answer to
+    /// what a read was as of or which generation served it — those are
+    /// [`Catalog::live_generation`] and [`Catalog::dataset_generation`].
     pub fn latest_gen_id(&self) -> Result<i64, StoreError> {
         let sql = "select coalesce(max(gen_id), 0) from file_generations";
         self.conn
@@ -324,6 +328,69 @@ impl<'a> Catalog<'a> {
         };
         self.conn
             .query_row(sql, duckdb::params_from_iter(params), |r| r.get(0))
+            .map_err(|source| StoreError::Sql {
+                statement: sql.into(),
+                source,
+            })
+    }
+
+    /// One partition's newest live generation — [`Self::live_source_time`]'s
+    /// identity, over the same rows under the same filters.
+    ///
+    /// A corrected republish keeps its source time and takes a new
+    /// generation ID, so this is the only thing that distinguishes the two
+    /// for a reader holding unsent work over the older one. `None` before
+    /// the partition's first load.
+    pub fn live_generation(
+        &self,
+        dataset: &str,
+        batch: &str,
+        book: Option<&str>,
+    ) -> Result<Option<i64>, StoreError> {
+        // The same dataset/batch/book scoping `live_source_time` explains:
+        // file stems can match across datasets, and the bookless partition
+        // is its own.
+        let (sql, params): (&str, Vec<duckdb::types::Value>) = match book {
+            Some(b) => (
+                "select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?
+                   and coalesce(fg.archived_only, false) = false",
+                vec![
+                    dataset.to_string().into(),
+                    batch.to_string().into(),
+                    b.to_string().into(),
+                ],
+            ),
+            None => (
+                "select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null
+                   and coalesce(fg.archived_only, false) = false",
+                vec![dataset.to_string().into(), batch.to_string().into()],
+            ),
+        };
+        self.conn
+            .query_row(sql, duckdb::params_from_iter(params), |r| r.get(0))
+            .map_err(|source| StoreError::Sql {
+                statement: sql.into(),
+                source,
+            })
+    }
+
+    /// A dataset's newest live generation, across every partition.
+    ///
+    /// The maximum, where [`Self::dataset_as_of`] takes the minimum, because
+    /// the two answer different questions. `as_of` reports how stale an answer
+    /// is and so must name its stalest input; the generation reports whether
+    /// this is the same data as last time, and a minimum would not move when
+    /// a single partition republished — exactly the change a reader of this
+    /// field exists to see. `None` before the dataset's first load.
+    pub fn dataset_generation(&self, dataset: &str) -> Result<Option<i64>, StoreError> {
+        let sql = "select max(gen_id) from file_generations
+                   where dataset = ? and coalesce(archived_only, false) = false";
+        self.conn
+            .query_row(sql, [dataset], |r| r.get(0))
             .map_err(|source| StoreError::Sql {
                 statement: sql.into(),
                 source,
@@ -827,6 +894,49 @@ mod tests {
             t.day(),
             30,
             "the partition's live time is the newest across its files"
+        );
+    }
+
+    #[test]
+    fn live_generation_is_the_partitions_newest_and_moves_on_a_same_time_republish() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        // Two generations of ONE partition at the SAME source time: the
+        // corrected republish a draft must be able to tell apart.
+        for generation in [1i64, 2] {
+            let mut r = FileGeneration {
+                path: format!("/src/risk_v{generation}_BK000.csv").into(),
+                ..record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"))
+            };
+            r.gen_id = generation;
+            cat.record(&r).unwrap();
+        }
+        // Another partition, newer, must not answer for this one.
+        let mut other = record("BK001", &["BK001"], ts("2026-08-30T14:00:00Z"));
+        other.gen_id = 9;
+        cat.record(&other).unwrap();
+
+        assert_eq!(
+            cat.live_generation("risk_snapshot", "BK000", Some("BK000"))
+                .unwrap(),
+            Some(2),
+            "the partition's own newest generation, not the database's"
+        );
+        assert_eq!(
+            cat.dataset_generation("risk_snapshot").unwrap(),
+            Some(9),
+            "the dataset's newest generation across its partitions"
+        );
+        assert_eq!(
+            cat.live_generation("risk_snapshot", "NOSUCH", Some("BK000"))
+                .unwrap(),
+            None,
+            "a partition that has never loaded has no generation"
+        );
+        assert_eq!(
+            cat.dataset_generation("nosuch_dataset").unwrap(),
+            None,
+            "a dataset that has never loaded has no generation"
         );
     }
 

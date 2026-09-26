@@ -1,51 +1,27 @@
-//! Frame-time instrumentation (spec §7.4): a cheap, always-compiled
-//! fixed-bucket histogram of frame intervals, owned by `ShellView` and fed
-//! from the top of its `render`. Pure logic — no gpui, no I/O, no clocks
-//! (callers hand in durations they measured) — so it is fully unit-testable
-//! and obeys the render discipline it exists to measure: recording is O(1),
-//! allocation-free, and lock-free (a plain fixed-size array behind `&mut`).
+//! Frame-time instrumentation: a fixed-bucket histogram owned by
+//! `ShellView` and fed from the top of its `render`. Callers supply measured
+//! durations; recording is O(1), allocation-free, and lock-free.
 //!
-//! **What the recorded signal is** (recorded decision): `ShellView` stores
-//! the `Instant` at the top of each `render` call and records the interval
-//! between consecutive renders. Geode is event-driven — the window only
-//! redraws on invalidation — so this measures *render-to-render intervals
-//! while Geode is actually rendering*: during continuous interaction
-//! (key-repeat resizes, divider drags, palette typing) consecutive samples
-//! are honest frame times including gpui's full prepaint/paint/present of
-//! the previous frame. It does NOT capture: compositor/display latency
-//! beyond what delays the next render, frames where only a child entity
-//! re-rendered without `ShellView::render` running, or the duration of the
-//! *last* render before an idle gap. Intervals longer than [`IDLE_CUTOFF`]
-//! are discarded (counted in [`FrameHistogram::discarded_idle`]) — after the
-//! user pauses, the next render's interval measures the pause, not a frame.
-//! The alternative (gpui's own draw-duration histograms) needs the `profiler`
-//! feature; see `docs/perf.md` and the `profiling` feature flag for that.
+//! The signal is the interval between consecutive shell renders. During
+//! continuous interaction it includes work between those renders, including
+//! GPUI's prepaint, paint, and present. It does not separately measure
+//! compositor latency, child-only redraws, or the last render before an idle
+//! gap. Intervals at or above [`IDLE_CUTOFF`] are excluded from the histogram
+//! and counted in [`FrameHistogram::discarded_idle`]. GPUI's draw-duration
+//! histograms require the `profiling` feature; see `docs/perf.md`.
 
 use std::time::Duration;
 
-/// Intervals at or above this are idle gaps between interaction bursts, not
-/// frame times, and are excluded from the histogram (see the module doc).
-/// Deliberately well above [`BUCKET_UPPER_BOUNDS_MICROS`]' top (100ms) so a
-/// genuinely catastrophic-but-real 100–500ms frame still lands in the
-/// overflow bucket and drives `max` instead of being mistaken for idleness.
+/// Intervals at or above this threshold count as idle gaps rather than
+/// frame samples. The threshold exceeds the regular buckets' 100ms maximum,
+/// so slower frames below the cutoff still contribute to overflow and `max`.
 ///
-/// **Coupled to `hot_reload::RELOAD_POLL_INTERVAL` (also 500ms) — not by
-/// any code reference, only by value (Phase 4b final review, MAJ-4's
-/// related finding).** A visible diagnostics tile's `Diagnostics::
-/// refresh_frame_hist` copies `ShellView::perf` and calls `cx.notify()`
-/// on that same ~500ms tick even when nothing new was recorded; that
-/// notify alone drives a repaint, which records a fresh render interval,
-/// which is exactly the reload tick's own period later — landing just
-/// under this cutoff and being discarded as an idle gap rather than
-/// counted. If either constant ever moves independently (a shorter
-/// reload poll, or a lower cutoff to catch shorter real idle gaps), an
-/// idle diagnostics tile could instead pin the app in a self-sustaining
-/// full-repaint loop: notify -> repaint -> interval recorded as a real
-/// frame -> `perf.record()` moves `count()`/`max_micros()` -> the next
-/// tick's `refresh_frame_hist` sees a change and copies again -> notify.
-/// Keep these two constants at least this close, or add a floor: a
-/// notify with no real state change must not, on its own, ever produce
-/// an interval below `IDLE_CUTOFF`.
+/// Keep `hot_reload::RELOAD_POLL_INTERVAL` at least this long: the poll also
+/// refreshes watched diagnostics histograms. That refresh notifies only when
+/// sample count or maximum changes. If a notification-driven redraw becomes
+/// a new sample on every poll, it can sustain a repaint loop. The idle cutoff
+/// prevents a poll-spaced redraw from feeding that loop; shortening the poll
+/// requires a corresponding sampling guard.
 pub const IDLE_CUTOFF: Duration = Duration::from_millis(500);
 
 /// Upper bounds (inclusive ceiling of each bucket, in microseconds) of the
@@ -186,11 +162,9 @@ impl FrameHistogram {
     }
 }
 
-/// Requery timing (Phase 3 §6.8): the two halves of §7.1's "query +
-/// snapshot handoff + first painted frame" that the headless benchmarks
-/// cannot see. The blotter records submit→snapshot on `deliver` and
-/// snapshot→paint on the first render after it. Fixed-size, allocation-
-/// free, never notifies — the same discipline as `FrameHistogram`.
+/// Requery timing beyond the headless benchmark: submit-to-snapshot is
+/// recorded on delivery, and snapshot-to-paint on the first render afterward.
+/// Fixed-size, allocation-free, and never notifies observers.
 #[derive(Debug)]
 pub struct RequeryStats {
     submit_to_snapshot: FrameHistogram,

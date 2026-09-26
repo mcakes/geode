@@ -1,9 +1,9 @@
 //! TableDelegate over a prepared Rc<GridModel> installed by the tile. Cursor, loading
-//! state, entry field, and cell editor are read-only mirrors of tile state. Column zero
-//! is a pinned tree column with indentation, a fixed chevron slot, and shorthand; the
-//! cell cursor does not enter it.
+//! state, and cell editor are read-only mirrors of tile state. Column zero
+//! is a pinned tree column with indentation, a fixed chevron slot, and a
+//! package's template tag; the cell cursor does not enter it.
 //!
-//! Package and entry backgrounds belong to render_tr. The table replaces row
+//! Package backgrounds belong to render_tr. The table replaces row
 //! backgrounds for hover and selection; per-cell fills would obscure those states.
 
 use crate::grid::{GridModel, GridRowKind};
@@ -25,10 +25,11 @@ use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
 
-/// The tree column: pixels, like every width here (the vocabulary's own
-/// known gap); not resizable, since a dragged width has nowhere to live.
-const TREE_WIDTH: f32 = 260.0;
-/// One depth step, and the chevron slot every non-entry row reserves
+/// The tree column: a leg's indent, the chevron slot and the widest
+/// template token at the largest font size (checked below), in pixels
+/// like every width here; not resizable.
+const TREE_WIDTH: f32 = 88.0;
+/// One depth step, and the chevron slot every row reserves
 /// (empty on a line or leg), both on the rem scale: roots share one
 /// leading edge whether or not they carry a chevron, and a leg sits
 /// exactly one step in from its package.
@@ -39,39 +40,25 @@ pub(crate) const EMPTY_TEXT: &str = "No lines — press o to add one";
 pub(crate) const LOADING_TEXT: &str = "Loading sheet…";
 pub(crate) const TREE_COL: usize = 0;
 
-/// The gutter number of every painted grid row: `None` on the entry
-/// placeholder, which no motion can land on. Rows are numbered by their
-/// ordinal among cursor rows — the index `NG` jumps to and `Nj`/`Nk`
-/// count — so an open placeholder never shifts the numbers below it.
-/// Relative mode measures from the cursor row; with no cursor row it
-/// numbers absolutely. Off numbers nothing.
+/// The gutter number of every painted grid row. Relative mode measures
+/// from the cursor row; with no cursor row it numbers absolutely. Off
+/// numbers nothing.
 pub(crate) fn number_rows(
     mode: LineNumbers,
     len: usize,
-    entry: Option<usize>,
     cursor: Option<usize>,
 ) -> Vec<Option<usize>> {
-    // A grid row's ordinal among cursor rows: the placeholder above it
-    // takes no number.
-    let ordinal = |row: usize| row - usize::from(entry.is_some_and(|e| e < row));
-    let (mode, at) = match (mode, cursor.filter(|c| Some(*c) != entry)) {
-        (LineNumbers::Relative, Some(c)) => (mode, ordinal(c)),
+    let (mode, at) = match (mode, cursor) {
+        (LineNumbers::Relative, Some(c)) => (mode, c),
         (LineNumbers::Relative, None) => (LineNumbers::On, 0),
         (mode, _) => (mode, 0),
     };
-    (0..len)
-        .map(|row| {
-            (Some(row) != entry)
-                .then(|| gutter_number(mode, ordinal(row), at))
-                .flatten()
-        })
-        .collect()
+    (0..len).map(|row| gutter_number(mode, row, at)).collect()
 }
 
 /// What `SheetDelegate::refresh_numbers` last derived from: row count,
-/// placeholder row, the cursor row (relative mode only — absolute
-/// numbers ignore it), and the mode.
-type NumbersStamp = (usize, Option<usize>, Option<usize>, LineNumbers);
+/// the cursor row (relative mode only), and the mode.
+type NumbersStamp = (usize, Option<usize>, LineNumbers);
 
 /// A chevron click, re-implemented from the blotter (spec §8.2: "the
 /// blotter's idiom re-implemented, nothing lifted"); the tile toggles
@@ -192,11 +179,7 @@ pub struct SheetDelegate {
     /// refuse.
     pub(crate) loading: bool,
     chevron: Option<(control::ControlInputs, control::ControlPaint)>,
-    /// The tile's open entry field, mirrored here so `render_td` can paint
-    /// it (the `Entry` row); the tile's `entry` is the source of
-    /// truth, this is a read-only mirror.
-    pub(crate) entry: Option<Entity<InputState>>,
-    /// The tile's open cell editor, mirrored the same way.
+    /// The tile's open cell editor, a read-only mirror of the tile's.
     pub(crate) editor: Option<EditorPaint>,
     /// The typeahead's rows call back into the tile; a dropped tile
     /// paints no popup.
@@ -205,7 +188,7 @@ pub struct SheetDelegate {
     /// tile (`PricerTile::on_ui_settings`), which refreshes the table on a
     /// change: the tree column's width includes the gutter.
     pub(crate) line_numbers: LineNumbers,
-    /// Gutter text per grid row, empty on the placeholder, and the
+    /// Gutter text per grid row and the
     /// gutter's width. `refresh_numbers` prepares both outside render, so
     /// `render_td` only clones a refcount.
     numbers: Vec<SharedString>,
@@ -221,7 +204,6 @@ impl SheetDelegate {
             paints: Paints::derive(theme),
             loading: false,
             chevron: None,
-            entry: None,
             editor: None,
             tile,
             line_numbers: LineNumbers::Off,
@@ -239,20 +221,19 @@ impl SheetDelegate {
     pub(crate) fn refresh_numbers(&mut self) {
         let mode = self.line_numbers;
         let len = self.model.rows.len();
-        let entry = self.model.entry_row();
         let cursor = match mode {
             LineNumbers::Relative => self.cursor.map(|(row, _)| row),
             _ => None,
         };
-        let stamp = (len, entry, cursor, mode);
+        let stamp = (len, cursor, mode);
         if self.numbers_stamp == Some(stamp) {
             return;
         }
         self.numbers_stamp = Some(stamp);
-        self.gutter = gutter_px(mode, len - usize::from(entry.is_some()));
+        self.gutter = gutter_px(mode, len);
         self.numbers.clear();
         self.numbers
-            .extend(number_rows(mode, len, entry, cursor).into_iter().map(|n| {
+            .extend(number_rows(mode, len, cursor).into_iter().map(|n| {
                 n.map(|n| SharedString::from(n.to_string()))
                     .unwrap_or_default()
             }));
@@ -336,7 +317,7 @@ impl TableDelegate for SheetDelegate {
         let Some(c) = Self::plan_col(col_ix).and_then(|i| self.model.columns.get(i)) else {
             return Column {
                 key: SharedString::from("__tree"),
-                name: SharedString::from("line"),
+                name: SharedString::from(""),
                 align: TextAlign::Left,
                 sort: None,
                 width: px(TREE_WIDTH + self.gutter_px()),
@@ -381,17 +362,16 @@ impl TableDelegate for SheetDelegate {
             .child(column.name)
     }
 
-    /// A package row's ground and the entry row's active fill, on the row
-    /// (see the module doc). A filler row past the model paints nothing.
+    /// A package row's ground, on the row (see the module doc). A filler
+    /// row past the model paints nothing.
     fn render_tr(
         &mut self,
         row_ix: usize,
         _window: &mut Window,
-        cx: &mut Context<TableState<Self>>,
+        _cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let ground = match self.model.rows.get(row_ix).map(|r| r.kind) {
             Some(GridRowKind::Package { .. }) => Some(self.paints.package_ground),
-            Some(GridRowKind::Entry) => Some(cx.theme().table_active),
             _ => None,
         };
         div()
@@ -501,9 +481,7 @@ impl SheetDelegate {
         let Some(plan_col) = Self::plan_col(col_ix) else {
             // The tree column: indent by depth, then the fixed chevron
             // slot (a chevron on a package, empty otherwise), then the
-            // row's shorthand — except the entry placeholder, which puts
-            // the open field (or nothing, mid-transition) where its row
-            // will land: the same indent and slot.
+            // row's tag (a package's template token).
             let slot = div()
                 .w(scale::design(CHEVRON_SLOT))
                 .h_full()
@@ -512,23 +490,6 @@ impl SheetDelegate {
                 .items_center()
                 .justify_center();
             let el = base.pl(scale::design(row.depth as f32 * INDENT));
-            if row.kind == GridRowKind::Entry {
-                return match &self.entry {
-                    Some(input) => el
-                        .debug_selector(|| "pricer-entry".into())
-                        .child(slot)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .debug_selector(|| "pricer-entry-field".into())
-                                .child(cell_input(input, TextAlign::Left)),
-                        )
-                        .into_any_element(),
-                    None => el.into_any_element(),
-                };
-            }
             let slot = match row.kind {
                 GridRowKind::Package { open } => {
                     let states = self.chevron_states(cx.theme());
@@ -566,7 +527,7 @@ impl SheetDelegate {
                         .min_w_0()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .child(row.tree.clone()),
+                        .child(row.tag.clone()),
                 )
                 .into_any_element();
         };
@@ -656,41 +617,25 @@ mod tests {
     /// take numbers like any other.
     #[test]
     fn on_numbers_every_painted_row_including_expanded_legs() {
-        let n = number_rows(LineNumbers::On, 5, None, Some(3));
+        let n = number_rows(LineNumbers::On, 5, Some(3));
         assert_eq!(n, [1, 2, 3, 4, 5].map(Some));
     }
 
     #[test]
     fn rel_measures_from_the_cursor_which_shows_its_own_number() {
-        let n = number_rows(LineNumbers::Relative, 5, None, Some(2));
+        let n = number_rows(LineNumbers::Relative, 5, Some(2));
         assert_eq!(n, [2, 1, 3, 1, 2].map(Some));
         assert_eq!(
-            number_rows(LineNumbers::Relative, 3, None, None),
+            number_rows(LineNumbers::Relative, 3, None),
             [1, 2, 3].map(Some),
             "no cursor row: absolute"
-        );
-    }
-
-    /// The placeholder at grid row 1 is blank and does not shift the
-    /// rows below it: their numbers are the index `NG` jumps to, which
-    /// counts cursor rows only.
-    #[test]
-    fn the_entry_placeholder_is_blank_and_shifts_nothing() {
-        assert_eq!(
-            number_rows(LineNumbers::On, 6, Some(1), Some(0)),
-            vec![Some(1), None, Some(2), Some(3), Some(4), Some(5)]
-        );
-        assert_eq!(
-            number_rows(LineNumbers::Relative, 6, Some(1), Some(3)),
-            vec![Some(2), None, Some(1), Some(3), Some(1), Some(2)],
-            "grid row 3 is the third cursor row; distances skip the placeholder"
         );
     }
 
     #[test]
     fn off_numbers_nothing() {
         assert!(
-            number_rows(LineNumbers::Off, 4, None, Some(0))
+            number_rows(LineNumbers::Off, 4, Some(0))
                 .iter()
                 .all(Option::is_none)
         );
@@ -766,5 +711,32 @@ mod width_tests {
             );
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Column 0 holds a leg's indent, the chevron slot and the widest tag
+    /// at the largest font size. Indent and slot are on the rem scale;
+    /// the column is fixed pixels.
+    #[test]
+    fn the_tree_column_fits_the_widest_tag() {
+        use super::{CHEVRON_SLOT, INDENT, TREE_WIDTH};
+        use crate::core::template::Template;
+        let rem = FontSize::Large.rem_px();
+        let advance = rem * TABLE_TEXT_REM * MONO_ADVANCE_EM;
+        let pad = Size::XSmall.table_cell_padding();
+        let padding = f32::from(pad.left) + f32::from(pad.right);
+        let widest = Template::ALL
+            .iter()
+            .map(|t| t.token().chars().count())
+            .max()
+            .unwrap();
+        let need = (INDENT + CHEVRON_SLOT) * rem / geode_shell::shell::scale::DESIGN_REM
+            + widest as f32 * advance
+            + padding;
+        assert!(need <= TREE_WIDTH, "needs {need:.1}px in {TREE_WIDTH}px");
+        assert!(
+            TREE_WIDTH - need < 16.0,
+            "{TREE_WIDTH}px wastes {:.1}px",
+            TREE_WIDTH - need
+        );
     }
 }

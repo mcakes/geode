@@ -51,14 +51,10 @@ impl ShellView {
         self.occupants.get(&tile).map(|o| o.kind)
     }
 
-    /// Route a delivery (§5.1): one with a key to the tile whose id it
-    /// is, dropped if that tile is gone; one without
-    /// (`SeriesFetched`, timeseries spec §5.4) to every occupant of a
-    /// tile on screen, each handed its own copy, since `Delivery` is not
-    /// `Clone` (`QueryOutcome` is not) and an occupant takes it by
-    /// value. Hidden tiles are skipped on purpose: they hold no
-    /// subscription and requery on `set_visible(true)`. The app bridge
-    /// calls this.
+    /// Deliver keyed results to their tile, dropping results for closed tiles.
+    /// Broadcast `SeriesFetched` to visible non-placeholder occupants, each
+    /// with its own copy. Hidden tiles hold no subscription and requery when
+    /// made visible. The app bridge calls this entry point.
     pub fn deliver(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
         // Matched on the VARIANT, not on `key()`, and with every keyed
         // variant named rather than a wildcard: a new variant — keyed
@@ -118,10 +114,9 @@ impl ShellView {
         }
     }
 
-    /// The tiles of the active workspace: what is on screen. Same
-    /// out-parameter shape as `fill_all_tiles`, same reason. `visible_
-    /// tiles()` (tile-stacks spec §3), not `tiles()`: a hidden stack
-    /// member is not on screen and must not be told `set_visible(true)`.
+    /// Fill `out` with tiles on screen in the active workspace, clearing it
+    /// first. Hidden stack members and hidden docks are excluded. Reusing the
+    /// set avoids a fresh allocation each frame.
     fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
         out.clear();
         let ws = self.services.workspaces.active();
@@ -133,23 +128,14 @@ impl ShellView {
         }
     }
 
-    /// The `QueryKey`s of every tile in the active workspace that has an
-    /// occupant right now (Phase 4 §3.10) — what `ShellView::
-    /// on_frame_changed` opens a flip barrier over on a scope/grouping/
-    /// as-of change, so every tile that is actually going to requery
-    /// (rather than one still waiting on `ensure_occupants`, or one in a
-    /// workspace/dock nobody can see) is exactly what the barrier waits
-    /// on. `out` is cleared and refilled, same reason `fill_all_tiles`/
-    /// `fill_active_tiles` take an out-parameter — a flip opens on a user
-    /// mutation, not every render, but there's no reason to allocate
-    /// fresh every time either (the caller passes its own scratch `Vec`).
+    /// Fill `out` with keys for visible, non-placeholder occupants in the active
+    /// workspace, including docks. Frame flips wait on this set; tiles without
+    /// an occupant cannot query or arrive. The caller retains the vector's
+    /// allocation between uses.
     pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
         out.clear();
-        // Phase 4b M8: a placeholder occupant (nothing has opened on
-        // this tile yet) never submits a query and never arrives, so a
-        // barrier that waited on it would sit open until `FLIP_DEADLINE`
-        // every single time — the placeholder is filtered out here
-        // rather than counted as a tile the barrier should wait for.
+        // Placeholders never query or arrive; waiting on them would hold every
+        // flip until its deadline.
         let has_real_occupant = |id: &TileId| {
             self.occupants
                 .get(id)
@@ -176,37 +162,16 @@ impl ShellView {
         }
     }
 
-    /// Create occupants for tiles that lack one, drop occupants whose tile
-    /// is gone, and tell occupants when they enter or leave the screen.
-    /// Runs at the top of `render`, the one place with a `Window` on every
-    /// path that can change the tile set (a split, a close, a restore, a
-    /// workspace switch).
-    ///
-    /// The all-tiles/active-tiles sets are computed into `scratch_all_tiles`
-    /// / `scratch_active_tiles`, reused every frame so nothing is allocated
-    /// once warm (fix-round finding: this used to allocate two fresh
-    /// `HashSet`s per render). Each is taken out of `self` for the
-    /// duration of the borrow-heavy loop below (`f.create` needs `&mut
-    /// self.services`/`cx`, which a live borrow of a `self` field would
-    /// block) and put back before returning.
+    /// Reconcile tile occupants, visibility, and stack positions at render time.
+    /// Create missing occupants, notify removed occupants that they are hidden,
+    /// then drop them. Reusable tile sets retain capacity between frames and
+    /// are temporarily taken out of `self` while factory calls borrow services.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
-        // Phase 4b Task 5 fix round 1, MAJ-2: tell a vanished tile's
-        // occupant it is no longer visible BEFORE dropping it — the
-        // visibility diff further down only ever compares
-        // `self.visible_tiles` against `active` (the *live* set), so a
-        // tile that closed between one render and the next was never in
-        // `active` to begin with and that diff's `self.occupants.get(id)`
-        // would already be `None` by the time it got there, silently
-        // skipping the `set_visible(false)` call every occupant is owed
-        // (`TileContent::set_visible`'s own doc comment: "hidden tiles
-        // may drop subscriptions"). No `Drop` impl can do this instead —
-        // it has no `Context` to call back into gpui with — and this is
-        // generic over every module, not diagnostics-specific: any
-        // occupant that opens something in `set_visible(true)` (a
-        // `Diagnostics::watch()`, a future module's own equivalent) leaks
-        // it forever otherwise.
+        // Tell removed occupants they are hidden before dropping them, so they
+        // can release subscriptions with a live GPUI context. The visibility
+        // diff below can only reach occupants still in the map.
         for (id, o) in self.occupants.iter() {
             if !all.contains(id) {
                 o.content.set_visible(false, cx);
@@ -214,14 +179,9 @@ impl ShellView {
         }
         self.occupants.retain(|id, _| all.contains(id));
 
-        // Computed here, ahead of the creation loop (I2, final review),
-        // so a newly created occupant can be told its own starting
-        // visibility below — see `TileContent::set_visible`'s doc
-        // comment for the contract this satisfies. The diff loop further
-        // down is unchanged: a tile created active is told `true` twice
-        // (once here, once there, since it is also new to
-        // `self.visible_tiles`) — harmless, and simpler than teaching
-        // that loop to skip ids this loop already announced.
+        // Compute visibility before creating occupants so even initially hidden
+        // ones receive their state. Newly visible occupants may receive `true`
+        // here and again in the diff; visibility setters must be idempotent.
         let mut active = std::mem::take(&mut self.scratch_active_tiles);
         self.fill_active_tiles(&mut active);
 
@@ -295,12 +255,8 @@ impl ShellView {
                     cx,
                 ),
             };
-            // I2 (final review): an occupant created outside the active
-            // set (a different workspace, a collapsed dock) was never
-            // told anything — it is never in `self.visible_tiles`, so
-            // the diff loop below never sees it either, and it would
-            // hold whatever it defaults to (visible, per `TileContent::
-            // set_visible`'s doc comment) for the rest of the process.
+            // Announce initial visibility, including for occupants in hidden docks
+            // or inactive workspaces that the later visibility diff cannot see.
             occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
             // A fresh occupant under this id must hear its stack position
@@ -313,7 +269,7 @@ impl ShellView {
             self.stack_sent.remove(id);
         }
         // A request whose tile closed before this render is dropped, not
-        // re-aimed (spec 2026-09-08 add-tile §4.3).
+        // re-aimed.
         self.pending_tiles.retain(|id, p| {
             let live = all.contains(id);
             if !live {
@@ -323,7 +279,7 @@ impl ShellView {
         });
         // An unplaced record outlives only its own tile: once the tile is
         // gone from every workspace there is nothing left to write it
-        // back for (§7.2). Filling the tile in place drops it too —
+        // back for. Filling the tile in place drops it too —
         // `add_tile` does that, since the live occupant's own record
         // supersedes it.
         self.unplaced_records
@@ -343,16 +299,9 @@ impl ShellView {
             }
         }
 
-        // Stack positions (tile-stacks spec §5.1): every occupant is told
-        // its `(index, len)` on its first render and on every change,
-        // never on an unrelated render — `stack_sent` remembers the last
-        // value sent per tile, and a missing entry means "unsent", so a
-        // fresh occupant always hears once, `None` included. The record
-        // is written only AFTER the delivery actually reaches an
-        // occupant (fix round 1): a tile with no occupant yet (defensive
-        // — every id in `creation_order` has one by this point) is left
-        // unrecorded so the next render retries it, rather than being
-        // marked "sent" for a delivery that never happened.
+        // Send stack positions on first delivery and whenever they change.
+        // Record the value only after reaching an occupant, so missing
+        // occupants can receive it on a later reconciliation.
         for id in &creation_order {
             let now = self.services.workspaces.stack_position(*id);
             if self.stack_sent.get(id) == Some(&now) {
@@ -377,38 +326,15 @@ impl ShellView {
         self.stack_sent
             .retain(|id, _| self.scratch_all_tiles.contains(id));
 
-        // The focus backstop (review finding, Important 1). A tile that
-        // leaves the visible set is unmounted as an *element* but keeps
-        // its occupant: `fill_all_tiles` spans every workspace, so a
-        // `mod+2` switch retains the view entity — and with it the
-        // `FocusHandle` a focus-tracking view holds as a field. The
-        // handle's refcount never reaches zero, so `Window::focused` is
-        // still `Some` and `render`'s `is_none()` net cannot see this at
-        // all. What actually breaks is dispatch: gpui resolves the
-        // focused id against the RENDERED tree and falls back to
-        // `root_node_id` when it is absent (`Window::
-        // focus_node_id_in_rendered_frame`, `gpui-pre-0.3.5/src/window.rs`
-        // — `focused_node_id` at the old git rev), and that node carries
-        // none of `ShellView`'s element key listeners — so
-        // `handle_key_down` stops firing and every shell chord is dead
-        // until a click claims focus.
+        // Restore focus immediately if a tile leaves the screen while an
+        // occupant holds the keyboard. Hidden occupants retain their focus
+        // handles, but GPUI can only route through the rendered tree. A live
+        // handle alone therefore does not guarantee working key dispatch.
         //
-        // Focus is taken back HERE rather than through
-        // `pending_focus_restore`, because the flag is consumed at the
-        // TOP of render: setting it now would leave one whole frame in
-        // which the keyboard is dead, and this runs inside the very
-        // render that unmounts the tile.
-        //
-        // The condition mirrors the net's restraint. Focus on any handle
-        // that is not one of the shell's OWN — the root, plus the four
-        // `Entity<InputState>` surfaces a user can be typing into — is,
-        // by this crate's design, a tile view's, and a tile view's focus
-        // is never meant to outlive a render (every tile mouse-down
-        // re-arms the restore for exactly that reason). A shell surface
-        // that is legitimately focused across the switch — the palette
-        // filter, a dialog field, a per-tile command line, the scope bar
-        // — keeps its caret. If `ShellView` ever gains another focusable
-        // field, it belongs in `holds_shell_focus` below.
+        // This runs during the render that removes the tile; deferring through
+        // `pending_focus_restore` would leave a frame with invalid focus.
+        // Shell inputs retain their caret. Any new shell focusable surface must
+        // be included in `holds_shell_focus`.
         if any_tile_left_the_screen
             && let Some(focused) = window.focused(cx)
             && !self.holds_shell_focus(&focused, cx)
@@ -420,7 +346,7 @@ impl ShellView {
         self.scratch_active_tiles = active;
     }
 
-    /// Open the member list on `tile` (spec §5.2): focus that tile first
+    /// Open the member list on `tile`: focus that tile first
     /// (a marker click on an unfocused tile must open THAT tile's list),
     /// refuse with the notice if it is not a member, close the palette
     /// and any command line, and highlight the active member.
@@ -438,12 +364,8 @@ impl ShellView {
             Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
             None => return,
         };
-        // The same "a click that actually moved focus dirties the
-        // session" rule the tile mouse-down handlers follow (`render.rs`)
-        // — `focus_main_tile`/`focus_dock_tile` answer `true` whenever
-        // `tile` is simply present, focused already or not, so the dirty
-        // flag is gated on the tile actually differing too (fix round 1,
-        // Minor 5).
+        // Only a change of focused tile dirties the session. The focus methods
+        // report success even when the requested tile was already focused.
         if moved && was_focused != Some(tile) {
             self.session_dirty = true;
         }
@@ -460,17 +382,9 @@ impl ShellView {
             members,
             highlighted: index - 1,
         });
-        // The list owns the keyboard the instant it opens (fix round 1,
-        // Ruling 5 — Important): `close_palette` above can hand focus
-        // BACK to the scope bar's own text field (`return_focus_from_
-        // overlay`'s `overlay_return_to_filter` arm), which is a shell
-        // surface `note_keyboard_focus_move`'s own `holds_shell_focus`
-        // check treats as perfectly legitimate — so that call alone
-        // cannot fix this. Take the shell root's focus directly whenever
-        // it isn't already there, unconditionally of which surface (shell
-        // or occupant) currently holds it, so `j`/`k`/digits/`escape`
-        // resolve against the list rather than typing into — or being
-        // eaten by — whatever held the keyboard a moment ago.
+        // Give the member list shell focus immediately. Closing the palette may
+        // restore the scope input, whose caret would otherwise consume list
+        // commands before they reached raw key routing.
         if !window
             .focused(cx)
             .is_some_and(|focused| focused == self.focus_handle)
@@ -491,8 +405,8 @@ impl ShellView {
             .unwrap_or_default()
     }
 
-    /// Close the list, if open (spec §5.2's `escape`/click-outside/any-
-    /// dispatch/`ctrl+k` doors, all funnelled here).
+    /// Close the member list. Escape, outside clicks, dispatch, and palette
+    /// opening share this path.
     pub(super) fn close_stack_list(&mut self, cx: &mut Context<Self>) {
         if self.stack_list.take().is_some() {
             cx.notify();
@@ -519,33 +433,13 @@ impl ShellView {
         self.close_stack_list(cx);
     }
 
-    /// A keyboard verb moved which TILE has focus — hand the keyboard
-    /// back to the shell if a tile occupant is still holding it (I-3,
-    /// final whole-branch review).
+    /// After a keyboard action moves tile focus, schedule shell focus
+    /// restoration if an occupant still holds the keyboard. Otherwise an
+    /// editor in the old tile could consume text intended for the new tile.
     ///
-    /// The one door every focus-moving verb goes through: `dispatch`'s
-    /// workspace branch (directional focus, next/prev, the workspace
-    /// switch, a dock show/toggle/move, a close) and
-    /// [`ShellView::open_module`]'s "focus the existing tile" arm. It is
-    /// the keyboard sibling of the rule CLAUDE.md records for the mouse —
-    /// every tile mouse-down re-arms `pending_focus_restore` — and it
-    /// exists because a focus-tracking occupant that owns a focused
-    /// `Input` (a market-data cell editor, spec §8.6) otherwise keeps
-    /// WINDOW focus after the FOCUSED TILE has moved out from under it:
-    /// the next bare key is then dispatched by the matcher against the
-    /// newly focused tile AND typed into the abandoned cell, count prefix
-    /// and all.
-    ///
-    /// The flag rather than `focus_handle.focus` directly: this runs
-    /// inside a dispatch, so the restore is consumed at the top of the
-    /// very next render (`ensure_occupants`'s own backstop takes focus
-    /// immediately only because it runs *inside* that render, where the
-    /// flag would be a frame late). The condition is
-    /// `holds_shell_focus`'s exactly — a shell surface that legitimately
-    /// holds the caret (the scope bar's field, a dialog, the palette, a
-    /// command line) keeps it. The occupant's editor is left OPEN: it
-    /// belongs to the module until commit or cancel, and `escape` on the
-    /// tile once focus returns there still cancels it.
+    /// Shell inputs retain their caret. The occupant's editor remains open;
+    /// its module owns commit/cancel. `render` consumes the flag before the
+    /// next paint, using `occupant_insert_stack` to preserve a valid editor.
     pub(super) fn note_keyboard_focus_move(&mut self, window: &Window, cx: &App) {
         if window
             .focused(cx)
@@ -555,56 +449,16 @@ impl ShellView {
         }
     }
 
-    /// Does the FOCUSED TILE's occupant itself hold the keyboard, in
-    /// insert mode, right now? Answers that tile's context stack when
-    /// two things hold at once — the focused tile's occupant reports that
-    /// one of ITS OWN inputs is the focused handle
-    /// (`TileContent::holds_focus`), and its stack carries `mode ==
-    /// insert` — and `None` otherwise (nothing focused included).
+    /// Return the focused tile's context stack only when that occupant owns
+    /// window focus and reports insert mode. Key routing and deferred focus
+    /// restoration share this predicate, so a mouse-opened editor keeps focus
+    /// under the same conditions that allow it to receive text.
     ///
-    /// There is deliberately no separate "focus is not on a shell
-    /// surface" test in front of the ownership one: an occupant's own
-    /// input is never one of the shell's surfaces, so ownership already
-    /// implies it, and the harness showed the extra check as a SURVIVED
-    /// — no fixture could tell it apart from the ownership check it
-    /// duplicated. `holds_shell_focus` stays the rule for the two doors
-    /// that ask the OTHER question (is the caret on something of the
-    /// shell's own?): `ensure_occupants`' backstop and
-    /// `note_keyboard_focus_move`.
+    /// An open editor alone is insufficient: another tile may own the focused
+    /// input after a keyboard focus move. Checking ownership prevents routing
+    /// against one tile's stack while typing into another tile's editor.
     ///
-    /// **The one predicate behind two doors, which must not drift** (user
-    /// ruling 2026-09-17, reversing the 2026-09-14 "editing is
-    /// keyboard-only" ruling): `handle_key_down`'s insert branch routes
-    /// typing at the occupant's input exactly while this is `Some`, and
-    /// `render`'s consumption of `pending_focus_restore` SKIPS the
-    /// restore — flag cleared, focus left where it is — under the same
-    /// condition, so an editor a module opened from a mouse event (a
-    /// double-click on a cell or an attribute) keeps the keyboard past
-    /// the frame that would otherwise have handed it to the shell root.
-    /// A module whose own field holds the keyboard in insert mode owns
-    /// it; the shell's chords still dispatch from there through the
-    /// insert branch, so nothing goes dead. Both other reasons the flag
-    /// exists stay covered: the orphaned-focus case (`apply_reload`'s
-    /// palette close) has no occupant holding a field, and the
-    /// workspace-switch case is caught in `ensure_occupants` itself,
-    /// never through the flag.
-    ///
-    /// **The ownership check is the load-bearing half** (review C-1): a
-    /// module reports `mode == insert` while its editor is OPEN, and the
-    /// keyboard's own rule (`note_keyboard_focus_move`) leaves an editor
-    /// open when tile focus moves away. With two panels, `i` in A,
-    /// `mod+l`, `i` in B, `mod+h` puts the ring on A — whose abandoned
-    /// editor still claims insert — while B's field holds the keyboard;
-    /// read from the mode alone, that withheld the restore and typed every
-    /// following bare key into B against A's stack. The restore is
-    /// withheld only while the focused tile's occupant itself HOLDS the
-    /// focused handle in insert mode, and the insert branch resolves
-    /// only then too.
-    ///
-    /// Returns the stack rather than a bare `bool` because the insert
-    /// branch resolves the keystroke against it next, and computing the
-    /// stack twice per typed character is the kind of churn this crate
-    /// avoids; [`Self::occupant_holds_insert_focus`] is the `bool` form.
+    /// Returning the stack lets key routing reuse it without computing it twice.
     pub(super) fn occupant_insert_stack(
         &self,
         window: &Window,

@@ -2505,7 +2505,7 @@ mod tests {
             datasets: vec![Freshness {
                 dataset: "risk".into(),
                 as_of: Some("2026-09-12T14:00:00Z".into()),
-                generation: 1,
+                generation: Some(1),
             }],
             as_of_request: None,
         };

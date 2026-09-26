@@ -711,7 +711,7 @@ impl Frame {
     /// `key`'s outcome for `versions` arrived — a failed outcome counts
     /// too (`geode-blotter`'s `deliver`: one broken tile must never hold
     /// the rest open). `true` exactly when this arrival emptied the
-    /// barrier, which also bumps `flip` via [`release`](Self::release);
+    /// barrier, which also bumps `flip` via `release`;
     /// the caller uses the return value to promote its own staged
     /// snapshot right away rather than waiting for its own
     /// `on_frame_changed` to see the bump.

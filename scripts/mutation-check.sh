@@ -610,14 +610,42 @@ run_mutation 'provenance: resolved vs requested time' \
   '                        AsOf::At(_) => Freshness {
                             dataset: dataset.clone(),
                             as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
-                            generation: 0,
+                            generation: None,
                         },' \
   '                        AsOf::At(t) => Freshness {
                             dataset: dataset.clone(),
                             as_of: Some(t.to_rfc3339()),
-                            generation: 0,
+                            generation: None,
                         },' \
   geode-data a_historical_result_is_labelled_with_the_data_it_actually_read
+
+# A live document reports the generation of its OWN partition. Mutated to
+# the dataset-wide maximum, every document in a dataset reports the same
+# number, so a panel holding unsent edits on one underlying is told its
+# document moved whenever any OTHER underlying republishes: a spurious
+# `update HH:MM`, edits frozen out of `edit` and `:bump`, and a rebase the
+# trader has no reason to run.
+run_mutation "provenance: a live document reports its partition's generation, not the dataset's" \
+  crates/geode-data/src/query/read.rs \
+  '                        generation: catalog.live_generation(
+                            &params.dataset,
+                            &join_key(&params.document_key),
+                            None,
+                        )?,' \
+  '                        generation: catalog.dataset_generation(&params.dataset)?,' \
+  geode-data a_live_document_request_reports_its_own_documents_freshness
+
+# A historical document read reports the generation its as-of pinned.
+# Mutated to `None`, identity falls back to source time alone for every
+# as-of read: two generations that share a source time read as the same
+# document, so a draft stays `Editing` while the panel installs the
+# republished grid and the position-keyed edits paint onto whatever node
+# now sits where they were made.
+run_mutation "provenance: an as-of document reports the generation it pinned" \
+  crates/geode-data/src/query/read.rs \
+  '                        generation: compiled.resolved_generation,' \
+  '                        generation: None,' \
+  geode-data a_republish_at_the_same_source_time_reports_a_different_generation
 
 run_mutation "provenance: a join is labelled with its own instant" \
   crates/geode-data/src/query/compile.rs \
@@ -861,17 +889,43 @@ run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" 
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (named book)" \
   crates/geode-data/src/store/catalog.rs \
-  'where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
-  'where ? is not null and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where ? is not null and fg.batch = ? and fb.book = ?' \
   geode-data \
   the_backfill_guard_does_not_read_another_datasets_source_times
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
   crates/geode-data/src/store/catalog.rs \
-  'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
-  'where ? is not null and fg.batch = ? and fb.book is null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where ? is not null and fg.batch = ? and fb.book is null' \
   geode-data \
   the_backfill_guard_does_not_read_another_datasets_source_times
+
+# The generation half of the same partition identity: `live_generation`
+# answers for one (dataset, batch, book), where `dataset_generation`
+# answers for the whole dataset. Mutated to stop scoping by batch, a
+# partition that has never loaded borrows a neighbour's generation and
+# every partition sharing a book reports the same one — the reader that
+# decides whether the document under a trader's unsent edits moved can no
+# longer tell one document's correction from another's.
+run_mutation "catalog: a partition's live generation is its own" \
+  crates/geode-data/src/store/catalog.rs \
+  '"select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and ? is not null and fb.book = ?' \
+  geode-data \
+  live_generation_is_the_partitions_newest_and_moves_on_a_same_time_republish
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
@@ -939,8 +993,14 @@ run_mutation "catalog: the bookless partition gets a file_books row" \
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
-  'and fg.batch = ? and fb.book is null' \
-  'and fg.batch = ? and fb.book is not null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null
+                   and coalesce(fg.archived_only, false) = false",' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is not null
+                   and coalesce(fg.archived_only, false) = false",' \
   geode-data \
   the_backfill_guard_sees_the_bookless_partition
 
@@ -1116,6 +1176,18 @@ run_mutation "pool: a panicking query does not wedge its view" \
   '        let outcome = run(&conn, &req).map_err(|e| e.to_string());' \
   geode-data \
   a_panicking_query_degrades_its_view_without_wedging_it
+
+# A worker leaves every run outside a transaction: an aborted one left by an
+# interrupt on BEGIN, COMMIT or ROLLBACK otherwise fails every later query.
+run_mutation "pool: a worker releases a transaction left behind" \
+  crates/geode-data/src/query/pool.rs \
+  '        release_transaction(&conn);
+
+        // The stale check' \
+  '
+        // The stale check' \
+  geode-data \
+  a_transaction_left_aborted_does_not_wedge_the_worker
 
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
@@ -3931,6 +4003,40 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
   '                    cell = fresh.or(cont).map(|s| s + base);' \
   geode-shell indices_are_contiguous_for_a_prefix_match
 
+# Multi-word queries match word by word in any order: `scope clear`
+# finds "Clear scope". Dropping the per-word path leaves only the literal
+# whole-query subsequence, which requires the typed order.
+run_mutation "palette: query words match in any order" \
+  crates/geode-shell/src/palette.rs \
+  '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
+  '        { let _ = alone; None };' \
+  geode-shell words_typed_out_of_order_still_match
+
+# When the words' best alignments collide, each is placed again on the
+# characters earlier words left free. Ignoring the claimed set re-places
+# `til` on the prefix `tile` already holds, and `til tile` stops matching.
+run_mutation "palette: colliding words are placed on free characters" \
+  crates/geode-shell/src/palette.rs \
+  '        let (s, ix) = align(words[w], candidate, title_len, Some(&claimed))?;' \
+  '        let (s, ix) = align(words[w], candidate, title_len, None)?;' \
+  geode-shell colliding_words_are_placed_again_on_free_characters
+
+# Words in the typed order rank above the same words reversed; with no
+# literal space between them only the per-word order bonus separates them.
+run_mutation "palette: words in the typed order earn the order bonus" \
+  crates/geode-shell/src/palette.rs \
+  '        score += ORDER_BONUS;' \
+  '        score += 0;' \
+  geode-shell words_in_order_without_a_literal_space_between_them_earn_the_order_bonus
+
+# One candidate letter cannot stand for two typed ones: `scope scope`
+# must not match a candidate holding "scope" once.
+run_mutation "palette: out-of-order words claim distinct characters" \
+  crates/geode-shell/src/palette.rs \
+  '    if indices.windows(2).any(|w| w[0] == w[1]) {' \
+  '    if false {' \
+  geode-shell words_claim_distinct_characters
+
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
   '                    if let Ok(true) = f.load_scope(&name) {' \
@@ -4096,6 +4202,40 @@ run_mutation "picker: an empty tick set drops the chip" \
   '        if !values.is_empty() {' \
   '        if true {' \
   geode-shell apply_replaces_the_columns_selection_and_an_empty_tick_set_drops_it
+
+# A member row drags from its grip. The grip's left press must stop before
+# the row's own mouse-down, which opens a Views column's stage and would
+# leave the list before the drag could start.
+run_mutation "objectdialog: a grip press does not open the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {' \
+  '                                .on_mouse_down(MouseButton::Right, |_event, _window, cx| {' \
+  geode-shell pressing_a_member_rows_grip_does_not_open_its_column_stage
+
+# A layer badge's slot is sized by the widest name it can hold, so an
+# unbadged row's value lines up with a badged row's.
+run_mutation "objectdialog: the layer slot keeps the values aligned" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .child(sizer)' \
+  '        .child(div())' \
+  geode-shell the_column_stage_badges_the_layer_in_one_aligned_slot
+
+# Schema's layer names differ in width; the slot is sized by the widest of
+# them, so a `builtin` row's value lines up with a `user` row's.
+run_mutation "objectdialog: schema layer names share one slot width" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                    &LAYER_NAMES,' \
+  '                                    &["user"],' \
+  geode-shell schema_values_line_up_whatever_layer_each_row_names
+
+# The column filter must not survive into Values: `set_value` emits no
+# change event, so without this reset the typed column query hides every
+# value of the chosen column.
+run_mutation "picker: the column filter carries into the values stage" \
+  crates/geode-shell/src/shell/picker.rs \
+  $'otherwise hide every value.\n        p.query.clear();' \
+  'otherwise hide every value.' \
+  geode-shell a_column_filter_does_not_carry_into_the_values_stage
 
 # The single-value flow. Collapse the untouched branch so an empty tick
 # set always means "select nothing" again — the exact defect this fixed:
@@ -6851,6 +6991,96 @@ run_mutation "docks: showing a dock focuses it" \
             self.docks.get_mut(side).set_visible(true);' \
   geode-shell toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty
 
+# The status bar's fullscreen segment counts what a maximised tile hides:
+# one per layout slot (a stack is one), visible docks included, hidden
+# docks not. It must paint whenever a main-tree tile is fullscreen, even
+# a lone one, and its click must restore the layout.
+run_mutation "fullscreen segment: a stack is one hidden slot" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        Node::Leaf(_) | Node::Stack { .. } => 1,' \
+  '        Node::Leaf(_) => 1,
+        Node::Stack { children, .. } => children.len(),' \
+  geode-shell fullscreen_hidden_counts_a_stack_as_one_slot
+
+run_mutation "fullscreen segment: visible dock slots count as hidden" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        Some(self.tree.slot_count() - 1 + docked)' \
+  '        Some(self.tree.slot_count() - 1 + 0 * docked)' \
+  geode-shell fullscreen_hidden_counts_visible_dock_slots_only
+
+run_mutation "fullscreen segment: hidden docks do not count" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            .filter(|(_, dock)| dock.visible())
+            .map(|(_, dock)| dock.tree().slot_count())' \
+  '            .map(|(_, dock)| dock.tree().slot_count())' \
+  geode-shell fullscreen_hidden_counts_visible_dock_slots_only
+
+run_mutation "fullscreen segment: paints while a tile is fullscreen" \
+  crates/geode-shell/src/shell/render.rs \
+  '        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();' \
+  '        let fullscreen_hidden: Option<usize> = None;' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+run_mutation "fullscreen segment: a click restores the layout" \
+  crates/geode-shell/src/shell/status.rs \
+  '                    on_fullscreen_click(window, cx);' \
+  '                    let _ = (&on_fullscreen_click, window, cx);' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+run_mutation "fullscreen segment: sits in the right-hand view-state section" \
+  crates/geode-shell/src/shell/status.rs \
+  '        bar = bar.right(
+            h_flex()
+                .id("status-fullscreen")' \
+  '        bar = bar.left(
+            h_flex()
+                .id("status-fullscreen")' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+# A press on a title-bar control must not reach `TitleBar`'s drag surface:
+# each pressable element occludes it, so a drag there selects text (the
+# field) or does nothing, instead of moving the window.
+run_mutation "title bar: chips occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .px_2()' \
+  '        .items_center()
+        .gap_1()
+        .px_2()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: verbs occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()' \
+  '        .flex()
+        .items_center()
+        .justify_center()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the grouping readout occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  '        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the scope field occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()
+                    .debug_selector(|| "scope-field".to_string())' \
+  '                    .debug_selector(|| "scope-field".to_string())' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+
 # Final review, Important 1: the cross-workspace restore pass must heal
 # only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
 # OR empty") drags focus back to `Main` and prints a launch-time warning
@@ -7626,10 +7856,10 @@ run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
 
 run_mutation "focus: the drag grab re-arms the focus restore" \
   crates/geode-shell/src/shell/drag.rs \
-  '        // as the plain-click path (§3.3).
+  '        // taken window focus and must not strand it after a workspace switch.
         self.pending_focus_restore = true;
         cx.stop_propagation();' \
-  '        // as the plain-click path (§3.3).
+  '        // taken window focus and must not strand it after a workspace switch.
         cx.stop_propagation();' \
   geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
 
@@ -11888,12 +12118,63 @@ run_mutation "matrix: an edited cell paints the draft's value" \
 # Mutated to always, every routine redelivery (the frame's `data` version
 # bumps on any publish of any dataset) tips a draft into Behind and stops
 # painting the live document.
-run_mutation "draft: on_delivered goes Behind only on a different as_of" \
+run_mutation "draft: on_delivered goes Behind only on a different generation" \
   crates/geode-marketdata/src/core/draft.rs \
-  '            DraftState::Editing if self.base.as_deref() != Some(as_of) => {' \
+  '            DraftState::Editing
+                if self
+                    .base
+                    .as_ref()
+                    .is_none_or(|base| base.differs_from(delivered)) =>
+            {' \
   '            DraftState::Editing => {' \
   geode-marketdata \
   on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one
+
+# A document generation is the pair (source time, store generation).
+# Mutated back to the source time alone, a corrected republish — same
+# instant, new generation — is invisible: the draft stays `Editing`, the
+# panel installs the republished grid under it, and edits keyed by grid
+# position paint onto whatever node now sits where they were made. A
+# reordered or extended ladder then shows one term's number on another's
+# row, as the trader's own edit, and `:upload` sends it.
+run_mutation "draft: identity is the generation pair, not the source time alone" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        self.as_of != delivered.as_of
+            || matches!(
+                (self.generation, delivered.generation),
+                (Some(mine), Some(theirs)) if mine != theirs
+            )' \
+  '        self.as_of != delivered.as_of' \
+  geode-marketdata \
+  a_same_time_republish_is_a_different_generation_when_both_ids_are_known
+
+# An unknown generation is not evidence that the document moved. Mutated
+# so a known generation differs from an unknown one, every base missing
+# its generation half — a session file written before the generation was
+# persisted, or any read that names none — puts a restored draft `Behind`
+# on its first delivery, refusing `edit` and `:bump` and demanding a
+# rebase nothing actually moved under.
+run_mutation "draft: an unknown generation is not evidence of movement" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                (Some(mine), Some(theirs)) if mine != theirs' \
+  '                (mine, theirs) if mine != theirs' \
+  geode-marketdata \
+  a_same_time_republish_is_a_different_generation_when_both_ids_are_known
+
+# The one wire between the generation the store reported and the pair a
+# draft compares. Mutated to drop it, nothing complains: the type checks,
+# provenance still names the right generation, and every generation entry
+# above still reports `caught` — but a corrected republish at the same
+# source time is invisible again. The panel installs the republished grid
+# under the open draft, each edit keyed by grid position lands on whichever
+# node now sits where it was made, and the trader sees another node's
+# number marked as their own edit and uploads it.
+run_mutation "matrix: a model's base carries the generation, not the source time alone" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        generation: freshness.generation,' \
+  '        generation: None,' \
+  geode-marketdata \
+  a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it
 
 # A rebase matches by LABEL. Mutated to keep each edit's old index, a term
 # that moved up a row has its edit reassigned to a different expiry, and a
@@ -11914,7 +12195,13 @@ run_mutation "draft: rebase matches a cell by label, not by index" \
 # were not made against, silently.
 run_mutation "draft: from_toml restores the base" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);' \
+  '        let base = t
+            .get("base")
+            .and_then(|v| v.as_str())
+            .map(|as_of| DocumentBase {
+                as_of: as_of.to_string(),
+                generation: t.get("base_generation").and_then(|v| v.as_integer()),
+            });' \
   '        let base = None;' \
   geode-marketdata \
   to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base
@@ -12006,7 +12293,7 @@ run_mutation "mdtile: serialize writes the draft" \
 # sizes and the shifted edit is no longer refused.
 run_mutation "mdtile: a capture only counts the draft's true base" \
   crates/geode-marketdata/src/tile.rs \
-  '        if source_time_of(&base) != draft.base {' \
+  '        if base_of(&base) != draft.base {' \
   '        if false {' \
   geode-marketdata \
   rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
@@ -12221,7 +12508,7 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
   '                match parse_cell(text, ty) {' \
-  '                match Ok::<f64, String>(0.0) {' \
+  '                match Ok::<Value, String>(Value::F64(0.0)) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
 
@@ -12526,7 +12813,12 @@ run_mutation "final: a keyboard focus move hands the keyboard back to the shell"
 # not showing and `edit`/`:bump` stay refused with every edit valid.
 run_mutation "final: the base generation redelivered leaves Behind" \
   crates/geode-marketdata/src/core/draft.rs \
-  '            DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
+  '            DraftState::Behind { .. }
+                if self
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| !base.differs_from(delivered)) =>
+            {
                 self.state = DraftState::Editing;
                 true
             }' \
@@ -12544,7 +12836,7 @@ run_mutation "final: only the edits' own base generation is retained" \
   '                None => self
                     .snapshot
                     .clone()
-                    .filter(|s| draft.base.is_some() && source_time_of(s) == draft.base),' \
+                    .filter(|s| draft.base.is_some() && base_of(s) == draft.base),' \
   '                None => self.snapshot.clone(),' \
   geode-marketdata \
   a_restored_behind_draft_keeps_following_the_feed
@@ -13751,17 +14043,22 @@ run_mutation "mdpicker: step is clamped at the last ranked row with the window f
         }' \
   geode-marketdata the_highlight_never_leaves_the_painted_rows
 
-# A4: an I64 attribute parses as `i64` directly. Mutated back to the
-# `parse_cell` → f64 → `as i64` path, 9007199254740993 (2^53 + 1)
-# silently becomes 9007199254740992.
-run_mutation "mdattr: an I64 attribute parses exactly above 2^53" \
+# One parse for cells and attributes, and an integer column parses as
+# `i64` and stays one. Mutated back to the f64 path, 9007199254740993
+# (2^53 + 1) silently becomes ...92 wherever a whole number is typed — a
+# cell, a header attribute, a restored session value — and a fractional
+# entry in an integer column is truncated instead of refused.
+run_mutation "mdnum: an integer cell and attribute both parse exactly above 2^53" \
   crates/geode-marketdata/src/core/draft.rs \
   '        ColumnType::I64 => trimmed
             .parse::<i64>()
-            .map(Value::I64)' \
-  '        ColumnType::I64 => parse_cell(text, ColumnType::I64)
-            .map(|f| Value::I64(f as i64))' \
-  geode-marketdata parse_attr_per_type
+            .map(Value::I64)
+            .map_err(|_| format!("'"'"'{text}'"'"' is not a whole number")),' \
+  '        ColumnType::I64 => trimmed
+            .parse::<f64>()
+            .map(|v| Value::I64(v as i64))
+            .map_err(|_| format!("'"'"'{text}'"'"' is not a whole number")),' \
+  geode-marketdata parse_cell_reads_f64_and_i64_and_names_the_text_it_refused
 
 # A5: `:set <attr> <value...>` joins the tail with single spaces (a
 # Utf8 attribute may carry them). Mutated to join with nothing, `:set
@@ -14815,8 +15112,10 @@ run_mutation "mdauto: a restored draft's first delivery is always hold" \
 run_mutation "mdauto: the policy fires only on a real transition, never a redelivery" \
   crates/geode-marketdata/src/tile.rs \
   '        if moved
-            && draft.is_behind()' \
-  '        if draft.is_behind()' \
+            && draft.is_behind()
+            && self.policy != UpdatePolicy::Hold' \
+  '        if draft.is_behind()
+            && self.policy != UpdatePolicy::Hold' \
   geode-marketdata \
   switching_to_auto_rebase_does_not_rebase_a_draft_already_behind
 
@@ -15269,9 +15568,23 @@ run_mutation "draft: set_row_cell leaves Sent" \
 # type mismatch the first time an integer column is bumped.
 run_mutation "draft: bump lands the declared integer type" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
+  '                .map(Value::I64)
+                .ok_or_else(|| format!("bump: {column} would be too large"))' \
+  '                .map(|v| Value::F64(v as f64))
+                .ok_or_else(|| format!("bump: {column} would be too large"))' \
   geode-marketdata bump_lands_the_declared_type
+
+# The arithmetic itself stays in `i64`. Mutated through an f64, a holding
+# above 2^53 comes back as a quantity nobody typed: 9007199254740993 + 1
+# lands 9007199254740992, one BELOW the value before the bump, painted as
+# the trader's own edit and sent by `:upload`.
+run_mutation "mdnum: a bump of an integer column does integer arithmetic" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            current
+                .checked_add(delta as i64)' \
+  '            ((current as f64 + delta) as i64)
+                .checked_add(0)' \
+  geode-marketdata a_bump_of_an_integer_column_stays_an_integer_above_2_pow_53
 
 # A same-day group whose size changed has shifted ordinals. Mutated to
 # skip the check, an edit keyed `<date>#2` lands on a different row.
@@ -15310,7 +15623,7 @@ run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
 run_mutation "mdedit: an inserted-row bump checks every cell before writing any" \
   crates/geode-marketdata/src/tile.rs \
   '        for (labels, value, ty) in &inserted {
-            bumped(*value, delta, *ty, &labels.1)?;
+            bumped(value, delta, *ty, &labels.1)?;
         }' \
   '        for (labels, value, ty) in &inserted {
             let _ = (labels, value, ty);
@@ -18182,7 +18495,7 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
     }
 }' \
   geode-timeseries \
-  a_reloaded_colours_doc_reaches_an_open_tile
+  a_reloaded_colors_doc_reaches_an_open_tile
 
 # One entry for the PAIR of defences behind a removed pair leaving no
 # ghost (Task 7, review round 1, I-2): `prune_in_flight` is the
@@ -18823,7 +19136,11 @@ run_mutation "panel: the tile answers keys after the upload confirm ends" \
 # difference within seconds of every upload on the demo bus.
 run_mutation "panel: a redelivery of the base is not read as the echo" \
   crates/geode-marketdata/src/tile.rs \
-  '        if draft.base.as_deref() == Some(t) {' \
+  '        if draft
+            .base
+            .as_ref()
+            .is_some_and(|b| !b.differs_from(delivered))
+        {' \
   '        if false {' \
   geode-marketdata \
   a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo
@@ -18962,8 +19279,12 @@ run_mutation "panel: an Err outcome shows the inline upload error" \
 # any delta, 3 + 0.5 lands a truncated 3 the trader never asked for.
 run_mutation "draft: bump refuses a fractional delta on an I64 column" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
-  '        ColumnType::I64 if true => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if delta.fract() != 0.0 => {
+            Err(format!("bump: {column} takes whole numbers"))
+        }' \
+  '        ColumnType::I64 if false => {
+            Err(format!("bump: {column} takes whole numbers"))
+        }' \
   geode-marketdata \
   bump_refuses_a_fractional_delta_on_an_integer_column_before_writing
 
@@ -19137,7 +19458,7 @@ run_mutation "pricer tile: the entry field is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
   '        if entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
   '        if false && entry.input.read(cx).focus_handle(cx).is_focused(window) {' \
-  geode-pricer escape_removes_the_placeholder_and_the_field_blurs_before_it_drops
+  geode-pricer escape_closes_the_bar_and_the_field_blurs_before_it_drops
 
 run_mutation "pricer tile: the cell editor is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
@@ -19243,7 +19564,103 @@ run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
   '            leg: if below { leg } else { leg },' \
-  geode-pricer o_lands_after_the_cursor_row_and_shift_o_before_it
+  geode-pricer a_place_lands_after_the_cursor_row_or_before_it
+
+# With no cursor row a typed line lands at the end, where the bar's
+# label says `at end`. Mutated, it lands at the top.
+run_mutation "pricer entry: no cursor row lands at the start" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        return Place::Root { at: sheet.len() };' \
+  '        return Place::Root { at: 0 };' \
+  geode-pricer with_no_cursor_row_a_line_lands_at_the_end
+
+# A root after a package is named by the package, not its last leg.
+run_mutation "pricer entry: the label names a leg for a root place" \
+  crates/geode-pricer/src/core/entry.rs \
+  '            let root = sheet.parent(before).unwrap_or(before);' \
+  '            let root = before;' \
+  geode-pricer the_label_names_where_enter_lands
+
+# A refused enter's reason describes the text as it was; an edit must
+# clear it, or the bar blames text that is no longer there.
+run_mutation "pricer entry bar: an edit keeps a stale error" \
+  crates/geode-pricer/src/tile.rs \
+  '                && entry.error.take().is_some()' \
+  '                && entry.error.clone().is_some()' \
+  geode-pricer a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it
+
+# A refused insert must put the place back, or the next enter lands
+# past a line that never went in.
+run_mutation "pricer entry bar: a refusal keeps the advanced place" \
+  crates/geode-pricer/src/tile.rs \
+  '                    entry.place = at;
+                    entry.error = Some(e.to_string().into());' \
+  '                    entry.error = Some(e.to_string().into());' \
+  geode-pricer a_refused_line_puts_the_place_back
+
+# The label follows the place after each enter.
+run_mutation "pricer entry bar: the label stays on the first place" \
+  crates/geode-pricer/src/tile.rs \
+  '                    entry.label = target_label(&self.sheet, entry.place).into();' \
+  '' \
+  geode-pricer o_lands_below_the_cursor_row_and_the_label_says_so
+
+# Closing the bar moves the table up on screen between the two presses of
+# one double-click: without the hand-off the second press edits a lower
+# row.
+run_mutation "pricer entry bar: the double-click ignores the closing press's line" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take();' \
+  '                self.pressed = None;' \
+  geode-pricer a_double_click_on_a_row_while_the_bar_is_open_edits_that_row
+
+# The hand-off is for the very next press only: kept longer, a later
+# double-click at the same spot edits the line that used to be there.
+run_mutation "pricer entry bar: the closing press's line outlives the next press" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take();' \
+  '                self.pressed = self.click_anchor;' \
+  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
+
+# The handed-on line reaches the cursor before the tree-column return.
+run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.cursor.line = Some(id);
+                self.sync_cursor(cx);
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
+
+# A chevron stops propagation, so no SelectCell hands off for it: without
+# its own anchor the double-click's second press lands the cursor on the
+# row that slid up under the pointer.
+run_mutation "pricer entry bar: a chevron press that closes the bar hands off nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.click_anchor = self.entry.is_some().then_some(line);' \
+  '' \
+  geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
+
+# `o` on a closed package lands the line as its first leg: unopened, the
+# leg is hidden and the cursor names a row the model does not paint.
+run_mutation "pricer entry bar: o on a closed package leaves it closed" \
+  crates/geode-pricer/src/tile.rs \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
+
+# The palette's commit focuses the shell root before it dispatches
+# "Add lines…": an open bar that only keeps its text reads insert without
+# holding focus, and shift+d duplicates the tile.
+run_mutation "pricer entry bar: a palette add on an open bar leaves it unfocused" \
+  crates/geode-pricer/src/tile.rs \
+  '            // holding no focus, and shifted letters reach shell bindings.
+            entry.input.read(cx).focus_handle(cx).focus(window, cx);' \
+  '            // holding no focus, and shifted letters reach shell bindings.' \
+  geode-app \
+  a_palette_add_on_an_open_bar_keeps_typing_in_its_field
 
 run_mutation "pricer cell: an empty shift commits zero" \
   crates/geode-pricer/src/core/cell.rs \
@@ -19383,46 +19800,6 @@ run_mutation "pricer tile: the entry field is not insert mode" \
 
 # ---- Pricer post-merge cleanup (2026-09-24) ----
 
-# The entry placeholder is a grid row: a chevron's row read after the
-# entry closes names the package below the one clicked.
-run_mutation "pricer tile: a chevron click reads its row after the entry closes" \
-  crates/geode-pricer/src/tile.rs \
-  '        let line = self.line_at(row);
-        self.close_entry(window, cx);
-        self.close_editor(window, cx);' \
-  '        self.close_entry(window, cx);
-        self.close_editor(window, cx);
-        let line = self.line_at(row);' \
-  geode-pricer a_chevron_click_below_an_open_entry_toggles_that_package
-
-# The same for a cell click: the cursor lands one row low.
-run_mutation "pricer tile: a cell click reads its row after the entry closes" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.close_entry(window, cx);
-                self.close_editor(window, cx);
-                if let Some(id) = line {' \
-  '                self.close_entry(window, cx);
-                self.close_editor(window, cx);
-                let line = self.line_at(*row);
-                if let Some(id) = line {' \
-  geode-pricer a_cell_click_below_an_open_entry_lands_on_that_row
-
-# A double-click's second press carries a row index the first press's
-# close has shifted: without the hand-off it edits the next line.
-run_mutation "pricer tile: a double-click's second press ignores the first's line" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
-  '                self.pressed = None;' \
-  geode-pricer a_double_click_below_an_open_entry_edits_that_row
-
-# The hand-off is for the very next press only: kept longer, a later
-# double-click at the same spot edits the line that used to be there.
-run_mutation "pricer tile: the closing press's line outlives the next press" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);' \
-  '                self.pressed = self.click_anchor.filter(|(r, _)| r == row);' \
-  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
-
 # "loading…" is the only sign a load is pending.
 run_mutation "pricer tile: escape clears the loading notice" \
   crates/geode-pricer/src/tile.rs \
@@ -19489,24 +19866,6 @@ run_mutation "pricer tile: a restored leg's package stays closed" \
   '                        self.expansion.set(self.sheet.id(p), true);' \
   '                        let _ = p;' \
   geode-pricer undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg
-
-# A press on the placeholder must hand on "nothing" too, or its
-# double-click edits the row that slides up under the second press.
-run_mutation "pricer tile: a placeholder press hands nothing on" \
-  crates/geode-pricer/src/tile.rs \
-  '                    self.click_anchor = Some((*row, line));' \
-  '                    self.click_anchor = line.map(|id| (*row, Some(id)));' \
-  geode-pricer a_double_click_on_the_placeholder_opens_nothing
-
-# The handed-on line must reach the cursor before the tree-column return,
-# or a tree-column double-click leaves it on the row that slid up.
-run_mutation "pricer tile: a tree-column double-click keeps the slid-up row" \
-  crates/geode-pricer/src/tile.rs \
-  '                self.cursor.line = Some(id);
-                self.sync_cursor(cx);
-                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
-  geode-pricer a_tree_column_double_click_below_an_open_entry_keeps_that_row
 
 # Planning decision 4's gate: every line in flight at its revision asks
 # for nothing more.
@@ -20466,7 +20825,7 @@ run_mutation "timeseries colour picker: a pick of the painted colour is a no-op"
   crates/geode-timeseries/src/tile/popups.rs \
   '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
   '        if false {' \
-  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+  geode-timeseries a_pick_of_the_color_already_painted_is_a_no_op
 
 # The pick context outlives the popup: the hex field's `enter` closes the
 # popover before its commit arrives.
@@ -20474,7 +20833,7 @@ run_mutation "timeseries colour picker: the pick context survives the close" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
-  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+  geode-timeseries a_typed_hex_commits_an_absolute_color_and_hands_focus_back
 
 # The Colours dialog refuses a `#` name up front...
 run_mutation "colours dialog: a name starting with '#' is reserved" \
@@ -20517,14 +20876,14 @@ run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
   crates/geode-timeseries/src/tile/mod.rs \
   '        Color::Custom(c) => c.to_hsla(),' \
   '        Color::Custom(_) => palette.colour(0),' \
-  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+  geode-timeseries a_featured_pick_keeps_the_theme_following_color_and_anything_else_is_absolute
 
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            "pick_color" => self.open_color_picker(window, cx),' \
   '            "pick_color" => false,' \
-  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+  geode-timeseries the_color_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
 run_mutation "timeseries colour picker: a Change applies to the target slot" \
@@ -20557,6 +20916,25 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
 
+# Column 0 paints only a package's template token.
+run_mutation "pricer grid: a package's tag is its search text" \
+  crates/geode-pricer/src/grid.rs \
+  '                    SharedString::new_static(template.token()),' \
+  '                    package_search(sheet, r).into(),' \
+  geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
+
+# Find reads the unpainted search key, not the painted tag. Anchored on
+# `row_labels`'s wrapped chain (rustfmt splits it past chain_width); the
+# harness's own `tree()` helper keeps the equivalent call on one line, so
+# the two never collide.
+run_mutation "pricer tile: find reads the painted tag" \
+  crates/geode-pricer/src/tile.rs \
+  '            .map(|r| r.search.to_string())
+            .collect()' \
+  '            .map(|r| r.tag.to_string())
+            .collect()' \
+  geode-pricer find_matches_shorthand_that_no_column_shows
+
 # The pricer's gutter follows `[ui] line_numbers` through the observed
 # `UiSettings` global. Mutated, the mirror never takes the new mode and
 # no gutter paints.
@@ -20577,8 +20955,8 @@ run_mutation "pricer gutter: the tree column's width includes the gutter" \
 # stamp ignores the cursor and a move leaves the old distances painted.
 run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
   crates/geode-pricer/src/delegate.rs \
-  '        let stamp = (len, entry, cursor, mode);' \
-  '        let stamp = (len, entry, None, mode);' \
+  '        let stamp = (len, cursor, mode);' \
+  '        let stamp = (len, None, mode);' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 # A tenor line's date commit replaces the tenor with that date. Mutated,
@@ -20919,6 +21297,250 @@ run_mutation "blotter selection: a drag without a recorded press selects nothing
   '            let Some(started_on_gutter) = d.drag_origin.or(Some(gutter)) else {' \
   geode-blotter \
   a_drag_that_never_pressed_a_cell_selects_nothing
+
+# ---- timeseries expression field: series-name completion ----
+# The name at the caret follows the expression tokenizer. Dropped, the
+# `@source` part is not part of the name, and a Tab would complete only
+# the identity and leave the typed source dangling after it.
+run_mutation "timeseries completion: a source suffix is part of the name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '                i = run(i + 1, is_source_char);' \
+  '                i += 1;' \
+  geode-timeseries the_name_at_the_caret_follows_the_tokenizer
+
+# A caret in a number takes no name: otherwise `VIX * 2` offers `V2X`
+# for the `2`, and Enter would expand the number into a series.
+run_mutation "timeseries completion: a number takes no name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            if start <= caret && caret <= i {
+                return None;' \
+  '            if false {
+                return None;' \
+  geode-timeseries the_name_at_the_caret_follows_the_tokenizer
+
+# A caret at a name start is in that name; otherwise Tab glues a second
+# name in front of it (`SPX.close/SPX.closeVIX`).
+run_mutation "timeseries completion: a caret at a name start is in that name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            if start <= caret && caret <= i {
+                return Some(start..i);' \
+  '            if start < caret && caret <= i {
+                return Some(start..i);' \
+  geode-timeseries tab_at_the_start_of_a_name_completes_that_name
+
+# The list ranks against the name at the caret, not the whole field.
+run_mutation "timeseries completion: the list ranks the name at the caret" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.token = name_at(line, caret);' \
+  '        self.token = Some(0..0);' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# An empty name (an empty field, after an operator) offers every name.
+run_mutation "timeseries completion: an empty name offers every loaded name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            Some(token) => rank_candidates(&names, &line[token.clone()]),' \
+  '            Some(token) if !token.is_empty() => rank_candidates(&names, &line[token.clone()]),
+            Some(_) => Vec::new(),' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# Typing re-ranks: the input Change event refreshes the list.
+run_mutation "timeseries completion: typing re-ranks the list" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            f.error = None;
+            this.refresh_expr_completion(cx);' \
+  '            f.error = None;' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# The echo of a completion write is skipped; treated as typing, it clears
+# the refusal an Enter expansion just put up.
+run_mutation "timeseries completion: a write echo is not typing" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if f.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if f.echo.take().is_some_and(|_| false) {' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
+
+# A seeded `e` edit emits no Change, so the list ranks at open.
+run_mutation "timeseries completion: the list ranks on open" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        // ranked here for the text it opens with.
+        self.refresh_expr_completion(cx);' \
+  '        // ranked here for the text it opens with.' \
+  geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# A default-source change relabels an open list.
+run_mutation "timeseries completion: a default-source change relabels the list" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            // offering a name that no longer resolves.
+            this.refresh_expr_completion(cx);' \
+  '            // offering a name that no longer resolves.' \
+  geode-timeseries a_default_source_change_relabels_the_open_list
+
+# The painted window scrolls with the lit row past the eighth.
+run_mutation "timeseries completion: the painted window follows the lit row" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        let first = (self.highlighted + 1).saturating_sub(MAX_ROWS);' \
+  '        let first = 0;' \
+  geode-timeseries the_painted_window_holds_eight_and_follows_the_lit_row
+
+# Tab writes the lit candidate through the field listener.
+run_mutation "timeseries completion: tab writes the candidate" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if let Some(write) = f.completion.cycle(&text, forward) {' \
+  '        if let Some(write) = f.completion.cycle(&text, forward).filter(|_| false) {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# gpui-component Root binds tab to focus cycling window-wide; without the
+# EXPR_CONTEXT reclaim the field listener never sees the key (in a host
+# without the shell root reclaim, as the tile tests are).
+run_mutation "timeseries completion: tab is reclaimed in the expression context" \
+  crates/geode-timeseries/src/lib.rs \
+  '    for context in [popup::RANGE_CONTEXT, popup::EXPR_CONTEXT] {' \
+  '    for context in [popup::RANGE_CONTEXT] {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# Repeated Tab replaces the name just written, not the typed prefix.
+run_mutation "timeseries completion: the cached range moves over the written name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.token = Some(write.range.start..write.caret());' \
+  '        self.token = Some(write.range.clone());' \
+  geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
+
+# Repeated Tab cycles the cached list rather than re-ranking the written name.
+run_mutation "timeseries completion: repeated tab cycles without rebuilding" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if f.completion.stale_at(f.input.read(cx).cursor()) {' \
+  '        if true {' \
+  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+
+# The first Tab after a caret move ranks at the live caret.
+run_mutation "timeseries completion: a first tab re-ranks at the live caret" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            self.refresh_expr_completion(cx);
+        }
+        let Some(Popup::Expr(f)) = &mut self.popup else {' \
+  '        }
+        let Some(Popup::Expr(f)) = &mut self.popup else {' \
+  geode-timeseries tab_after_a_caret_move_completes_the_name_at_the_caret
+
+# ...and after a write, a moved caret makes the cycle stale too.
+run_mutation "timeseries completion: a moved caret ends the cycle" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.written.is_none() || self.caret != Some(caret)' \
+  '        self.written.is_none()' \
+  geode-timeseries tab_after_a_completion_and_a_caret_move_completes_at_the_caret
+
+# Shift+Tab steps back through the cached list.
+run_mutation "timeseries completion: shift-tab steps back" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            (Some(w), false) => (w + n - 1) % n,' \
+  '            (Some(w), false) => (w + 1) % n,' \
+  geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
+
+# A write is one range replace, kept in the input undo history.
+run_mutation "timeseries completion: a completion is undoable" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            s.replace(write.name.clone(), window, cx);' \
+  '            let line = write.apply(&s.value());
+            s.set_value(line.0, window, cx);' \
+  geode-timeseries undo_takes_back_a_completion
+
+# A cached range must fit the live text at both ends, never panic.
+run_mutation "timeseries completion: a range ending inside a char is refused" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        && line.is_char_boundary(range.end)' \
+  '' \
+  geode-timeseries a_range_that_does_not_fit_the_line_writes_nothing
+
+# Enter writes in a unique inexact name before resolving.
+run_mutation "timeseries completion: enter expands a unique name" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)) {' \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)).filter(|_| false) {' \
+  geode-timeseries enter_expands_a_unique_name_then_commits
+
+# ...and re-ranks against the expanded text before a refusal leaves it open.
+run_mutation "timeseries completion: an expansion re-ranks the list" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                self.write_expr(write, window, cx);
+                self.refresh_expr_completion(cx);' \
+  '                self.write_expr(write, window, cx);' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
+
+# ...and only a unique one: several matches commit as typed.
+run_mutation "timeseries completion: enter never picks among several" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        [one] => Some(Write {' \
+  '        [one, ..] => Some(Write {' \
+  geode-timeseries enter_expands_a_unique_inexact_name_only
+
+# A row press writes the candidate at the caret.
+run_mutation "timeseries completion: a row click inserts the candidate" \
+  crates/geode-timeseries/src/popup.rs \
+  '                    move |window, cx| tile.update(cx, |t, cx| t.expr_pick(i, window, cx))' \
+  '                    move |_window, _cx| {}' \
+  geode-timeseries clicking_a_candidate_inserts_it_and_typing_continues
+
+# A press on the list surface must not let the shell root take focus.
+run_mutation "timeseries completion: a list press keeps the keyboard in the field" \
+  crates/geode-timeseries/src/popup.rs \
+  '        // popup, and the shell root from taking focus on a press here.
+        .occlude();' \
+  '        // popup, and the shell root from taking focus on a press here.
+        ;' \
+  geode-timeseries clicking_a_candidate_inserts_it_and_typing_continues
+
+# Nothing loaded: the one muted line naming `a`.
+run_mutation "timeseries completion: nothing loaded says so" \
+  crates/geode-timeseries/src/popup.rs \
+  '    if c.nothing_loaded() {' \
+  '    if false {' \
+  geode-timeseries the_expression_field_says_when_no_series_is_loaded
+
+# ---- Modal Back button: the pointer route for Escape's back rung
+
+# The shared title row paints the button only while the dialog reports a
+# back step; Browse, Columns, and the log-level targets have none.
+run_mutation "modal back: the button paints only while a back step exists" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                .when(show_back, |row| row.child(back_button(cx)))' \
+  '                .when(true, |row| row.child(back_button(cx)))' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# The object dialog's availability is its stage's parent, not merely an
+# open dialog.
+run_mutation "modal back: the object dialog offers Back only off Browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                .is_some_and(ObjectDialogState::has_previous_stage)' \
+  '                .is_some()' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# One click is one whole screen: an open field is cancelled before the
+# stage is left. Leaving Edit drops the draft and leaving Column drops the
+# entry anyway, so only the pure preparation shows the skipped cancel.
+run_mutation "modal back: a click cancels the open field before leaving" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            draft.cancel_text_entry();
+            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  '            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  geode-shell abandon_for_back_cancels_an_open_field
+
+# A kept query is Escape's rung before the stage step; the click clears it.
+run_mutation "modal back: a click clears the kept query" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !self.effective_query().is_empty() {' \
+  '        if false {' \
+  geode-shell abandon_for_back_leaves_the_filter_and_clears_the_query
+
+# A pending confirmation owns input: the click must do nothing.
+run_mutation "modal back: a click is ignored while a confirm is pending" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.confirm.is_some() || !self.has_previous_stage() {' \
+  '        if !self.has_previous_stage() {' \
+  geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

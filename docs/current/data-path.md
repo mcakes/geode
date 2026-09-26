@@ -287,7 +287,10 @@ The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each
 other. A newer request interrupts an older one for the same key; request and
 result tags let the receiver discard a stale arrival. A failed or refused
-delivery does not stop a worker. See [`compile.rs`](../../crates/geode-data/src/query/compile.rs)
+delivery does not stop a worker. An interrupt can land on a read transaction's
+own `BEGIN`, `COMMIT` or `ROLLBACK` and leave the connection inside an aborted
+transaction, so a worker issues `ROLLBACK` after every run, retrying while it
+is interrupted, and starts each request outside any transaction. See [`compile.rs`](../../crates/geode-data/src/query/compile.rs)
 and [`pool.rs`](../../crates/geode-data/src/query/pool.rs).
 
 Live queries read live tables directly. An as-of query resolves, for **each
@@ -389,6 +392,17 @@ Freshness is measured in source time. A book is as fresh as its stalest
 contributing file, and a view with multiple inputs is as fresh as its stalest
 input. That avoids labeling a partial or joined answer with the newest
 contributor's timestamp.
+
+Provenance also reports the generation each dataset was read from. A live read
+names the newest live generation of the partition asked about (a document read)
+or of the whole dataset (a view read); a historical document read names the
+generation its as-of pinned. A historical view read reports no generation,
+because its era resolves one generation per partition and no single ID names
+that answer. An absent generation means unknown — a dataset that has never
+loaded, or a read that cannot name one — never unchanged: a reader deciding
+whether the data under it moved then falls back to source time, and must treat
+that as the weaker test it is, because a corrected republish keeps its source
+time and differs only by generation.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish

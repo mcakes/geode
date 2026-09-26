@@ -112,6 +112,7 @@ pub(crate) fn compile_distinct_with_cache(
         columns: vec![meta("value"), meta("n")],
         stalest_input: Vec::new(),
         resolved_as_of: Default::default(),
+        resolved_generation: None,
     })
 }
 

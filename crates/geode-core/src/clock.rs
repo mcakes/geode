@@ -1,12 +1,10 @@
-//! The trader's clock (as-of dialog spec 2026-09-20 §3): ONE owner of
-//! "which zone is this?" for every displayed time in the app. `[time]
-//! zone` names it (an IANA name; the machine's zone by default), and
-//! `sod`/`eod` are the two day boundaries the as-of presets resolve to.
-//! Pure and `Copy`; the shell publishes it as the `AppClock` gpui global
-//! and every module reads it there.
+//! The configured clock for displayed times and local-time input. `[time] zone`
+//! selects an IANA zone, defaulting to the machine's zone; `sod` and `eod` supply
+//! day-boundary times for as-of presets. The shell publishes this `Copy` value
+//! through `AppClock` for modules to read.
 //!
-//! Storage, the query compiler and the log/crash file names are UTC and
-//! never see this — the data layer is zone-free by design.
+//! Storage, query timestamps, and log/crash filenames remain UTC. Local-time
+//! conversion belongs at the input and display boundaries.
 
 use std::fmt;
 use std::str::FromStr;
@@ -88,15 +86,10 @@ impl Clock {
         self
     }
 
-    /// The machine's own zone, read and memoised ONCE per process (spec
-    /// §3.1, final review Minor 2): the machine's zone cannot change
-    /// mid-session, but every module's `try_global` fallback calls this
-    /// on the paint path (a tile that never installed `AppClock`, or a
-    /// test fixture), and `iana_time_zone::get_timezone()` is an OS
-    /// call — a filesystem read on most platforms — that a hot render
-    /// loop must never pay per frame. `Some(warning)` when the zone
-    /// could not be read or named one the database does not know, in
-    /// which case the clock is UTC.
+    /// Read and memoize the machine's zone once per process. This keeps OS zone
+    /// lookup out of repeated render-time fallbacks when `AppClock` is absent.
+    /// Changes to the machine zone during the process are not detected. Return
+    /// UTC with a warning if lookup fails or the zone name is unrecognized.
     pub fn machine() -> (Clock, Option<String>) {
         static MACHINE: std::sync::OnceLock<(Clock, Option<String>)> = std::sync::OnceLock::new();
         MACHINE
@@ -238,11 +231,9 @@ impl Clock {
     }
 }
 
-/// [`Clock::machine`]'s pure seam (final review, Minor 3): the OS call
-/// pulled out into an argument, so the two fallback arms — a zone that
-/// could not be read, a zone name the IANA database does not recognise
-/// — are ordinary function inputs rather than states neither test nor
-/// developer can provoke on a real machine.
+/// Convert an OS zone-lookup result into a clock and optional warning.
+/// Accepting the result as an argument makes lookup failure and unknown-zone
+/// fallbacks testable without changing the machine's configuration.
 fn machine_from(zone: Result<String, impl std::fmt::Display>) -> (Clock, Option<String>) {
     match zone {
         Ok(name) => match Tz::from_str(&name) {
@@ -263,10 +254,9 @@ fn machine_from(zone: Result<String, impl std::fmt::Display>) -> (Clock, Option<
     }
 }
 
-/// Walk `n` business days back from `date`, weekends skipped (spec §2
-/// ruling 1: no holiday calendar). A `date` that is itself a Saturday or
-/// Sunday first snaps to the Friday before it, so `T-0` on a weekend is
-/// the last business day and `T-1` the one before that.
+/// Walk `n` business days back from `date`, skipping weekends without a
+/// holiday calendar. A weekend date first snaps to the preceding Friday, so
+/// `T-0` on a weekend is Friday and `T-1` is Thursday.
 pub fn business_days_back(date: NaiveDate, n: u32) -> NaiveDate {
     let mut day = date;
     while matches!(day.weekday(), Weekday::Sat | Weekday::Sun) {
@@ -289,7 +279,7 @@ pub struct Preset {
     pub at: DateTime<Utc>,
 }
 
-/// The fixed preset list (spec §3.3), in display order. `T` is `now` on
+/// The fixed preset list, in display order. `T` is `now` on
 /// the clock's date; `T-n` walks business days. A preset that resolves
 /// AFTER `now` is dropped — it would mean live, and the dialog's `Live`
 /// row already says that — and one whose local time does not exist on
@@ -326,10 +316,8 @@ mod tests {
     use chrono_tz::Asia::Tehran;
     use chrono_tz::Europe::London;
 
-    /// Final review, Minor 3: `machine_from` is [`Clock::machine`]'s pure
-    /// seam — the two fallback arms are untestable through `machine()`
-    /// itself (neither state is provokable on a real machine), but each
-    /// is an ordinary argument here.
+    /// Unknown zone names and OS lookup failures both return UTC with a warning.
+    /// Inject the lookup result so the test is independent of the host machine.
     #[test]
     fn machine_from_an_unreadable_zone_is_utc_with_a_warning_naming_time_zone() {
         let zone: Result<String, &str> = Err("no zone");
@@ -571,7 +559,7 @@ mod tests {
     }
 
     /// Every crate's `src/**/*.rs` — chrono's own machine-zone clock is
-    /// banned (spec §6.3): a stray site is silent wrong-time on every
+    /// disallowed: a stray site displays the wrong time in every
     /// zone but the machine's, which no fixture on a developer's machine
     /// would catch. The scanner is checked against a planted line first,
     /// so an emptied pattern list cannot make this pass vacuously — and

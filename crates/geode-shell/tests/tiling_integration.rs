@@ -1,6 +1,5 @@
-//! Keyboard to layout, end to end: builtin keymap → Matcher → ActionId →
-//! apply_workspace_action → Tree geometry. This is the exact pipeline
-//! Phase 1b-ui wires into gpui's key handler.
+//! Keyboard-to-layout integration: builtin keymap → Matcher → ActionId → workspace
+//! action → tree geometry.
 
 use geode_core::config::LayerDoc;
 use geode_shell::actions::ActionRegistry;
@@ -37,10 +36,8 @@ fn keystrokes_drive_the_tiling_tree() {
         }
     };
 
-    // Two tiles side by side. There is no split chord any more (spec
-    // 2026-09-08 add-tile §3.1) — the shell adds tiles through
-    // `ShellView::add_tile`, which calls this same door — so the tiles
-    // this keyboard pipeline then drives are made directly.
+    // Create two tiles side by side directly. The shell's add path uses the same tree
+    // operation; the keyboard pipeline below exercises their layout.
     ws.split_active(Orientation::Horizontal);
     ws.split_active(Orientation::Horizontal);
     assert_eq!(ws.active().tree().tiles().len(), 2);
@@ -93,11 +90,9 @@ fn keystrokes_drive_the_tiling_tree() {
         layout_before.len()
     );
 
-    // shift+d reaches the matcher like any other chord, but
-    // `workspace::duplicate_horizontal` is a *shell* verb (it carries the
-    // focused occupant's serialized state into the new tile, spec
-    // 2026-09-08 add-tile §3.3/§6) — the tiling router must decline it
-    // rather than quietly turn it into a bare split.
+    // `shift+d` resolves to `workspace::duplicate_horizontal`, but duplication belongs
+    // to the shell because it copies occupant state. The geometry router must decline
+    // it instead of reducing it to a bare split.
     let ks = parse_keystroke("shift+d", mod_alias).unwrap();
     match matcher.press(&keymap, ks, &stack) {
         MatchResult::Matched { action, .. } => {
@@ -111,11 +106,9 @@ fn keystrokes_drive_the_tiling_tree() {
     }
 }
 
-/// Dock-regions task: the dock verbs run through the exact same pipeline.
-/// The keystroke specs here are the ones BUILTIN_KEYMAP really binds —
-/// `ctrl+{`, not `ctrl+shift+[`: real platform events arrive as the
-/// shifted character with shift cleared (see BUILTIN_KEYMAP's doc
-/// comment), and `parse_keystroke("ctrl+{")` produces that same shape.
+/// Dock commands traverse the builtin keymap and workspace router. Use `ctrl+{`,
+/// matching platform events that carry the shifted character with Shift cleared and the
+/// shape produced by the keystroke parser.
 #[test]
 fn keystrokes_drive_the_docks() {
     let mut registry = ActionRegistry::default();
@@ -149,8 +142,7 @@ fn keystrokes_drive_the_docks() {
     assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     assert_eq!(ws.active().tree().tiles().len(), 1);
 
-    // A split lands *inside* the focused dock (dock-trees task): the
-    // dock's tree gains a second, stacked tile.
+    // Splitting inside the focused dock adds a second tile to its tree.
     ws.split_active(Orientation::Vertical);
     assert_eq!(
         ws.active().docks().get(DockSide::Left).tree().tiles().len(),

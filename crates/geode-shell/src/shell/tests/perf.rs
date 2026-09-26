@@ -2,12 +2,8 @@
 
 use super::*;
 
-/// Spec §7.4's debug overlay toggle, end to end through the real key
-/// pipeline: `mod+shift+p` (alt is the test/default mod) dispatches
-/// `perf::toggle_overlay`, which paints the readout panel; a second
-/// press removes it. Bounds via the `perf-overlay` debug selector —
-/// the same honest what-the-test-can-see contract as
-/// `empty_workspace_paints_the_hint`.
+/// The real `mod+shift+p` key path toggles the performance overlay on and off. The
+/// fixture uses Alt as `mod`; debug bounds establish whether the readout is painted.
 #[gpui::test]
 fn perf_overlay_toggles_via_the_bound_action(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services());
@@ -112,18 +108,9 @@ fn render_records_frame_samples_and_reset_clears_them(cx: &mut gpui::TestAppCont
     });
 }
 
-/// Bug fix: `perf::reset` zeroes the histogram but used to leave
-/// `last_render_started` pointing at whatever render happened before the
-/// reset was dispatched (e.g. the frame painted before the user's
-/// reaction time in the palette). The render that the reset's own
-/// `cx.notify()` triggers — which in this test-support build's
-/// `flush_effects` (see `gpui::App::flush_effects`'s dirty-window sweep)
-/// happens synchronously inside the `dispatch` call below, same as
-/// `render_records_frame_samples_and_reset_clears_them`'s "notify flushes
-/// into its own automatic draw" — then measured that stale gap as the
-/// first sample of the freshly zeroed histogram. `last_render_started`
-/// must be cleared too, so that render records nothing and becomes the
-/// new baseline; only the render after that records a real interval.
+/// Reset clears both the histogram and `last_render_started`. The reset notification
+/// triggers a draw that establishes a new baseline without recording the gap preceding
+/// reset; only the following render records an interval.
 #[gpui::test]
 fn reset_drops_the_previous_render_timestamp_so_the_first_sample_after_it_is_fresh(
     cx: &mut gpui::TestAppContext,

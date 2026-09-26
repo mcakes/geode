@@ -87,8 +87,8 @@ cargo check -p geode-app --features profiling
   startup and on reload, with an error diagnostic.
 - At quit, `stop_at_quit` flushes every pricer tile's unsaved sheet, then
   spawns the data service's shutdown, in one hook, so the saves are admitted
-  ahead of `Shutdown` and stored by the writer's shutdown drain (within
-  gpui's 200 ms quit wait).
+  ahead of `Shutdown`. The writer drains queued local writes, but GPUI waits
+  only 200 ms for quit hooks; writes still pending at process exit can be lost.
 - Test fixtures hosting a pricer tile install `geode_pricer::init` after
   `gpui_component::init`, as `main` does: gpui gives the later binding
   precedence, and the reverse order lets `DataTable`'s own keys beat the
