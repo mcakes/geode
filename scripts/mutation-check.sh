@@ -18816,14 +18816,14 @@ run_mutation "pricer app: a config reload never reaches the pricer" \
 # only when the query equals it or the trader moved it.
 run_mutation "pricer tile: the free typeahead commits an unmoved subsequence guess" \
   crates/geode-pricer/src/tile.rs \
-  '                        let take_highlight = *moved
-                            || highlighted
-                                .as_deref()
-                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
-  '                        let take_highlight = {
-                            let _ = moved;
-                            true
-                        };' \
+  '                    let take_highlight = *moved
+                        || highlighted
+                            .as_deref()
+                            .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
+  '                    let take_highlight = {
+                        let _ = moved;
+                        true
+                    };' \
   geode-pricer a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved
 
 # A failed load shows a fallback; publishing it would make it the real
@@ -20135,8 +20135,8 @@ run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
 # a tenor commit applies nothing and the line keeps its tenor.
 run_mutation "pricer date field: a tenor commits as a date" \
   crates/geode-pricer/src/core/cell.rs \
-  '    Ok(Some(set(row, with_vanilla(i, |v| v.expiry = expiry))))' \
-  '    Ok(match i.expiry() { Expiry::Tenor(_) => None, Expiry::Date(_) => Some(set(row, with_vanilla(i, |v| v.expiry = expiry))) })' \
+  '    let edit = set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date)));' \
+  '    let edit = if matches!(i.expiry(), Expiry::Tenor(_)) { set(row, i.clone()) } else { set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date))) };' \
   geode-pricer a_tenor_opens_on_the_app_clocks_today_and_enter_makes_it_a_date
 
 # Committing the line's own date is no edit. Mutated, it applies an
