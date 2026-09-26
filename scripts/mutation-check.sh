@@ -20806,6 +20806,29 @@ run_mutation "grid selection: a lost anchor row resolves to None" \
   geode-core \
   resolution_goes_through_identity_and_a_lost_anchor_is_none
 
+# ---- blotter selection (grid selection spec) -------------------------------
+
+run_mutation "blotter selection: escape clears the selection before find" \
+  crates/geode-blotter/src/tile.rs \
+  '                if self.with_delegate(cx, |d| d.selection.is_some()) {' \
+  '                if false {' \
+  geode-blotter \
+  escape_clears_the_selection_before_find
+
+run_mutation "blotter selection: a lost anchor clears and raises the notice" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.selection_lost = true;' \
+  '            self.selection_lost = false;' \
+  geode-blotter \
+  a_selection_whose_anchor_row_vanishes_clears_with_a_notice
+
+run_mutation "blotter selection: summarize goes through top_most" \
+  crates/geode-blotter/src/core/select.rs \
+  '    let rows = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  '    let _ = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  geode-blotter \
+  a_group_with_its_child_sums_the_group_once
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

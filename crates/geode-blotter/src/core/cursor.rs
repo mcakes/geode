@@ -5,21 +5,11 @@ use crate::core::expansion::path_of;
 use crate::core::plan::ColumnPlan;
 use geode_core::snapshot::Snapshot;
 use geode_shell::vimnav::{NavCommand, apply, apply_clamped};
-use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
     pub row: usize,
     pub col: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    #[default]
-    Normal,
-    Visual {
-        anchor: usize,
-    },
 }
 
 impl Cursor {
@@ -62,18 +52,6 @@ impl Cursor {
     pub fn clamp(&mut self, len: usize, cols: usize) {
         self.row = self.row.min(len.saturating_sub(1));
         self.col = self.col.min(cols.saturating_sub(1));
-    }
-}
-
-/// The rows a yank covers: anchor..=cursor in visual mode, the cursor
-/// row alone otherwise. Returned as a half-open range.
-pub fn selection(mode: &Mode, cursor: &Cursor) -> Range<usize> {
-    match mode {
-        Mode::Normal => cursor.row..cursor.row + 1,
-        Mode::Visual { anchor } => {
-            let (a, b) = (cursor.row.min(*anchor), cursor.row.max(*anchor));
-            a..b + 1
-        }
     }
 }
 
@@ -187,9 +165,9 @@ mod tests {
 
     #[test]
     fn visual_mode_clamps_a_bare_step() {
-        // `wrap = false` is what the tile passes while `Mode::Visual`: a
-        // wrap would put the cursor above the anchor and invert the
-        // selection.
+        // `wrap = false` is what the tile passes while a grid selection
+        // is live: a wrap would put the cursor above the anchor and
+        // invert the selection.
         let mut c = Cursor { row: 9, col: 0 };
         c.move_rows(10, NavCommand::Move(1), None, false);
         assert_eq!(c.row, 9);
@@ -211,14 +189,6 @@ mod tests {
         assert_eq!(c.col, 3);
         c.clamp(1, 2);
         assert_eq!((c.row, c.col), (0, 1));
-    }
-
-    #[test]
-    fn a_visual_selection_spans_anchor_to_cursor_either_way() {
-        let c = Cursor { row: 2, col: 0 };
-        assert_eq!(selection(&Mode::Visual { anchor: 5 }, &c), 2..6);
-        assert_eq!(selection(&Mode::Visual { anchor: 0 }, &c), 0..3);
-        assert_eq!(selection(&Mode::Normal, &c), 2..3);
     }
 
     /// Shown rows: root, L1, L1/SPX. Shared by the `find_by_path` /

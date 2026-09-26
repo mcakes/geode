@@ -4,19 +4,22 @@
 //! `render_td` is a lookup. The pure core does the work; this file only
 //! sequences it and paints.
 
-use crate::colour_cache::{ColourCache, Resolved};
+use crate::colour_cache::{ColourCache, Resolved as ColourResolved};
 use crate::core::cache::{FormatCache, cell};
-use crate::core::cursor::{Cursor, Mode, restore_by_path, selection};
+use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
 use crate::core::flatten::{SortOrder, SortSpec, flatten};
 use crate::core::format::Sign;
 use crate::core::plan::{ColumnKind, ColumnPlan};
+use crate::core::select::summarize;
 use geode_core::attribution::Attribution;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
+use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
@@ -62,7 +65,25 @@ pub struct BlotterDelegate {
     /// What the table shows: `visible`, or its fzf-narrowed subset.
     pub shown: Vec<u32>,
     pub cursor: Cursor,
-    pub mode: Mode,
+    /// A live grid selection (grid selection spec §3–§4), anchored by row
+    /// path and column name so it survives a re-sort, a column move or a
+    /// redelivery. `None` in the ordinary cursor-only state.
+    pub selection: Option<Selection<Path, String>>,
+    /// `selection` re-resolved against the current `shown`/`plan` by
+    /// `refresh_selection` — the only field `render_tr`/`render_td` read
+    /// to paint the tint, so painting never re-resolves anything itself.
+    pub resolved: Option<Resolved>,
+    /// The footer's per-column aggregates over `resolved`, rebuilt
+    /// alongside it.
+    pub summary: Vec<AggregateCell>,
+    /// Set by `refresh_selection` when a live selection's anchor row is
+    /// no longer displayed and the selection was cleared as a result;
+    /// taken by the tile to raise its one-shot notice.
+    pub selection_lost: bool,
+    /// The last resolved anchor row index, kept as `find_by_path`'s
+    /// `near` so a redelivery's re-resolution starts its search where
+    /// the anchor was last seen rather than from row 0.
+    anchor_hint: usize,
     pub sort: Option<SortSpec>,
     /// The column whose sort `apply_snapshot` just dropped because a
     /// rebuild no longer carries it (a view edit hid it, or a regroup
@@ -174,7 +195,11 @@ impl BlotterDelegate {
             visible: Vec::new(),
             shown: Vec::new(),
             cursor: Cursor::default(),
-            mode: Mode::Normal,
+            selection: None,
+            resolved: None,
+            summary: Vec::new(),
+            selection_lost: false,
+            anchor_hint: 0,
             sort: None,
             dropped_sort: None,
             cache: FormatCache::default(),
@@ -219,7 +244,7 @@ impl BlotterDelegate {
         col_ix: usize,
         anchors: &Anchors,
         tokens: &Tokens,
-    ) -> Option<Resolved> {
+    ) -> Option<ColourResolved> {
         // Borrows `self.plan` only, so the `&mut self.colour_cache`
         // below is a disjoint field — which is what lets the name stay a
         // `&str` rather than being cloned per cell per frame. That is
@@ -236,7 +261,7 @@ impl BlotterDelegate {
     ///
     /// The one door both paint sites use, so a cell and its header can no
     /// more disagree about the memo than they can about the colour.
-    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<Resolved> {
+    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<ColourResolved> {
         self.ensure_theme_inputs(theme);
         // Four disjoint field borrows in one body — `plan` and `colours`
         // and `theme_inputs` shared, `colour_cache` mutable. Splitting
@@ -376,6 +401,88 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
+    /// Start a selection of `kind` at the cursor, or — when one is live —
+    /// switch its kind keeping the anchor; the same kind again clears
+    /// (spec §4.1).
+    pub fn start_selection(&mut self, kind: SelectKind) {
+        match self.selection.as_ref().map(|s| s.kind) {
+            Some(k) if k == kind => self.selection = None,
+            Some(_) => {
+                if let Some(s) = self.selection.as_mut() {
+                    s.kind = kind;
+                }
+            }
+            None => {
+                let (Some(path), Some(col)) = (
+                    self.cursor_path(),
+                    self.plan
+                        .as_ref()
+                        .and_then(|p| p.columns.get(self.cursor.col))
+                        .map(|c| c.name.clone()),
+                ) else {
+                    return;
+                };
+                self.anchor_hint = self.cursor.row;
+                self.selection = Some(Selection {
+                    kind,
+                    anchor_row: path,
+                    anchor_col: col,
+                });
+            }
+        }
+        self.refresh_selection();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.refresh_selection();
+    }
+
+    /// Re-resolve the selection against the current rows and columns and
+    /// rebuild the summary — every change point calls this, so render
+    /// only ever looks `resolved` and `summary` up. An anchor no longer
+    /// shown clears the selection and raises `selection_lost` for the
+    /// tile's notice; no neighbouring row is guessed.
+    pub fn refresh_selection(&mut self) {
+        let resolved = match (&self.selection, &self.snapshot, &self.plan) {
+            (Some(sel), Some(snapshot), Some(plan)) => {
+                let hint = self.anchor_hint;
+                let shown = &self.shown;
+                sel.resolve_with(
+                    (self.cursor.row, self.cursor.col),
+                    plan.columns.len(),
+                    |path| find_by_path(shown, snapshot, plan, path, hint),
+                    |name| plan.position_of(name),
+                )
+            }
+            _ => None,
+        };
+        if self.selection.is_some() && resolved.is_none() {
+            self.selection = None;
+            self.selection_lost = true;
+        }
+        if let Some(r) = &resolved {
+            // `resolve` orders the range, so the anchor is whichever end
+            // the cursor is not on.
+            self.anchor_hint = if r.rows.start == self.cursor.row {
+                r.rows.end - 1
+            } else {
+                r.rows.start
+            };
+        }
+        self.summary = match (&resolved, &self.snapshot, &self.plan) {
+            (Some(r), Some(snapshot), Some(plan)) => summarize(snapshot, plan, &self.shown, r)
+                .into_iter()
+                .map(|(label, text)| AggregateCell {
+                    label: label.into(),
+                    text: text.into(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        self.resolved = resolved;
+    }
+
     /// Installs a snapshot and answers whether the column plan was
     /// replaced. The plan is always built afresh from `view` — it is
     /// where a column's label, width, format and colour live, and a
@@ -467,6 +574,7 @@ impl BlotterDelegate {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             self.visible.clear();
             self.shown.clear();
+            self.refresh_selection();
             return;
         };
         flatten(
@@ -494,6 +602,7 @@ impl BlotterDelegate {
         }
         self.cursor.clamp(self.shown.len(), plan.columns.len());
         self.invalidate_cells();
+        self.refresh_selection();
     }
 
     /// Invalidate the format cache and the cached tree glyphs together,
@@ -574,6 +683,7 @@ impl BlotterDelegate {
         let cols = self.plan.as_ref().map_or(0, |p| p.columns.len());
         self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();
+        self.refresh_selection();
     }
 
     pub fn shown_texts(&self) -> Vec<String> {
@@ -931,6 +1041,7 @@ impl TableDelegate for BlotterDelegate {
         // harmless: `refill_window` recomputes the same values from the
         // same tree, and the window is only ever tens of rows.
         self.invalidate_cells();
+        self.refresh_selection();
         cx.notify();
     }
 
@@ -978,11 +1089,13 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let range = selection(&self.mode, &self.cursor);
-        let in_visual = matches!(self.mode, Mode::Visual { .. }) && range.contains(&row_ix);
+        let tint = self
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row_ix));
         div()
             .id(("row", row_ix))
-            .when(in_visual, |el| el.bg(cx.theme().selection.opacity(0.35)))
+            .when(tint, |el| el.bg(cx.theme().selection.opacity(0.35)))
     }
 
     fn render_td(
@@ -994,6 +1107,10 @@ impl TableDelegate for BlotterDelegate {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let is_cursor = self.cursor.row == row_ix && self.cursor.col == col_ix;
+        let in_block = self
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Block && r.contains(row_ix, col_ix));
         let kind = self
             .plan
             .as_ref()
@@ -1015,6 +1132,7 @@ impl TableDelegate for BlotterDelegate {
             // nothing on the render thread in release.
             .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
+            .when(in_block, |el| el.bg(theme.selection.opacity(0.35)))
             .when(is_cursor, |el| {
                 el.border_1().border_color(theme.table_active_border)
             });
@@ -1127,7 +1245,7 @@ impl TableDelegate for BlotterDelegate {
                     // A named colour never paints bullish/bearish (§6.3):
                     // `sign` and a name are alternatives, not layers —
                     // but a `tint_sign` colour carries its own two sign
-                    // variants, and `Resolved::for_sign` picks by the
+                    // variants, and `ColourResolved::for_sign` picks by the
                     // cell's sign (the base for an untinted colour, for
                     // zero and for a cell with no number). An unknown
                     // name falls back to the theme's own foreground —
@@ -1973,7 +2091,9 @@ mod tests {
 
         assert_eq!(
             d.cell_colour(1, &anchors, &tokens),
-            Some(Resolved::plain(geode_shell::shell::colours::to_hsla(red))),
+            Some(ColourResolved::plain(geode_shell::shell::colours::to_hsla(
+                red
+            ))),
             "a named column resolves its own definition against the theme"
         );
         assert_eq!(
@@ -2001,7 +2121,7 @@ mod tests {
 
     /// A `tint_sign` colour: `cell_colour` hands back the triad — the
     /// three the cache resolved together — and `render_td`'s named arm
-    /// picks by the cell's own sign through `Resolved::for_sign`, while
+    /// picks by the cell's own sign through `ColourResolved::for_sign`, while
     /// the header takes the base. The cell signs come from the cache the
     /// same way the `sign` arm reads them.
     #[test]

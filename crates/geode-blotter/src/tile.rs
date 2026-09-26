@@ -3,7 +3,6 @@
 //! timing, and paints the header strip, the table, and the footer.
 
 use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
-use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
 use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
@@ -11,6 +10,7 @@ use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::grid::selection::SelectKind;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
@@ -24,6 +24,7 @@ use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::aggregates;
 use geode_shell::shell::chip::{self, Tone};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -73,7 +74,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::toggle", "Toggle node"),
     ("blotter::expand_all", "Expand all"),
     ("blotter::collapse_all", "Collapse all"),
-    ("blotter::visual", "Visual mode"),
+    ("blotter::visual_rows", "Select rows"),
+    ("blotter::visual_block", "Select cells"),
     ("blotter::escape", "Leave visual / clear narrowing"),
     ("blotter::yank", "Yank rows as TSV"),
     ("blotter::find_next", "Next match"),
@@ -719,6 +721,7 @@ impl BlotterTile {
                     Tone::WarningText,
                 ));
             }
+            self.take_selection_notice(cx);
         }
         self.delivered_at = Some(Instant::now());
     }
@@ -894,11 +897,25 @@ impl BlotterTile {
     }
 
     pub fn key_context(&self, cx: &App) -> KeyContext {
-        let mode = match self.table.read(cx).delegate().mode {
-            Mode::Normal => "normal",
-            Mode::Visual { .. } => "visual",
-        };
-        KeyContext::new("blotter").pair("mode", mode).counts()
+        let d = self.table.read(cx).delegate();
+        let mut ctx = KeyContext::new("blotter").pair(
+            "mode",
+            if d.selection.is_some() {
+                "visual"
+            } else {
+                "normal"
+            },
+        );
+        if let Some(s) = &d.selection {
+            ctx = ctx.pair(
+                "select",
+                match s.kind {
+                    SelectKind::Rows => "rows",
+                    SelectKind::Block => "block",
+                },
+            );
+        }
+        ctx.counts()
     }
 
     fn with_delegate<R>(
@@ -931,13 +948,16 @@ impl BlotterTile {
         }
     }
 
-    fn sync_cursor(&self, cx: &mut Context<Self>) {
+    fn sync_cursor(&mut self, cx: &mut Context<Self>) {
+        self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
             t.set_selected_row(row, cx);
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
         });
+        self.take_selection_notice(cx);
+        cx.notify();
     }
 
     /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
@@ -998,8 +1018,9 @@ impl BlotterTile {
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
-                    // Spec §20.5: a bare j/k wraps in normal mode only.
-                    let wrap = matches!(d.mode, Mode::Normal);
+                    // Spec §20.5: a bare j/k wraps outside a selection only —
+                    // wrapping past the anchor would silently invert it.
+                    let wrap = d.selection.is_none();
                     d.cursor.move_rows(len, cmd, count, wrap);
                 });
                 self.sync_cursor(cx);
@@ -1043,39 +1064,46 @@ impl BlotterTile {
                     self.requery(cx);
                 }
             }
-            "visual" => {
-                self.with_delegate(cx, |d| {
-                    d.mode = match d.mode {
-                        Mode::Normal => Mode::Visual {
-                            anchor: d.cursor.row,
-                        },
-                        Mode::Visual { .. } => Mode::Normal,
-                    };
-                });
+            "visual_rows" | "visual_block" => {
+                let kind = if name == "visual_rows" {
+                    SelectKind::Rows
+                } else {
+                    SelectKind::Block
+                };
+                self.with_delegate(cx, |d| d.start_selection(kind));
+                self.table.update(cx, |_, cx| cx.notify());
+                cx.notify();
             }
             "escape" => {
-                self.with_delegate(cx, |d| {
-                    d.mode = Mode::Normal;
-                    if d.narrowed.is_some() {
-                        d.set_narrowed(None);
-                    }
-                });
-                self.find = None;
-                self.table.update(cx, |t, cx| t.refresh(cx));
+                if self.with_delegate(cx, |d| d.selection.is_some()) {
+                    self.with_delegate(cx, |d| d.clear_selection());
+                } else {
+                    self.with_delegate(cx, |d| {
+                        if d.narrowed.is_some() {
+                            d.set_narrowed(None);
+                        }
+                    });
+                    self.find = None;
+                    self.table.update(cx, |t, cx| t.refresh(cx));
+                }
             }
             "yank" => {
                 let text = self.with_delegate(cx, |d| {
                     let (Some(snapshot), Some(plan)) = (&d.snapshot, &d.plan) else {
                         return None;
                     };
-                    let range = selection(&d.mode, &d.cursor);
-                    let out = tsv(snapshot, plan, &d.shown, range, 0..plan.columns.len());
-                    d.mode = Mode::Normal;
+                    let (rows, cols) = match &d.resolved {
+                        Some(r) => (r.rows.clone(), r.cols.clone()),
+                        None => (d.cursor.row..d.cursor.row + 1, 0..plan.columns.len()),
+                    };
+                    let out = tsv(snapshot, plan, &d.shown, rows, cols);
+                    d.clear_selection();
                     Some(out)
                 });
                 if let Some(text) = text {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
+                cx.notify();
             }
             "find_next" | "find_prev" => {
                 let dir = if name == "find_next" {
@@ -1136,8 +1164,21 @@ impl BlotterTile {
             }
             _ => return false,
         }
+        self.take_selection_notice(cx);
         cx.notify();
         true
+    }
+
+    /// The tile's one-shot notice for `refresh_selection` clearing a
+    /// selection whose anchor row is no longer shown — `selection_lost`
+    /// is taken, not read, so the same loss is never reported twice.
+    fn take_selection_notice(&mut self, cx: &mut Context<Self>) {
+        if self.with_delegate(cx, |d| std::mem::take(&mut d.selection_lost)) {
+            self.error = Some((
+                "selection cleared: its first row is no longer shown".into(),
+                Tone::WarningText,
+            ));
+        }
     }
 
     pub fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
@@ -1431,6 +1472,11 @@ impl BlotterTile {
     /// `AppClock` before this, so a tile that ignored it would have
     /// passed everything else).
     #[cfg(test)]
+    pub fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(|(e, _)| e.clone())
+    }
+
+    #[cfg(test)]
     pub(crate) fn freshness_texts(&self, cx: &App) -> Vec<String> {
         let clock = cx
             .try_global::<geode_shell::clock::AppClock>()
@@ -1712,8 +1758,22 @@ impl gpui::Render for BlotterTile {
             .text_color(theme.muted_foreground)
             .border_t_1()
             .border_color(theme.border)
-            .child(div().child(format!("{} rows", delegate.shown.len())));
-        if delegate.any_determined {
+            .child(div().child(format!("{} rows", delegate.shown.len())))
+            .when(!delegate.summary.is_empty(), |f| {
+                f.child(aggregates::strip(&delegate.summary, theme))
+            });
+        if delegate.summary.is_empty()
+            && let Some(r) = &delegate.resolved
+        {
+            footer =
+                footer.child(div().child(format!("{} × {} selected", r.rows.len(), r.cols.len())));
+        }
+        // The dagger legend also covers a selection summary that carries
+        // one: a per-row cell can be plain while the group it is folded
+        // into is not (e.g. a determined-non-additive column at depth 1).
+        let show_dagger =
+            delegate.any_determined || delegate.summary.iter().any(|c| c.text.contains('†'));
+        if show_dagger {
             footer = footer.child(div().child("† shown for this row, do not total"));
         }
         if !delegate.semi_joined.is_empty() {
@@ -2598,6 +2658,174 @@ mod tests {
         );
     }
 
+    fn act(h: &Harness, cx: &mut gpui::VisualTestContext, id: &str) -> bool {
+        h.tile
+            .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+    }
+    fn clip(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+    }
+    fn delivered(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        (h, cx)
+    }
+
+    #[gpui::test]
+    fn shift_v_selects_rows_and_y_copies_them_with_every_column(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::yank");
+        assert_eq!(
+            clip(&mut cx).as_deref(),
+            Some("lhu / underlying_ref\tdelta01\tdaily_trading_pnl\n\t9\t7\n  L1\t5\t7\n")
+        );
+        assert!(
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_none()),
+            "yank ends the selection"
+        );
+    }
+
+    #[gpui::test]
+    fn v_selects_a_block_and_y_copies_only_the_block(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::right"); // cursor (0, delta01)
+        act(&h, &mut cx, "blotter::visual_block");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::right"); // block rows 0..2 × cols 1..3
+        act(&h, &mut cx, "blotter::yank");
+        assert_eq!(
+            clip(&mut cx).as_deref(),
+            Some("delta01\tdaily_trading_pnl\n9\t7\n5\t7\n")
+        );
+    }
+
+    #[gpui::test]
+    fn the_other_key_switches_kind_and_the_same_key_clears(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let kind = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table()
+                    .read(cx)
+                    .delegate()
+                    .selection
+                    .as_ref()
+                    .map(|s| s.kind)
+            })
+        };
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::visual_block");
+        assert_eq!(kind(&mut cx), Some(SelectKind::Block));
+        let rows = h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().resolved.clone().unwrap().rows
+        });
+        assert_eq!(rows, 0..2, "the anchor survived the switch");
+        act(&h, &mut cx, "blotter::visual_block");
+        assert_eq!(kind(&mut cx), None);
+    }
+
+    #[gpui::test]
+    fn escape_clears_the_selection_before_find(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![1, 2])))
+        });
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::escape");
+        let (sel, narrowed) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), d.narrowed.is_some())
+        });
+        assert_eq!(
+            (sel, narrowed),
+            (false, true),
+            "first escape: selection only"
+        );
+        act(&h, &mut cx, "blotter::escape");
+        assert!(h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().narrowed.is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn the_footer_sums_a_group_and_its_child_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "blotter::expand"); // shown: root, L1, SPX, L2
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // L1 + SPX
+        let summary = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().summary.clone());
+        let delta = summary
+            .iter()
+            .find(|c| c.label.as_ref() == "delta01")
+            .expect("delta01 summarised");
+        assert!(delta.text.starts_with("Σ 5.00"), "{}", delta.text);
+    }
+
+    #[gpui::test]
+    fn a_redelivery_keeps_the_selection_on_the_same_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::down"); // L1
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // L1..L2 = rows 1..3
+        // expand_all reflattens at once (SPX is materialised, so it lands
+        // between L1 and L2) and always requeries.
+        act(&h, &mut cx, "blotter::expand_all");
+        let before = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone());
+        assert_eq!(
+            before.as_ref().map(|r| r.rows.clone()),
+            Some(1..4),
+            "anchor L1, cursor L2, by path"
+        );
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let after = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone());
+        assert_eq!(
+            before, after,
+            "a redelivery keeps the selection on the same rows"
+        );
+    }
+
+    #[gpui::test]
+    fn a_selection_whose_anchor_row_vanishes_clears_with_a_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::bottom"); // L2
+        act(&h, &mut cx, "blotter::visual_rows");
+        // Narrow to rows that exclude L2.
+        h.tile.update(&mut cx, |t, cx| {
+            t.table()
+                .update(cx, |t, _| t.delegate_mut().set_narrowed(Some(vec![0, 1])));
+            t.dispatch(&ActionId("blotter::up".into()), None, cx);
+        });
+        let (sel, err) = h.tile.read_with(&cx, |t, cx| {
+            (
+                t.table().read(cx).delegate().selection.is_some(),
+                t.error_text(),
+            )
+        });
+        assert!(!sel);
+        assert_eq!(
+            err.as_deref(),
+            Some("selection cleared: its first row is no longer shown")
+        );
+    }
+
     #[gpui::test]
     fn motions_expansion_and_yank(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -2653,7 +2881,7 @@ mod tests {
         );
 
         act(&mut cx, "blotter::top", None);
-        act(&mut cx, "blotter::visual", None);
+        act(&mut cx, "blotter::visual_rows", None);
         act(&mut cx, "blotter::down", Some(1));
         act(&mut cx, "blotter::yank", None);
         let clip = cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
@@ -2662,11 +2890,12 @@ mod tests {
             Some("lhu / underlying_ref\tdelta01\tdaily_trading_pnl\n\t9\t7\n  L1\t5\t7\n")
         );
         assert!(
-            matches!(
-                h.tile
-                    .read_with(&cx, |t, cx| t.table().read(cx).delegate().mode),
-                Mode::Normal
-            ),
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .selection
+                .is_none()),
             "yank leaves visual"
         );
         assert!(!act(&mut cx, "workspace::focus_left", None), "not ours");
@@ -2695,19 +2924,22 @@ mod tests {
         assert_eq!(cursor_row(&h, &cx), 0, "a bare j wraps in normal mode");
 
         assert!(act(&mut cx, "blotter::bottom"));
-        assert!(act(&mut cx, "blotter::visual"));
+        assert!(act(&mut cx, "blotter::visual_rows"));
         assert!(act(&mut cx, "blotter::down"));
         assert_eq!(
             cursor_row(&h, &cx),
             2,
             "in visual mode the same keystroke clamps at the last row"
         );
-        assert!(
-            matches!(
-                h.tile
-                    .read_with(&cx, |t, cx| t.table().read(cx).delegate().mode),
-                Mode::Visual { anchor: 2 }
-            ),
+        assert_eq!(
+            h.tile.read_with(&cx, |t, cx| t
+                .table()
+                .read(cx)
+                .delegate()
+                .resolved
+                .clone()
+                .map(|r| r.rows)),
+            Some(2..3),
             "and the selection anchor is intact"
         );
     }

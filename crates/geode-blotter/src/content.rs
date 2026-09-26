@@ -38,7 +38,8 @@ use std::time::Duration;
 ///
 /// Two contexts, matching what `BlotterTile::key_context` actually
 /// pushes: `normal` is the full grammar, `visual` the subset that makes
-/// sense while a selection is live (motions, `y`, and the two ways out).
+/// sense while a selection is live — motions (both axes), `y`, `v`/`V` to
+/// switch or leave, and `escape`.
 /// `^`/`$` sit beside `home`/`end` as the column-extreme pair (user ruling
 /// 2026-09-12: a general navigation grammar, the blotter its first
 /// surface); both are shifted punctuation on a US layout, so they bind as
@@ -69,7 +70,8 @@ context = "blotter && mode == normal"
 "z shift+r" = "blotter::expand_all"
 "z shift+m" = "blotter::collapse_all"
 "space" = "blotter::toggle"
-"v" = "blotter::visual"
+"v" = "blotter::visual_block"
+"shift+v" = "blotter::visual_rows"
 "y" = "blotter::yank"
 "n" = "blotter::find_next"
 "shift+n" = "blotter::find_prev"
@@ -82,6 +84,8 @@ context = "blotter && mode == visual"
 [bindings.keys]
 "j" = "blotter::down"
 "k" = "blotter::up"
+"h" = "blotter::left"
+"l" = "blotter::right"
 "g g" = "blotter::top"
 "shift+g" = "blotter::bottom"
 "ctrl+d" = "blotter::page_down"
@@ -90,8 +94,13 @@ context = "blotter && mode == visual"
 "ctrl+b" = "blotter::page_up_full"
 "pagedown" = "blotter::page_down_full"
 "pageup" = "blotter::page_up_full"
+"home" = "blotter::first_col"
+"end" = "blotter::last_col"
+"^" = "blotter::first_col"
+"$" = "blotter::last_col"
 "y" = "blotter::yank"
-"v" = "blotter::escape"
+"v" = "blotter::visual_block"
+"shift+v" = "blotter::visual_rows"
 "escape" = "blotter::escape"
 "#;
 
@@ -374,6 +383,45 @@ mod tests {
         for (spec, expected) in [("^", "blotter::first_col"), ("$", "blotter::last_col")] {
             let keystroke = parse_keystroke(spec, default_mod()).unwrap();
             match Matcher::default().press(&keymap, keystroke, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
+                other => panic!("{spec}: expected a match, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn v_and_shift_v_start_the_two_selections_and_h_moves_in_visual() {
+        let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
+        let mut registry = ActionRegistry::default();
+        for (id, title) in ACTIONS {
+            let _ = registry.register(ActionDef {
+                id: ActionId((*id).to_string()),
+                title: (*title).to_string(),
+                category: "Blotter".to_string(),
+            });
+        }
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let normal = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").pair("mode", "normal").counts(),
+        ];
+        let visual = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").pair("mode", "visual").counts(),
+        ];
+        for (stack, spec, expected) in [
+            (&normal, "v", "blotter::visual_block"),
+            (&normal, "shift+v", "blotter::visual_rows"),
+            (&visual, "v", "blotter::visual_block"),
+            (&visual, "shift+v", "blotter::visual_rows"),
+            (&visual, "h", "blotter::left"),
+            (&visual, "l", "blotter::right"),
+        ] {
+            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, keystroke, stack) {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
                 other => panic!("{spec}: expected a match, got {other:?}"),
             }
