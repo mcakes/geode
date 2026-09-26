@@ -33,7 +33,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 
 use crate::core::Range;
 use crate::core::model::{Color, Model, SlotState};
@@ -549,18 +549,44 @@ pub(crate) fn render_notice(notice: &SharedString, theme: &Theme) -> impl IntoEl
 /// inline, in the notice line's own danger text, because a bad
 /// expression keeps the field open and the reason belongs beside what
 /// caused it rather than in the tile's standing notice.
-pub(crate) fn render_expr_field(f: &ExprField, theme: &Theme) -> impl IntoElement {
+///
+/// The loaded-name completion list hangs from the strip's bottom-left
+/// corner over the chart, so the chart does not reflow as it grows and
+/// shrinks. The strip carries [`crate::popup::EXPR_CONTEXT`] and the
+/// listener that takes `tab`/`shift-tab` for completion before the shell
+/// sees them.
+pub(crate) fn render_expr_field(
+    f: &ExprField,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> impl IntoElement {
+    let theme = cx.theme();
     let paint = chip_paint(theme, Tone::DangerText);
+    let list = crate::popup::render_expr_list(f, tile, tile_id, cx);
     v_flex()
+        .relative()
         .w_full()
         .px_2()
         .py_1()
         .gap_0p5()
         .border_b_1()
         .border_color(theme.border)
+        .key_context(crate::popup::EXPR_CONTEXT)
+        .on_key_down({
+            let tile = tile.clone();
+            move |event: &gpui::KeyDownEvent, window, cx| {
+                if tile.update(cx, |t, cx| t.expr_key(event, window, cx)) {
+                    cx.stop_propagation();
+                }
+            }
+        })
         .child(Input::new(&f.input).appearance(false).w_full())
         .when_some(f.error.clone(), |el, e| {
             el.child(div().text_xs().text_color(paint.text).child(e))
+        })
+        .when_some(list, |el, list| {
+            el.child(div().absolute().left_0().bottom_0().child(list))
         })
 }
 

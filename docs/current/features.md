@@ -200,6 +200,24 @@ series, including a pair loaded twice under two rules, is refused rather than
 resolved to either. A long expression's chip label is cut to 24 characters
 ending in `…`.
 
+The expression field (`x`, or `e` on an expression) completes loaded series
+names, the only names an expression may reference. The name at the caret is
+the run the expression tokenizer reads as one reference (an identity with an
+optional `@source`), so `SPX.close/VI` completes `VI` and a caret in a number
+offers nothing. Loaded names that name exactly one series are ranked against
+it with the `:` line's matcher; an empty name (an empty field, or after an
+operator, a parenthesis or a space) offers every one. The list hangs under the
+field over the chart, showing at most eight rows that scroll with the lit row;
+with nothing loaded it says so and names `a`. Tab writes the lit name over the
+name at the caret and repeated Tab cycles the same list; Shift+Tab cycles
+back, and a first Shift+Tab writes the last. The lit row is the name last
+written. A row click writes that name the same way and leaves the keyboard in
+the field. Enter first writes in a typed name that is not exact but matches
+exactly one loaded name, then commits; with several matches it commits the
+text as typed and the resolver names the unknown reference. A caret moved
+without typing re-ranks on the next Tab, not before; the list itself shows the
+ranking from the last edit.
+
 A tile's session table is written with `version = 2`. A table without it
 may name series in expression text by slot handle (`s3`), and restore
 rewrites each handle: a source slot's handle becomes its full

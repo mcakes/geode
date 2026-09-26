@@ -1,20 +1,22 @@
 //! State and painting for six mutually exclusive transient surfaces: series
 //! list, add picker, expression field, custom dates editor, the menus (action
-//! list, range menu and frequency menu, one painter), and colour picker.
+//! list, range menu and frequency menu, one painter), and color picker.
 //!
 //! Add/expression inputs, the dates editor's container, and the component
-//! colour picker use insert-mode routing. Series and the menus retain normal
+//! color picker use insert-mode routing. Series and the menus retain normal
 //! mode with popup-specific context. The shared closer blurs only a popup that
 //! owns focus. Color-picker ownership includes focused descendants such as its
 //! hex field.
 //!
 //! Series labels, state text, and swatches are prepared alongside header chips.
-//! Picker labels, menu rows, and date segments are also prepared outside render.
-//! Series/picker rows share row_shell; menu rows add disabled reasons and toggles.
+//! Picker labels, completion labels, menu rows, and date segments are also
+//! prepared outside render. Series, picker and completion rows share
+//! row_shell; menu rows add disabled reasons and toggles.
 //!
-//! The lists, add picker, and range editor use deferred anchored popovers above
-//! the chart. Expressions paint inline below the header. The component colour
-//! picker replaces its target chip's swatch and owns its own popup surface.
+//! The lists, add picker, range editor, and expression completion list use
+//! deferred anchored popovers above the chart. The expression field itself
+//! paints inline below the header. The component color picker replaces its
+//! target chip's swatch and owns its own popup surface.
 
 use std::rc::Rc;
 
@@ -35,6 +37,7 @@ use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
+use crate::core::complete::Completion;
 use crate::core::menu::{MenuKind, MenuRow, Trailing};
 use crate::core::model::{Color, Model, SlotState};
 use crate::tile::TimeseriesTile;
@@ -53,6 +56,15 @@ const LABEL_WIDTH: f32 = 32.0;
 /// Dates-editor key context. `crate::init` unbinds GPUI's focus-cycling
 /// Tab actions here so the container can switch its two date fields.
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
+
+/// Expression-field key context. `crate::init` unbinds GPUI's
+/// focus-cycling Tab actions here so the field's listener completes a
+/// series name.
+pub const EXPR_CONTEXT: &str = "GeodeTimeseriesExpr";
+
+/// The completion list's line when no series is loaded: an expression
+/// may reference only a loaded one. Backtick-quoted runs are keys.
+const EXPR_NOTHING_LOADED: &str = "no series loaded — `a` adds one";
 
 /// The dates editor's hint: `tab` and `escape` do things a trader cannot see
 /// from the two fields alone. Backtick-quoted runs are keys, painted as chips
@@ -399,6 +411,9 @@ pub(crate) struct ExprField {
     /// name and checks for a cycle through.
     pub editing: Option<u8>,
     pub error: Option<SharedString>,
+    /// The loaded-name list under the field, rebuilt on the input's
+    /// Change event and on open, never in render.
+    pub completion: Completion,
 }
 
 /// Split each option into the two columns a picker row paints. The
@@ -732,6 +747,60 @@ pub(crate) fn render_picker(
         list = list.child(empty_row(theme, "no identities known"));
     }
     anchor_popup(list, Anchor::TopRight)
+}
+
+/// Paint the expression field's completion list under the field: the
+/// painted window of ranked loaded names with the lit row, or the one
+/// muted line when nothing is loaded. `None` when there is nothing to
+/// offer at the caret (a number, or no name matches).
+///
+/// A row press writes that name at the caret through `expr_pick`, the
+/// same write `tab` makes. The press never leaves the popup: rows stop
+/// propagation, and the surface prevents the default focus move, so the
+/// shell root's `track_focus` cannot take the keyboard from the field.
+pub(crate) fn render_expr_list(
+    f: &ExprField,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> Option<Deferred> {
+    let c = &f.completion;
+    if !c.nothing_loaded() && c.candidate_count() == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let hover = row_paint(theme).hover;
+    let mut list = popover_surface(cx)
+        .debug_selector(move || format!("ts-expr-list-{tile_id}"))
+        // Keep the chart below from receiving pointer hits through the popup.
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default());
+    if c.nothing_loaded() {
+        list = list.child(
+            empty_row(theme, EXPR_NOTHING_LOADED)
+                .debug_selector(move || format!("ts-expr-empty-{tile_id}")),
+        );
+        return Some(anchor_popup(list, Anchor::TopLeft));
+    }
+    for (i, label) in c.painted() {
+        let highlighted = i == c.highlighted();
+        let selector_label = label.clone();
+        list = list.child(
+            row_shell(
+                theme,
+                hover,
+                ElementId::Name(label.clone()),
+                highlighted,
+                move || format!("ts-expr-row-{tile_id}-{selector_label}"),
+                {
+                    let tile = tile.clone();
+                    move |window, cx| tile.update(cx, |t, cx| t.expr_pick(i, window, cx))
+                },
+            )
+            .child(label.clone()),
+        );
+    }
+    Some(anchor_popup(list, Anchor::TopLeft))
 }
 
 /// Read date-field colors from the current theme; segment strings are already

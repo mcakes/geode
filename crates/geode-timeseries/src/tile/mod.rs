@@ -43,10 +43,11 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
 };
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_component::input::{InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState, Position};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
+use crate::core::complete::expand_unique;
 use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{
@@ -1095,7 +1096,7 @@ impl Render for TimeseriesTile {
             _ => None,
         };
         let expr_field = match self.popup.as_ref() {
-            Some(Popup::Expr(f)) => Some(header::render_expr_field(f, theme)),
+            Some(Popup::Expr(f)) => Some(header::render_expr_field(f, &tile, tile_id, cx)),
             _ => None,
         };
         let header = div()

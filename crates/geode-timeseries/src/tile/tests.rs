@@ -609,6 +609,29 @@ impl Harness {
             _ => None,
         })
     }
+    /// The expression field's ranked completions, in list order.
+    fn expr_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Expr(f)) => f.completion.candidates().map(str::to_string).collect(),
+            _ => Vec::new(),
+        })
+    }
+    /// The completion list's lit row.
+    fn expr_lit(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Expr(f)) => f
+                .completion
+                .candidates()
+                .nth(f.completion.highlighted())
+                .map(str::to_string),
+            _ => None,
+        })
+    }
+    fn is_painted(&self, vcx: &mut gpui::VisualTestContext, selector: &str) -> bool {
+        self.draw(vcx);
+        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        vcx.debug_bounds(selector).is_some()
+    }
     fn popup_is_range(&self, vcx: &gpui::VisualTestContext) -> bool {
         self.tile
             .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Range(_))))
@@ -1909,6 +1932,135 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.popup_is_none(&vcx), "`e` on a source slot does nothing");
     assert_eq!(h.notice(&vcx).as_deref(), Some("VIX is not an expression"));
+}
+
+/// The expression field lists the loaded names, re-ranked against the
+/// name at the caret as the text changes, and paints them under the
+/// field with the first lit. An empty field offers every name.
+#[gpui::test]
+fn the_expression_field_lists_loaded_names_ranked_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.expr_candidates(&vcx),
+        vec!["SPX.close", "VIX", "VIX@demo_rest"],
+        "an empty field offers every loaded name"
+    );
+    vcx.simulate_input("SPX.close / V");
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX", "VIX@demo_rest"]);
+    assert_eq!(h.expr_lit(&vcx).as_deref(), Some("VIX"));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-VIX@demo_rest")));
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close")));
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    vcx.simulate_input(" * 2");
+    assert!(h.expr_candidates(&vcx).is_empty(), "a number takes no name");
+    // `e` seeds the field and ranks at once, against the name the
+    // caret sits after.
+    h.set_input_text(&mut vcx, "SPX.close / VIX");
+    h.dispatch(&mut vcx, "commit", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.expr_candidates(&vcx)[0], "VIX", "ranked on open");
+}
+
+/// With nothing loaded there is nothing an expression may reference:
+/// the list says so and names the key that loads one.
+#[gpui::test]
+fn the_expression_field_says_when_no_series_is_loaded(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "expr", None);
+    assert!(h.popup_is_expr(&vcx));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    h.dispatch(&mut vcx, "cancel", None);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-VIX")));
+}
+
+/// Real `tab` keys reach the field (not `Root`'s focus cycling): the
+/// first writes the lit name over the typed one, the next cycles the
+/// same list, `shift-tab` steps back, and typing carries on after the
+/// written name.
+#[gpui::test]
+fn tab_completes_the_name_at_the_caret_and_cycles(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest");
+    assert_eq!(h.expr_lit(&vcx).as_deref(), Some("VIX@demo_rest"));
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX", "wraps");
+    h.keys(&mut vcx, "shift-tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest");
+    assert!(h.popup_is_expr(&vcx));
+    assert!(
+        vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+        "the field keeps the keyboard"
+    );
+    vcx.simulate_input(" * 2");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest * 2");
+}
+
+/// A caret moved without typing emits no Change; the first `tab` after
+/// it completes the name at the LIVE caret, not the one last typed.
+#[gpui::test]
+fn tab_after_a_caret_move_completes_the_name_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("V / SPX.close");
+    h.keys(&mut vcx, "home right tab");
+    assert_eq!(h.input_text(&vcx), "VIX / SPX.close");
+}
+
+/// `enter` on a name that is not exact but matches exactly one loaded
+/// name writes that name in, then commits — the `:` line's rule.
+#[gpui::test]
+fn enter_expands_a_unique_name_then_commits(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / VI");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX")
+    );
+}
+
+/// A candidate click writes it at the caret like `tab`, and the field
+/// keeps the keyboard: the test TYPES after the click, since a press the
+/// stand-in shell root took would leave the text unchanged.
+#[gpui::test]
+fn clicking_a_candidate_inserts_it_and_typing_continues(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / ");
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-VIX"));
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    assert!(h.popup_is_expr(&vcx));
+    vcx.simulate_input(" * 2");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2");
+    assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
 }
 
 /// The palette can dispatch any action over an open field (`ctrl+k`

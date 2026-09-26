@@ -1,4 +1,5 @@
 pub mod chart;
+pub mod complete;
 pub mod menu;
 pub mod model;
 pub mod range;

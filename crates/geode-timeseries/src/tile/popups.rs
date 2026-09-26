@@ -401,11 +401,15 @@ impl TimeseriesTile {
         }
         cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
             // A typed character answers the error under the field: it
-            // describes text that is no longer what is there.
+            // describes text that is no longer what is there. It also
+            // re-ranks the completions against the name now at the caret.
             if let InputEvent::Change = event
-                && let Some(Popup::Expr(f)) = &mut this.popup
-                && f.error.take().is_some()
+                && matches!(this.popup, Some(Popup::Expr(_)))
             {
+                if let Some(Popup::Expr(f)) = &mut this.popup {
+                    f.error = None;
+                }
+                this.refresh_expr_completion(cx);
                 cx.notify();
             }
         })
@@ -415,9 +419,102 @@ impl TimeseriesTile {
             input,
             editing: seed.map(|(number, _)| number),
             error: None,
+            completion: Default::default(),
         }));
+        // A seeded `e` edit emits no Change (`set_value`), so the list is
+        // ranked here for the text it opens with.
+        self.refresh_expr_completion(cx);
         self.notice = None;
         cx.notify();
+    }
+
+    /// The loaded names an expression may reference, as the list and
+    /// Enter's expansion offer them.
+    fn expr_names(&self, cx: &App) -> Vec<String> {
+        let default_source = cx
+            .try_global::<SeriesSettings>()
+            .and_then(|s| s.default_source.clone());
+        self.model.series_names(default_source.as_deref())
+    }
+
+    /// Re-rank the completion list against the field's live text and
+    /// caret. Runs on open and on the input's Change event, never in render.
+    fn refresh_expr_completion(&mut self, cx: &mut Context<Self>) {
+        let names = self.expr_names(cx);
+        if let Some(Popup::Expr(f)) = &mut self.popup {
+            let input = f.input.read(cx);
+            let (text, caret) = (input.value().to_string(), input.cursor());
+            f.completion.refresh(&text, caret, names);
+        }
+    }
+
+    /// Write a completed line into the field with the caret after the
+    /// written name. `set_value` emits no Change, so the completion's own
+    /// cached range (already moved by the write) is what the next `tab`
+    /// replaces; setting the caret also keeps the field focused.
+    fn write_expr_line(
+        &mut self,
+        (line, caret): (String, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Popup::Expr(f)) = &self.popup else {
+            return;
+        };
+        let column = line[..caret].chars().count() as u32;
+        f.input.update(cx, |s, cx| {
+            s.set_value(line, window, cx);
+            s.set_cursor_position(Position::new(0, column), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The expression field's own keys, ahead of the shell: bare `tab`
+    /// writes the next candidate over the name at the caret and
+    /// `shift-tab` the previous one, both cycling the cached list. Both
+    /// are consumed while the field is up, even with nothing to offer,
+    /// so neither moves focus out of the field.
+    pub(crate) fn expr_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ks = &event.keystroke;
+        let m = &ks.modifiers;
+        if ks.key != "tab" || m.control || m.alt || m.platform || m.function {
+            return false;
+        }
+        let forward = !m.shift;
+        if !matches!(&self.popup, Some(Popup::Expr(_))) {
+            return false;
+        }
+        // A caret moved by arrows or a click emits no Change, so a Tab
+        // that starts a cycle ranks at the live caret first; a Tab that
+        // continues one keeps the cached list and range.
+        if !matches!(&self.popup, Some(Popup::Expr(f)) if f.completion.cycling()) {
+            self.refresh_expr_completion(cx);
+        }
+        let Some(Popup::Expr(f)) = &mut self.popup else {
+            return false;
+        };
+        let text = f.input.read(cx).value().to_string();
+        if let Some(written) = f.completion.cycle(&text, forward) {
+            self.write_expr_line(written, window, cx);
+        }
+        true
+    }
+
+    /// A completion row's press: write candidate `index` at the caret,
+    /// exactly as `tab` would, and keep typing in the field.
+    pub(crate) fn expr_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Expr(f)) = &mut self.popup else {
+            return;
+        };
+        let text = f.input.read(cx).value().to_string();
+        if let Some(written) = f.completion.pick(&text, index) {
+            self.write_expr_line(written, window, cx);
+        }
     }
 
     /// Resolve the draft against this tile's slots. A resolution error stays
@@ -427,8 +524,16 @@ impl TimeseriesTile {
         let Some(Popup::Expr(f)) = &self.popup else {
             return false;
         };
-        let text = f.input.read(cx).value().to_string();
+        let mut text = f.input.read(cx).value().to_string();
+        let caret = f.input.read(cx).cursor();
         let editing = f.editing;
+        // The `:` line's rule: a typed name that is not exact but matches
+        // exactly one loaded name is written in first, so the field shows
+        // what was committed (or what the refusal below is about).
+        if let Some(expanded) = expand_unique(&text, caret, &self.expr_names(cx)) {
+            text = expanded.0.clone();
+            self.write_expr_line(expanded, window, cx);
+        }
         let default_source = cx
             .try_global::<SeriesSettings>()
             .and_then(|s| s.default_source.clone());
