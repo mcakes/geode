@@ -1411,6 +1411,11 @@ impl MarketDataTile {
         // committing either. An unbuildable generation changes only the notice, keeping
         // the last usable snapshot, draft state, and model together.
         let mut draft = self.draft.clone();
+        // The generation the edits were made against, taken before anything
+        // below is allowed to move the draft onto another one: an automatic
+        // rebase overwrites `draft.base` with the delivered pair, and a base
+        // read after that would be compared with itself.
+        let held = draft.base.clone();
         let mut moved = base.as_ref().is_some_and(|b| draft.on_delivered(b));
         // Evaluate the upload echo on the same draft copy before committing state.
         let echo = match self.echo_of(&snapshot, base.as_ref(), &mut draft) {
@@ -1480,26 +1485,36 @@ impl MarketDataTile {
                 }
             }
         }
-        // A republish at the SAME source time is invisible in the `update
-        // HH:MM` badge, because the base carries that time too. Say so.
+        // A republish at the SAME source time moves nothing a trader can
+        // see: the `update HH:MM` badge and the header's source-time chip
+        // both carry that time already, and under an automatic rebase even
+        // the badge returns to the plain dirty dot. The document changed
+        // underneath the draft, so say so however the delivery was handled —
+        // silence here is the whole defect this identity exists to remove.
+        //
+        // `held` differing from the delivered pair at an equal source time is
+        // exactly the republish case: a redelivery of the same generation, or
+        // the base generation coming back, does not differ and says nothing.
         // Only when no policy notice already speaks for this delivery: a
-        // `Replace` disclosure of lost work outranks this one.
+        // `Replace` disclosure of lost work, or a dropped-edit report,
+        // outranks this one.
         if moved
-            && draft.is_behind()
             && notice.is_none()
             && let Some(delivered) = &base
-            && draft
-                .base
-                .as_ref()
-                .is_some_and(|held| held.as_of == delivered.as_of)
+            && let Some(held) = &held
+            && held.as_of == delivered.as_of
+            && held.differs_from(delivered)
         {
-            notice = Some(
-                format!(
-                    "republished at {} — :rebase or :revert",
-                    local_hhmm(&delivered.as_of, self.clock)
-                )
-                .into(),
-            );
+            let when = local_hhmm(&delivered.as_of, self.clock);
+            notice = Some(if draft.is_behind() {
+                // The edits are still pending against the old generation, so
+                // name the two keys that resolve them.
+                format!("republished at {when} — :rebase or :revert").into()
+            } else {
+                // Rebased automatically by the trader's own standing policy:
+                // nothing is pending, so there is no key to offer.
+                format!("republished at {when} — your edits moved onto it").into()
+            });
         }
         // Retain the outgoing snapshot only when it is the draft's actual base and the
         // new state still needs it. Restored drafts may have no delivered base; never
@@ -8851,6 +8866,135 @@ deleted = true
         assert!(
             notice.is_some_and(|n| n.contains("republished")),
             "the badge's time is the base's own, so the notice must say what moved"
+        );
+    }
+
+    /// The same defect in the shape that names it: a corrected republish at
+    /// the SAME source time whose node ladder GREW. An axis panel's column
+    /// order is the document's own node order and `Draft::edits` is keyed by
+    /// model column, so painting the republished grid under a position-keyed
+    /// edit would move that edit one column along — onto the node the
+    /// republish inserted, at a value the trader never typed there.
+    #[gpui::test]
+    fn a_republish_that_reorders_the_nodes_keeps_the_edit_on_its_own_node(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The base ladder with a node inserted AHEAD of it, so every node a
+        // held edit could be keyed by sits one column further right.
+        const WIDER: [f64; 4] = [-30.0, -20.0, -1.0, 3.5];
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(&TERMS, &NODES, provenance_gen(BASE, 7))),
+        );
+
+        // Onto the first NODE column, past the slice values: a cell whose
+        // column identity is a ladder position, which is what moves.
+        h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.9");
+        h.dispatch(&mut vcx, "commit", None);
+        let node = h
+            .tile
+            .read_with(&vcx, |t, _| t.model().columns[SLICE].clone());
+
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(&TERMS, &WIDER, provenance_gen(BASE, 8))),
+        );
+
+        let (state, columns, cells) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.model().columns.clone(),
+                t.model().rows[0].cells.clone(),
+            )
+        });
+        assert!(
+            matches!(
+                state,
+                DraftState::Behind { ref newer }
+                    if newer.as_of == BASE && newer.generation == Some(8)
+            ),
+            "a same-time republish must be Behind, got {state:?}"
+        );
+        assert_eq!(
+            columns.len(),
+            SLICE + NODES.len(),
+            "still the base ladder, not the republished one: {columns:?}"
+        );
+        let edited: Vec<SharedString> = columns
+            .iter()
+            .zip(&cells)
+            .filter(|(_, cell)| cell.edited)
+            .map(|(label, _)| label.clone())
+            .collect();
+        assert_eq!(
+            edited,
+            vec![node],
+            "the painted edit is still on the node it was typed into: {columns:?}"
+        );
+        assert_eq!(cells[SLICE].text.to_string(), "0.9000", "its own value");
+    }
+
+    /// Under `:auto rebase` a corrected republish is resolved without the
+    /// trader touching a key — and nothing on screen moves, because the
+    /// source time did not: no `update HH:MM` badge, the same time chip. The
+    /// notice is the only disclosure that the document changed under the
+    /// draft, so it fires here too, naming no key since nothing is pending.
+    #[gpui::test]
+    fn auto_rebase_still_discloses_a_same_time_republish(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.command(&mut vcx, "auto rebase").unwrap();
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        let tag = h.document_request().unwrap().tag;
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(&TERMS, &NODES, provenance_gen(BASE, 7))),
+        );
+
+        h.dispatch(&mut vcx, "edit", None);
+        h.set_editor(&mut vcx, "0.5");
+        h.dispatch(&mut vcx, "commit", None);
+
+        // The same terms and nodes, so every label resolves and nothing is
+        // dropped: no `dropped_notice` stands in for the disclosure.
+        h.deliver(
+            &mut vcx,
+            tag,
+            Arc::new(document_with(&TERMS, &NODES, provenance_gen(BASE, 8))),
+        );
+
+        let (state, base, notice, chips) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().state.clone(),
+                t.draft().base.clone(),
+                t.notice().map(str::to_string),
+                t.header_texts(),
+            )
+        });
+        assert_eq!(state, DraftState::Editing, "rebased, never left Behind");
+        assert_eq!(
+            base.and_then(|b| b.generation),
+            Some(8),
+            "and it stands on the republished generation"
+        );
+        assert!(
+            !chips.iter().any(|c| c.starts_with("update ")),
+            "no badge moves on a same-time republish: {chips:?}"
+        );
+        let notice = notice.expect("the republish must be disclosed somewhere");
+        assert!(notice.contains("republished"), "{notice}");
+        assert!(
+            !notice.contains(":rebase") && !notice.contains(":revert"),
+            "nothing is pending, so offer no keys: {notice}"
         );
     }
 

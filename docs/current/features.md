@@ -78,14 +78,19 @@ and draft unchanged and reports the error.
 
 A base is a generation, not an instant. A historical delivery puts the draft
 Behind, and so does a corrected republish at the same source time: the
-generation differs even when the time does not. While such a delivery leaves
-the draft held, a notice names the republish, because the `update HH:MM` badge
-carries the base's own source time and would otherwise report nothing new.
-Returning to the base generation restores Editing. A document read names its
-generation under both live and historical as-of, so an open draft normally has
-one; where nothing named it — a session file written before the generation was
-saved — the comparison falls back to source time alone, which cannot see a
-republish. The module supports numeric, date, text, and closed-choice
+generation differs even when the time does not. Such a delivery always produces
+a notice naming the republish, because the `update HH:MM` badge and the
+source-time chip both carry the base's own time and would otherwise report
+nothing new — held, the notice offers `:rebase` and `:revert`; automatically
+rebased, it says the edits were moved, since nothing is left pending. A
+disclosure the policy already made, of replaced or dropped work, outranks it.
+Returning to the base generation, or a redelivery of the same one, is not a
+republish and says nothing. A document read names its generation under both
+live and historical as-of, so an open draft normally has one; where nothing
+named it — a session file written before the generation was saved — the
+comparison falls back to source time alone, which cannot see a republish.
+
+The module supports numeric, date, text, and closed-choice
 cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
