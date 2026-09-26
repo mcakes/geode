@@ -1,7 +1,8 @@
 # Geode — Mutation Harness Linting and Mechanical Fixes Design
 
 The first work unit arising from the 2026-09-25 codebase review
-(`review-2026-09-25/`). That review produced findings across fifteen areas;
+(`docs/superpowers/reviews/2026-09-25/`). That review produced findings across
+fifteen areas;
 this document specifies only the harness repair and the mechanical fixes,
 which were chosen to go first because the harness is the instrument that
 verifies everything after it.
