@@ -26,8 +26,8 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, asof_view, choicedialog, commandline_view, dialog, objectdialog, perf_overlay,
-    picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
+    ShellView, addfilter, asof_view, choicedialog, commandline_view, dialog, objectdialog,
+    perf_overlay, picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -1054,16 +1054,34 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` pick glyph (scope-save spec's amendment) —
-        // the mouse form of `mod+p`, opened on the column-choice stage
-        // exactly as `frame::pick` is. Same `cx.entity()`-captured shape
-        // as `on_chip_open` just above.
-        let pick_chip_entity = cx.entity();
-        let on_pick = move |window: &mut Window, cx: &mut App| {
-            pick_chip_entity.update(cx, |view, cx| {
-                picker::open(view, None, window, cx);
+        // The scope bar's `+` opens the add-a-filter menu, whose rows
+        // dispatch `frame::pick` and `frame::add_expression`. Same
+        // `cx.entity()`-captured shape as `on_chip_open` just above.
+        let add_entity = cx.entity();
+        let on_add = move |window: &mut Window, cx: &mut App| {
+            add_entity.update(cx, |view, cx| {
+                view.open_add_filter_menu(window, cx);
             });
         };
+        // The open menu's panel, painted from its prepared rows. A row
+        // click commits through `commit_add_filter` (a dispatch); hovering
+        // a row highlights it.
+        let add_menu = self.add_filter_menu.as_ref().map(|menu| {
+            let pick_entity = cx.entity().downgrade();
+            let hover_entity = pick_entity.clone();
+            addfilter::render(
+                menu,
+                move |entry, window: &mut Window, cx: &mut App| {
+                    let _ = pick_entity
+                        .update(cx, |view, cx| view.commit_add_filter(entry, window, cx));
+                },
+                move |i, _window: &mut Window, cx: &mut App| {
+                    let _ = hover_entity.update(cx, |view, cx| view.hover_add_filter(i, cx));
+                },
+                cx,
+            )
+            .into_any_element()
+        });
         // The scope bar's save glyph — the mouse form of
         // `scope::save_current`, through the same door `input.rs`'s
         // dispatch arm uses.
@@ -1091,12 +1109,23 @@ impl Render for ShellView {
                 asof_view::open(view, window, cx);
             });
         };
-        // The expression chip's click (command-line locality 2026-09-20)
-        // — the mouse form of `frame::scope_expression`.
-        let expr_entity = cx.entity();
-        let on_expr = move |window: &mut Window, cx: &mut App| {
-            expr_entity.update(cx, |view, cx| {
-                scope_expr_view::open(view, window, cx);
+        // An expression term chip's click opens the dialog on that term
+        // alone; its `×` drops that term alone (an undoable edit, like a
+        // dimension chip's `×`).
+        let term_open_entity = cx.entity();
+        let on_term_open = move |i: usize, window: &mut Window, cx: &mut App| {
+            term_open_entity.update(cx, |view, cx| {
+                scope_expr_view::open(view, scope_expr_view::Mode::Term(i), window, cx);
+            });
+        };
+        let term_close_entity = cx.entity();
+        let on_term_close = move |i: usize, _window: &mut Window, cx: &mut App| {
+            term_close_entity.update(cx, |view, cx| {
+                view.frame.update(cx, |f, cx| {
+                    if f.drop_expression_term(i) {
+                        cx.notify();
+                    }
+                });
             });
         };
         // Whether the grouping picker is up: the readout holds its pressed
@@ -1111,13 +1140,15 @@ impl Render for ShellView {
             &self.filter_input,
             &bar_model,
             grouping_open,
+            add_menu,
             on_chip_close,
             on_chip_open,
-            on_pick,
+            on_add,
             on_save,
             on_grouping,
             on_as_of,
-            on_expr,
+            on_term_open,
+            on_term_close,
             cx,
         );
 
@@ -1557,6 +1588,29 @@ impl Render for ShellView {
                     )
                 },
             )
+            // The add-a-filter menu's click catcher: a press anywhere but
+            // the menu closes it and goes no further. The menu panel itself
+            // is deferred (painted above this) from inside the toolbar, so
+            // its rows are hit first. `occlude` is what keeps the press
+            // from also reaching the element beneath, the `+` included —
+            // otherwise a click on the `+` would close and reopen the menu.
+            .when(self.add_filter_menu.is_some(), |el| {
+                el.child(
+                    div()
+                        .id("scope-add-menu-click-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
+                        .occlude()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| view.close_add_filter_menu(cx)),
+                        ),
+                )
+            })
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.

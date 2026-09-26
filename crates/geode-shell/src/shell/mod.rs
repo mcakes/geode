@@ -7,6 +7,7 @@
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 mod add_tile;
+pub mod addfilter;
 pub mod asof_rows;
 pub mod asof_view;
 pub mod chip;
@@ -836,6 +837,11 @@ pub struct ShellView {
     /// `notice`), and dropped by `render`'s generic staleness check when
     /// its tile stops being the focused member.
     stack_list: Option<stacklist::StackList>,
+    /// The scope bar's open "Add a filter" menu, or `None` when closed.
+    /// Owns the keyboard while open (`handle_key_down`'s own branch),
+    /// closed by any dispatch (which is also how a row commits), by the
+    /// palette or a dialog opening, and by a click outside it.
+    add_filter_menu: Option<addfilter::AddFilterMenu>,
     /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
     /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
     /// fresh `HashSet` every render). Always cleared and refilled there;
@@ -1650,6 +1656,7 @@ impl ShellView {
             stack_sent: HashMap::new(),
             notice: None,
             stack_list: None,
+            add_filter_menu: None,
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),

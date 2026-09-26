@@ -6505,10 +6505,130 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '                if f.set_scope(scope) {' \
-  '                if f.clear_scope() {' \
+  '            Ok(frame.set_scope(scope))' \
+  '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
+
+# ---- Expression term chips and the add-a-filter menu: the scope bar
+# splits the expression into its top-level `and` terms, one chip each,
+# and the `+` opens a menu onto the picker and the dialog's add mode.
+
+# A left-nested `and` must flatten too; pushing the left operand whole
+# leaves `(a and b) and c` as two terms.
+run_mutation "expr-chips: conjuncts flatten the left side of an and" \
+  crates/geode-core/src/scope/expr.rs \
+  '                a.walk_conjuncts(out);' \
+  '                out.push(a);' \
+  geode-core \
+  nested_ands_flatten_on_both_sides_in_order
+
+# The rebuild keeps the terms' order; folding the other way reverses it.
+run_mutation "expr-chips: from_conjuncts folds left in order" \
+  crates/geode-core/src/scope/expr.rs \
+  '            .reduce(|acc, term| Expr::And(Box::new(acc), Box::new(term)))' \
+  '            .reduce(|acc, term| Expr::And(Box::new(term), Box::new(acc)))' \
+  geode-core \
+  conjuncts_split_a_chain_and_rebuild_it
+
+# Dropping term i must drop that term, not whichever is last.
+run_mutation "expr-chips: dropping a term removes that term" \
+  crates/geode-shell/src/frame.rs \
+  '                terms.remove(i);' \
+  '                terms.pop();' \
+  geode-shell \
+  drop_expression_term_removes_only_that_term_and_is_undoable
+
+# A term index the scope no longer has refuses; without the check the
+# edit indexes past the end.
+run_mutation "expr-chips: an out-of-range term refuses" \
+  crates/geode-shell/src/frame.rs \
+  '        if i >= terms.len() {' \
+  '        if terms.is_empty() {' \
+  geode-shell \
+  replace_expression_term_keeps_the_others_and_refuses_out_of_range
+
+# Replacing term i keeps the others.
+run_mutation "expr-chips: a term edit replaces only that term" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(t) => terms[i] = t,' \
+  '            Some(t) => terms = vec![t],' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# Appending joins with `and`; replacing loses the existing expression.
+run_mutation "expr-chips: append joins the existing expression with and" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '            Some(_) => term,' \
+  geode-shell \
+  append_expression_joins_with_and_or_sets_it
+
+# The dialog's add mode appends; committing as whole mode replaces.
+run_mutation "expr-chips: the add dialog appends rather than replaces" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
+  '        Mode::Add => {
+            let mut scope = frame.scope().clone();
+            scope.expression = parsed;
+            Ok(frame.set_scope(scope))
+        }' \
+  geode-shell \
+  the_plus_menus_expression_row_appends_with_and
+
+# A term chip's body opens the dialog on that term, not the whole.
+run_mutation "expr-chips: a term chip opens term mode" \
+  crates/geode-shell/src/shell/render.rs \
+  '                scope_expr_view::open(view, scope_expr_view::Mode::Term(i), window, cx);' \
+  '                scope_expr_view::open(view, scope_expr_view::Mode::Whole, window, cx);' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# A term chip's `×` drops its own term.
+run_mutation "expr-chips: a term's × drops its own index" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_expression_term(i) {' \
+  '                    if f.drop_expression_term(0) {' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# As on a dimension chip, `occlude()` on the `×` is the one mechanism
+# that keeps its press from also reaching the body and opening the
+# dialog; there is no `stop_propagation` beside it.
+run_mutation "expr-chips: the term × occludes the chip body" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .occlude()' \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .flex_shrink_0()' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# The menu's click catcher occludes: without it the closing press also
+# reaches what is beneath (the grouping readout opens its picker).
+run_mutation "add-filter: an outside press closes the menu and goes no further" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
+                        .occlude()' \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())' \
+  geode-shell \
+  a_click_outside_the_menu_closes_it_and_goes_no_further
+
+# `j` moves the highlight.
+run_mutation "add-filter: j moves the highlight" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '            "j" | "down" => step(menu, 1),' \
+  '            "j" | "down" => step(menu, 0),' \
+  geode-shell \
+  the_plus_menu_answers_j_k_enter_and_escape
+
+# `frame::clear_expression` drops the layer.
+run_mutation "add-filter: clear_expression drops the expression" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.clear_expression() {' \
+  '                if false {' \
+  geode-shell \
+  the_add_and_clear_expression_actions
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
@@ -7811,8 +7931,10 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
 # drop still happens AND the picker opens.
 run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '                    .occlude()' \
-  '                    .flex_shrink_0()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .occlude()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .flex_shrink_0()' \
   geode-shell \
   the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
 
@@ -15595,7 +15717,7 @@ run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focu
     // Dialog state is installed before this call so synchronization can choose its' \
   '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
-  the_pick_chip_is_always_present_and_opens_the_picker
+  the_pick_chip_is_always_present_and_its_menu_opens_the_picker
 
 # ---- tile picker (2026-09-19): a placeholder's double-click and
 # `tile::add` / `mod+n` over the same choice dialog ----------------------
