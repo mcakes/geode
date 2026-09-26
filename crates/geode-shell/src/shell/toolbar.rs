@@ -38,6 +38,18 @@
 //! field shows the frame's text while unfocused and clears it with the
 //! component's own clear glyph (`Input::cleanable`).
 //!
+//! **Title-bar controls occlude.** Every pressable element here (the
+//! `chip` and `verb` builders, the grouping readout, the field's wrapper)
+//! calls `occlude()`. `TitleBar` turns any left press that reaches its own
+//! hitbox into a window move on the next mouse move, without asking
+//! whether a child handled the press, and on Windows its `Drag` control
+//! area answers the platform's caption hit test the same way. An
+//! occluding hitbox ends gpui's hit test, so neither sees a press on a
+//! control: a drag there belongs to the control (text selection in the
+//! field) and only bare title-bar space moves the window. `occlude()`
+//! rather than `stop_propagation`, which would leave the caption hit test
+//! untouched.
+//!
 //! The scope's chips are the dimension chips, then one chip per
 //! top-level `and` term of the expression (mono text, the same `×`
 //! inside), then the contradiction chip. The `+` opens the add-a-filter
@@ -99,6 +111,9 @@ fn chip(
 ) -> Stateful<Div> {
     h_flex()
         .id(id)
+        // A title-bar control: `occlude()` keeps a press here from
+        // reaching `TitleBar`'s drag surface (module doc: title-bar controls).
+        .occlude()
         .items_center()
         .gap_1()
         .px_2()
@@ -128,6 +143,8 @@ fn verb(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
@@ -481,6 +498,8 @@ pub fn toolbar(
     // chord.
     let grouping = h_flex()
         .id("scope-grouping")
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
         .items_center()
         .gap_1()
         .pl_1p5()
@@ -601,12 +620,17 @@ pub fn toolbar(
             // never the cleared text). The wrapper carries the selector a
             // window test measures the field by — `Input` has none.
             .child(
-                div().debug_selector(|| "scope-field".to_string()).child(
-                    Input::new(filter_input)
-                        .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
-                        .cleanable(true)
-                        .w(scale::design(FILTER_WIDTH)),
-                ),
+                // A title-bar control (module doc: title-bar controls): a drag
+                // in the field selects text.
+                div()
+                    .occlude()
+                    .debug_selector(|| "scope-field".to_string())
+                    .child(
+                        Input::new(filter_input)
+                            .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                            .cleanable(true)
+                            .w(scale::design(FILTER_WIDTH)),
+                    ),
             ),
     )
 }

@@ -6891,6 +6891,50 @@ run_mutation "fullscreen segment: sits in the right-hand view-state section" \
                 .id("status-fullscreen")' \
   geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
 
+# A press on a title-bar control must not reach `TitleBar`'s drag surface:
+# each pressable element occludes it, so a drag there selects text (the
+# field) or does nothing, instead of moving the window.
+run_mutation "title bar: chips occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .px_2()' \
+  '        .items_center()
+        .gap_1()
+        .px_2()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: verbs occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .flex()
+        .items_center()
+        .justify_center()' \
+  '        .flex()
+        .items_center()
+        .justify_center()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the grouping readout occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        .occlude()
+        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  '        .items_center()
+        .gap_1()
+        .pl_1p5()' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+run_mutation "title bar: the scope field occlude the drag surface" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .occlude()
+                    .debug_selector(|| "scope-field".to_string())' \
+  '                    .debug_selector(|| "scope-field".to_string())' \
+  geode-shell dragging_from_a_toolbar_control_does_not_move_the_window
+
+
 # Final review, Important 1: the cross-workspace restore pass must heal
 # only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
 # OR empty") drags focus back to `Main` and prints a launch-time warning
