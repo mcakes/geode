@@ -728,10 +728,10 @@ fn the_factory_is_kind_timeseries_with_its_fragment_and_actions(cx: &mut gpui::T
 fn a_fresh_tile_paints_the_empty_hint_and_its_title(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     assert_eq!(h.title(&mut vcx).as_ref(), "timeseries · 1y · 1d");
-    assert!(
-        h.painted_text(&mut vcx)
-            .contains("no series — `a` adds one, `x` composes")
-    );
+    // `painted_text` reads the prepared model, so this proves the empty
+    // state is up, not how its keys paint (`EMPTY_HINT` marks them in
+    // backticks for `kbd::marked`).
+    assert!(h.painted_text(&mut vcx).contains("no series"));
     assert_eq!(h.key_context_mode(&mut vcx).as_str(), "normal");
 }
 

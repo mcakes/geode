@@ -3913,6 +3913,14 @@ run_mutation "kbd: a command-line verb hint stays text" \
   '    if spec.is_empty() || names_mod {' \
   geode-shell a_spec_names_keys_unless_it_is_a_command_verb
 
+# `mod` is the user's alias: parsed against none it adds no modifier, and
+# a `mod+x` hint would paint a bare `X` chip instead of staying text.
+run_mutation "kbd: a spec naming mod stays text" \
+  crates/geode-shell/src/shell/kbd.rs \
+  "    if spec.is_empty() || spec.starts_with(':') || names_mod {" \
+  "    if spec.is_empty() || spec.starts_with(':') {" \
+  geode-shell a_spec_names_keys_unless_it_is_a_command_verb
+
 # Recency must be bucketed by age, not flat: reading every record as
 # just-used leaves frequency alone to rank, and a command used once this
 # minute no longer outranks one used once a month ago.

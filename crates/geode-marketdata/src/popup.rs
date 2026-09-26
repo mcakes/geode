@@ -315,11 +315,18 @@ pub(crate) fn render_menu(
                 ..
             } => {
                 let disabled = enabled.is_err();
+                // The trailing lane follows the row's highlight, as the
+                // title does, so its keys never sit muted on the accent.
+                let lane = if i == m.highlighted && !disabled {
+                    theme.accent_foreground
+                } else {
+                    theme.muted_foreground
+                };
                 // A disabled row says why; an enabled one shows its key
                 // (or its `:` verb).
                 let reason = match enabled {
                     Err(r) => div().child(*r).into_any_element(),
-                    Ok(()) => geode_shell::shell::kbd::menu_spec(hint, theme.muted_foreground),
+                    Ok(()) => geode_shell::shell::kbd::menu_spec(hint, lane),
                 };
                 // A choice row carries a tick or a same-width blank
                 // ahead of its title, so the group's titles align
@@ -373,7 +380,7 @@ pub(crate) fn render_menu(
                             })
                             .child(title.clone()),
                     )
-                    .child(div().text_color(theme.muted_foreground).child(reason))
+                    .child(div().text_color(lane).child(reason))
                     .into_any_element()
             }
         });
