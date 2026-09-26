@@ -1,5 +1,6 @@
 //! Coalesced state for UI delivery. Pending entries are keyed by event kind and
-//! recipient, source, or dataset/batch. Tagged outcomes retain the highest tag;
+//! recipient, source, dataset/batch, or (for local-write outcomes) arrival
+//! sequence. Tagged outcomes retain the highest tag;
 //! publications union affected books and keep the greatest generation ID.
 //! Replacing an entry preserves its position among other pending keys, so this
 //! is not a chronological event log. See `docs/current/request-delivery.md`.

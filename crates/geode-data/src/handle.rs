@@ -262,8 +262,11 @@ impl DataHandle {
     ///
     /// Joining waits for service open, request dispatch, and downstream worker
     /// shutdown. Fetch calls, discovery, and publication can delay it indefinitely
-    /// if their I/O does not return. This is not a storage flush guarantee; ingest
-    /// shutdown does not drain its queued jobs. Call off the UI thread.
+    /// if their I/O does not return. Ingest shutdown runs the queued local writes
+    /// (the app's own publishes and forgets), in order and each answering as usual,
+    /// then drops every other queued job. It is not a flush guarantee beyond that:
+    /// a caller that stops waiting (gpui's quit hook waits at most 200 ms) can exit
+    /// while a write is still running. Call off the UI thread.
     pub fn shutdown(&self) {
         self.inner.stop();
     }

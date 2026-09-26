@@ -25,7 +25,7 @@ pub const SHEET_KEY: &str = "sheet";
 pub const LINE_AXIS: &str = "line";
 
 /// The datasets-doc declaration (spec §7.2), one `[pricer_sheets.columns.<name>]`
-/// table per column. Part 4 pushes it into `ConfigSources.builtin`.
+/// table per column. `geode-app` pushes it into the builtin config layer.
 ///
 /// **Frozen.** The store creates the tables with `CREATE TABLE IF NOT
 /// EXISTS` and publishes insert positionally, so once a database holds
