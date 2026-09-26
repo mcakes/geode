@@ -9,4 +9,5 @@ pub mod find;
 pub mod flatten;
 pub mod format;
 pub mod plan;
+pub mod select;
 pub mod yank;

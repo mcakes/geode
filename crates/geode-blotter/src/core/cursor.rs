@@ -77,7 +77,8 @@ pub fn selection(mode: &Mode, cursor: &Cursor) -> Range<usize> {
     }
 }
 
-/// The visible index whose node has `path`, or `fallback` clamped.
+/// The visible index whose node has `path`, or `None` when no visible
+/// row matches (including an empty `visible`).
 ///
 /// I3 (final review): this runs inside every `reflatten_keeping`, i.e.
 /// on every keypress that expands/collapses/sorts/regroups, so its cost
@@ -90,20 +91,20 @@ pub fn selection(mode: &Mode, cursor: &Cursor) -> Range<usize> {
 /// Fixed by (1) `tree.depth(row) == path.len()` first — an O(1), non-
 /// allocating check that skips the overwhelming majority of rows (most
 /// depths in a tree aren't the cursor's) before ever calling `path_of`,
-/// and (2) searching outward from `fallback` (the cursor's previous row)
+/// and (2) searching outward from `near` (the cursor's previous row)
 /// rather than from row 0 — the common case is that the cursor's node
 /// moved by a handful of positions or not at all, so this finds it in
-/// O(1) `path_of` calls instead of O(fallback).
-pub fn restore_by_path(
+/// O(1) `path_of` calls instead of O(near).
+pub fn find_by_path(
     visible: &[u32],
     snapshot: &Snapshot,
     plan: &ColumnPlan,
     path: &[Option<String>],
-    fallback: usize,
-) -> usize {
+    near: usize,
+) -> Option<usize> {
     let len = visible.len();
     if len == 0 {
-        return 0;
+        return None;
     }
     let tree = snapshot.tree();
     let depth = path.len();
@@ -111,9 +112,9 @@ pub fn restore_by_path(
         let row = visible[i] as usize;
         tree.depth(row) == depth && path_of(snapshot, plan, row) == path
     };
-    let start = fallback.min(len - 1);
+    let start = near.min(len - 1);
     if matches(start) {
-        return start;
+        return Some(start);
     }
     let (mut lo, mut hi) = (start, start);
     loop {
@@ -125,17 +126,29 @@ pub fn restore_by_path(
         if can_dec {
             lo -= 1;
             if matches(lo) {
-                return lo;
+                return Some(lo);
             }
         }
         if can_inc {
             hi += 1;
             if matches(hi) {
-                return hi;
+                return Some(hi);
             }
         }
     }
-    fallback.min(len - 1)
+    None
+}
+
+/// `find_by_path`, falling back to `fallback` clamped.
+pub fn restore_by_path(
+    visible: &[u32],
+    snapshot: &Snapshot,
+    plan: &ColumnPlan,
+    path: &[Option<String>],
+    fallback: usize,
+) -> usize {
+    find_by_path(visible, snapshot, plan, path, fallback)
+        .unwrap_or_else(|| fallback.min(visible.len().saturating_sub(1)))
 }
 
 #[cfg(test)]
@@ -206,6 +219,63 @@ mod tests {
         assert_eq!(selection(&Mode::Visual { anchor: 5 }, &c), 2..6);
         assert_eq!(selection(&Mode::Visual { anchor: 0 }, &c), 0..3);
         assert_eq!(selection(&Mode::Normal, &c), 2..3);
+    }
+
+    /// Shown rows: root, L1, L1/SPX. Shared by the `find_by_path` /
+    /// `restore_by_path` tests below.
+    fn fixture() -> (
+        geode_core::snapshot::Snapshot,
+        crate::core::plan::ColumnPlan,
+        Vec<u32>,
+    ) {
+        use crate::core::plan::ColumnPlan;
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        use geode_core::view::ViewSpec;
+
+        let dim = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Str(vec![None, Some("L1"), Some("L1")]),
+                ),
+                (
+                    dim("underlying_ref"),
+                    TestColumn::Str(vec![None, None, Some("SPX")]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 2])),
+            ],
+            2,
+        );
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n",
+            )
+            .unwrap()],
+        );
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        (snap, plan, vec![0, 1, 2])
+    }
+
+    #[test]
+    fn find_by_path_is_exact_and_restore_falls_back() {
+        // fixture: shown rows [root, L1, L1/SPX]; path ["L2"] absent.
+        let (snap, plan, shown) = fixture();
+        let l1 = path_of(&snap, &plan, shown[1] as usize);
+        assert_eq!(find_by_path(&shown, &snap, &plan, &l1, 0), Some(1));
+        let missing = vec![Some("L2".to_string())];
+        assert_eq!(find_by_path(&shown, &snap, &plan, &missing, 1), None);
+        assert_eq!(restore_by_path(&shown, &snap, &plan, &missing, 1), 1);
+        assert_eq!(find_by_path(&[], &snap, &plan, &l1, 0), None);
     }
 
     #[test]

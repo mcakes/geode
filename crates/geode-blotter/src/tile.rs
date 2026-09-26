@@ -1069,7 +1069,7 @@ impl BlotterTile {
                         return None;
                     };
                     let range = selection(&d.mode, &d.cursor);
-                    let out = tsv(snapshot, plan, &d.shown, range);
+                    let out = tsv(snapshot, plan, &d.shown, range, 0..plan.columns.len());
                     d.mode = Mode::Normal;
                     Some(out)
                 });
