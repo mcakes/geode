@@ -27,6 +27,28 @@ use std::sync::mpsc::Receiver;
 
 const TILE: u64 = 7;
 
+/// What the shell root is to a tile, for focus: a `track_focus`ed
+/// ancestor. gpui's `div` answers a mouse-down's BUBBLE phase on such
+/// an element by focusing it unless a listener called
+/// `prevent_default`, so a popup a tile opens from a press and focuses
+/// in the same press loses the keyboard to the root a moment later.
+/// Without this ancestor the harness has nothing to steal focus and
+/// cannot see that loss.
+struct ShellStandIn {
+    focus: gpui::FocusHandle,
+    tile: Entity<TimeseriesTile>,
+}
+
+impl gpui::Render for ShellStandIn {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        gpui::div()
+            .size_full()
+            .track_focus(&self.focus)
+            .child(self.tile.clone())
+    }
+}
+
 /// What the window closure hands back: it can return only one value,
 /// so everything a test drives or reads is parked here on the way
 /// out.
@@ -263,8 +285,14 @@ fn open_full(
                 // shell: gpui-component registers the focused
                 // `InputState` on the `Root`, so a tile that opens a
                 // field needs one for focus to behave
-                // here as it does in the app.
-                cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                // here as it does in the app. The tile sits under a
+                // focus-tracking stand-in for the shell root, which
+                // takes focus on any press nothing prevented.
+                let host = cx.new(|cx| ShellStandIn {
+                    focus: cx.focus_handle(),
+                    tile,
+                });
+                cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
         })
         .unwrap();
@@ -2468,10 +2496,17 @@ fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
     assert!(h.model(&vcx).slots()[0].visible, "shown again");
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
     assert!(h.popup_is_range(&vcx));
+    // The press that opened the popup must not hand its focus to the
+    // root: `left`/`right` reach the fields only through the popup's
+    // own focused listener (`up`/`down` have a keymap route too, so
+    // they cannot tell).
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+    vcx.simulate_keystrokes("left");
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
     // A second click closes rather than reseeding over typed dates
-    // (`left` onto the month, then a digit typed into it — a bare
-    // digit on an unedited popup would be a preset and commit).
-    vcx.simulate_keystrokes("left 3");
+    // (a digit typed into the month — a bare digit on an unedited
+    // popup would be a preset and commit).
+    vcx.simulate_keystrokes("3");
     assert!(h.popup_is_range(&vcx));
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
     assert!(h.popup_is_none(&vcx), "the readout toggles");

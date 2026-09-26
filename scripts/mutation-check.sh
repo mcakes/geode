@@ -18557,10 +18557,20 @@ run_mutation "timeseries mouse: the actions button toggles in capture" \
 # first and the click meant to close reopens on a fresh seed.
 run_mutation "timeseries mouse: the readout toggles in capture" \
   crates/geode-timeseries/src/header.rs \
-  '            // would reopen on a fresh seed instead.
+  '            // tile press in the shell still focuses the tile.
             .capture_any_mouse_down({' \
-  '            // would reopen on a fresh seed instead.
+  '            // tile press in the shell still focuses the tile.
             .on_any_mouse_down({' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# The readout's press prevents default: the shell root is track_focus'ed,
+# and without it gpui focuses the root in the press's bubble phase, so
+# the range popup it just opened loses left/right to the root.
+run_mutation "timeseries mouse: the readout press keeps the popup's focus" \
+  crates/geode-timeseries/src/header.rs \
+  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                    window.prevent_default();' \
+  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));' \
   geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
 
 # A right press focuses the tile it lands on (review M1: a context menu

@@ -264,6 +264,13 @@ pub(crate) fn render_header(
             // listener that would close it before a bubble handler
             // here could see it open, and the click meant to close
             // would reopen on a fresh seed instead.
+            //
+            // `prevent_default` because the popup takes focus in THIS
+            // press: the shell root is `track_focus`ed, and gpui focuses
+            // it in the press's bubble phase unless default is
+            // prevented, which left the popup open without its keyboard
+            // (`left`/`right` dead). Propagation still runs, so the
+            // tile press in the shell still focuses the tile.
             .capture_any_mouse_down({
                 let tile = tile.clone();
                 move |event: &MouseDownEvent, window, cx| {
@@ -271,6 +278,7 @@ pub(crate) fn render_header(
                         return;
                     }
                     tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                    window.prevent_default();
                 }
             }),
     );
