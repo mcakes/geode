@@ -20143,9 +20143,41 @@ run_mutation "pricer date field: a tenor commits as a date" \
 # identical instrument and records an undo entry.
 run_mutation "pricer date field: an unchanged commit records no undo" \
   crates/geode-pricer/src/core/cell.rs \
-  '    if *i.expiry() == expiry {' \
-  '    if false {' \
+  '    Ok(changed(sheet, row, edit))' \
+  '    Ok(Some(edit))' \
   geode-pricer an_unchanged_date_commit_is_no_edit
+
+# A text commit of the value the cell already holds is no edit. Mutated,
+# every parsed commit applies and records an undo entry.
+run_mutation "pricer cell: an unchanged text commit records no undo" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    edit_for(sheet, row, kind, text).map(|edit| changed(sheet, row, edit))' \
+  '    edit_for(sheet, row, kind, text).map(Some)' \
+  geode-pricer an_unchanged_text_commit_is_no_edit
+
+# Unchanged is decided on values: an instrument equal to the line's is no
+# edit. Mutated, `5000.0` on a `5000` strike applies.
+run_mutation "pricer cell: an equal instrument is unchanged" \
+  crates/geode-pricer/src/core/cell.rs \
+  '        Edit::SetInstrument { instrument, .. } => sheet.instrument(row) == Some(instrument),' \
+  '        Edit::SetInstrument { .. } => false,' \
+  geode-pricer an_unchanged_commit_is_no_edit_in_every_cell
+
+# Own → inherited is a change. Mutated, every shift commit reads as
+# unchanged and an emptied own shift keeps its value.
+run_mutation "pricer cell: own to inherited shift is a change" \
+  crates/geode-pricer/src/core/cell.rs \
+  '        Edit::SetShift { shift, .. } => *shift == sheet.shift(row),' \
+  '        Edit::SetShift { .. } => true,' \
+  geode-pricer an_unchanged_commit_is_no_edit_in_every_cell
+
+# The tenor note stands while the date field is open. Mutated, the first
+# key retires it.
+run_mutation "pricer date field: the tenor note stands until it closes" \
+  crates/geode-pricer/src/tile.rs \
+  '                let note = note.clone();' \
+  '                let note: Option<SharedString> = None;' \
+  geode-pricer the_tenor_note_stands_until_the_field_closes
 
 # `escape` in the date field cancels. Mutated, it commits the stepped
 # date and the tenor is lost.
