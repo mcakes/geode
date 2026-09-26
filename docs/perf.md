@@ -74,7 +74,16 @@ These rows read `—` until a module records its first requery (Plan 3c).
   read 13.2 µs (was 11.5), the 2000-item pass 405 µs (was 360), and
   `fuzzy_match_one` (a bare title, no category) 400 ns, unchanged. The
   bonus itself costs nothing per keystroke — one `u32` add per matched
-  row, baked per row once at palette open.
+  row, baked per row once at palette open. On 2026-09-26 multi-word
+  queries began matching word by word in any order (per-word passes, a
+  collision fallback, then the whole-query pass). Both bench queries
+  (`tgl splt`, `spl wk`) take that path. Same machine and build, main's
+  matcher then the new one: `fuzzy_match_one` 552 ns → 1.84 µs (a
+  matching candidate pays every pass), the 66-item pass 19.0 → 24.5 µs,
+  500 items 190 → 173 µs (noise, p = 0.32), 2000 items 615 → 696 µs.
+  Rows missing a word stop after the per-word passes, which keeps the
+  filter-pass cost small. The machine was loaded: main's own figures read
+  above the earlier entries.
 - `cargo bench -p geode-demo-data` — the synthetic data generator
   (100k/1M rows), established in phase 0.
 - `cargo bench -p geode-documents` — the CVI document kind's parse and

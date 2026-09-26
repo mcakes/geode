@@ -86,7 +86,11 @@ mod tests {
         );
         assert_eq!(put_place(&s, Some(2), false, &cs), Place::Root { at: 1 });
         assert_eq!(put_place(&s, Some(1), true, &cs), Place::Root { at: 4 });
-        assert_eq!(put_place(&s, None, true, &cs), Place::Root { at: 0 });
+        assert_eq!(
+            put_place(&s, None, true, &cs),
+            Place::Root { at: 5 },
+            "no cursor row: the end, same as a line's o"
+        );
         assert_eq!(
             put_place(&s, Some(2), true, &one),
             Place::Leg { package: 1, leg: 1 }
