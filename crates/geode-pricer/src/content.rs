@@ -21,7 +21,7 @@ use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{App, Entity, SharedString, Subscription, WeakEntity, Window};
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -207,10 +207,31 @@ pub(crate) struct Shared {
     /// exist, but the store does not know it until the save is confirmed
     /// — so `untitled-N` and `:name` treat these as taken (a closed
     /// tile's queued save must not have its name handed to a new sheet,
-    /// whose first save would land on top of it). Added when `save`
-    /// answers `true`, removed by either outcome (`save_answered`):
-    /// outcomes coalesce latest-wins, so they are never counted.
+    /// whose first save would land on top of it), and a load of one
+    /// waits for the answer (reads and saves run on different lanes, so
+    /// a read submitted now could return the previous generation).
+    ///
+    /// Added when `save` answers `true`, removed by the FIRST outcome for
+    /// the name, whichever save it describes. Outcomes coalesce
+    /// latest-wins, so two queued saves may produce one outcome or two: a
+    /// per-name count could stay above zero forever. The first outcome
+    /// un-reserves early only when a second save of the same name is
+    /// still queued behind it — a narrow window in which the name reads
+    /// as known (a confirmed save of it just landed) or free (the first
+    /// failed), and a load may read the first save's generation rather
+    /// than the second's.
     pub(crate) pending_saves: RefCell<BTreeSet<String>>,
+    /// The tile that queued each name's latest save: its outcome is that
+    /// tile's, not the current holder's (a tile that moved on via `:e`
+    /// leaves its name to another). Latest origin wins per name; kept
+    /// after the outcome so a second coalesced outcome still routes.
+    pub(crate) save_origins: RefCell<BTreeMap<String, TileId>>,
+    /// Names whose document is about to be forgotten — a `:name`'s old
+    /// name from the rename until its forget is answered, and a confirmed
+    /// `:rm`'s until its forget is answered. Taken for `untitled-N`; `:e`,
+    /// `:name` and `:rm` refuse them, so no tile opens a sheet the forget
+    /// would then delete under it.
+    pub(crate) retiring: RefCell<BTreeSet<String>>,
     /// So a reload reaches every open tile (planning decision 20).
     pub(crate) tiles: RefCell<Vec<WeakEntity<PricerTile>>>,
 }
@@ -284,7 +305,18 @@ impl Shared {
     /// Whether a document under `name` exists or is about to: known to
     /// the store, or with a save queued and unconfirmed.
     pub(crate) fn taken(&self, name: &str) -> bool {
-        self.store.contains(name) || self.pending_saves.borrow().contains(name)
+        self.store.contains(name)
+            || self.pending_saves.borrow().contains(name)
+            || self.retiring.borrow().contains(name)
+    }
+
+    /// `Err("sheet 'x' is being removed")` for a retiring name.
+    pub(crate) fn refuse_retiring(&self, name: &str) -> Result<(), String> {
+        if self.retiring.borrow().contains(name) {
+            Err(format!("sheet '{name}' is being removed"))
+        } else {
+            Ok(())
+        }
     }
 
     /// The known sheet names, sorted — the `:e`/`:rm` vocabulary. A
@@ -292,6 +324,9 @@ impl Shared {
     pub(crate) fn sheet_names(&self) -> Vec<String> {
         let mut names: BTreeSet<String> = self.store.names().into_iter().collect();
         names.extend(self.pending_saves.borrow().iter().cloned());
+        for gone in self.retiring.borrow().iter() {
+            names.remove(gone);
+        }
         names.into_iter().collect()
     }
 }
@@ -339,6 +374,8 @@ impl PricerFactory {
                 store,
                 open: RefCell::new(BTreeSet::new()),
                 pending_saves: RefCell::new(BTreeSet::new()),
+                save_origins: RefCell::new(BTreeMap::new()),
+                retiring: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
             }),
             catalog_watch: RefCell::new(None),
@@ -426,31 +463,49 @@ impl PricerFactory {
         self.shared.settings.borrow().clone()
     }
 
-    /// The open tile holding `sheet`, if any: the open set holds each
-    /// name at most once.
-    fn holder(&self, sheet: &str, cx: &App) -> Option<Entity<PricerTile>> {
+    /// Every live tile this factory built.
+    fn live_tiles(&self) -> Vec<Entity<PricerTile>> {
         self.shared
             .tiles
             .borrow()
             .iter()
             .filter_map(WeakEntity::upgrade)
-            .find(|t| t.read(cx).sheet.name == sheet)
+            .collect()
     }
 
     /// A local save of `sheet` landed (`Ok`) or failed (`Err(reason)`),
-    /// routed by sheet name from the data tier's local-publish outcomes.
-    /// Only a confirmed save makes the name known to the store (never
-    /// `save` answering `true`: a queued write may still fail). The tile
-    /// holding the name reads the outcome as describing its latest queued
-    /// save; an answer for a name no tile holds (a closed tile's flush)
-    /// reaches the store alone.
+    /// from the data tier's local-publish outcomes. Only a confirmed save
+    /// makes the name known to the store (never `save` answering `true`: a
+    /// queued write may still fail). The outcome goes to the tile that
+    /// queued the save (`Shared::save_origins`), not to whichever tile
+    /// holds the name now: if it still holds the name it reads the outcome
+    /// as its latest queued save's; if it moved on, a failure is painted
+    /// on it and an `Ok` is nothing to it. A closed origin leaves the
+    /// outcome to the store (the data tier's error diagnostic is the
+    /// record of a failure). Then any tile waiting to load `sheet` on this
+    /// save starts its load.
     pub fn save_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
         self.shared.pending_saves.borrow_mut().remove(sheet);
         if answer.is_ok() {
             self.shared.store.note_saved(sheet);
         }
-        if let Some(tile) = self.holder(sheet, cx) {
-            tile.update(cx, |t, cx| t.save_answered(answer, cx));
+        let origin = self.shared.save_origins.borrow().get(sheet).copied();
+        let tiles = self.live_tiles();
+        if let Some(tile) = origin.and_then(|id| tiles.iter().find(|t| t.read(cx).id == id)) {
+            tile.update(cx, |t, cx| {
+                if t.sheet.name == sheet && !t.load_waiting {
+                    t.save_answered(answer, cx)
+                } else {
+                    t.left_save_answered(sheet, answer, cx)
+                }
+            });
+        }
+        for tile in tiles {
+            tile.update(cx, |t, cx| {
+                if t.load_waiting && t.sheet.name == sheet {
+                    t.start_load(cx);
+                }
+            });
         }
     }
 
@@ -460,6 +515,8 @@ impl PricerFactory {
     /// already reported it as an error diagnostic. The tile that asked
     /// (`:rm`, or a `:name` retiring its old name) paints the outcome.
     pub fn forget_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
+        // Answered either way: the name is no longer about to go.
+        self.shared.retiring.borrow_mut().remove(sheet);
         match &answer {
             Ok(()) => self.shared.store.note_forgotten(sheet),
             Err(reason) => tracing::warn!(
@@ -468,14 +525,7 @@ impl PricerFactory {
                 "sheet forget failed"
             ),
         }
-        let tiles: Vec<Entity<PricerTile>> = self
-            .shared
-            .tiles
-            .borrow()
-            .iter()
-            .filter_map(WeakEntity::upgrade)
-            .collect();
-        for tile in tiles {
+        for tile in self.live_tiles() {
             tile.update(cx, |t, cx| t.forget_answered(sheet, &answer, cx));
         }
     }

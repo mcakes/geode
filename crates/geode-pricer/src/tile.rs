@@ -287,6 +287,11 @@ pub struct PricerTile {
     forgetting: Vec<String>,
     /// The armed `:rm` confirm: `None` outside it.
     pub(crate) confirm: Option<PendingRemove>,
+    /// Loading, but the load is not submitted: this sheet's name has a
+    /// save queued and unanswered (`Shared::pending_saves`), and a read
+    /// now could return the generation before it. The factory's
+    /// `save_answered` starts the load.
+    pub(crate) load_waiting: bool,
     /// A user error for the footer (spec §8.3); cleared by the next verb.
     pub(crate) footer: Option<SharedString>,
     /// What the footer paints: `footer`, else the cursor row's failure.
@@ -408,7 +413,15 @@ impl PricerTile {
         // The tile's first load is tag 1; `start_load` bumps it for every
         // later one, so an answer to an earlier load never installs.
         let load_tag = 1;
-        let (sheet, loading) = match shared.store.load(&name, QueryKey(id.0), load_tag) {
+        // A save of this name still queued (a closed tile's flush): the
+        // read waits for its answer (see `load_waiting`).
+        let load_waiting = shared.pending_saves.borrow().contains(&name);
+        let answer = if load_waiting {
+            Loaded::Pending
+        } else {
+            shared.store.load(&name, QueryKey(id.0), load_tag)
+        };
+        let (sheet, loading) = match answer {
             Loaded::Rows(rows) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
@@ -516,6 +529,16 @@ impl PricerTile {
             }
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
+            // A rename not yet confirmed keeps its old document.
+            if let Some(old) = this.rename_from.take() {
+                this.shared.retiring.borrow_mut().remove(&old);
+            }
+            // An armed `:rm` confirm drops here without a blur: release
+            // has no `Window`. The shell moves focus off a closing tile
+            // before it drops it (the close's focus move), so the prompt's
+            // handle no longer holds focus by now, and dropping it strands
+            // nothing.
+            this.confirm = None;
         })
         .detach();
 
@@ -551,6 +574,7 @@ impl PricerTile {
             rename_from: None,
             forgetting: Vec::new(),
             confirm: None,
+            load_waiting,
             footer: None,
             footer_text: None,
             header: HeaderModel::default(),
@@ -1253,6 +1277,10 @@ impl PricerTile {
                 .pending_saves
                 .borrow_mut()
                 .insert(self.sheet.name.clone());
+            self.shared
+                .save_origins
+                .borrow_mut()
+                .insert(self.sheet.name.clone(), self.id);
             self.dirty = false;
             self.save_failed = false;
             self.save_refused = false;
@@ -1283,9 +1311,15 @@ impl PricerTile {
                     self.save_notice = None;
                 }
                 if let Some(old) = self.rename_from.take() {
-                    if self.shared.store.forget(&old) {
+                    if self.shared.open.borrow().contains(&old) {
+                        // A tile holds the old name (a restore may open
+                        // it): forgetting would delete a sheet in use.
+                        self.shared.retiring.borrow_mut().remove(&old);
+                    } else if self.shared.store.forget(&old) {
+                        // Reserved until the forget is answered.
                         self.forgetting.push(old);
                     } else {
+                        self.shared.retiring.borrow_mut().remove(&old);
                         self.notice = Some(
                             format!("old sheet '{old}' not removed: the store refused it").into(),
                         );
@@ -1485,6 +1519,18 @@ impl PricerTile {
         self.load_cancelled = false;
         self.loading = true;
         self.end_refusals();
+        if self
+            .shared
+            .pending_saves
+            .borrow()
+            .contains(&self.sheet.name)
+        {
+            self.load_waiting = true;
+            self.notice = Some(LOADING.into());
+            self.rebuild(cx);
+            return;
+        }
+        self.load_waiting = false;
         let key = QueryKey(self.id.0);
         let answer = match self.shared.store.load(&self.sheet.name, key, self.load_tag) {
             Loaded::Pending => {
@@ -1513,6 +1559,33 @@ impl PricerTile {
             .snapshot
             .and_then(|snapshot| rows_from_snapshot(&name, &snapshot));
         self.loaded(answer, cx);
+    }
+
+    /// A save this tile queued under `sheet`, answered after the tile
+    /// moved on from that name (`:e`/`:new`/`:name`) or while it waits to
+    /// load it again: a failure means the edits it last queued there were
+    /// never stored, so it says so; an `Ok` is nothing to it.
+    pub(crate) fn left_save_answered(
+        &mut self,
+        sheet: &str,
+        answer: Result<(), String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Err(reason) = answer else {
+            return;
+        };
+        let text: SharedString =
+            format!("sheet '{sheet}' was not saved: {reason}; its last edits were not stored")
+                .into();
+        if self.sheet.name == sheet {
+            // Waiting to load it: `loaded` clears `notice`, so this goes
+            // in the save slot, where the next confirmed save clears it.
+            self.save_notice = Some(text);
+        } else {
+            self.notice = Some(text);
+        }
+        self.rebuild_chrome();
+        cx.notify();
     }
 
     /// A forget of `sheet` this tile asked for (`:rm`, or `:name`
@@ -2256,13 +2329,17 @@ impl PricerTile {
     // ---- sheets: `:e`, `:new`, `:name`, `:rm` (spec §7.4) --------------
 
     /// `:e <sheet>` (planning decision 13): refused when another tile
-    /// holds `name` (two writers would race); the tile's own name is a
-    /// no-op. A name with a save queued and not yet confirmed loads like
-    /// any other — its document is on the writer ahead of the read.
+    /// holds `name` (two writers would race) or its document is being
+    /// removed; the tile's own name is a no-op. A name with a save queued
+    /// and not yet answered is claimed at once but its load waits for
+    /// that answer (`start_load`): reads run on the query pool and saves
+    /// on the ingest writer, unordered, so a read now could return the
+    /// generation before the save.
     fn edit_sheet(&mut self, name: String, cx: &mut Context<Self>) -> Result<(), String> {
         if name == self.sheet.name {
             return Ok(());
         }
+        self.shared.refuse_retiring(&name)?;
         if self.shared.open.borrow().contains(&name) {
             return Err(format!("sheet '{name}' is open in another tile"));
         }
@@ -2312,7 +2389,11 @@ impl PricerTile {
         self.save_refused = false;
         self.save_notice = None;
         self.save_blocked = false;
-        self.rename_from = None;
+        // A rename not yet confirmed keeps its old document.
+        if let Some(old) = self.rename_from.take() {
+            self.shared.retiring.borrow_mut().remove(&old);
+        }
+        self.load_waiting = false;
         self.loading = false;
         self.load_cancelled = false;
         self.resolve_plan();
@@ -2356,6 +2437,7 @@ impl PricerTile {
         if self.rename_from.is_some() {
             return Err("the last rename is not saved yet".into());
         }
+        self.shared.refuse_retiring(&name)?;
         if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {
             return Err(format!("sheet '{name}' already exists"));
         }
@@ -2370,6 +2452,7 @@ impl PricerTile {
         self.save_refused = false;
         self.save_notice = None;
         if to_rows(&self.sheet).is_some() {
+            self.shared.retiring.borrow_mut().insert(old.clone());
             self.rename_from = Some(old);
         }
         // Dirty until queued: a refused save is retried by the next edit
@@ -2395,6 +2478,7 @@ impl PricerTile {
                 "sheet '{name}' is open here: close it or `:e` another sheet first"
             ));
         }
+        self.shared.refuse_retiring(&name)?;
         if self.shared.open.borrow().contains(&name) {
             return Err(format!("sheet '{name}' is open in another tile"));
         }
@@ -2480,6 +2564,11 @@ impl PricerTile {
             return;
         };
         if self.shared.store.forget(&pending.sheet) {
+            // Reserved until the forget is answered.
+            self.shared
+                .retiring
+                .borrow_mut()
+                .insert(pending.sheet.clone());
             self.forgetting.push(pending.sheet);
         } else {
             self.footer = Some(
@@ -6478,10 +6567,6 @@ pub(crate) mod tests {
             5
         );
         assert!(h.store.forgets().is_empty(), "not before the save lands");
-        // The old name is free for another tile at once.
-        let third = second_tile(&h, &mut vcx, TILE + 2);
-        assert_eq!(command_on(&*third, &mut vcx, "e book"), Ok(()));
-        let _ = command_on(&*third, &mut vcx, "new");
         save_answered(&h, &mut vcx, "fresh", Ok(()));
         assert_eq!(h.store.forgets(), vec!["book".to_string()]);
     }
@@ -6691,5 +6776,230 @@ pub(crate) mod tests {
         h.answer(&mut vcx, &batch, 42.0);
         let priced = h.tile.read_with(&vcx, |t, _| t.sheet.priced_at(0));
         assert_eq!(priced, None, "the old batch's answer is not this sheet's");
+    }
+
+    // ---- fix round 1: retiring names, deferred loads, save origins ----
+
+    /// A tile restoring `sheet` in a window of its own, from the harness's
+    /// factory — the production route a session restore takes.
+    fn restore_tile(
+        h: &Parts,
+        cx: &mut gpui::TestAppContext,
+        id: u64,
+        sheet: &str,
+    ) -> (Entity<PricerTile>, Box<dyn TileContent>, VisualTestContext) {
+        let mut record = toml::Table::new();
+        record.insert("sheet".into(), sheet.into());
+        type Slot = Option<(Entity<PricerTile>, Box<dyn TileContent>)>;
+        let slot: Rc<RefCell<Slot>> = Rc::new(RefCell::new(None));
+        let window = cx
+            .update(|cx| {
+                let slot = slot.clone();
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let o = h.factory.create(
+                        TileId(id),
+                        Some(&record),
+                        h.frame.clone(),
+                        h.diagnostics.clone(),
+                        window,
+                        cx,
+                    );
+                    let tile = o.view.clone().downcast::<PricerTile>().unwrap();
+                    *slot.borrow_mut() = Some((tile.clone(), o.content));
+                    cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                })
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        let (tile, content) = slot.borrow_mut().take().unwrap();
+        (tile, content, vcx)
+    }
+
+    /// What outlives a closed harness tile.
+    struct Parts {
+        factory: Rc<PricerFactory>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+    }
+
+    fn parts(h: &Harness) -> Parts {
+        Parts {
+            factory: h.factory.clone(),
+            frame: h.frame.clone(),
+            diagnostics: h.diagnostics.clone(),
+        }
+    }
+
+    /// `second_tile`, with the tile entity.
+    fn second_with_entity(
+        h: &Harness,
+        vcx: &mut VisualTestContext,
+        id: u64,
+    ) -> (Box<dyn TileContent>, Entity<PricerTile>) {
+        vcx.update(|window, cx| {
+            let o = h.factory.create(
+                TileId(id),
+                None,
+                h.frame.clone(),
+                h.diagnostics.clone(),
+                window,
+                cx,
+            );
+            let tile = o.view.clone().downcast::<PricerTile>().unwrap();
+            (o.content, tile)
+        })
+    }
+
+    fn loads_of(h: &MemorySheetStore, sheet: &str) -> usize {
+        h.loads().iter().filter(|(n, _, _)| n == sheet).count()
+    }
+
+    /// The race the rename test once hid: the old name is reserved from
+    /// the rename until its forget is answered, so no tile opens (and
+    /// then loses) a sheet that is about to be deleted.
+    #[gpui::test]
+    fn a_retiring_name_is_reserved_until_its_forget_is_answered(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let third = second_tile(&h, &mut vcx, TILE + 2);
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        let removing = Err("sheet 'book' is being removed".to_string());
+        assert_eq!(command_on(&*third, &mut vcx, "e book"), removing);
+        assert_eq!(command_on(&*third, &mut vcx, "rm book"), removing);
+        assert_eq!(command_on(&*third, &mut vcx, "name book"), removing);
+        save_answered(&h, &mut vcx, "fresh", Ok(()));
+        assert_eq!(h.store.forgets(), vec!["book".to_string()]);
+        assert_eq!(
+            command_on(&*third, &mut vcx, "e book"),
+            removing,
+            "reserved until the forget is answered"
+        );
+        vcx.update(|_, cx| h.factory.forget_answered("book", Ok(()), cx));
+        assert_eq!(command_on(&*third, &mut vcx, "e book"), Ok(()));
+    }
+
+    /// `:rm`'s forget reserves its name the same way.
+    #[gpui::test]
+    fn a_name_removed_by_rm_is_reserved_until_answered(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = rm_fixture(cx);
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("y");
+        assert_eq!(
+            h.command(&mut vcx, "e old"),
+            Err("sheet 'old' is being removed".into())
+        );
+        vcx.update(|_, cx| h.factory.forget_answered("old", Err("locked".into()), cx));
+        assert_eq!(h.command(&mut vcx, "e old"), Ok(()));
+    }
+
+    /// A restore is not refused a retiring name; if a tile holds the old
+    /// name when the rename's save is confirmed, the forget is skipped.
+    #[gpui::test]
+    fn a_rename_never_forgets_a_sheet_a_tile_has_open(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        let (restored, _content, vcx2) = restore_tile(&parts(&h), cx, TILE + 3, "book");
+        assert_eq!(
+            restored.read_with(&vcx2, |t, _| t.sheet.name.clone()),
+            "book"
+        );
+        save_answered(&h, &mut vcx, "fresh", Ok(()));
+        assert!(h.store.forgets().is_empty(), "book is open in a tile");
+        assert!(h.store.get("book").is_some());
+        assert!(h.tile.read_with(&vcx, |t, _| t.rename_from.is_none()));
+    }
+
+    /// Reads and saves run on different lanes: a load of a name whose save
+    /// is queued waits for that save's answer, then asks once.
+    #[gpui::test]
+    fn colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert!(
+            h.store
+                .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+        );
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        let before = loads_of(&h.store, "book");
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        assert_eq!(
+            loads_of(&h.store, "book"),
+            before,
+            "no read until the save answers"
+        );
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        assert_eq!(h.sheet_len(&vcx), 0);
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(loads_of(&h.store, "book"), before + 1, "asked once");
+        assert_eq!(h.sheet_len(&vcx), 5);
+        assert_eq!(stored(&h).qty(0), 7);
+        assert!(h.notice(&vcx).is_none());
+    }
+
+    /// A tile closed with its flush queued: a new tile restoring the name
+    /// waits for that save's answer the same way.
+    #[gpui::test]
+    fn a_restore_of_a_name_with_a_queued_save_waits_for_its_answer(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 9 });
+        let store = h.store.clone();
+        let before = loads_of(&store, "book");
+        let p = parts(&h);
+        // Close the first tile: its flush queues a save of `book`.
+        close(h, vcx);
+        let (restored, _content, mut vcx2) = restore_tile(&p, cx, TILE + 4, "book");
+        assert_eq!(
+            loads_of(&store, "book"),
+            before,
+            "no read until the save answers"
+        );
+        assert!(restored.read_with(&vcx2, |t, _| t.loading));
+        vcx2.update(|_, cx| p.factory.save_answered("book", Ok(()), cx));
+        assert_eq!(loads_of(&store, "book"), before + 1);
+        assert!(!restored.read_with(&vcx2, |t, _| t.loading));
+        assert_eq!(restored.read_with(&vcx2, |t, _| t.sheet.qty(0)), 9);
+    }
+
+    /// A save's outcome reaches the tile that queued it, not whichever
+    /// tile holds the name now; one that moved on is told its last edits
+    /// were not stored.
+    #[gpui::test]
+    fn a_save_outcome_reaches_the_tile_that_queued_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert!(
+            h.store
+                .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+        );
+        let (second, second_tile) = second_with_entity(&h, &mut vcx, TILE + 1);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        assert_eq!(command_on(&*second, &mut vcx, "e book"), Ok(()));
+        assert!(
+            second_tile.read_with(&vcx, |t, _| t.loading),
+            "the premise: it waits on book's queued save"
+        );
+        save_answered(&h, &mut vcx, "book", Err("disk full".into()));
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("sheet 'book' was not saved: disk full; its last edits were not stored")
+        );
+        assert_eq!(
+            h.save_notice(&vcx),
+            None,
+            "other's own save state is untouched"
+        );
+        assert!(!dirty(&h, &vcx));
+        second_tile.read_with(&vcx, |t, _| {
+            assert!(!t.save_failed, "not the holder's save");
+            assert!(!t.loading, "its waiting load started");
+        });
+        // An `Ok` for a moved-on tile paints nothing.
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 3 });
+        h.dispatch(&mut vcx, "escape", None);
+        assert_eq!(h.command(&mut vcx, "new"), Ok(()));
+        save_answered(&h, &mut vcx, "other", Ok(()));
+        assert!(h.notice(&vcx).is_none());
     }
 }

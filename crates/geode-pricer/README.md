@@ -124,7 +124,13 @@ cargo bench -p geode-pricer
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds; confirmed saves; less confirmed forgets) plus
   `Shared::pending_saves` — names with a save queued and not yet answered.
-  `untitled-N` and `:name` treat both as taken. The factory observes the one
+  `untitled-N` and `:name` treat both as taken. A load of a pending-save name
+  waits (`load_waiting`, no request) until the factory's `save_answered`
+  starts it: reads and saves are on unordered lanes. `Shared::retiring`
+  reserves a name from `:name`/`:rm` until its forget is answered, and a
+  rename's confirmed save never forgets a name a tile holds. Save outcomes
+  route to `Shared::save_origins` (the queuing tile), never by current
+  holder. The factory observes the one
   `Diagnostics` entity from its first `create`, comparing the data version,
   and asks for a catalog (with a notify) when none is held.
 - In the free underlying typeahead, `enter` takes the highlighted option only

@@ -329,7 +329,10 @@ tile holds:
 
 - `:e <sheet>` saves the current sheet first when it has unsaved changes
   (a refused save keeps the tile where it is), gives its name back, and loads
-  the other sheet (`loading…` until it answers). Undo history, open packages,
+  the other sheet (`loading…` until it answers). If that sheet has a save
+  still queued, the read waits for the save's answer before it is sent:
+  reads and saves run on different lanes, so an earlier read could return
+  the generation before the save. A restored tile waits the same way. Undo history, open packages,
   the cursor, and the save state stay with the sheet left behind, and pricing
   in flight for it is cancelled. A sheet open in another tile is refused
   (`sheet 'x' is open in another tile`); the tile's own name does nothing.
@@ -341,14 +344,24 @@ tile holds:
   save under the new name is confirmed. If that save fails, the tile keeps the
   new name, the save slot shows the reason, and the old document stays until a
   later save under the new name is confirmed. An empty sheet saves nothing, so
-  its old document stays.
+  its old document stays. From the rename until that removal is answered, the
+  old name is reserved: `:e`, `:name` and `:rm` refuse it (`sheet 'x' is
+  being removed`) and `untitled-N` skips it. If a tile nevertheless holds the
+  old name when the save is confirmed (a restore), nothing is removed.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
   the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
   keyboard (the tile is in insert mode). Bare `y` removes the document and its
   whole history; any other key, a pointer press on the tile, or focus leaving
   it answers no (`sheet not removed` in the footer). A removal that fails says
-  so in the header.
+  so in the header. The name is reserved, as for `:name`, until the removal
+  is answered.
+
+A save's outcome goes to the tile that queued it, not to whichever tile holds
+the name now. A tile that has moved on (`:e`, `:new`, `:name`) and hears its
+old sheet's save failed says `sheet 'x' was not saved: …; its last edits were
+not stored`. A closed tile's failed save is recorded only by the data tier's
+error diagnostic.
 
 `:e` and `:rm` complete from the known sheet names: the diagnostics catalog's
 `pricer_sheets` documents (the factory asks for a catalog when it is created

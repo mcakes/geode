@@ -16317,9 +16317,11 @@ run_mutation "pricer sheets: :e of the current name reloads it" \
   '        if name == self.sheet.name {
             return Ok(());
         }
+        self.shared.refuse_retiring(&name)?;
         if self.shared.open.borrow().contains(&name) {
             return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
-  '        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
+  '        self.shared.refuse_retiring(&name)?;
+        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
             return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
   geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
 
@@ -16339,9 +16341,9 @@ run_mutation "pricer sheets: a switch keeps the old sheet's failed-load block" \
   crates/geode-pricer/src/tile.rs \
   '        self.save_notice = None;
         self.save_blocked = false;
-        self.rename_from = None;' \
+        // A rename not yet confirmed' \
   '        self.save_notice = None;
-        self.rename_from = None;' \
+        // A rename not yet confirmed' \
   geode-pricer a_switch_starts_the_save_state_over
 
 run_mutation "pricer sheets: a switch keeps the old sheet's undo" \
@@ -16378,9 +16380,9 @@ run_mutation "pricer sheets: :name forgets the old name before the save lands" \
 run_mutation "pricer sheets: a confirmed save after :name never retires the old name" \
   crates/geode-pricer/src/tile.rs \
   '                if let Some(old) = self.rename_from.take() {
-                    if self.shared.store.forget(&old) {' \
+                    if self.shared.open.borrow().contains(&old) {' \
   '                if let Some(old) = self.rename_from.take().filter(|_| false) {
-                    if self.shared.store.forget(&old) {' \
+                    if self.shared.open.borrow().contains(&old) {' \
   geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
 
 run_mutation "pricer sheets: a failed save after :name forgets the old document" \
@@ -16453,9 +16455,9 @@ run_mutation "pricer rm: a modified y confirms" \
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
   '        if self.shared.store.forget(&pending.sheet) {
-            self.forgetting.push(pending.sheet);' \
+            // Reserved until the forget is answered.' \
   '        if false {
-            self.forgetting.push(pending.sheet);' \
+            // Reserved until the forget is answered.' \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: the confirm is not insert mode" \
@@ -16505,6 +16507,111 @@ run_mutation "pricer rm: a failed forget is painted nowhere" \
   '        if let Err(reason) = answer {
             let _ = reason;' \
   geode-pricer a_failed_forget_is_painted_on_the_tile_that_asked
+
+# Line pricer Part 4 Task 5 fix round 1: retiring names, loads deferred
+# behind a queued save, save outcomes routed to their origin tile.
+run_mutation "pricer retiring: :e opens a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            return Ok(());
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            return Ok(());
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: :name takes a name being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            return Err("the last rename is not saved yet".into());
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            return Err("the last rename is not saved yet".into());
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: :rm arms over a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            ));
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            ));
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: a rename does not reserve the old name" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared.retiring.borrow_mut().insert(old.clone());
+            self.rename_from = Some(old);' \
+  '            self.rename_from = Some(old);' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: a confirmed rename forgets a sheet a tile has open" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if self.shared.open.borrow().contains(&old) {
+                        // A tile holds the old name' \
+  '                    if false {
+                        // A tile holds the old name' \
+  geode-pricer a_rename_never_forgets_a_sheet_a_tile_has_open
+
+run_mutation "pricer retiring: an answered forget keeps its name reserved" \
+  crates/geode-pricer/src/content.rs \
+  '        self.shared.retiring.borrow_mut().remove(sheet);' \
+  '' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: an rm's forget does not reserve its name" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared
+                .retiring
+                .borrow_mut()
+                .insert(pending.sheet.clone());
+            self.forgetting.push(pending.sheet);' \
+  '            self.forgetting.push(pending.sheet);' \
+  geode-pricer a_name_removed_by_rm_is_reserved_until_answered
+
+run_mutation "pricer deferred load: :e reads past a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '            .contains(&self.sheet.name)
+        {
+            self.load_waiting = true;' \
+  '            .contains(&self.sheet.name)
+            && false
+        {
+            self.load_waiting = true;' \
+  geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer deferred load: a restore reads past a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '        let load_waiting = shared.pending_saves.borrow().contains(&name);' \
+  '        let load_waiting = false;' \
+  geode-pricer a_restore_of_a_name_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer deferred load: a save answer never starts the waiting load" \
+  crates/geode-pricer/src/content.rs \
+  '                if t.load_waiting && t.sheet.name == sheet {
+                    t.start_load(cx);
+                }' \
+  '                let _ = (&t.load_waiting, sheet, &cx);' \
+  geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer save origin: an outcome goes to the tile holding the name" \
+  crates/geode-pricer/src/content.rs \
+  '        if let Some(tile) = origin.and_then(|id| tiles.iter().find(|t| t.read(cx).id == id)) {' \
+  '        if let Some(tile) = origin.and(tiles.iter().find(|t| t.read(cx).sheet.name == sheet)) {' \
+  geode-pricer a_save_outcome_reaches_the_tile_that_queued_it
+
+run_mutation "pricer save origin: a moved-on tile is not told its save failed" \
+  crates/geode-pricer/src/tile.rs \
+  '        let Err(reason) = answer else {
+            return;
+        };' \
+  '        let Err(reason) = answer else {
+            return;
+        };
+        if true {
+            let _ = (reason, sheet, cx);
+            return;
+        }' \
+  geode-pricer a_save_outcome_reaches_the_tile_that_queued_it
 
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
