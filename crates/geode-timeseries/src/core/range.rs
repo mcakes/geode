@@ -41,26 +41,17 @@ impl Preset {
     pub fn parse(s: &str) -> Option<Preset> {
         Self::ALL.into_iter().find(|p| p.as_str() == s)
     }
-    /// The label's leading count — the digit a trader types first in
-    /// the range popup to name this preset.
-    fn count(self) -> u8 {
-        self.as_str().as_bytes()[0] - b'0'
-    }
-    /// Whether this preset's label begins with the digit `d`.
-    pub fn starts_with(self, d: u8) -> bool {
-        self.count() == d
-    }
-    /// Whether any preset's label begins with the digit `d`.
-    pub fn any_starts_with(d: u8) -> bool {
-        Self::ALL.into_iter().any(|p| p.starts_with(d))
-    }
-    /// The preset whose label is `d` followed by `unit` — the range
-    /// popup's typed form of a chip (`3` `m` is `3m`).
-    pub fn typed(d: u8, unit: char) -> Option<Preset> {
-        Self::ALL.into_iter().find(|p| {
-            let label = p.as_str().as_bytes();
-            p.starts_with(d) && label[1] as char == unit
-        })
+    /// The preset written out, for its range-menu row.
+    pub fn title(self) -> &'static str {
+        match self {
+            Preset::W1 => "1 week",
+            Preset::M1 => "1 month",
+            Preset::M3 => "3 months",
+            Preset::M6 => "6 months",
+            Preset::Y1 => "1 year",
+            Preset::Y2 => "2 years",
+            Preset::Y5 => "5 years",
+        }
     }
     /// The start of the span that ends at `to`. Months and years are
     /// calendar months (a `1m` on 31 March starts on 28/29 February);
@@ -205,23 +196,6 @@ mod tests {
             assert_eq!(Preset::parse(p.as_str()), Some(p));
         }
         assert_eq!(Preset::parse("4m"), None);
-    }
-
-    /// The range popup's typed labels: a digit narrows to the presets
-    /// it starts, and digit plus unit is the preset of that label.
-    #[test]
-    fn a_typed_digit_narrows_and_a_unit_completes_the_label() {
-        assert!(Preset::W1.starts_with(1));
-        assert!(Preset::M1.starts_with(1));
-        assert!(Preset::Y1.starts_with(1));
-        assert!(!Preset::M3.starts_with(1));
-        assert!(!Preset::any_starts_with(4));
-        assert!(Preset::any_starts_with(5));
-        assert_eq!(Preset::typed(1, 'y'), Some(Preset::Y1));
-        assert_eq!(Preset::typed(3, 'm'), Some(Preset::M3));
-        assert_eq!(Preset::typed(5, 'y'), Some(Preset::Y5));
-        assert_eq!(Preset::typed(2, 'm'), None);
-        assert_eq!(Preset::typed(1, 'd'), None);
     }
 
     #[test]
