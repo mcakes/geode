@@ -839,9 +839,21 @@ fn press_and_drag(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixel
     vcx.run_until_parked();
 }
 
+/// A point on bare title-bar space: left of the grouping readout, level
+/// with the scope field.
+fn bare_title_bar(vcx: &mut gpui::VisualTestContext) -> gpui::Point<gpui::Pixels> {
+    let field = vcx.debug_bounds("scope-field").expect("field painted");
+    let readout = vcx.debug_bounds("scope-grouping").expect("readout painted");
+    gpui::point(readout.left() - gpui::px(24.), field.center().y)
+}
+
 /// A drag that starts on a title-bar control belongs to the control —
 /// text selection in the field, nothing on a chip or verb — never to the
-/// window: each control occludes the title bar's drag surface.
+/// window: each control occludes the title bar's drag surface. Nor may
+/// the press leave the title bar's move armed: a control whose press
+/// opens an occluding popup hides the drag and the release from the
+/// title bar, and an armed move then fires on the next plain hover over
+/// bare title-bar space.
 #[gpui::test]
 fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
@@ -866,6 +878,9 @@ fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestA
         // Close whatever the press opened before the next control.
         vcx.simulate_keystrokes("escape");
         vcx.run_until_parked();
+        let bare = bare_title_bar(&mut vcx);
+        vcx.simulate_mouse_move(bare, None, gpui::Modifiers::default());
+        vcx.run_until_parked();
     }
 }
 
@@ -876,11 +891,6 @@ fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestA
 fn dragging_from_bare_title_bar_space_moves_the_window(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx) = open_shell(cx, test_services());
     vcx.run_until_parked();
-    let field = vcx.debug_bounds("scope-field").expect("field painted");
-    let bar = vcx.debug_bounds("scope-grouping").expect("readout painted");
-    // Left of the readout, level with the field: title-bar background.
-    press_and_drag(
-        &mut vcx,
-        gpui::point(bar.left() - gpui::px(24.), field.center().y),
-    );
+    let bare = bare_title_bar(&mut vcx);
+    press_and_drag(&mut vcx, bare);
 }
