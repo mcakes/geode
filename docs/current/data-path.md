@@ -295,13 +295,23 @@ not promise complete history across all grains and partitions.
 
 The application does not schedule live/archive sweeps for measure datasets or
 feed-published documents; the API is called only by tests for those. Local
-documents (`local = true`) are the exception: after each successful local
-publish, the ingest writer sweeps that dataset to 200 archived generations per
-document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most 201), with no
-age limit. The sweep runs after the publish committed and its outcome was sent,
-so a sweep failure is logged and never turns a stored save into a failed one;
-the next local publish sweeps again. Evicted generations keep their
-`file_generations` provenance rows, as every sweep does.
+documents (`local = true`) are the exception: they keep 200 archived
+generations per document (`LOCAL_KEEP_GENERATIONS`; with the live one, at most
+201), with no age limit. After each successful local publish the ingest writer
+counts the saved document's generation summary rows; only when that document
+has crossed the bound does it sweep the whole dataset, then delete, in a
+separate transaction, the dataset's `file_books`/`file_generations` rows whose
+generation the summary no longer holds. An ordinary autosave therefore costs
+one summary count. The sweep runs after the publish committed and its outcome
+was sent, so a failure is logged and never turns a stored save into a failed
+one; that document's next save retries, since it is still past the bound.
+Sweeps of other datasets (tests only) leave evicted generations' provenance
+rows in place.
+
+A local save is always published live. Local saves are stamped with the wall
+clock, which can step back; the writer moves a save stamped at or before the
+document's live source time to one microsecond past it, so the backfill guard
+never archives the app's latest save while still answering `LocalPublished`.
 
 **Forgetting a local document.** `DataHandle::forget(LocalForget)` deletes one
 document's whole history: its live and archived rows, its generation summary

@@ -94,8 +94,10 @@ often tripped:
   greatest generation ID so corrected republishes win consistently.
 - Live/archive retention has a transactional storage API but no production
   scheduler for measure or feed-published document datasets. Local datasets
-  are swept on the writer after each local publish, to
-  `LOCAL_KEEP_GENERATIONS` (200) archived generations per document. Series
+  are swept on the writer after a local publish takes its document past
+  `LOCAL_KEEP_GENERATIONS` (200) archived generations, and the evicted
+  generations' provenance is pruned with it. A local save is always published
+  live: the writer moves a save stamped at or before live to just past it. Series
   retention runs inside append transactions. See the
   [maintenance contract](../../docs/current/data-path.md#retention-and-maintenance).
 - Only a `local = true` dataset can be written or forgotten from the app.

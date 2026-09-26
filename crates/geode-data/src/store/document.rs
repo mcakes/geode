@@ -333,6 +333,55 @@ pub fn forget_document(store: &Store, ds: &DatasetSpec, batch: &str) -> Result<u
     Ok(deleted)
 }
 
+/// How many generations (live and archived) the generation summary holds for
+/// one document. A small indexed-by-nothing read of the summary table, not of
+/// payload rows — what lets a local save decide whether it crossed the
+/// retention bound without sweeping.
+pub fn document_generation_count(
+    store: &Store,
+    ds: &DatasetSpec,
+    batch: &str,
+) -> Result<usize, StoreError> {
+    let sql = "select count(*) from generations where dataset = ? and batch = ?";
+    store
+        .writer()
+        .query_row(sql, duckdb::params![ds.name, batch], |r| r.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(|source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        })
+}
+
+/// Delete the dataset's provenance rows (`file_books`, then
+/// `file_generations`) whose generation the summary no longer holds — the
+/// ones a retention sweep evicted. A sweep deletes payload and summary rows
+/// only, so without this every evicted autosave would leave its provenance
+/// behind forever. One transaction; returns the `file_generations` rows
+/// deleted. A generation still in the summary (live or archived) keeps its
+/// provenance, so freshness and `live_source_time` are unaffected.
+pub fn prune_orphan_provenance(store: &Store, ds: &DatasetSpec) -> Result<usize, StoreError> {
+    const ORPHANS: &str = "select fg.file_id from file_generations fg \
+         where fg.dataset = ? and not exists (select 1 from generations g \
+         where g.dataset = fg.dataset and g.gen_id = fg.gen_id)";
+    let tx = crate::store::begin_transaction(store.writer())?;
+    let run = |sql: String| -> Result<usize, StoreError> {
+        tx.execute(&sql, duckdb::params![ds.name])
+            .map_err(|source| StoreError::Sql {
+                statement: sql.clone(),
+                source,
+            })
+    };
+    run(format!(
+        "delete from file_books where file_id in ({ORPHANS})"
+    ))?;
+    let pruned = run(format!(
+        "delete from file_generations where file_id in ({ORPHANS})"
+    ))?;
+    crate::store::commit_transaction(tx)?;
+    Ok(pruned)
+}
+
 fn cell(col: &Column, i: usize) -> duckdb::types::Value {
     match col {
         Column::F64(v) => duckdb::types::Value::Double(v[i]),

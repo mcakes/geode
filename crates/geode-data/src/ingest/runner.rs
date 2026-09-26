@@ -20,7 +20,8 @@ use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
 use crate::store::document::{
-    DocumentPublishRequest, DocumentPublished, document_path, forget_document, publish_document,
+    DocumentPublishRequest, DocumentPublished, document_generation_count, document_path,
+    forget_document, prune_orphan_provenance, publish_document,
 };
 use crate::store::retention::{RetentionPolicy, sweep};
 use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
@@ -418,6 +419,12 @@ fn publish_one_document(
         return;
     };
 
+    let source_time = if job.source == LOCAL_SOURCE {
+        local_source_time(store, dataset, &batch, job.source_time)
+    } else {
+        job.source_time
+    };
+
     // Contain publication panics as this document's failure and continue. The
     // contained marker tells the process panic hook to log without a crash file.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -428,7 +435,7 @@ fn publish_one_document(
                     dataset,
                     source: &job.source,
                     rows: &job.rows,
-                    source_time: job.source_time,
+                    source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
                 },
@@ -483,15 +490,58 @@ fn publish_one_document(
         );
     }
     if published && dataset.local {
-        sweep_local(store, dataset);
+        sweep_local(store, dataset, &batch);
     }
 }
 
+/// The source time a local save is published at: its own stamp, or just past
+/// the live generation's when the wall clock stepped back. The app's latest
+/// save is by definition its newest, and the writer is serialized, so it must
+/// become live — an archived-only save would still answer `LocalPublished`,
+/// telling the sheet it was stored while a reload shows the older content.
+/// A lookup failure keeps the job's stamp (the publish's own backfill guard
+/// then decides, as before) and is logged.
+fn local_source_time(
+    store: &Store,
+    dataset: &geode_core::schema::DatasetSpec,
+    batch: &str,
+    stamped: DateTime<Utc>,
+) -> DateTime<Utc> {
+    match Catalog::new(store.writer()).live_source_time(&dataset.name, batch, None) {
+        Ok(Some(live)) => stamped.max(live + chrono::Duration::microseconds(1)),
+        Ok(None) => stamped,
+        Err(e) => {
+            tracing::warn!(
+                target: "geode::ingest",
+                "reading the live source time of {}/{batch} failed; the save keeps its own stamp: {e}",
+                dataset.name,
+            );
+            stamped
+        }
+    }
+}
+
+/// Whether the document just saved holds more generations than a local
+/// document keeps (the archive bound plus the live one). A document only
+/// crosses the bound on its own publish, so checking the saved document alone
+/// is enough to know a sweep has work.
+fn local_needs_sweep(
+    store: &Store,
+    dataset: &geode_core::schema::DatasetSpec,
+    batch: &str,
+) -> Result<bool, StoreError> {
+    Ok(document_generation_count(store, dataset, batch)? > LOCAL_KEEP_GENERATIONS + 1)
+}
+
 /// Bound a local dataset's archive after a publish (`LOCAL_KEEP_GENERATIONS`
-/// per document). Runs on the writer, after the publish committed and its
-/// outcome was sent, so a sweep failure never turns a stored save into a
-/// failed one: it is logged, and the next publish sweeps again.
-fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec) {
+/// per document), then prune the evicted generations' provenance. Gated on
+/// the saved document crossing the bound, so an ordinary autosave costs one
+/// summary count rather than a sweep of every sheet; once gated, the sweep
+/// covers the whole dataset. Runs on the writer, after the publish committed
+/// and its outcome was sent, so a failure never turns a stored save into a
+/// failed one: it is logged, and that document's next save retries (it is
+/// still past the bound). Returns whether a sweep ran and succeeded.
+fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec, batch: &str) -> bool {
     let policy = RetentionPolicy {
         keep_generations: Some(LOCAL_KEEP_GENERATIONS),
         keep_age: None,
@@ -499,11 +549,17 @@ fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec) {
     let pairs = crate::store::ddl::table_pairs(dataset);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         geode_core::panic::contained(|| {
-            sweep(store.writer(), dataset, &pairs, &policy, Utc::now()).map_err(|e| e.to_string())
+            if !local_needs_sweep(store, dataset, batch).map_err(|e| e.to_string())? {
+                return Ok(false);
+            }
+            sweep(store.writer(), dataset, &pairs, &policy, Utc::now())
+                .map_err(|e| e.to_string())?;
+            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;
+            Ok(true)
         })
     }));
     let reason = match outcome {
-        Ok(Ok(_)) => return,
+        Ok(Ok(swept)) => return swept,
         Ok(Err(reason)) => reason,
         Err(payload) => format!("panicked: {}", panic_payload_message(payload.as_ref())),
     };
@@ -512,6 +568,7 @@ fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec) {
         "retention sweep of local dataset '{}' failed (history is kept until the next publish sweeps): {reason}",
         dataset.name,
     );
+    false
 }
 
 /// Forget one local document under panic containment and report the outcome.
@@ -2303,6 +2360,106 @@ mod tests {
         );
     }
 
+    /// The app's latest save is by definition its newest: a local save
+    /// stamped at or before what is live (a wall-clock step-back) is moved
+    /// just past live on the writer instead of being archived, or the sheet
+    /// would be told "saved" while a reload shows the older content.
+    #[test]
+    fn a_local_save_older_than_live_is_still_published_live() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let future = ts("2026-09-12T15:00:00Z");
+        handle.submit_document(local_job("s", &[1], future));
+        handle.submit_document(local_job("s", &[2], ts("2026-09-12T14:00:00Z")));
+        for _ in 0..2 {
+            assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        }
+        handle.shutdown();
+        drop(rx);
+        assert_eq!(
+            count_in(&path, "select min(qty) from sheets_document_live"),
+            2,
+            "the latest save is live"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations \
+                 where dataset = 'sheets' and archived_only"
+            ),
+            0
+        );
+        let store = Store::open(&path).unwrap();
+        let live: DateTime<Utc> = store
+            .writer()
+            .query_row(
+                "select max(source_time) from sheets_document_live",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, future + chrono::Duration::microseconds(1));
+    }
+
+    /// The sweep is gated on the saved document crossing the bound, so a
+    /// save under it costs one small count, not a sweep of every sheet; the
+    /// sweep that does run also prunes the evicted generations' provenance.
+    #[test]
+    fn a_local_sweep_runs_only_past_the_bound_and_prunes_provenance() {
+        use crate::store::ddl::tests_support::local_dataset;
+        let (_dir, path, store, _schema) = local_store();
+        let ds = local_dataset();
+        let start = ts("2026-09-12T14:00:00Z");
+        let save = |i: usize| {
+            let at = start + chrono::Duration::seconds(i as i64);
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: LOCAL_SOURCE,
+                    rows: &crate::store::ddl::tests_support::sheet_rows("s", &[i as i64]),
+                    source_time: at,
+                    received_at: at,
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        };
+        for i in 0..=LOCAL_KEEP_GENERATIONS {
+            save(i);
+        }
+        assert!(
+            !local_needs_sweep(&store, &ds, "s").unwrap(),
+            "at the bound"
+        );
+        assert!(!sweep_local(&store, &ds, "s"), "no sweep under the bound");
+        save(LOCAL_KEEP_GENERATIONS + 1);
+        assert!(
+            local_needs_sweep(&store, &ds, "s").unwrap(),
+            "past the bound"
+        );
+        assert!(sweep_local(&store, &ds, "s"));
+        drop(store);
+        let bound = LOCAL_KEEP_GENERATIONS as i64 + 1;
+        for sql in [
+            "select count(*) from generations where dataset = 'sheets'",
+            "select count(*) from file_generations where dataset = 'sheets'",
+            "select count(*) from file_books",
+        ] {
+            assert_eq!(count_in(&path, sql), bound, "{sql}");
+        }
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations fg where dataset = 'sheets' \
+                 and not exists (select 1 from generations g \
+                 where g.dataset = fg.dataset and g.gen_id = fg.gen_id)"
+            ),
+            0,
+            "only evicted generations' provenance went"
+        );
+    }
+
     /// Local documents are swept to the retention bound after each local
     /// publish, per key; a feed's documents are never swept by that path.
     #[test]
@@ -2355,6 +2512,14 @@ mod tests {
             ),
             n as i64 - 1,
             "a feed's history is not swept by a local publish"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations where dataset = 'sheets'"
+            ),
+            LOCAL_KEEP_GENERATIONS as i64 + 1,
+            "provenance is pruned with the sweep"
         );
     }
 }

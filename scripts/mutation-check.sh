@@ -10360,7 +10360,7 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                     dataset,
                     source: &job.source,
                     rows: &job.rows,
-                    source_time: job.source_time,
+                    source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
                 },
@@ -10375,7 +10375,7 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                 dataset,
                 source: &job.source,
                 rows: &job.rows,
-                source_time: job.source_time,
+                source_time,
                 received_at: job.received_at,
                 bytes: job.bytes,
             },
@@ -18843,6 +18843,35 @@ run_mutation "bridge: a forgotten document leaves a watched catalog stale" \
   '                        diagnostics.update(cx, |d, cx| {
                             if d.pending_catalog_request() {' \
   geode-app a_forgotten_document_rereads_a_watched_catalog
+
+# A local save is the app's newest by definition: stamped behind live (a
+# wall-clock step-back), it is moved past live, or the backfill guard would
+# archive it while `LocalPublished` still tells the sheet it was stored.
+run_mutation "runner: a local save older than live is archived" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Ok(Some(live)) => stamped.max(live + chrono::Duration::microseconds(1)),' \
+  '        Ok(Some(_live)) => stamped,' \
+  geode-data a_local_save_older_than_live_is_still_published_live
+
+# The sweep runs only once the saved document crosses the bound; an
+# ungated sweep is correct but costs every autosave a whole-dataset sweep.
+run_mutation "runner: every local save sweeps" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    Ok(document_generation_count(store, dataset, batch)? > LOCAL_KEEP_GENERATIONS + 1)' \
+  '    Ok(document_generation_count(store, dataset, batch)? > 0)' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+run_mutation "runner: a local sweep leaves evicted provenance" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
+  '' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+run_mutation "prune: file_books rows of evicted generations survive" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_books where file_id in ({ORPHANS})"' \
+  '        "delete from file_books where false and file_id in ({ORPHANS})"' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
