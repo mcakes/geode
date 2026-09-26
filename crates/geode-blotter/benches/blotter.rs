@@ -74,7 +74,7 @@ fn shape(l1: usize, l2: usize, l3: usize, measures: usize) -> (Snapshot, ViewSpe
         let name = format!("m{m}");
         let values: Vec<Option<f64>> = (0..rows).map(|r| Some(r as f64 * 1.5)).collect();
         columns.push((dim(&name), TestColumn::F64(values)));
-        view_columns.push(ViewColumn::Measure { name });
+        view_columns.push(ViewColumn::measure(name));
     }
     let snapshot = Snapshot::for_tests(columns, 3);
     let view = ViewSpec {

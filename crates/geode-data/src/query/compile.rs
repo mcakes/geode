@@ -423,7 +423,7 @@ pub(crate) fn compile_view_with_cache(
             .columns
             .iter()
             .filter_map(|c| match c {
-                ViewColumn::Measure { name } => ds.column(name),
+                ViewColumn::Measure { name, .. } => ds.column(name),
                 _ => None,
             })
             .filter(|c| c.grain() == Some(grain))
@@ -715,7 +715,7 @@ pub(crate) fn compile_view_with_cache(
             .columns
             .iter()
             .filter_map(|c| match c {
-                ViewColumn::Dimension { name } => Some(name),
+                ViewColumn::Dimension { name, .. } => Some(name),
                 _ => None,
             })
             .filter(|name| joined_ds.column(name).is_some() && !view.grouping.contains(*name))
@@ -797,7 +797,7 @@ pub(crate) fn compile_view_with_cache(
 
     // Derived columns are expressions over the columns already selected.
     for c in &view.columns {
-        if let ViewColumn::Derived { name, sql } = c {
+        if let ViewColumn::Derived { name, sql, .. } = c {
             // A derived expression inherits its inputs' attribution. It cannot
             // claim additive values at a depth where an input is non-attributable.
             let referenced = referenced_columns(sql, &columns);
@@ -2578,9 +2578,7 @@ kind = "measure"
         // instrument-level and coarser rows can aggregate it.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2620,9 +2618,7 @@ kind = "measure"
 
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2699,13 +2695,11 @@ kind = "measure"
         // The renderer uses that marker to decide where values can be summed.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "cg_per_delta".into(),
-            sql: "cross_gamma02 / nullif(delta01, 0)".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns.push(ViewColumn::derived(
+            "cg_per_delta",
+            "cross_gamma02 / nullif(delta01, 0)",
+        ));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2750,13 +2744,9 @@ kind = "measure"
         // the expression itself must be masked at non-attributable depths.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "cg_copy".into(),
-            sql: "cross_gamma02".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns
+            .push(ViewColumn::derived("cg_copy", "cross_gamma02"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2799,13 +2789,8 @@ kind = "measure"
             "cross_gamma02 * 2 -- can't total this",
         ] {
             let mut v = view();
-            v.columns.push(ViewColumn::Measure {
-                name: "cross_gamma02".into(),
-            });
-            v.columns.push(ViewColumn::Derived {
-                name: "scaled".into(),
-                sql: sql.into(),
-            });
+            v.columns.push(ViewColumn::measure("cross_gamma02"));
+            v.columns.push(ViewColumn::derived("scaled", sql));
             let q = compile_view(
                 store.writer(),
                 &v,
@@ -2838,13 +2823,11 @@ kind = "measure"
         // expression at depths where its actual input remains additive.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "scaled_delta".into(),
-            sql: "-- the desk's own scaling\n delta01 * 2".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        v.columns.push(ViewColumn::derived(
+            "scaled_delta",
+            "-- the desk's own scaling\n delta01 * 2",
+        ));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2880,16 +2863,12 @@ kind = "measure"
         // one outcome that must not happen.
         let (_d, store) = pair_fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Measure {
-            name: "cross_gamma02".into(),
-        });
-        v.columns.push(ViewColumn::Derived {
-            name: "odd".into(),
-            // A lone apostrophe outside a comment. An unterminated block
-            // comment does *not* reach this guard — it is stripped — so
-            // the input has to be unbalanced quoting itself.
-            sql: "cross_gamma02 'unterminated".into(),
-        });
+        v.columns.push(ViewColumn::measure("cross_gamma02"));
+        // A lone apostrophe outside a comment. An unterminated block
+        // comment does *not* reach this guard — it is stripped — so
+        // the input has to be unbalanced quoting itself.
+        v.columns
+            .push(ViewColumn::derived("odd", "cross_gamma02 'unterminated"));
         let q = compile_view(
             store.writer(),
             &v,
@@ -2922,10 +2901,8 @@ kind = "measure"
         // level for level, including the levels where they are additive.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "delta_doubled".into(),
-            sql: "delta01 * 2".into(),
-        });
+        v.columns
+            .push(ViewColumn::derived("delta_doubled", "delta01 * 2"));
         let q = compile_with(&store, &v);
         let of = |name: &str| {
             q.columns
@@ -2952,10 +2929,7 @@ kind = "measure"
         // weaker marker than it has earned, nor a stronger one.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "one".into(),
-            sql: "1".into(),
-        });
+        v.columns.push(ViewColumn::derived("one", "1"));
         let q = compile_with(&store, &v);
         let derived = q.columns.iter().find(|c| c.name == "one").unwrap();
         assert!(
@@ -2980,10 +2954,8 @@ kind = "measure"
         // the mutation harness is what said so.
         let (_d, store) = fixture();
         let mut v = view();
-        v.columns.push(ViewColumn::Derived {
-            name: "label".into(),
-            sql: "'daily_trading_pnl per unit'".into(),
-        });
+        v.columns
+            .push(ViewColumn::derived("label", "'daily_trading_pnl per unit'"));
         let q = compile_with(&store, &v);
         let derived = q.columns.iter().find(|c| c.name == "label").unwrap();
         assert!(

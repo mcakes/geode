@@ -15,29 +15,73 @@ pub struct JoinSpec {
     pub dataset: String,
     /// Join key columns declared by the view.
     pub on: Vec<String>,
+    /// Whether the view needs this join to mean what it says. A required join
+    /// that cannot be honoured refuses the view; an optional one is dropped
+    /// with an informational diagnostic naming it. Defaults to true, the same
+    /// way `ColumnSpec::required` does, so silence means "I meant this".
+    pub required: bool,
 }
 
+/// Whether a column needs to be honoured to mean what it says. A required
+/// column that cannot be honoured refuses the view; an optional one is
+/// dropped with an informational diagnostic naming it. Defaults to true, the
+/// same way `ColumnSpec::required` does, so silence means "I meant this".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewColumn {
     Dimension {
         name: String,
+        required: bool,
     },
     Measure {
         name: String,
+        required: bool,
     },
     /// A SQL expression over other columns of the same view.
     Derived {
         name: String,
         sql: String,
+        required: bool,
     },
 }
 
 impl ViewColumn {
     pub fn name(&self) -> &str {
         match self {
-            ViewColumn::Dimension { name }
-            | ViewColumn::Measure { name }
+            ViewColumn::Dimension { name, .. }
+            | ViewColumn::Measure { name, .. }
             | ViewColumn::Derived { name, .. } => name,
+        }
+    }
+
+    /// A required measure. `required` is a field rather than a defaulted
+    /// builder step because a declaration that omits it means required.
+    pub fn measure(name: impl Into<String>) -> ViewColumn {
+        ViewColumn::Measure {
+            name: name.into(),
+            required: true,
+        }
+    }
+
+    pub fn dimension(name: impl Into<String>) -> ViewColumn {
+        ViewColumn::Dimension {
+            name: name.into(),
+            required: true,
+        }
+    }
+
+    pub fn derived(name: impl Into<String>, sql: impl Into<String>) -> ViewColumn {
+        ViewColumn::Derived {
+            name: name.into(),
+            sql: sql.into(),
+            required: true,
+        }
+    }
+
+    pub fn required(&self) -> bool {
+        match self {
+            ViewColumn::Dimension { required, .. }
+            | ViewColumn::Measure { required, .. }
+            | ViewColumn::Derived { required, .. } => *required,
         }
     }
 }
@@ -324,7 +368,7 @@ impl ViewSpec {
             .columns
             .iter()
             .filter_map(|c| match c {
-                ViewColumn::Measure { name } => ds.column(name),
+                ViewColumn::Measure { name, .. } => ds.column(name),
                 _ => None,
             })
             .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))
@@ -518,6 +562,7 @@ impl ViewSpec {
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        required: j.get("required").and_then(|v| v.as_bool()).unwrap_or(true),
                     });
                 }
             }
@@ -535,17 +580,21 @@ impl ViewSpec {
                         continue;
                     };
                     let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("measure");
+                    let required = c.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
                     let column = match kind {
                         "dimension" => ViewColumn::Dimension {
                             name: col_name.to_string(),
+                            required,
                         },
                         "measure" => ViewColumn::Measure {
                             name: col_name.to_string(),
+                            required,
                         },
                         "derived" => match c.get("sql").and_then(|v| v.as_str()) {
                             Some(sql) => ViewColumn::Derived {
                                 name: col_name.to_string(),
                                 sql: sql.to_string(),
+                                required,
                             },
                             None => {
                                 diags.push(bad(
@@ -1208,6 +1257,40 @@ grain = "instrument"
     }
 
     #[test]
+    fn required_defaults_true_and_is_read_from_a_join_and_a_column() {
+        let text = r#"
+[risk]
+dataset = "risk_snapshot"
+grouping = ["book"]
+
+[[risk.joins]]
+dataset = "instrument_ref"
+on = ["instrument_ref"]
+
+[[risk.joins]]
+dataset = "optional_ref"
+on = ["instrument_ref"]
+required = false
+
+[[risk.columns]]
+name = "delta01"
+
+[[risk.columns]]
+name = "maybe_missing"
+required = false
+"#;
+        let (views, _) = ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", text).unwrap()],
+        ));
+        let v = views.iter().find(|v| v.name == "risk").expect("risk");
+        assert!(v.joins[0].required, "a join defaults to required");
+        assert!(!v.joins[1].required, "required = false is read");
+        assert!(v.columns[0].required(), "a column defaults to required");
+        assert!(!v.columns[1].required(), "required = false is read");
+    }
+
+    #[test]
     fn a_view_config_version_header_is_not_a_spurious_diagnostic() {
         // Every config doc carries this header by convention
         // (`groupings.toml`'s own `GroupingSlots::from_doc` already
@@ -1295,16 +1378,9 @@ dataset = "risk_snapshot"
         assert_eq!(
             v.columns,
             vec![
-                ViewColumn::Dimension {
-                    name: "book".into()
-                },
-                ViewColumn::Measure {
-                    name: "delta01".into()
-                },
-                ViewColumn::Derived {
-                    name: "delta_per_vega".into(),
-                    sql: "delta01 / nullif(vega01, 0)".into(),
-                },
+                ViewColumn::dimension("book"),
+                ViewColumn::measure("delta01"),
+                ViewColumn::derived("delta_per_vega", "delta01 / nullif(vega01, 0)"),
             ]
         );
     }

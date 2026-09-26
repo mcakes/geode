@@ -5139,6 +5139,7 @@ mod tests {
                 .push(geode_core::view::JoinSpec {
                     dataset: "joined".into(),
                     on: vec!["lhu".into()],
+                    required: true,
                 });
             views.iter_mut().find(|v| v.name == "wide").unwrap().dataset = "other".into();
         });
