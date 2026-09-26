@@ -7,6 +7,12 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# Read-only accessors a host's tests observe a tile through
+# (`PricerTile::sheet`, `is_loading`); geode-app's dev-dependencies turn
+# it on.
+test-support = []
+
 # The pure core (`core`) needs `geode-core` and `chrono` alone. The tile
 # (Part 3) adds `geode-shell` for the module-hosting contract (`TileContent`,
 # `Frame`, the keymap and action vocabulary, `ChoiceList`, the chip, colour,
@@ -30,11 +36,17 @@ tracing.workspace = true
 # resolves (test-feature parity, 2026-09-19), or this crate builds a
 # private copy of the stack.
 [dev-dependencies]
+# A self dev-dependency (geode-shell's precedent) so `cargo test -p
+# geode-pricer` builds this crate with the same features `--workspace`
+# does.
+geode-pricer = { path = ".", features = ["test-support"] }
 geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
+# The storage round trip opens a real `DataService` on a temp directory.
+tempfile = "3.27.0"
 
 [[bench]]
 name = "core"

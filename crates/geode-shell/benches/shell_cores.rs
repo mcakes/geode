@@ -201,7 +201,13 @@ fn palette_items(n: usize) -> Vec<PaletteItem> {
                     ActionId(format!("bench::action_{i}")),
                     format!("{verb} {noun} {i}"),
                     "Bench".to_string(),
-                    (i % 3 == 0).then(|| "ctrl+x".to_string()),
+                    (i % 3 == 0).then(|| {
+                        geode_shell::keymap::parse_binding(
+                            "ctrl+x",
+                            geode_shell::keymap::Modifiers::NONE,
+                        )
+                        .unwrap()
+                    }),
                 )
             }
         })

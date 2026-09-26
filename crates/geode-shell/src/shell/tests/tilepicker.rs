@@ -512,3 +512,19 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     assert_eq!(main, vec![main_tile], "main untouched");
     assert!(cx.debug_bounds("dock-empty-hint-left").is_none());
 }
+
+/// The empty tree's hint names its key inside prose (`kbd::marked`): the
+/// `ctrl+k` paints as a `Kbd` chip, not as text. A fresh shell paints
+/// nothing else bound to `ctrl+k`, so the chip is the hint's.
+#[gpui::test]
+fn an_empty_workspace_hint_paints_its_keys_as_kbd(cx: &mut gpui::TestAppContext) {
+    let (mut cx, _shell) = dock_test_shell(cx);
+    assert!(
+        cx.debug_bounds("empty-hint").is_some(),
+        "sanity: the hint painted"
+    );
+    assert!(
+        cx.debug_bounds("kbd:ctrl-k").is_some(),
+        "the hint's `ctrl+k` paints as a Kbd chip"
+    );
+}

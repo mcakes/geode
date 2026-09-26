@@ -4,24 +4,41 @@
 //! stored (spec §1.2): a reopened sheet reprices.
 //!
 //! Values have no NULL, so every optional is a flag plus a value or a
-//! kind plus a value. Part 4 wires the dataset into the builtin layer and
-//! the `SheetStore` around `DataHandle`; this module is the pure pair.
+//! kind plus a value. `geode-app` declares the dataset in its builtin
+//! layer and the tile's `DuckSheetStore` reads and writes it over
+//! `DataHandle`; this module is the pure conversion both ways.
 
 use crate::core::sheet::{LineId, LineState, OwnShifts, Refresh, RowKind, RowRecord, Sheet};
 use crate::core::template::Template;
 use chrono::NaiveDate;
+use geode_core::config::{LayerDoc, merge_docs};
 use geode_core::document::{Column, DocumentRows, Value};
 use geode_core::pricing::{
     Barrier, BarrierKind, Expiry, Instrument, MarketOverrides, OptionKind, Strike, Vanilla,
 };
+use geode_core::schema::{ColumnRole, ColumnType, DatasetSpec, SchemaSpec};
+use geode_core::snapshot::Snapshot;
 use geode_core::source_config::parse_duration;
+use std::sync::OnceLock;
 
 pub const PRICER_SHEETS_DATASET: &str = "pricer_sheets";
 pub const SHEET_KEY: &str = "sheet";
 pub const LINE_AXIS: &str = "line";
 
 /// The datasets-doc declaration (spec §7.2), one `[pricer_sheets.columns.<name>]`
-/// table per column. Part 4 pushes it into `ConfigSources.builtin`.
+/// table per column. `geode-app` pushes it into the builtin config layer.
+///
+/// **Frozen.** The store creates the tables with `CREATE TABLE IF NOT
+/// EXISTS` and publishes insert positionally, so once a database holds
+/// `pricer_sheets` its column list and order cannot change without a
+/// migration, which does not exist: a changed declaration would write
+/// values into the wrong columns of an existing database. Add, remove or
+/// reorder a column only together with a migration.
+///
+/// `sheet` is `categorical = false`: a text dimension is categorical by
+/// default, which would offer sheet names in the frame picker and the
+/// groupings and rebuild an ENUM on every autosave. A sheet name is not a
+/// scope dimension.
 pub const PRICER_SHEETS_DECLARATION: &str = r#"[pricer_sheets]
 family = "document"
 local = true
@@ -32,6 +49,7 @@ axes = ["line"]
 type = "utf8"
 role = "dimension"
 textual = true
+categorical = false
 [pricer_sheets.columns.line]
 type = "i64"
 role = "axis"
@@ -541,6 +559,168 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
     Ok(sheet)
 }
 
+/// The declaration, parsed once. The decoder walks THIS column list,
+/// never the answer's: a column the answer lacks is an error naming it,
+/// and a column the answer adds is ignored.
+fn declared() -> Result<&'static DatasetSpec, String> {
+    static DECLARED: OnceLock<Result<DatasetSpec, String>> = OnceLock::new();
+    DECLARED
+        .get_or_init(|| {
+            let layer = LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
+                .map_err(|e| format!("the {PRICER_SHEETS_DATASET} declaration: {e:?}"))?;
+            let (schema, diags) = SchemaSpec::from_doc(&merge_docs("datasets", &[layer]));
+            if let Some(d) = diags.first() {
+                return Err(format!("the {PRICER_SHEETS_DATASET} declaration: {d:?}"));
+            }
+            schema
+                .dataset(PRICER_SHEETS_DATASET)
+                .cloned()
+                .ok_or_else(|| format!("{PRICER_SHEETS_DATASET} is not declared"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+fn column_present(snapshot: &Snapshot, name: &str) -> Result<(), String> {
+    snapshot
+        .column_index(name)
+        .map(|_| ())
+        .ok_or_else(|| format!("column '{name}' is missing from the answer"))
+}
+
+/// One declared column over every row of the answer. The type check is
+/// the strict one (`i64_column`/`f64_column` match exactly Int64 and
+/// Float64); every cell then goes through the per-row accessor, which
+/// answers `None` for a NULL — a NULL is refused, never read as a zero.
+fn decode_column(snapshot: &Snapshot, name: &str, ty: ColumnType) -> Result<Column, String> {
+    column_present(snapshot, name)?;
+    let n = snapshot.rows();
+    let null = |row: usize| format!("column '{name}' is NULL at row {row}");
+    match ty {
+        ColumnType::Utf8 => {
+            if snapshot.str_column(name).is_none() && snapshot.dict_column(name).is_none() {
+                return Err(format!("column '{name}' is not utf8"));
+            }
+            (0..n)
+                .map(|r| {
+                    snapshot
+                        .text_value(name, r)
+                        .map(str::to_string)
+                        .ok_or_else(|| null(r))
+                })
+                .collect::<Result<_, _>>()
+                .map(Column::Utf8)
+        }
+        ColumnType::I64 => {
+            if snapshot.i64_column(name).is_none() {
+                return Err(format!("column '{name}' is not i64"));
+            }
+            (0..n)
+                .map(|r| snapshot.i64_value(name, r).ok_or_else(|| null(r)))
+                .collect::<Result<_, _>>()
+                .map(Column::I64)
+        }
+        ColumnType::F64 => {
+            if snapshot.f64_column(name).is_none() {
+                return Err(format!("column '{name}' is not f64"));
+            }
+            (0..n)
+                .map(|r| snapshot.f64_value(name, r).ok_or_else(|| null(r)))
+                .collect::<Result<_, _>>()
+                .map(Column::F64)
+        }
+        other => Err(format!(
+            "column '{name}' is declared {other:?}, which a sheet never stores"
+        )),
+    }
+}
+
+/// An attribute is repeated on every row of the answer; it is read from
+/// row 0 only after every row agrees. Rows that disagree are a store
+/// fault, and picking one would be a plausible wrong sheet.
+fn decode_attribute(snapshot: &Snapshot, name: &str, ty: ColumnType) -> Result<Value, String> {
+    let differs = || format!("attribute '{name}' differs between rows");
+    Ok(match decode_column(snapshot, name, ty)? {
+        Column::Utf8(v) => {
+            if v.iter().any(|x| *x != v[0]) {
+                return Err(differs());
+            }
+            Value::Utf8(v[0].clone())
+        }
+        Column::I64(v) => {
+            if v.iter().any(|x| *x != v[0]) {
+                return Err(differs());
+            }
+            Value::I64(v[0])
+        }
+        Column::F64(v) => {
+            if v.iter().any(|x| x.to_bits() != v[0].to_bits()) {
+                return Err(differs());
+            }
+            Value::F64(v[0])
+        }
+        Column::Date(_) => unreachable!("decode_column never yields a date"),
+    })
+}
+
+/// A document answer (`DataHandle::document` over `pricer_sheets`) back
+/// into the rows `to_rows` produced — the inverse the store's read path
+/// needs before `from_rows`.
+///
+/// `Ok(None)` for a zero-row answer: no document under the name (a live
+/// read of an unknown key answers empty, not an error). Otherwise every
+/// declared column must be present, of its declared type and NULL-free,
+/// and the key column must name `name` on every row; anything else is an
+/// `Err` naming the column, never a partial document. Rows keep the
+/// answer's order (by `line`); `from_rows` orders them by `order`.
+pub fn rows_from_snapshot(name: &str, snapshot: &Snapshot) -> Result<Option<DocumentRows>, String> {
+    let ds = declared()?;
+    if snapshot.rows() == 0 {
+        return Ok(None);
+    }
+    let mut out = DocumentRows {
+        key: vec![name.to_string()],
+        attributes: Vec::new(),
+        axes: Vec::new(),
+        values: Vec::new(),
+    };
+    for spec in ds.document_columns() {
+        if ds.key.contains(&spec.name) {
+            // A misrouted answer must not install as this sheet.
+            match decode_column(snapshot, &spec.name, spec.ty)? {
+                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,
+                _ => {
+                    return Err(format!(
+                        "column '{}' does not name sheet '{name}' on every row",
+                        spec.name
+                    ));
+                }
+            }
+        }
+        match spec.role {
+            ColumnRole::Attribute { .. } => out.attributes.push((
+                spec.name.clone(),
+                decode_attribute(snapshot, &spec.name, spec.ty)?,
+            )),
+            ColumnRole::Axis => out.axes.push((
+                spec.name.clone(),
+                decode_column(snapshot, &spec.name, spec.ty)?,
+            )),
+            ColumnRole::Value => out.values.push((
+                spec.name.clone(),
+                decode_column(snapshot, &spec.name, spec.ty)?,
+            )),
+            _ => {
+                return Err(format!(
+                    "column '{}' has a role a sheet document never declares",
+                    spec.name
+                ));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn read_instrument(
     underlying: &str,
@@ -598,7 +778,7 @@ fn read_instrument(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::edit::Edit;
     use crate::core::sheet::tests::{callspread, line, push, spx};
@@ -607,6 +787,7 @@ mod tests {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::pricing::OptionKind;
     use geode_core::schema::SchemaSpec;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn dataset() -> geode_core::schema::DatasetSpec {
@@ -879,5 +1060,277 @@ mod tests {
         assert!(e.contains("contiguously"), "{e}");
         // The good one still loads.
         assert!(from_rows("book-1", &good).is_ok());
+    }
+
+    // ---- the snapshot decoder -------------------------------------------
+
+    use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+
+    fn meta(name: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: vec![Attribution::DeterminedNonAdditive],
+            scope_semantics: ScopeSemantics::Direct,
+        }
+    }
+
+    fn test_column(col: &Column) -> TestColumn {
+        match col {
+            Column::F64(v) => TestColumn::F64(v.iter().map(|x| Some(*x)).collect()),
+            Column::I64(v) => TestColumn::I64(v.clone()),
+            Column::Utf8(v) => TestColumn::Dict(v.iter().map(|s| Some(s.clone())).collect()),
+            Column::Date(_) => unreachable!("the declaration has no date column"),
+        }
+    }
+
+    /// `doc` in the shape a document answer arrives in —
+    /// `document_columns()` order, every attribute repeated on every row
+    /// — with `edit` free to drop or retype a column before it is built.
+    /// The tile's tests answer a load's `Delivery::Query` with it.
+    pub(crate) fn snapshot_of(
+        doc: &DocumentRows,
+        edit: impl FnOnce(&mut Vec<(ColumnMeta, TestColumn)>),
+    ) -> Snapshot {
+        let n = doc.rows();
+        let mut columns = vec![(
+            meta(SHEET_KEY),
+            TestColumn::Dict(vec![Some(doc.key.join("/")); n]),
+        )];
+        for (name, col) in doc.axes.iter().chain(doc.values.iter()) {
+            columns.push((meta(name), test_column(col)));
+        }
+        for (name, value) in &doc.attributes {
+            let col = match value {
+                Value::F64(x) => TestColumn::F64(vec![Some(*x); n]),
+                Value::I64(x) => TestColumn::I64(vec![*x; n]),
+                Value::Utf8(s) => TestColumn::Dict(vec![Some(s.clone()); n]),
+                Value::Date(_) => unreachable!("the declaration has no date attribute"),
+            };
+            columns.push((meta(name), col));
+        }
+        edit(&mut columns);
+        Snapshot::for_tests(columns, 0)
+    }
+
+    type Columns = Vec<(ColumnMeta, TestColumn)>;
+
+    fn replace(columns: &mut [(ColumnMeta, TestColumn)], name: &str, col: TestColumn) {
+        let slot = columns
+            .iter_mut()
+            .find(|(m, _)| m.name == name)
+            .expect("the fixture has the column");
+        slot.1 = col;
+    }
+
+    #[test]
+    fn the_declaration_is_clean_and_sheet_is_not_a_scope_dimension() {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION).unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset(PRICER_SHEETS_DATASET).unwrap();
+        // A categorical `sheet` would put sheet names into the frame
+        // picker and groupings and rebuild an ENUM on every autosave.
+        assert!(
+            !ds.categorical_columns().contains(&SHEET_KEY),
+            "{:?}",
+            ds.categorical_columns()
+        );
+    }
+
+    #[test]
+    fn a_decoded_snapshot_is_the_document_it_was_built_from() {
+        let s = full_sheet();
+        let rows = to_rows(&s).unwrap();
+        let decoded = rows_from_snapshot("book-1", &snapshot_of(&rows, |_| {}))
+            .unwrap_or_else(|e| panic!("{e}"))
+            .expect("rows");
+        assert_eq!(decoded, rows);
+    }
+
+    #[test]
+    fn a_zero_row_answer_is_no_document() {
+        let rows = to_rows(&full_sheet()).unwrap();
+        let empty = snapshot_of(&rows, |cols| {
+            for (_, c) in cols.iter_mut() {
+                *c = match c {
+                    TestColumn::F64(_) => TestColumn::F64(Vec::new()),
+                    TestColumn::I64(_) => TestColumn::I64(Vec::new()),
+                    _ => TestColumn::Dict(Vec::new()),
+                };
+            }
+        });
+        assert_eq!(empty.rows(), 0);
+        assert_eq!(rows_from_snapshot("book-1", &empty), Ok(None));
+    }
+
+    #[test]
+    fn a_missing_or_wrong_typed_column_is_refused_by_name() {
+        let rows = to_rows(&full_sheet()).unwrap();
+        let n = rows.rows();
+        let refused = |edit: &dyn Fn(&mut Columns)| {
+            rows_from_snapshot("book-1", &snapshot_of(&rows, |c| edit(c)))
+                .expect_err("refused, never a half-sheet")
+        };
+        // Missing, in each role.
+        for name in ["qty", "line", "spot_overrides", "kind"] {
+            let e = refused(&|c| c.retain(|(m, _)| m.name != name));
+            assert!(e.contains(&format!("'{name}' is missing")), "{name}: {e}");
+        }
+        // An f64 where an i64 is declared (a value and an attribute).
+        for name in ["qty", "sheet_vol_shift_own"] {
+            let e = refused(&|c| replace(c, name, TestColumn::F64(vec![Some(1.0); n])));
+            assert!(e.contains(&format!("'{name}' is not i64")), "{name}: {e}");
+        }
+        // An i64 where an f64 is declared.
+        for name in ["strike", "sheet_spot_shift"] {
+            let e = refused(&|c| replace(c, name, TestColumn::I64(vec![1; n])));
+            assert!(e.contains(&format!("'{name}' is not f64")), "{name}: {e}");
+        }
+        // Numbers where text is declared.
+        for name in ["kind", "refresh"] {
+            let e = refused(&|c| replace(c, name, TestColumn::I64(vec![1; n])));
+            assert!(e.contains(&format!("'{name}' is not utf8")), "{name}: {e}");
+        }
+        // A NULL cell is not a zero.
+        let e = refused(&|c| {
+            let mut v: Vec<Option<f64>> = vec![Some(1.0); n];
+            v[1] = None;
+            replace(c, "strike", TestColumn::F64(v))
+        });
+        assert!(e.contains("'strike'"), "{e}");
+        // An attribute that differs between rows is a store fault, not a
+        // choice of row 0.
+        let e = refused(&|c| {
+            let mut v = vec![Some("off".to_string()); n];
+            v[n - 1] = Some("30s".into());
+            replace(c, "refresh", TestColumn::Dict(v))
+        });
+        assert!(e.contains("'refresh'"), "{e}");
+        // An answer for another sheet.
+        let e = rows_from_snapshot("book-2", &snapshot_of(&rows, |_| {})).unwrap_err();
+        assert!(e.contains("'sheet'"), "{e}");
+    }
+
+    /// A second sheet on the other side of every sheet-wide setting:
+    /// default refresh, no override, no sheet shift, the default view.
+    fn plain_sheet() -> Sheet {
+        let mut s = Sheet::new("plain");
+        push(
+            &mut s,
+            vec![
+                parse("SPX 1m 100% P").unwrap(),
+                parse("SPX Z26 4800/5200 RR").unwrap(),
+            ],
+        );
+        s
+    }
+
+    fn off_sheet() -> Sheet {
+        let mut s = Sheet::new("off sheet/with odd; name");
+        push(
+            &mut s,
+            vec![parse("-7 NDX 20DEC26 20000 C UO 23000").unwrap()],
+        );
+        s.refresh = Refresh::Off;
+        s.apply(Edit::SetSheetShift(OwnShifts {
+            spot_pct: Some(-2.5),
+            vol_pts: None,
+        }))
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn a_sheet_survives_the_real_store() {
+        use geode_core::dimensions::DerivedDimensions;
+        use geode_core::pricing::LocalPublish;
+        use geode_core::query::{AsOf, DocumentParams, QueryKey};
+        use geode_data::{DataEvent, DataService, DataServiceConfig, PricerConfig};
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(dataset());
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: dir.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::missing("none"),
+        })
+        .unwrap();
+        let until = |pick: &mut dyn FnMut(DataEvent) -> Option<Arc<Snapshot>>| loop {
+            let e = rx.recv_timeout(Duration::from_secs(30)).expect("an event");
+            if let Some(t) = pick(e) {
+                return t;
+            }
+        };
+        let read = |key: u64, name: &str| {
+            assert!(
+                service
+                    .document(&DocumentParams {
+                        key: QueryKey(key),
+                        tag: 1,
+                        submitted: Instant::now(),
+                        dataset: PRICER_SHEETS_DATASET.into(),
+                        document_key: vec![name.into()],
+                        as_of: AsOf::Live,
+                    })
+                    .is_ok()
+            );
+            until(&mut |e| match e {
+                DataEvent::Query(o) if o.key == QueryKey(key) => {
+                    Some(o.snapshot.unwrap_or_else(|e| panic!("{e}")))
+                }
+                _ => None,
+            })
+        };
+
+        // No document under the name: an empty answer, read as "Missing".
+        let nothing = read(1, "book-1");
+        assert_eq!(rows_from_snapshot("book-1", &nothing), Ok(None));
+
+        let sheets = [full_sheet(), plain_sheet(), off_sheet()];
+        for s in &sheets {
+            service.publish(LocalPublish {
+                dataset: PRICER_SHEETS_DATASET.into(),
+                rows: to_rows(s).unwrap(),
+            });
+        }
+        let mut stored = 0;
+        while stored < sheets.len() {
+            match rx.recv_timeout(Duration::from_secs(30)).expect("an event") {
+                DataEvent::LocalPublished { .. } => stored += 1,
+                DataEvent::LocalPublishFailed { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+
+        for (i, s) in sheets.iter().enumerate() {
+            let snapshot = read(10 + i as u64, &s.name);
+            let rows = rows_from_snapshot(&s.name, &snapshot)
+                .unwrap_or_else(|e| panic!("{}: {e}", s.name))
+                .expect("a stored document");
+            let back = from_rows(&s.name, &rows).unwrap_or_else(|e| panic!("{e}"));
+            let expected = from_rows(&s.name, &to_rows(s).unwrap()).unwrap();
+            assert_eq!(definition(&back), definition(&expected), "{}", s.name);
+            assert_eq!(definition(&back), definition(s), "{}", s.name);
+            assert_eq!(back.view, s.view);
+            assert_eq!(back.sheet_shift(), s.sheet_shift());
+            assert_eq!(back.overrides(), s.overrides());
+            assert_eq!(back.refresh, s.refresh);
+            // The whole document, not only what `definition` looks at.
+            assert_eq!(to_rows(&back), to_rows(&expected), "{}", s.name);
+        }
+        service.shutdown();
     }
 }

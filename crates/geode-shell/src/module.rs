@@ -54,12 +54,9 @@ pub enum Delivery {
         identity: String,
         result: Result<u64, String>,
     },
-    /// A document upload's outcome (egress spec §5), routed by the
-    /// submitting tile's key like a `Query`. Plain fields so the shell,
-    /// which never names `geode-data`, can carry `geode_data::egress::
-    /// UploadOutcome` across the boundary. Only `MarketDataTile::deliver_
-    /// upload` acts on it (entering `Sent`, or painting the failure);
-    /// every other occupant ignores it.
+    /// Document-upload outcome routed to the submitting tile. Plain fields keep
+    /// the shell independent of `geode-data`; the market-data tile checks the
+    /// upload tag before changing draft state or reporting the result.
     Upload(UploadDelivery),
 }
 
@@ -461,7 +458,9 @@ pub mod placeholder {
                 .justify_center()
                 .gap_1()
                 .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
-                .child("double-click or ctrl+k → Add a tile");
+                .child(crate::shell::kbd::marked(
+                    "double-click or `ctrl+k` → Add a tile",
+                ));
             div()
                 .size_full()
                 .flex()

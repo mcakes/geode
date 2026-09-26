@@ -9,7 +9,7 @@
 
 use crate::egress::UploadParams;
 use crate::service::{
-    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams,
+    DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
 };
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
@@ -45,6 +45,9 @@ pub enum Request {
     Price(PriceParams),
     /// App-authored document for a dataset declared local.
     Publish(LocalPublish),
+    /// Delete one local document's whole history, answered with
+    /// DataEvent::Forgotten or DataEvent::ForgetFailed.
+    Forget(LocalForget),
     /// Document upload to an egress target, answered with DataEvent::Upload
     /// from the service thread (a refusal) or the target's worker.
     Upload(UploadParams),
@@ -161,8 +164,9 @@ impl DataHandle {
     }
 
     /// Queue an upload. False means no request was admitted and no outcome is
-    /// owed; the caller reports the refusal. An admitted upload answers exactly
-    /// one `DataEvent::Upload`.
+    /// owed; the caller reports the refusal. Serviced uploads normally emit one
+    /// `DataEvent::Upload`; startup, worker, and event-delivery failures can
+    /// prevent that outcome. Admission does not acknowledge transport success.
     pub fn upload(&self, params: UploadParams) -> bool {
         self.send(Request::Upload(params))
     }
@@ -188,9 +192,21 @@ impl DataHandle {
 
     /// Queue local publication. False means no admission. After admission the
     /// service validates local-dataset permission and reports rejection through
-    /// Diagnostics; true does not mean the document has been stored.
+    /// Diagnostics and LocalPublishFailed; otherwise the writer answers
+    /// LocalPublished or LocalPublishFailed. True does not mean the document
+    /// has been stored.
     pub fn publish(&self, publish: LocalPublish) -> bool {
         self.send(Request::Publish(publish))
+    }
+
+    /// Queue forgetting one local document. False means no admission. After
+    /// admission the service refuses a dataset that is not local (or a key of
+    /// the wrong arity) with an error Diagnostics and ForgetFailed and runs
+    /// nothing; otherwise the forget runs on the writer after every publish
+    /// queued before it and answers Forgotten or ForgetFailed. True does not
+    /// mean it has run.
+    pub fn forget(&self, forget: LocalForget) -> bool {
+        self.send(Request::Forget(forget))
     }
 
     /// Queue a fetch. False means not queued. SeriesFetched identifies the
@@ -247,8 +263,11 @@ impl DataHandle {
     ///
     /// Joining waits for service open, request dispatch, and downstream worker
     /// shutdown. Fetch calls, discovery, and publication can delay it indefinitely
-    /// if their I/O does not return. This is not a storage flush guarantee; ingest
-    /// shutdown does not drain its queued jobs. Call off the UI thread.
+    /// if their I/O does not return. Ingest shutdown runs the queued local writes
+    /// (the app's own publishes and forgets), in order and each answering as usual,
+    /// then drops every other queued job. It is not a flush guarantee beyond that:
+    /// a caller that stops waiting (gpui's quit hook waits at most 200 ms) can exit
+    /// while a write is still running. Call off the UI thread.
     pub fn shutdown(&self) {
         self.inner.stop();
     }
@@ -384,6 +403,7 @@ fn serve(
             }
             Request::Price(params) => service.price(params),
             Request::Publish(publish) => service.publish(publish),
+            Request::Forget(forget) => service.forget(forget),
             Request::Upload(params) => service.upload(params),
             Request::Fetch(params) => service.fetch(&params),
             Request::Identities { source } => {
@@ -998,6 +1018,203 @@ mod tests {
             !handle.price(crate::pricing::worker::tests::params(2, 10, &["SPX"])),
             "refused after shutdown"
         );
+    }
+
+    /// A real service over the local `sheets` dataset and the non-local CVI
+    /// dataset, for the forget tests.
+    fn local_handle() -> (
+        tempfile::TempDir,
+        DataHandle,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (handle, rx) = local_handle_at(dir.path());
+        (dir, handle, rx)
+    }
+
+    /// [`local_handle`] over an existing directory: a restart.
+    fn local_handle_at(
+        dir: &std::path::Path,
+    ) -> (DataHandle, std::sync::mpsc::Receiver<DataEvent>) {
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        schema.datasets.push(cvi_dataset());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                egress: Vec::new(),
+                pricer: PricerConfig::default(),
+            },
+            sink,
+        );
+        (handle, rx)
+    }
+
+    /// Local writes still queued when the app quits are the user's last
+    /// edits: shutting the service down runs them before it stops, so a
+    /// restart over the same database holds every one of them (and none
+    /// of a forgotten one).
+    #[test]
+    fn local_writes_queued_at_shutdown_are_stored_before_the_service_stops() {
+        let (dir, handle, _rx) = local_handle();
+        let sheets: Vec<String> = (0..30).map(|i| format!("s{i}")).collect();
+        for sheet in &sheets {
+            assert!(handle.publish(LocalPublish {
+                dataset: "sheets".into(),
+                rows: sheet_rows(sheet, &[1, 2]),
+            }));
+        }
+        assert!(handle.forget(crate::service::LocalForget {
+            dataset: "sheets".into(),
+            key: vec!["s0".into()],
+        }));
+        handle.shutdown();
+
+        let (handle, rx) = local_handle_at(dir.path());
+        for (tag, sheet) in sheets.iter().enumerate() {
+            assert!(handle.document(DocumentParams {
+                key: QueryKey(9),
+                tag: tag as u64,
+                submitted: Instant::now(),
+                dataset: "sheets".into(),
+                document_key: vec![sheet.clone()],
+                as_of: AsOf::Live,
+            }));
+            let rows = loop {
+                if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap()
+                    && o.tag == tag as u64
+                {
+                    break o.snapshot.unwrap().rows();
+                }
+            };
+            let expected = if sheet == "s0" { 0 } else { 2 };
+            assert_eq!(rows, expected, "{sheet} after the restart");
+        }
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_forget_through_the_handle_deletes_the_document_and_reports_forgotten() {
+        let (_dir, handle, rx) = local_handle();
+        assert!(handle.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("a", &[7, 8]),
+        }));
+        assert!(handle.forget(crate::service::LocalForget {
+            dataset: "sheets".into(),
+            key: vec!["a".into()],
+        }));
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                DataEvent::Forgotten { dataset, batch } => {
+                    assert_eq!((dataset.as_str(), batch.as_str()), ("sheets", "a"));
+                    break;
+                }
+                DataEvent::ForgetFailed { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        assert!(handle.document(DocumentParams {
+            key: QueryKey(4),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "sheets".into(),
+            document_key: vec!["a".into()],
+            as_of: AsOf::Live,
+        }));
+        loop {
+            if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                assert_eq!(o.snapshot.unwrap().rows(), 0, "no document is left");
+                break;
+            }
+        }
+        handle.shutdown();
+    }
+
+    /// A forget to a dataset that is not local, or with a key of the wrong
+    /// arity, is refused at the service with an error diagnostic and one
+    /// `ForgetFailed` (its asker may be waiting on an outcome), and never
+    /// reaches the writer. The proof it never ran: the documents lane is
+    /// FIFO, so a forget that had been queued would answer a second time
+    /// (`Forgotten` or the writer's own `ForgetFailed`) before the publish
+    /// submitted after it.
+    #[test]
+    fn a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing() {
+        let (_dir, handle, rx) = local_handle();
+        let refusals = [
+            (
+                crate::service::LocalForget {
+                    dataset: "cvi_params".into(),
+                    key: vec!["SPX.Z".into()],
+                },
+                "not a local dataset",
+            ),
+            (
+                crate::service::LocalForget {
+                    dataset: "sheets".into(),
+                    key: Vec::new(),
+                },
+                "key has 0 part(s)",
+            ),
+        ];
+        for (forget, expected) in refusals {
+            let (dataset, batch) = (
+                forget.dataset.clone(),
+                geode_core::document::join_key(&forget.key),
+            );
+            assert!(handle.forget(forget), "admitted; the service refuses it");
+            let mut diagnosed = false;
+            let mut answered = false;
+            while !(diagnosed && answered) {
+                match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                    DataEvent::Diagnostics(d) => {
+                        assert!(
+                            d.iter()
+                                .any(|d| d.severity == Severity::Error
+                                    && d.message.contains(expected)),
+                            "{d:?}"
+                        );
+                        diagnosed = true;
+                    }
+                    DataEvent::ForgetFailed {
+                        dataset: d,
+                        batch: b,
+                        reason,
+                    } if !answered => {
+                        assert_eq!((d.as_str(), b.as_str()), (dataset.as_str(), batch.as_str()));
+                        assert!(reason.contains(expected), "{reason}");
+                        answered = true;
+                    }
+                    DataEvent::Forgotten { .. } | DataEvent::ForgetFailed { .. } => {
+                        panic!("the refused forget reached the writer")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(handle.publish(LocalPublish {
+            dataset: "sheets".into(),
+            rows: sheet_rows("proof", &[1]),
+        }));
+        loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                DataEvent::Published { dataset, .. } if dataset == "sheets" => break,
+                DataEvent::Forgotten { .. } | DataEvent::ForgetFailed { .. } => {
+                    panic!("the refused forget reached the writer")
+                }
+                _ => {}
+            }
+        }
+        handle.shutdown();
     }
 
     #[test]

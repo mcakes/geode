@@ -1,108 +1,46 @@
 #!/bin/zsh
 #
-# Mutation check for the query path (spec §6).
-#
-# Each entry breaks one load-bearing behaviour and runs the suite. A
-# mutation that SURVIVES is a branch no test can see — the suite is green
-# whether that code is right or wrong.
-#
-# This exists because five rounds of code review found silent defects the
-# suite could not see, and the fixture was the reason every time: reviews
-# find what the fixture makes reachable. Reading the tests never revealed
-# that; twenty minutes of mutation did. Run it after touching the
-# compiler, the scope lowering, as-of routing, publish, the grain
-# vocabulary, the document family, the adapter tier, the coalescer, the
-# receiver pipeline, or the panel's matrix model and draft, and treat a
-# SURVIVED line as a missing test rather than a curiosity.
-#
-# The two source-time tie-break entries were described as "caught
-# probabilistically, because the tests loop twenty times". Measured, that
-# reasoning was wrong: the query plan is deterministic within a process,
-# so twenty iterations sample one answer twenty times rather than twenty
-# times independently. The as-of entry survived two runs in three.
-#
-# What fixes it is the fixture, not the loop. Eight tied generations
-# instead of two, with the winner inserted first, makes an unordered pick
-# land on the wrong row every time rather than half the time: 4/4 caught
-# after, 1/3 before. The retention entry measured 3/3 as it stood and was
-# left alone. Neither is probabilistic now — treat a SURVIVED on either as
-# a real finding.
-#
-# This script edits tracked source files in place and restores them
-# afterwards, so it takes three precautions.
-#
-#   * The backup path is unique per run. A single shared /tmp path let two
-#     concurrent runs restore each other's backup over the wrong file, and
-#     one checkout ended up with the contents of scope_sql.rs inside
-#     compile.rs.
-#   * A lock directory serialises runs against the same checkout, because
-#     two runs mutating the same files cannot both be meaningful anyway.
-#   * A trap restores the file in flight however the script exits, so an
-#     interrupt or a stale anchor cannot leave a mutation in the tree. An
-#     earlier abort did exactly that, and the mutation was found committed
-#     to a working tree days later.
+# Mutation checks: replace one source anchor and run the tests expected to
+# detect the broken behavior. A surviving mutation identifies a behavior the
+# selected package's tests did not distinguish from the original code.
 #
 # Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
-#   (from the repo root)
 #
-# --anchors-only runs no cargo at all: it checks every selected entry's
-# anchor against its file and reports the ones that no longer match
-# (ANCHOR) or match more than once (AMBIG), then a one-line summary.
-# Under a second over the whole file (one python pass, each source file
-# read once). Exits non-zero on any finding, so it can gate a merge; a
-# selection that matches nothing says so rather than passing. Run it
-# before every merge and after
-# any edit near an anchored line — a normal run reports these two only
-# for the entries it happens to select, and an ambiguous anchor is the
-# quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
-# anchor is duplicated by a later verbatim reuse (the final review of the
-# health follow-ups found exactly that — a seed loop copied the ingest
-# sink's emit closure, and the entry guarding the sink mutated the seed
-# instead) keeps printing "caught" while defending nothing. A normal run
-# now prints AMBIG for the entries it does select, and still mutates the
-# first match.
+# --anchors-only runs no Cargo commands and changes no source files. It checks
+# every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
+# exits nonzero for either finding or an empty selection. Run the unfiltered
+# anchor check before merging and after editing an anchored source block.
+# Nonempty test filters are checked against test-attributed function names under
+# the selected package's src directory. FILTER means no match; FILTERx means
+# several matches without an exact function name and is also an error. FILTER?
+# means an exact name plus other substring matches and is a warning. This is a
+# source scan, not Cargo test discovery: it does not evaluate cfg attributes,
+# expand macros, or distinguish identical function names in different modules.
+# DUP and SHADOW report shared or overlapping anchors as warnings. They do not
+# by themselves establish that the mutations test the same behavior.
 #
-# It also checks the sixth-argument test filter, which nothing checked before:
-# an entry whose filter matches no test still prints `caught`, because the
-# script clears the filter and falls back to the whole crate suite, so the
-# verdict comes from an unrelated test. `FILTER` is a filter that matches
-# nothing; `FILTERx N` matches several with none of them named exactly, so the
-# intended test never runs; `FILTER? N` names a real test that shares its name
-# with siblings, which is only slower and is reported as a warning. libtest's
-# `--exact` cannot be used instead: it matches the full `module::path::fn`,
-# and every filter here is a bare function name, so it would match nothing.
+# --changed defaults to main. It selects files changed versus REF, changed in
+# the working tree, or untracked. The set is captured before mutation so the
+# script cannot select files because of its own edits. A substring narrows the
+# selection by entry name; both filters can be combined. Use targeted entries
+# or --changed during development; a full mutation run is a broader audit.
 #
-# With a substring, only entries whose name contains it are run — for
-# iterating on the entries you just added. Always finish with an unfiltered
-# run; a filtered one proves nothing about the rest. The unfiltered run is
-# what CI and a merge gate should use; --changed is the everyday form
-# while a change is in flight.
+# Mutation runs edit tracked source in place. Preserve work before running
+# them. A per-checkout lock serializes runs; unique temporary files isolate
+# backups and logs. Exit and signal traps restore the file in flight, though
+# forced termination can bypass cleanup. Concurrent external edits to that
+# file can be overwritten by restoration.
 #
-# --changed (default REF: main) skips any entry whose `file` is not among
-# the files changed versus REF, changed in the working tree, or untracked.
-# The changed set is computed once, before the first mutation — this
-# script edits tracked files in place, so computing it later would see
-# its own mutations. A run prints "skipped N entries whose files are
-# unchanged since REF" at the end. --changed and a substring compose:
-# `--changed "pool:"` runs only entries matching both filters.
+# Each entry names the package containing its detecting test and a test-name
+# filter. The filtered test runs first; if it passes or matches nothing, the
+# full package suite runs. caught* means another test failed, while FILTER
+# means the declared filter matched no tests. Correct either mismatch before
+# relying on the entry as evidence for its named test.
 #
-# Cost note (measured on this checkout, warm cache): a geode-data entry
-# with a covering test filter ("pool: the tag is echoed, not
-# regenerated", filtered to the one test) took ~3s; the same entry with
-# no filter, running the whole geode-data --lib suite, took ~36s — the
-# filter is why every entry now names one. The last 79 that did not were
-# filled in by probing each mutation against the full suite and reading
-# back which test failed; a `--changed` run over service.rs and catalog.rs
-# had been taking over an hour on those alone. An entry added from here on
-# names its test too: without one, "caught" says nothing about WHICH test
-# saw the mutation, which is the "two defences overlapping" lie the header
-# above warns about. `.cargo/config.toml`
-# pinning `profile.dev.split-debuginfo = "unpacked"` was also tried, to
-# skip dsymutil packing on macOS: measured with `time` across two warm
-# runs of a single entry, before (~3.1-3.4s) and after (~3.0-3.1s) adding
-# the file — no measurable difference on this toolchain (cargo's macOS
-# default is already "unpacked"), so the file was dropped rather than
-# kept for a change that does nothing here.
+# A failed Cargo command is reported as caught; this script does not distinguish
+# compilation failure from a failing assertion. Inspect the failure when
+# validating an entry. Repeating a deterministic fixture does not add coverage;
+# the fixture must exercise the behavior the mutation changes.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -166,7 +104,7 @@ trap 'cleanup; exit 143' TERM
 #                                           matches no test", then falls
 #                                           back to the full suite for a
 #                                           plain caught/SURVIVED verdict
-# Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+# Omitting `test_filter` runs the full crate suite.
 anchors_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
@@ -221,8 +159,8 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    # Five fields per entry, not three: the filter is the field that makes a
-    # `caught` verdict mean anything, and nothing checked it before.
+    # Retain the package and test filter alongside the source anchor so the
+    # final source scan can validate both locations and intended tests.
     printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
@@ -4012,6 +3950,53 @@ run_mutation "palette: the usage bonus is added to the match score" \
   '                scored.push((i, score, indices));' \
   geode-shell an_empty_query_lists_used_items_first_by_bonus_then_registry_order
 
+# Every key on screen is a `Kbd` (`shell::kbd`). The palette's binding
+# column painting nothing leaves no `kbd:g` chip for the bound row.
+run_mutation "kbd: the palette's binding column paints its keys" \
+  crates/geode-shell/src/palette.rs \
+  '            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());' \
+  '            let binding = crate::shell::kbd::binding(&[]);' \
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+# The status strip's pending keys and the which-key overlay's
+# continuations are separate routes: each one painting nothing leaves its
+# own chip (`kbd:q`, `kbd:w`) missing while the other still paints.
+run_mutation "kbd: the status strip paints the pending keys" \
+  crates/geode-shell/src/shell/status.rs \
+  '        bar = bar.left(super::kbd::binding(pending));' \
+  '        bar = bar.left(super::kbd::binding(&[]));' \
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+run_mutation "kbd: the which-key overlay paints each continuation key" \
+  crates/geode-shell/src/shell/whichkey.rs \
+  '                .child(super::kbd::chip(keystroke))' \
+  '                .child(div())' \
+  geode-shell pending_keys_which_key_and_palette_bindings_paint_as_kbd
+
+# Hint lines name keys between backticks; dropping the key runs leaves the
+# empty workspace's hint without its `ctrl+k` chip.
+run_mutation "kbd: a marked hint line paints its backticked keys" \
+  crates/geode-shell/src/shell/kbd.rs \
+  '                return Some(self::spec(part));' \
+  '                return None;' \
+  geode-shell an_empty_workspace_hint_paints_its_keys_as_kbd
+
+# A module menu's `:` verb is not a key: parsing `:upload` as one would
+# paint a chip reading `:upload`'s last segment instead of the verb.
+run_mutation "kbd: a command-line verb hint stays text" \
+  crates/geode-shell/src/shell/kbd.rs \
+  "    if spec.is_empty() || spec.starts_with(':') || names_mod {" \
+  '    if spec.is_empty() || names_mod {' \
+  geode-shell a_spec_names_keys_unless_it_is_a_command_verb
+
+# `mod` is the user's alias: parsed against none it adds no modifier, and
+# a `mod+x` hint would paint a bare `X` chip instead of staying text.
+run_mutation "kbd: a spec naming mod stays text" \
+  crates/geode-shell/src/shell/kbd.rs \
+  "    if spec.is_empty() || spec.starts_with(':') || names_mod {" \
+  "    if spec.is_empty() || spec.starts_with(':') {" \
+  geode-shell a_spec_names_keys_unless_it_is_a_command_verb
+
 # Recency must be bucketed by age, not flat: reading every record as
 # just-used leaves frequency alone to rank, and a command used once this
 # minute no longer outranks one used once a month ago.
@@ -4209,9 +4194,7 @@ run_mutation "picker: the footer hint never paints" \
             "picker-hints",
             WIDTH,
             theme.muted_foreground,
-            theme.muted,
             theme.border,
-            theme.radius,
         ))' \
   '' \
   geode-shell arrowing_to_a_value_and_pressing_enter_commits_it_without_tab
@@ -6598,10 +6581,203 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '                if f.set_scope(scope) {' \
-  '                if f.clear_scope() {' \
+  '            Ok(frame.set_scope(scope))' \
+  '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
+
+# ---- Expression term chips and the add-a-filter menu: the scope bar
+# splits the expression into its top-level `and` terms, one chip each,
+# and the `+` opens a menu onto the picker and the dialog's add mode.
+
+# A left-nested `and` must flatten too; pushing the left operand whole
+# leaves `(a and b) and c` as two terms.
+run_mutation "expr-chips: conjuncts flatten the left side of an and" \
+  crates/geode-core/src/scope/expr.rs \
+  '                a.walk_conjuncts(out);' \
+  '                out.push(a);' \
+  geode-core \
+  nested_ands_flatten_on_both_sides_in_order
+
+# The rebuild keeps the terms' order; folding the other way reverses it.
+run_mutation "expr-chips: from_conjuncts folds left in order" \
+  crates/geode-core/src/scope/expr.rs \
+  '            .reduce(|acc, term| Expr::And(Box::new(acc), Box::new(term)))' \
+  '            .reduce(|acc, term| Expr::And(Box::new(term), Box::new(acc)))' \
+  geode-core \
+  conjuncts_split_a_chain_and_rebuild_it
+
+# Dropping term i must drop that term, not whichever is last.
+run_mutation "expr-chips: dropping a term removes that term" \
+  crates/geode-shell/src/frame.rs \
+  '                terms.remove(i);' \
+  '                terms.pop();' \
+  geode-shell \
+  drop_expression_term_removes_only_that_term_and_is_undoable
+
+# A term index the scope no longer has refuses; without the check the
+# edit indexes past the end.
+run_mutation "expr-chips: an out-of-range term refuses" \
+  crates/geode-shell/src/frame.rs \
+  '        let Some(current) = terms.get(i) else {' \
+  '        let Some(current) = terms.get(i).or(terms.first()) else {' \
+  geode-shell \
+  drop_expression_term_removes_only_that_term_and_is_undoable
+
+# The index alone is not the term: a scope replaced underneath with the
+# same term count still has index 1, holding a different term. Without
+# the seeded-term comparison the dialog silently edits (or removes) it.
+run_mutation "expr-chips: a term changed underneath refuses" \
+  crates/geode-shell/src/frame.rs \
+  '        if expected.is_some_and(|e| e != current) {' \
+  '        if false && expected.is_some_and(|e| e != current) {' \
+  geode-shell \
+  a_term_replaced_underneath_refuses_edit_and_removal
+
+# Replacing term i keeps the others.
+run_mutation "expr-chips: a term edit replaces only that term" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(t) => terms[i] = t,' \
+  '            Some(t) => terms = vec![t],' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# Appending joins with `and`; replacing loses the existing expression.
+run_mutation "expr-chips: append joins the existing expression with and" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '            Some(_) => term,' \
+  geode-shell \
+  append_expression_joins_with_and_or_sets_it
+
+# The dialog's add mode appends; committing as whole mode replaces.
+run_mutation "expr-chips: the add dialog appends rather than replaces" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
+  '        Mode::Add => {
+            let mut scope = frame.scope().clone();
+            scope.expression = parsed;
+            Ok(frame.set_scope(scope))
+        }' \
+  geode-shell \
+  the_plus_menus_expression_row_appends_with_and
+
+# A term chip's body opens the dialog on that term, not the whole.
+run_mutation "expr-chips: a term chip opens term mode" \
+  crates/geode-shell/src/shell/render.rs \
+  '                scope_expr_view::open_term(view, i, window, cx);' \
+  '                scope_expr_view::open(view, scope_expr_view::Mode::Whole, window, cx);' \
+  geode-shell \
+  a_terms_body_edits_that_term_alone
+
+# A term chip's `×` drops its own term.
+run_mutation "expr-chips: a term's × drops its own index" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_expression_term(i) {' \
+  '                    if f.drop_expression_term(0) {' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# As on a dimension chip, `occlude()` on the `×` is the one mechanism
+# that keeps its press from also reaching the body and opening the
+# dialog; there is no `stop_propagation` beside it.
+run_mutation "expr-chips: the term × occludes the chip body" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .occlude()' \
+  '                    .debug_selector(move || close_selector.to_string())
+                    .flex_shrink_0()' \
+  geode-shell \
+  a_terms_close_glyph_drops_only_that_term
+
+# The menu's click catcher occludes: without it the closing press also
+# reaches what is beneath (the grouping readout opens its picker).
+run_mutation "add-filter: an outside press closes the menu and goes no further" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())
+                        .occlude()' \
+  '                        .debug_selector(|| "scope-add-menu-click-catcher".to_string())' \
+  geode-shell \
+  a_click_outside_the_menu_closes_it_and_goes_no_further
+
+# `j` moves the highlight.
+run_mutation "add-filter: j moves the highlight" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '            "j" | "down" => step(menu, 1),' \
+  '            "j" | "down" => step(menu, 0),' \
+  geode-shell \
+  the_plus_menu_answers_j_k_enter_and_escape
+
+# `frame::clear_expression` drops the layer.
+run_mutation "add-filter: clear_expression drops the expression" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if f.clear_expression() {' \
+  '                if false {' \
+  geode-shell \
+  the_add_and_clear_expression_actions
+
+# Opening the menu takes the root's focus, so it records whether the
+# scope text field held focus first; without the record nothing returns.
+run_mutation "add-filter: the menu records the text field's focus at open" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        let return_to_filter = self.filter_field_focused(window, cx);' \
+  '        let return_to_filter = false;' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# The menu's own close (escape, outside press) returns focus to the field.
+run_mutation "add-filter: the menu's own close returns focus to the field" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        self.overlay_return_to_filter = menu.return_to_filter;
+        self.return_focus_from_overlay(window, cx);' \
+  '        self.overlay_return_to_filter = false;
+        self.return_focus_from_overlay(window, cx);' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# A row's dialog recorded the root as its origin; the commit hands it the
+# menu's record so closing that dialog returns to the field.
+run_mutation "add-filter: a row's dialog returns focus to the field" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '            if self.modal.is_some() {
+                self.overlay_return_to_filter = true;' \
+  '            if self.modal.is_some() {
+                self.overlay_return_to_filter = false;' \
+  geode-shell \
+  focus_returns_to_the_text_field_after_the_menu
+
+# The catcher swallows every button, so every button must close the menu.
+run_mutation "add-filter: any button outside closes the menu" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {' \
+  '                        .on_mouse_down(MouseButton::Left, cx.listener(|view, _event, window, cx| {' \
+  geode-shell \
+  any_button_outside_the_menu_closes_it
+
+# A chord prefix typed while the menu was open must not outlive it.
+run_mutation "add-filter: closing the menu cancels a pending sequence" \
+  crates/geode-shell/src/shell/addfilter.rs \
+  '        self.matcher.cancel();
+        self.overlay_return_to_filter = menu.return_to_filter;' \
+  '        self.overlay_return_to_filter = menu.return_to_filter;' \
+  geode-shell \
+  closing_the_menu_cancels_a_pending_sequence
+
+# The palette opening over the menu closes it.
+run_mutation "add-filter: the palette toggle closes the menu" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.close_add_filter_menu(cx);' \
+  '        let _ = &self.add_filter_menu;' \
+  geode-shell \
+  the_palette_toggle_closes_the_menu
+
+# The `+` holds its pressed fill (and its open marker) while the menu is up.
+run_mutation "add-filter: the + holds its pressed fill while open" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                    add_open.then_some("scope-pick-chip-open"),' \
+  '                    None,' \
+  geode-shell \
+  the_plus_holds_its_pressed_fill_while_the_menu_is_open
 
 # ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
 #
@@ -7904,8 +8080,10 @@ run_mutation "scope-save: the toolbar only paints the save chip while savable" \
 # drop still happens AND the picker opens.
 run_mutation "toolbar: the × occludes the chip body so a drop does not open the picker" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '                    .occlude()' \
-  '                    .flex_shrink_0()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .occlude()' \
+  '                    .debug_selector(move || format!("scope-chip-close-{close_column}"))
+                    .flex_shrink_0()' \
   geode-shell \
   the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker
 
@@ -8463,14 +8641,14 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # review's re-review — so the bare-`div()` text the old anchor matched
 # no longer exists). The three match arms together are still the
 # unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
-# `action_bar(shell, entity, cx)` each occur nowhere else in this file.
+# `action_bar(shell, entity)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (false, None) => action_bar(shell, entity, cx),' \
+        (false, None) => action_bar(shell, entity),' \
   '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (_, None) => action_bar(shell, entity, cx),' \
+        (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -10477,7 +10655,7 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                     dataset,
                     source: &job.source,
                     rows: &job.rows,
-                    source_time: job.source_time,
+                    source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
                 },
@@ -10492,7 +10670,7 @@ run_mutation "runner/document: the publish runs outside the panic boundary" \
                 dataset,
                 source: &job.source,
                 rows: &job.rows,
-                source_time: job.source_time,
+                source_time,
                 received_at: job.received_at,
                 bytes: job.bytes,
             },
@@ -12610,12 +12788,13 @@ run_mutation "footer: an empty row is dropped from the layout" \
   an_empty_row_is_kept_empty_and_the_order_holds
 
 # And an empty row is as TALL as a full one — the label alone is a
-# `text_xs` line, shorter than a chip, so without the unpainted chip the
+# `text_xs` line, shorter than a hint, so without the unpainted hint the
 # footer still moved by a few pixels between the two kinds of row.
 run_mutation "footer: an empty row is shorter than a full one" \
   crates/geode-shell/src/shell/dialog.rs \
-  '            line = line.child(div().invisible().child(chip("space")));' \
-  '            let _ = &chip;' \
+  '                    .child(chip("space"))
+                    .child(div().child("space")),' \
+  '                    .child(div()),' \
   geode-shell \
   the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit
 
@@ -13196,18 +13375,12 @@ run_mutation "mdcursor: j from the strip returns to the remembered column" \
 run_mutation "mdattr: a refused attribute value stays in insert mode" \
   crates/geode-marketdata/src/tile.rs \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.notice = Some(e.into());
                     return true;
                 }' \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.close_editor(window, cx);
                     self.notice = Some(e.into());
                     return true;
@@ -13725,9 +13898,9 @@ run_mutation "mddate: insert_up steps a date field" \
 # — the trader sees the edit land with the day they typed gone.
 run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
   crates/geode-marketdata/src/tile.rs \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
 
@@ -13736,9 +13909,9 @@ run_mutation "mddate: enter completes an unambiguous pending digit, never commit
 # `commit` on `ex` writes the 18th the cell had, marked edited.
 run_mutation "mddate: a date cell's enter completes a pending digit too" \
   crates/geode-marketdata/src/tile.rs \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata a_date_cell_commits_and_cancels_through_the_fragments_verbs
 
@@ -14411,19 +14584,15 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
 
-# ---- Popup hover (user report 2026-09-17) ------------------------------
+# ---- Popup hover and occlusion ---------------------------------------
 #
-# The popup must OCCLUDE: without `occlude()` gpui keeps hit-testing the
-# grid beneath it, so a hover over a menu row lit up the table row under
-# the pointer. Mutated out, every keyboard test passes — only the test
-# Host's hover-gated move counter (the grid's stand-in) sees the leak.
+# Popup occlusion prevents pointer events from reaching the grid underneath.
+# The host's hover-gated counter detects the leak; keyboard tests do not
+# exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
   crates/geode-marketdata/src/popup.rs \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
-        // keeps hit-testing the grid painted beneath it, so hovering a
-        // menu row lit up the table row under the pointer instead. The
-        // shell'"'"'s own modal (`dialog.rs`) makes the same call.
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()' \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
   geode-marketdata \
@@ -15690,14 +15859,16 @@ run_mutation "grouping: the readout click opens the picker" \
 
 # `open_shell_dialog_with_key`'s `prevent_default`: without it the shell
 # root's bubble-phase focus grab takes the field's focus back on the same
-# mouse-down and typing after any chip click goes nowhere.
+# mouse-down and typing after any chip click goes nowhere. The detector
+# is an expression term chip's click: the `+` menu's rows stop
+# propagation themselves, so the `+` path no longer depends on this.
 run_mutation "grouping: a dialog opened from a mouse-down keeps its field's focus" \
   crates/geode-shell/src/shell/dialog.rs \
   '    window.prevent_default();
     // Dialog state is installed before this call so synchronization can choose its' \
   '    // Dialog state is installed before this call so synchronization can choose its' \
   geode-shell \
-  the_pick_chip_is_always_present_and_opens_the_picker
+  a_terms_body_edits_that_term_alone
 
 # ---- tile picker (2026-09-19): a placeholder's double-click and
 # `tile::add` / `mod+n` over the same choice dialog ----------------------
@@ -16187,6 +16358,543 @@ run_mutation "pricer storage: legs need not follow their package" \
   '            let follows = true;' \
   geode-pricer a_hostile_document_is_refused_with_a_reason
 
+run_mutation "pricer storage: a zero-row answer decodes as a document" \
+  crates/geode-pricer/src/core/storage.rs \
+  '    if snapshot.rows() == 0 {
+        return Ok(None);
+    }
+    let mut out = DocumentRows {' \
+  '    let mut out = DocumentRows {' \
+  geode-pricer a_zero_row_answer_is_no_document
+
+run_mutation "pricer storage: the decoder skips the i64 column-type refusal" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            if snapshot.i64_column(name).is_none() {
+                return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
+  '            if false {
+                return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+run_mutation "pricer storage: the decoder skips the utf8 column-type refusal" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            if snapshot.str_column(name).is_none() && snapshot.dict_column(name).is_none() {' \
+  '            if false {' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+run_mutation "pricer storage: an answer for another sheet installs under this name" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,' \
+  '                Column::Utf8(_) => continue,' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+run_mutation "pricer store: a refused submission answers Refused, not Pending" \
+  crates/geode-pricer/src/store.rs \
+  '        if queued {
+            Loaded::Pending
+        } else {
+            Loaded::Refused
+        }' \
+  '        let _ = queued;
+        Loaded::Pending' \
+  geode-pricer a_closed_channel_answers_refused_not_pending
+
+run_mutation "pricer store: DuckSheetStore.save publishes to the wrong dataset" \
+  crates/geode-pricer/src/store.rs \
+  '        self.data.publish(LocalPublish {
+            dataset: PRICER_SHEETS_DATASET.to_string(),
+            rows,
+        })' \
+  '        self.data.publish(LocalPublish {
+            dataset: String::new(),
+            rows,
+        })' \
+  geode-pricer save_submits_a_publish_request_with_the_dataset_and_rows
+
+run_mutation "pricer store: DuckSheetStore.forget names the wrong dataset" \
+  crates/geode-pricer/src/store.rs \
+  '        self.data.forget(LocalForget {
+            dataset: PRICER_SHEETS_DATASET.to_string(),
+            key: vec![name.to_string()],
+        })' \
+  '        self.data.forget(LocalForget {
+            dataset: String::new(),
+            key: vec![name.to_string()],
+        })' \
+  geode-pricer forget_submits_a_forget_request_naming_the_dataset_and_key
+
+run_mutation "pricer store: note_forgotten leaves a forgotten name known" \
+  crates/geode-pricer/src/store.rs \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
+' \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+' \
+  geode-pricer names_and_contains_are_known_union_saved_minus_forgotten
+
+run_mutation "pricer store: MemorySheetStore.forget keeps the sheet" \
+  crates/geode-pricer/src/store.rs \
+  '        self.sheets.borrow_mut().remove(name);
+        if !self.confirming.get() {
+            self.known.borrow_mut().remove(name);
+        }' \
+  '        if false {
+            self.known.borrow_mut().remove(name);
+        }' \
+  geode-pricer forget_removes_the_entry_and_drops_it_from_names
+
+run_mutation "pricer load: an answer under an older load tag installs" \
+  crates/geode-pricer/src/tile.rs \
+  '        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.load_tag || !self.loading {' \
+  '        if outcome.key != QueryKey(self.id.0) || !self.loading {' \
+  geode-pricer a_query_answer_under_the_latest_load_tag_installs_the_sheet_and_an_older_one_is_ignored
+
+run_mutation "pricer load: a show after a hide does not resubmit a cancelled load" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.loading && self.load_cancelled {
+                self.start_load(cx);
+            }' \
+  '            let _ = self.load_cancelled;' \
+  geode-pricer a_load_cancelled_by_a_hide_is_resubmitted_on_show_under_a_fresh_tag
+
+run_mutation "pricer load: every show resubmits a pending load" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.loading && self.load_cancelled {
+                self.start_load(cx);
+            }' \
+  '            if self.loading {
+                self.start_load(cx);
+            }' \
+  geode-pricer a_query_answer_under_the_latest_load_tag_installs_the_sheet_and_an_older_one_is_ignored
+
+run_mutation "pricer save: a queued save clears the notice before its outcome" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.dirty = false;
+            self.save_failed = false;
+            self.save_refused = false;' \
+  '            self.dirty = false;
+            self.save_failed = false;
+            self.save_refused = false;
+            self.save_notice = None;' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: a failed outcome is read as a landed one" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  '                let _ = reason;
+                self.save_failed = false;' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: an Ok outcome leaves a failure standing" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(()) => {
+                self.save_failed = false;
+                if !self.save_refused {' \
+  '            Ok(()) => {
+                if !self.save_refused {' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: a failed save is not flushed on close" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.dirty || self.save_failed {' \
+  '        if self.dirty {' \
+  geode-pricer an_ok_for_an_earlier_save_keeps_a_newer_edit_dirty_and_a_failure_is_flushed_on_close
+
+run_mutation "pricer save: an unconfirmed save makes its name known" \
+  crates/geode-pricer/src/content.rs \
+  '        if answer.is_ok() {
+            self.shared.store.note_saved(sheet);' \
+  '        if true {
+            self.shared.store.note_saved(sheet);' \
+  geode-pricer confirmed_outcomes_update_the_stores_known_names
+
+# Line pricer Part 4 Task 5: known names, `:e`, `:new`, `:name`, `:rm`
+# and its confirm (planning decisions 12-15).
+run_mutation "pricer save: an Ok for an earlier save clears a later refusal's notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !self.save_refused {
+                    self.save_notice = None;
+                }' \
+  '                if true {
+                    self.save_notice = None;
+                }' \
+  geode-pricer an_ok_for_an_earlier_save_keeps_a_later_refusals_notice
+
+run_mutation "pricer save: a save answer reaches a sheet whose load failed" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn save_answered(&mut self, answer: Result<(), String>, cx: &mut Context<Self>) {
+        if self.save_blocked {
+            return;
+        }' \
+  '    pub(crate) fn save_answered(&mut self, answer: Result<(), String>, cx: &mut Context<Self>) {' \
+  geode-pricer a_save_answer_never_clears_a_failed_loads_block
+
+run_mutation "pricer names: untitled-N ignores a queued unconfirmed save" \
+  crates/geode-pricer/src/tile.rs \
+  '        .find(|name| !shared.open.borrow().contains(name) && !shared.taken(name))' \
+  '        .find(|name| !shared.open.borrow().contains(name) && !shared.store.contains(name))' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: a queued save is not recorded as pending" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared.save_queued(&self.sheet.name);' \
+  '' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: an answered save stays pending forever" \
+  crates/geode-pricer/src/content.rs \
+  '                pending.remove(name);' \
+  '' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: the catalog's sheets never reach the store" \
+  crates/geode-pricer/src/content.rs \
+  '                if !names.is_empty() {
+                    shared.store.set_known(names);
+                }' \
+  '                let _ = names;' \
+  geode-pricer the_catalog_seeds_the_known_names_and_a_later_one_adds
+
+run_mutation "pricer names: another dataset's partitions read as sheets" \
+  crates/geode-pricer/src/content.rs \
+  '                .find(|ds| ds.name == PRICER_SHEETS_DATASET)' \
+  '                .last()' \
+  geode-pricer the_catalog_seeds_the_known_names_and_a_later_one_adds
+
+run_mutation "pricer names: a factory with no catalog never asks for one" \
+  crates/geode-pricer/src/content.rs \
+  '                d.request_catalog();
+                cx.notify();' \
+  '                let _ = d;
+                cx.notify();' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer names: the catalog request wakes nothing" \
+  crates/geode-pricer/src/content.rs \
+  '                d.request_catalog();
+                cx.notify();' \
+  '                d.request_catalog();
+                let _ = cx;' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer names: every tile asks for a catalog" \
+  crates/geode-pricer/src/content.rs \
+  '        if self.catalog_watched.replace(true) {
+            return;
+        }' \
+  '' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer sheets: :e takes a sheet another tile holds" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
+        }
+        self.switch_sheet(name, true, cx)' \
+  '        self.switch_sheet(name, true, cx)' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: :e of the current name reloads it" \
+  crates/geode-pricer/src/tile.rs \
+  '        if name == self.sheet.name {
+            if self.save_blocked {
+                return self.switch_sheet(name, true, cx);
+            }
+            return Ok(());
+        }
+        self.shared.refuse_retiring(&name)?;
+        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+  '        self.shared.refuse_retiring(&name)?;
+        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: a switch drops the unsaved sheet it leaves" \
+  crates/geode-pricer/src/tile.rs \
+  '        if (self.dirty || self.save_failed) && !self.save_now() {' \
+  '        if false {' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: a switch past a refused flush loses the edits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if (self.dirty || self.save_failed) && !self.save_now() {' \
+  '        if (self.dirty || self.save_failed) && !self.save_now() && false {' \
+  geode-pricer colon_e_stays_when_the_sheet_it_leaves_cannot_be_saved
+
+run_mutation "pricer sheets: a switch keeps the old sheet's failed-load block" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.save_notice = None;
+        self.save_blocked = false;
+        // A rename not yet confirmed' \
+  '        self.save_notice = None;
+        // A rename not yet confirmed' \
+  geode-pricer a_switch_starts_the_save_state_over
+
+run_mutation "pricer sheets: a switch keeps the old sheet's undo" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.sheet = Sheet::new(&name);
+        self.undo.clear();' \
+  '        self.sheet = Sheet::new(&name);' \
+  geode-pricer colon_new_opens_the_next_untitled_sheet_empty
+
+run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.data.cancel(QueryKey(self.id.0));
+        self.tag += 1;
+        self.in_flight.clear();
+        self.sheet = Sheet::new(&name);' \
+  '        self.data.cancel(QueryKey(self.id.0));
+        self.in_flight.clear();
+        self.sheet = Sheet::new(&name);' \
+  geode-pricer an_old_sheets_pricing_answer_never_lands_on_the_new_one
+
+run_mutation "pricer load: a load starting leaves a refusal streak standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.loading = true;
+        self.end_refusals();' \
+  '        self.loading = true;' \
+  geode-pricer a_load_starting_clears_a_refusal_streak
+
+run_mutation "pricer sheets: :name forgets the old name before the save lands" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.rename_from = Some(old);' \
+  '            let _ = self.shared.store.forget(&old);' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: a confirmed save after :name never retires the old name" \
+  crates/geode-pricer/src/tile.rs \
+  '                if let Some(old) = self.rename_from.take() {
+                    if self.shared.open.borrow().contains(&old) {' \
+  '                if let Some(old) = self.rename_from.take().filter(|_| false) {
+                    if self.shared.open.borrow().contains(&old) {' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: a failed save after :name forgets the old document" \
+  crates/geode-pricer/src/tile.rs \
+  '            Err(reason) => {
+                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  '            Err(reason) => {
+                if let Some(old) = self.rename_from.take() {
+                    let _ = self.shared.store.forget(&old);
+                }
+                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  geode-pricer a_failed_save_after_colon_name_keeps_the_new_name_and_the_old_document
+
+run_mutation "pricer sheets: :name renames a sheet whose load failed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_blocked {
+            // The sheet shown is the fallback' \
+  '        if false {
+            // The sheet shown is the fallback' \
+  geode-pricer colon_name_refuses_a_sheet_that_did_not_load
+
+run_mutation "pricer sheets: :name takes a known name" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
+  '        if self.shared.open.borrow().contains(&name) {' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: :name takes a name with a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.store.contains(&name) {' \
+  geode-pricer colon_name_refuses_a_name_with_a_queued_save
+
+run_mutation "pricer rm: the tile's own sheet can be removed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if name == self.sheet.name {
+            return Err(format!(
+                "sheet '"'"'{name}'"'"' is open here: close it or `:e` another sheet first"
+            ));
+        }' \
+  '' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+run_mutation "pricer rm: an unknown name arms the confirm" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.shared.taken(&name) {
+            return Err(format!("no sheet '"'"'{name}'"'"'"));
+        }' \
+  '' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+run_mutation "pricer rm: any key confirms" \
+  crates/geode-pricer/src/tile.rs \
+  '        if ks.key == "y" && !ks.modifiers.modified() {
+            self.submit_remove(window, cx);' \
+  '        if true {
+            self.submit_remove(window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: a modified y confirms" \
+  crates/geode-pricer/src/tile.rs \
+  '        if ks.key == "y" && !ks.modifiers.modified() {
+            self.submit_remove(window, cx);' \
+  '        if ks.key == "y" {
+            self.submit_remove(window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: y forgets nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if self.shared.store.forget(&pending.sheet) {
+            // Reserved until the forget is answered.' \
+  '        } else if false {
+            // Reserved until the forget is answered.' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "pricer rm: the confirm is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.entry.is_some() || self.editor.is_some() {' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "pricer rm: focus leaving leaves the question standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if this.confirm.is_some() {
+                this.cancel_remove(window, cx);
+            }
+        });' \
+  '        let blur = cx.on_blur(&focus, window, |_, _, _| {});' \
+  geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
+
+run_mutation "pricer rm: a pointer press leaves the question standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() {
+            self.cancel_remove(window, cx);
+        }
+    }
+
+    /// Drop the armed confirm' \
+  '        let _ = (window, cx);
+    }
+
+    /// Drop the armed confirm' \
+  geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
+
+run_mutation "pricer rm: the confirm drops still focused" \
+  crates/geode-pricer/src/tile.rs \
+  '        let pending = self.confirm.take()?;
+        if pending.focus.is_focused(window) {
+            window.blur(cx);
+        }' \
+  '        let pending = self.confirm.take()?;
+        let _ = (window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: a failed forget is painted nowhere" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Err(reason) = answer {
+            self.notice = Some(format!("sheet '"'"'{sheet}'"'"' not removed: {reason}").into());' \
+  '        if let Err(reason) = answer {
+            let _ = reason;' \
+  geode-pricer a_failed_forget_is_painted_on_the_tile_that_asked
+
+# Line pricer Part 4 Task 5 fix round 1: retiring names, loads deferred
+# behind a queued save, save outcomes routed to their origin tile.
+run_mutation "pricer retiring: :e opens a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            return Ok(());
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            return Ok(());
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: :name takes a name being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            return Err("the last rename is not saved yet".into());
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            return Err("the last rename is not saved yet".into());
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: :rm arms over a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            ));
+        }
+        self.shared.refuse_retiring(&name)?;' \
+  '            ));
+        }' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: a rename does not reserve the old name" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared.retiring.borrow_mut().insert(old.clone());
+            self.rename_from = Some(old);' \
+  '            self.rename_from = Some(old);' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: a confirmed rename forgets a sheet a tile has open" \
+  crates/geode-pricer/src/tile.rs \
+  '                    if self.shared.open.borrow().contains(&old) {
+                        // A tile holds the old name' \
+  '                    if false {
+                        // A tile holds the old name' \
+  geode-pricer a_rename_never_forgets_a_sheet_a_tile_has_open
+
+run_mutation "pricer retiring: an answered forget keeps its name reserved" \
+  crates/geode-pricer/src/content.rs \
+  '        self.shared.retiring.borrow_mut().remove(sheet);' \
+  '' \
+  geode-pricer a_retiring_name_is_reserved_until_its_forget_is_answered
+
+run_mutation "pricer retiring: an rm's forget does not reserve its name" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared
+                .retiring
+                .borrow_mut()
+                .insert(pending.sheet.clone());
+            self.forgetting.push(pending.sheet);' \
+  '            self.forgetting.push(pending.sheet);' \
+  geode-pricer a_name_removed_by_rm_is_reserved_until_answered
+
+run_mutation "pricer deferred load: :e reads past a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.save_pending(&self.sheet.name) {' \
+  '        if false {' \
+  geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer deferred load: a restore reads past a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '        let load_waiting = shared.save_pending(&name);' \
+  '        let load_waiting = false;' \
+  geode-pricer a_restore_of_a_name_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer deferred load: a save answer never starts the waiting load" \
+  crates/geode-pricer/src/content.rs \
+  '                if t.load_waiting && t.sheet.name == sheet {
+                    t.start_load(cx);
+                }' \
+  '                let _ = (&t.load_waiting, sheet, &cx);' \
+  geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
+
+run_mutation "pricer save origin: an outcome goes to the tile holding the name" \
+  crates/geode-pricer/src/content.rs \
+  '        if let Some(tile) = origin.and_then(|id| tiles.iter().find(|t| t.read(cx).id == id)) {' \
+  '        if let Some(tile) = origin.and(tiles.iter().find(|t| t.read(cx).sheet.name == sheet)) {' \
+  geode-pricer a_save_outcome_reaches_the_tile_that_queued_it
+
+run_mutation "pricer save origin: a moved-on tile is not told its save failed" \
+  crates/geode-pricer/src/tile.rs \
+  '        let Err(reason) = answer else {
+            return;
+        };' \
+  '        let Err(reason) = answer else {
+            return;
+        };
+        if true {
+            let _ = (reason, sheet, cx);
+            return;
+        }' \
+  geode-pricer a_save_outcome_reaches_the_tile_that_queued_it
+
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
   '                qty: qty
@@ -16252,20 +16960,20 @@ run_mutation "pricer commands: group accepts a zero count" \
   '        ["group", n] => n
             .parse::<usize>()
             .ok()' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  geode-pricer bad_arguments_answer_the_usage
 
 run_mutation "pricer commands: refresh accepts a zero duration" \
   crates/geode-pricer/src/core/commands.rs \
   '        ["refresh", d] => parse_duration(d)
             .filter(|d| !d.is_zero())' \
   '        ["refresh", d] => parse_duration(d)' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  geode-pricer bad_arguments_answer_the_usage
 
-run_mutation "pricer commands: a Part 4 verb answers 'unknown command' instead of naming itself" \
+run_mutation "pricer commands: a sheet name may hold the key separator" \
   crates/geode-pricer/src/core/commands.rs \
-  '        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
-  '        [verb, ..] if false && NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  '    if name.chars().any(char::is_control) {' \
+  '    if false {' \
+  geode-pricer bad_arguments_answer_the_usage
 
 run_mutation "pricer commands: completions offer the word under the cursor as a choice" \
   crates/geode-pricer/src/core/commands.rs \
@@ -16926,7 +17634,7 @@ run_mutation "timeseries: an ambiguous identity is refused" \
   geode-timeseries \
   ambiguity_and_absence_are_named_errors
 
-# `f`/`:freq`/`:range` refuse in place against the same 500,000-point cap
+# The frequency menu, `:freq` and `:range` refuse in place against the same 500,000-point cap
 # the service enforces (controller decision 4), so a step that would
 # overrun it never leaves the tile. Unchecked, the tile sends a request
 # the service refuses and the trader gets an error notice instead of an
@@ -17098,31 +17806,123 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
   geode-timeseries \
   x_opens_the_expression_field_and_enter_adds_or_reports_inline
 
-# In the range popup a bare `1`..`7` is a PRESET until the trader starts
-# editing a date (§9.8, Task 10 ruling). Without the preset arm the digit
-# types itself into the day segment and the popup stays open — the
-# keyboard path to `3m` is gone.
-run_mutation "timeseries: a digit in the range popup commits a preset" \
+# The range menu (`r`): the preset in force is ticked and the highlight
+# starts on it; an absolute range ticks `Custom dates…` instead.
+run_mutation "timeseries range menu: the preset in force is ticked" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            checked: Some(*current == Range::Relative(p)),' \
+  '            checked: Some(false),' \
+  geode-timeseries \
+  the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+run_mutation "timeseries range menu: an absolute range ticks custom dates" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '        checked: Some(matches!(current, Range::Absolute { .. })),' \
+  '        checked: Some(false),' \
+  geode-timeseries \
+  an_absolute_range_ticks_custom_dates_and_starts_there
+
+run_mutation "timeseries menus: the highlight starts on the value in force" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '                    checked: Some(true),
+                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  '                    checked: Some(false),
+                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  geode-timeseries \
+  the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+# A preset row writes THAT preset, through the model's own setter.
+run_mutation "timeseries range menu: a preset pick writes the preset" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    && Preset::digit(d).is_some() =>' \
-  '                    && false =>' \
+  '                let written = self.model.set_range(Range::Relative(preset), now, &as_of);' \
+  '                let written = self.model.set_range(self.model.range().clone(), now, &as_of);' \
   geode-timeseries \
-  r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
 
-# …and the other half of the same rule: only a key that MOVED something
-# counts as an edit. `right` on the last segment, or a `tab`, changes
-# nothing on screen, and a popup that called either an edit would look
-# exactly as it opened while the preset digits had silently gone dead.
-run_mutation "timeseries: a no-op key is not an edit" \
-  crates/geode-timeseries/src/popup.rs \
-  '        self.edited |= moved;' \
-  '        self.edited = true;' \
+# `r` toggles its own menu: a second `r` closes it rather than reopening.
+run_mutation "timeseries menus: an opener toggles its own menu shut" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if matches!(&self.popup, Some(Popup::Menu(m)) if m.kind == kind) {' \
+  '        if false {' \
   geode-timeseries \
-  a_key_that_moves_nothing_leaves_the_preset_digits_live
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
 
-# An `Absolute` range seeds the popup from the dates it STORES; only a
-# relative one resolves against now/as-of (Task 10 ruling). Resolved, a
-# trader who opens `r` under a historical as-of and presses `enter` has
+# The openers survive an open menu so their arm can toggle it; gated off,
+# the dispatch gate closes the menu first and the arm reopens it.
+run_mutation "timeseries menus: the openers survive an open menu" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                    | "range"
+                    | "freq"
+                    | "range_custom"
+            ),' \
+  '                    | "range_custom"
+            ),' \
+  geode-timeseries \
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
+
+# A `:` line under an open range or frequency menu rebuilds THAT menu's
+# rows, so the tick follows the value.
+run_mutation "timeseries menus: a chrome rebuild refreshes the open menu's own rows" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        let rows = self.menu_rows(m.kind, cx);' \
+  '        let rows = self.menu_rows(MenuKind::Actions, cx);' \
+  geode-timeseries \
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
+
+# `c` in the range menu opens the dates editor: the binding (scoped to the
+# range menu, after the normal layer whose `c` cycles a colour) and the arm.
+run_mutation "timeseries range menu: c is bound to custom dates" \
+  crates/geode-timeseries/src/content.rs \
+  '"c" = "timeseries::range_custom"' \
+  '"shift+c" = "timeseries::range_custom"' \
+  geode-timeseries \
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
+
+run_mutation "timeseries range menu: custom dates opens the editor" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            "range_custom" => {
+                self.open_range_editor(window, cx);' \
+  '            "range_custom" => {
+                self.toggle_menu_kind(MenuKind::Range, window, cx);' \
+  geode-timeseries \
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
+
+# The editor opens on the day of `from`, where the first digit lands.
+run_mutation "timeseries dates editor: it opens on the day segment" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                Precision::Date,
+                Segment::Day,' \
+  '                Precision::Date,
+                Segment::Year,' \
+  geode-timeseries \
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
+
+# `escape` in the editor goes back to the range menu (both doors), with
+# the highlight on `Custom dates…`.
+run_mutation "timeseries dates editor: the listener's escape returns to the menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            FieldKey::Cancel => self.back_to_range_menu(window, cx),' \
+  '            FieldKey::Cancel => self.close_popup_with_window(window, cx),' \
+  geode-timeseries \
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
+
+run_mutation "timeseries dates editor: the insert layer's cancel returns to the menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            "cancel" if matches!(self.popup, Some(Popup::Range(_))) => {' \
+  '            "cancel" if false => {' \
+  geode-timeseries \
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
+
+run_mutation "timeseries dates editor: escape lands the highlight on custom dates" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            m.highlighted = custom;' \
+  '            let _ = custom;' \
+  geode-timeseries \
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
+
+# An `Absolute` range seeds the dates editor from the dates it STORES; only a
+# relative one resolves against now/as-of (a ruling). Resolved, a
+# trader who opens the editor under a historical as-of and presses `enter` has
 # their stored `to` silently rewritten to the as-of day.
 run_mutation "timeseries: an absolute range seeds from its stored dates" \
   crates/geode-timeseries/src/tile/popups.rs \
@@ -17392,9 +18192,9 @@ run_mutation 'consistency: full request queue retains a view reload' \
 
 run_mutation 'consistency: terminal outcomes survive a UI burst' \
   crates/geode-app/src/events.rs \
-  '        let key = key(&event);' \
+  '        let key = key(&event, pending.local_seq);' \
   '        if pending.events.len() == 1 { return Err(Closed); }
-        let key = key(&event);' \
+        let key = key(&event, pending.local_seq);' \
   geode-app a_burst_retains_terminal_results_and_all_publication_books
 
 run_mutation 'consistency: older terminal result cannot replace newer' \
@@ -17923,10 +18723,8 @@ run_mutation "panel: a key switch drops the upload's sent rows" \
   crates/geode-marketdata/src/tile.rs \
   '        self.sent = None;
         self.submitted = None;
-        self.upload_error = None;
-        // Park the outgoing draft' \
-  '        self.upload_error = None;
-        // Park the outgoing draft' \
+        self.upload_error = None;' \
+  '        self.upload_error = None;' \
   geode-marketdata \
   an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key
 
@@ -18048,10 +18846,9 @@ run_mutation "egress: an unknown target answers Err" \
 run_mutation "egress: uploads to one target run in submission order" \
   crates/geode-data/src/egress.rs \
   '    while let Ok(job) = jobs.recv() {
-        // A transport is foreign code, so a panic here is a failure of this
-        // upload rather than of the worker. Uncontained it would unwind past
-        // `answer`, breaking the one-answer-per-upload contract, drop the
-        // receiver, and strand every queued job unanswered.
+        // Convert transport panics into this upload'"'"'s error and keep servicing the
+        // queue. Mark the catch boundary so the app logs a contained panic without
+        // creating a crash report.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
         })) {
@@ -18190,10 +18987,8 @@ run_mutation "pricer tile: a refused save is silent" \
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            if this.dirty {
-                this.save_now();
-            }' \
-  '            let _ = this.dirty;' \
+  '            this.flush_save();' \
+  '' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
 # A pending load (Part 4's production restore) holds the session record's
@@ -18309,7 +19104,7 @@ run_mutation "pricer tile: the free typeahead commits an unmoved subsequence gue
 run_mutation "pricer tile: a failed load's fallback is saved over the document" \
   crates/geode-pricer/src/tile.rs \
   '        if self.save_blocked {
-            return;
+            return true;
         }
         let Some(rows) = to_rows(&self.sheet) else {' \
   '        let Some(rows) = to_rows(&self.sheet) else {' \
@@ -18319,9 +19114,9 @@ run_mutation "pricer tile: a failed load's fallback is saved over the document" 
 # flushes only a pending task loses the unsaved sheet.
 run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
   crates/geode-pricer/src/tile.rs \
-  '            this.save_task = None;
-            if this.dirty {' \
-  '            if this.save_task.take().is_some() {' \
+  '        self.save_task = None;
+        if self.dirty || self.save_failed {' \
+  '        if self.save_task.take().is_some() {' \
   geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
 
 # ---- The cursor rests only on rows with a verb (ruling 2026-09-23) ----
@@ -18404,8 +19199,8 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
 # the tile, 2026-09-24).
 run_mutation "pricer tile: the entry field is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.editor.is_some() {' \
   geode-app \
   typing_into_the_pricer_entry_field_fires_no_shell_binding
 
@@ -18628,26 +19423,95 @@ run_mutation "timeseries mouse: the actions button toggles in capture" \
             .on_any_mouse_down({' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
-# The readout toggles for the same reason, in the same phase: in the
-# bubble phase the open range popup's `on_mouse_down_out` closes it
-# first and the click meant to close reopens on a fresh seed.
-run_mutation "timeseries mouse: the readout toggles in capture" \
+# The range trigger toggles in the CAPTURE phase, the `⋯` button's
+# reason: in the bubble phase the open menu's `on_mouse_down_out` closes
+# it first and the click meant to close reopens it.
+run_mutation "timeseries triggers: a trigger toggles in capture" \
   crates/geode-timeseries/src/header.rs \
-  '            // tile press in the shell still focuses the tile.
-            .capture_any_mouse_down({' \
-  '            // tile press in the shell still focuses the tile.
-            .on_any_mouse_down({' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  '        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
+  '        .on_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
+  geode-timeseries a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes
 
-# The readout's press prevents default: the shell root is track_focus'ed,
-# and without it gpui focuses the root in the press's bubble phase, so
-# the range popup it just opened loses left/right to the root.
-run_mutation "timeseries mouse: the readout press keeps the popup's focus" \
-  crates/geode-timeseries/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
-                    window.prevent_default();' \
-  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+# The range trigger owns the dates editor too: its click closes the
+# editor rather than dispatching `r` (which would land on the menu).
+run_mutation "timeseries triggers: the range trigger closes the editor it owns" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            Some(Popup::Range(_)) => true,' \
+  '            Some(Popup::Range(_)) => false,' \
+  geode-timeseries a_custom_dates_click_opens_the_editor_for_the_digits_after_it
+
+# The frequency trigger opens the frequency menu, not another.
+run_mutation "timeseries triggers: the frequency trigger opens the frequency menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        self.dispatch(&ActionId("timeseries::freq".into()), None, window, cx);' \
+  '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+# An outside press closes only the popup its listener was painted for:
+# a trigger's (or the ⋯ button's) capture-phase press runs first and may
+# have swapped another popup in, which the old popup's outside press must
+# not close. The guard compares the painted kind, a menu's included...
+run_mutation "timeseries menus: an outside press closes only its own menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.as_ref().is_some_and(|p| matches!((p.kind(), painted), (PopupKind::Menu(_), PopupKind::Menu(_))) || p.kind() == painted) {' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+run_mutation "timeseries popups: an outside press closes only the popup it painted" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.is_some() {' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# ...and every painted popup goes through it: the series list and the add
+# picker closed unconditionally, so a trigger pressed over either opened
+# its menu and the old listener closed it again.
+run_mutation "timeseries popups: the series list's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Series, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+run_mutation "timeseries popups: the picker's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Picker, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# A frame change refreshes an open menu's rows even where the chrome
+# rebuild does not run (a tile with no series): the frequency menu's cap
+# reasons are resolved under the frame's as-of.
+run_mutation "timeseries frequency menu: an as-of change refreshes the cap reasons" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.refresh_menu_rows(cx) {' \
+  '            if false {' \
+  geode-timeseries an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons
+
+# A menu's trailing lane paints keys as Kbd and non-key text (a preset's or
+# a frequency's short label) as text: a label routed to the key lane would
+# paint as nothing, or as a key it is not.
+run_mutation "timeseries menus: a short label is text, not a key" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '                (Ok(()), Some(label)) => Trailing::Text(label.clone()),' \
+  '                (Ok(()), Some(_)) => Trailing::Keys(hint),' \
+  geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+# A capped row's trailing column is short; the full refusal is the notice.
+run_mutation "timeseries frequency menu: a capped row shows a short reason" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            short_reason: Some(SharedString::new_static(OVER_CAP)),' \
+  '            short_reason: None,' \
+  geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
+
+# The range trigger paints its open state while the dates editor, not
+# only the range menu, is up.
+run_mutation "timeseries triggers: the editor keeps the range trigger open" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            Some(Popup::Range(_)) => TriggersOpen {
+                range: true,' \
+  '            Some(Popup::Range(_)) => TriggersOpen {
+                range: false,' \
+  geode-timeseries a_trigger_is_open_while_its_popup_is_up
 
 # A right press focuses the tile it lands on (review M1: a context menu
 # opened in an unfocused tile answers to the wrong tile's keys).
@@ -18664,8 +19528,11 @@ run_mutation "shell: a right press focuses the tile" \
 # A verb outside the menu's own closes it first.
 run_mutation "timeseries mouse: a foreign verb closes the menu" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"' \
-  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick" | "zoom_in"' \
+  '                    | "menu_pick"
+                    | "range"' \
+  '                    | "menu_pick"
+                    | "zoom_in"
+                    | "range"' \
   geode-timeseries the_menu_keys_step_over_action_rows_pick_and_close
 
 # A swatch click flips visibility through `v`'s own path.
@@ -18673,7 +19540,7 @@ run_mutation "timeseries mouse: the swatch toggles visibility" \
   crates/geode-timeseries/src/tile/popups.rs \
   '        let flipped = self.model.toggle_visible();' \
   '        let flipped = Changed::NONE;' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  geode-timeseries a_swatch_click_toggles_visibility
 
 # A right-click selects the slot under the pointer before opening.
 run_mutation "timeseries mouse: a right-click selects its chip" \
@@ -18686,23 +19553,64 @@ run_mutation "timeseries mouse: a right-click selects its chip" \
         if self.popup.is_some() {' \
   geode-timeseries a_right_click_on_a_chip_selects_it_and_opens_the_menu_on_it
 
-# The readout opens the RANGE popup, not another.
-run_mutation "timeseries mouse: the readout opens the range popup" \
+# The range trigger's click takes `r`'s own path.
+run_mutation "timeseries triggers: the range trigger opens the range menu" \
   crates/geode-timeseries/src/tile/popups.rs \
   '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
   '        self.dispatch(&ActionId("timeseries::list".into()), None, window, cx);' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  geode-timeseries a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes
 
-# A frequency chip's write reaches the chrome (the header readout).
-run_mutation "timeseries mouse: a frequency chip rebuilds the chrome" \
+# The frequency menu: a frequency the cap refuses is a disabled row
+# carrying the model's own reason (pure rows, and the tile's question).
+run_mutation "timeseries frequency menu: a capped row is disabled" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            enabled: refusal(f).map_err(SharedString::from),' \
+  '            enabled: Ok(()),' \
+  geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
+
+run_mutation "timeseries frequency menu: the tile asks the cap per row" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    r.frequency = f;
-                }
-                self.apply_changed(changed, cx);' \
-  '                    r.frequency = f;
-                }
-                self.apply_changed(Changed::NONE, cx);' \
-  geode-timeseries a_frequency_chip_writes_at_once_keeps_the_popup_open_and_refuses_inline
+  '                    self.model.frequency_refusal(f, now, &as_of)' \
+  '                    { let _ = (f, now, &as_of); Ok(()) }' \
+  geode-timeseries f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason
+
+run_mutation "timeseries frequency menu: the frequency in force is ticked" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                menu::frequency_rows(self.model.frequency(), |f| {' \
+  '                menu::frequency_rows(Frequency::D1, |f| {' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+run_mutation "timeseries frequency menu: a pick writes that frequency" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                let written = self.model.set_frequency(f, now, &as_of);' \
+  '                let written = self.model.set_frequency(self.model.frequency(), now, &as_of);' \
+  geode-timeseries f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason
+
+# A disabled row's pick is the notice and nothing else: mutated, the
+# action list's greyed `Remove` closes the menu and dispatches.
+run_mutation "timeseries menus: a disabled row explains and stays" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            self.notice = Some(reason.clone());
+            cx.notify();
+            return;' \
+  '            let _ = reason;' \
+  geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The action list's `Frequency…` row opens the frequency menu.
+run_mutation "timeseries action list: Frequency opens the frequency menu" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '    out.push(action("timeseries::freq", "Frequency…", Ok(())));' \
+  '    out.push(action("timeseries::range", "Frequency…", Ok(())));' \
+  geode-timeseries the_action_list_frequency_row_opens_the_frequency_menu
+
+# `F` no longer steps the frequency: a binding that came back would
+# reach the menu (or a step) where the trader expects nothing.
+run_mutation "timeseries frequency menu: shift+f stays unbound" \
+  crates/geode-timeseries/src/content.rs \
+  '"f" = "timeseries::freq"' \
+  '"f" = "timeseries::freq"
+"shift+f" = "timeseries::freq"' \
+  geode-timeseries shift_f_does_nothing_and_f_no_longer_steps
 
 # The empty state's first button adds, the second composes.
 run_mutation "timeseries mouse: the empty-state buttons dispatch their own verbs" \
@@ -18883,6 +19791,396 @@ run_mutation "mdedit: the value editor keeps the cell's alignment" \
   '                    .text_align(TextAlign::Left)' \
   geode-marketdata the_editor_keeps_the_value_right_aligned
 
+# ---- Local documents: forget, local-write outcomes, local retention -------
+
+# A forget deletes the document's whole history, not just what is live: an
+# archive left behind is still readable through as-of, and a summary or
+# provenance row left behind keeps the forgotten sheet in the catalog.
+run_mutation "forget: archived generations survive" \
+  crates/geode-data/src/store/document.rs \
+  '        &format!("delete from \"{}\" where batch = ?", tables.archive),' \
+  '        &format!("delete from \"{}\" where false and batch = ?", tables.archive),' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: the generation summary keeps the forgotten document" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from generations where dataset = ? and batch = ?",' \
+  '        "delete from generations where false and dataset = ? and batch = ?",' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: file_generations keeps the forgotten document" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_generations where dataset = ? and batch = ?",' \
+  '        "delete from file_generations where false and dataset = ? and batch = ?",' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: file_books rows are orphaned" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_books where file_id in \' \
+  '        "delete from file_books where false and file_id in \' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+run_mutation "forget: the dictionary still offers the forgotten key" \
+  crates/geode-data/src/store/document.rs \
+  '    for col in ddl::categorical_columns(ds) {
+        ddl::refresh_enum(conn, dataset, col, &tables.live, &tables.archive)?;
+    }
+    crate::store::commit_transaction(tx)?;
+    Ok(deleted)' \
+  '    crate::store::commit_transaction(tx)?;
+    Ok(deleted)' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+# The runner refuses a non-local forget itself: `ForgetJob` is a public door
+# onto the writer, and a feed's history is never a forget.
+run_mutation "runner: a non-local dataset can be forgotten" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Some(ds) if !ds.local => failed(format!(' \
+  '        Some(ds) if false && !ds.local => failed(format!(' \
+  geode-data a_forget_of_a_non_local_or_undeclared_dataset_fails_and_deletes_nothing
+
+run_mutation "service: a forget to a non-local dataset is queued" \
+  crates/geode-data/src/service.rs \
+  '            Some(ds) if !ds.local => Some("not a local dataset".to_string()),' \
+  '            Some(ds) if false && !ds.local => Some("not a local dataset".to_string()),' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+run_mutation "service: a forget with the wrong key arity is queued" \
+  crates/geode-data/src/service.rs \
+  '            Some(ds) if forget.key.len() != ds.key.len() => Some(format!(' \
+  '            Some(ds) if false && forget.key.len() != ds.key.len() => Some(format!(' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+# Local archives are bounded after each local publish; feeds are not swept
+# by that path (their retention is a separate, unwired decision).
+run_mutation "runner: local publishes are never swept" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if published && dataset.local {' \
+  '    if false && published && dataset.local {' \
+  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+
+run_mutation "runner: a feed publish is swept as if local" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if published && dataset.local {' \
+  '    if published {' \
+  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+
+# The writer's answer rides beside `Published`/the diagnostic: without it the
+# sheet that saved can never learn its save was stored or refused.
+run_mutation "service: a local publish sends no LocalPublished" \
+  crates/geode-data/src/service.rs \
+  '                    let local = (source == LOCAL_SOURCE).then(|| DataEvent::LocalPublished {' \
+  '                    let local = (source == "never").then(|| DataEvent::LocalPublished {' \
+  geode-data a_local_publish_reports_local_published_beside_published
+
+run_mutation "service: a failed local publish sends no LocalPublishFailed" \
+  crates/geode-data/src/service.rs \
+  '                        let answered = sink(DataEvent::LocalPublishFailed {
+                            dataset,
+                            batch,
+                            reason,
+                        });' \
+  '                        let answered = { let _ = (dataset, batch, reason); true };' \
+  geode-data a_failed_local_publish_reports_local_publish_failed_beside_the_diagnostic
+
+# Local-write outcomes share one mailbox key per document, apart from that
+# document's `Published` entry.
+# Every local-write outcome is some writer's answer (a sheet load deferred
+# behind its save waits for it), so none may coalesce into another.
+run_mutation "mailbox: local-write outcomes coalesce" \
+  crates/geode-app/src/events.rs \
+  '        | DataEvent::ForgetFailed { .. } => Key::Local(seq),' \
+  '        | DataEvent::ForgetFailed { .. } => Key::Local(0),' \
+  geode-app every_local_write_outcome_is_delivered_in_order
+
+run_mutation "bridge: a forgotten document leaves a watched catalog stale" \
+  crates/geode-app/src/bridge.rs \
+  '                        diagnostics.update(cx, |d, cx| {
+                            d.request_catalog_refresh();
+                            if d.pending_catalog_request() {' \
+  '                        diagnostics.update(cx, |d, cx| {
+                            if d.pending_catalog_request() {' \
+  geode-app a_forgotten_document_rereads_a_watched_catalog
+
+# A local save is the app's newest by definition: stamped behind live (a
+# wall-clock step-back), it is moved past live, or the backfill guard would
+# archive it while `LocalPublished` still tells the sheet it was stored.
+run_mutation "runner: a local save older than live is archived" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Ok(Some(live)) => stamped.max(live + chrono::Duration::microseconds(1)),' \
+  '        Ok(Some(_live)) => stamped,' \
+  geode-data a_local_save_older_than_live_is_still_published_live
+
+# The sweep runs only once the saved document crosses the bound; an
+# ungated sweep is correct but costs every autosave a whole-dataset sweep.
+run_mutation "runner: every local save sweeps" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    Ok(document_generation_count(store, dataset, batch)? > LOCAL_KEEP_GENERATIONS + 1)' \
+  '    Ok(document_generation_count(store, dataset, batch)? > 0)' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+run_mutation "runner: a local sweep leaves evicted provenance" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
+  '' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+run_mutation "prune: file_books rows of evicted generations survive" \
+  crates/geode-data/src/store/document.rs \
+  '        "delete from file_books where file_id in ({ORPHANS})"' \
+  '        "delete from file_books where false and file_id in ({ORPHANS})"' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+# A publish or forget refused at the service must still answer its writer,
+# or a sheet load deferred behind the save waits forever.
+run_mutation "service: a refused local publish answers nothing" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::LocalPublishFailed {
+                batch: geode_core::document::join_key(&publish.rows.key),
+                dataset: publish.dataset,
+                reason: "not a local dataset".to_string(),
+            });' \
+  '' \
+  geode-data a_publish_refused_at_the_service_answers_local_publish_failed
+
+run_mutation "service: a refused forget answers nothing" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::ForgetFailed {
+                batch: geode_core::document::join_key(&forget.key),
+                dataset: forget.dataset,
+                reason: why,
+            });' \
+  '' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+# The drain hands every pricer_sheets local-write outcome to the pricer
+# factory: a tile may wait on any one of them with no timeout.
+run_mutation "bridge: a stored sheet save is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.save_answered(sheet, Ok(()), cx);' \
+  '                            let _ = sheet;' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a failed sheet save is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.save_answered(sheet, Err(reason), cx);' \
+  '                            let _ = (sheet, reason);' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a failed sheet forget is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.forget_answered(sheet, Err(reason), cx);' \
+  '                            let _ = (sheet, reason);' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a forgotten sheet is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.forget_answered(sheet, Ok(()), cx);' \
+  '                            let _ = sheet;' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: another dataset's local-write outcome reaches the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '    (dataset == PRICER_SHEETS_DATASET).then_some(batch)' \
+  '    Some(batch).filter(|_| !dataset.is_empty())' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+# Sheets persist only through the DuckDB store; the in-memory one loses
+# them at a restart (and never answers a save, so a deferred load hangs).
+run_mutation "bridge: start builds the pricer over the in-memory store" \
+  crates/geode-app/src/bridge.rs \
+  '        Rc::new(DuckSheetStore::new(handle.clone())),' \
+  '        Rc::new(geode_pricer::store::MemorySheetStore::default()),' \
+  geode-app a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart
+
+run_mutation "main: the builtin layer omits pricer_sheets" \
+  crates/geode-app/src/main.rs \
+  '        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
+            .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),' \
+  '' \
+  geode-app the_builtin_layer_declares_pricer_sheets_as_a_local_dataset
+
+# A shutdown runs the queued local writes (the user's last edits) before
+# the runner stops, and only those.
+run_mutation "runner: shutdown drops the queued local writes" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    let local = take_local_writes(&mut q);' \
+  '                    let local: Vec<DocumentWork> = Vec::new();' \
+  geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
+
+run_mutation "runner: shutdown also runs a feed's queued document" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            DocumentWork::Publish(job) => job.source == LOCAL_SOURCE,' \
+  '            DocumentWork::Publish(_job) => true,' \
+  geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
+
+# At quit every unsaved sheet is saved before the data service stops.
+run_mutation "quit: the data hook stops the service without flushing sheets" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer.flush_all(cx);' \
+  '        let _ = &pricer;' \
+  geode-app quitting_saves_every_unsaved_sheet_before_the_data_service_stops
+
+run_mutation "pricer: flush_all flushes no tile" \
+  crates/geode-pricer/src/content.rs \
+  '                t.flush_save();' \
+  '' \
+  geode-pricer flush_all_saves_every_unsaved_sheet_now
+
+# A deferred load starts only after the LAST queued save of its sheet.
+run_mutation "pricer: the first save outcome releases the name" \
+  crates/geode-pricer/src/content.rs \
+  '            Some(n) if *n > 1 => *n -= 1,' \
+  '            Some(n) if *n > 1000 => *n -= 1,' \
+  geode-pricer a_load_behind_two_queued_saves_waits_for_both_answers
+
+run_mutation "pricer: a save refused at submission is counted as queued" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_refused = true;
+            self.save_notice = Some(NOT_SAVED.into());' \
+  '            self.shared.save_queued(&self.sheet.name);
+            self.save_refused = true;
+            self.save_notice = Some(NOT_SAVED.into());' \
+  geode-pricer a_save_refused_at_submission_leaves_no_load_waiting
+
+# `pricer_sheets` keeps the app's declaration: its tables are written
+# positionally, so a layer's redeclaration would misplace values.
+run_mutation "data_setup: a redeclared pricer_sheets is kept" \
+  crates/geode-app/src/bridge.rs \
+  '    diagnostics.extend(pin_pricer_sheets(&mut schema, config));' \
+  '' \
+  geode-app a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error
+
+run_mutation "reload: a redeclared pricer_sheets is kept" \
+  crates/geode-app/src/bridge.rs \
+  '                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));' \
+  '                    let _ = &mut schema;' \
+  geode-app a_reload_ignores_and_reports_a_redeclared_pricer_sheets
+
+run_mutation "pin: an identical redeclaration of pricer_sheets is reported" \
+  crates/geode-app/src/bridge.rs \
+  '    if slot.is_some_and(|i| schema.datasets[i] == declared) {' \
+  '    if false {' \
+  geode-app a_layer_redeclaring_pricer_sheets_identically_is_silent
+
+# A local dataset is neither a view's nor a source's to name.
+run_mutation "views dialog: a local dataset is offered" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        .filter(|d| !d.local)' \
+  '        .filter(|d| !d.name.is_empty())' \
+  geode-shell the_dataset_choice_offers_no_local_dataset
+
+run_mutation "sources dialog: a local dataset is offered" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        .filter(|d| !d.local)' \
+  '        .filter(|d| !d.name.is_empty())' \
+  geode-shell the_dataset_choice_offers_no_local_dataset
+
+# ---- Pricer sheets: the last storage contracts ----------------------------
+
+# A forget deletes one document: the WHERE is the batch, never the dataset.
+run_mutation "forget: every document's live rows go" \
+  crates/geode-data/src/store/document.rs \
+  '        &format!("delete from \"{}\" where batch = ?", tables.live),' \
+  '        &format!("delete from \"{}\" where batch = ? or true", tables.live),' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+# The local bound is 200 archived generations, not fewer.
+run_mutation "runner: the local sweep keeps fewer than the bound" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        keep_generations: Some(LOCAL_KEEP_GENERATIONS),' \
+  '        keep_generations: Some(LOCAL_KEEP_GENERATIONS - 1),' \
+  geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.shared.refuse_retiring(&name)?;
+        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
+        }
+        if !self.shared.taken(&name) {' \
+  '        self.shared.refuse_retiring(&name)?;
+        if !self.shared.taken(&name) {' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+# Every key under the armed confirm is the confirm's alone.
+run_mutation "pricer rm: a key under the confirm reaches the tile too" \
+  crates/geode-pricer/src/header.rs \
+  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                            cx.stop_propagation();' \
+  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
+
+# The table's own escape would clear its selection and stop the key before
+# the tile's cancel closes the entry field.
+run_mutation "pricer init: DataTable keeps its own escape" \
+  crates/geode-pricer/src/lib.rs \
+  '            "escape",
+' \
+  '' \
+  geode-app escape_after_a_committed_line_closes_the_entry_field
+
+run_mutation "pricer retiring: a restore opens a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(n) if shared.refuse_retiring(n).is_err() => {' \
+  '            Some(n) if false => {' \
+  geode-pricer a_restore_of_a_retiring_name_opens_a_fresh_sheet
+
+run_mutation "pricer save origin: a renamed-from name's failure claims lost edits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.rename_from.as_deref() == Some(sheet) {' \
+  '        if false {' \
+  geode-pricer a_failed_save_of_the_renamed_from_name_claims_no_lost_edits
+
+run_mutation "pricer save: a failed load's block hides the lost-edits notice" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(lost) => format!("{blocked}; {lost}").into(),' \
+  '            Some(_lost) => blocked,' \
+  geode-pricer a_waiting_loads_failure_keeps_the_lost_edits_notice
+
+# A name confirmed forgotten is never revived by a catalog read before the
+# forget; the held catalog is re-read on every publish.
+run_mutation "pricer store: a catalog revives a forgotten sheet" \
+  crates/geode-pricer/src/store.rs \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
+        self.forgotten.borrow_mut().insert(name.to_string());' \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);' \
+  geode-pricer a_catalog_never_revives_a_forgotten_name_until_it_is_saved
+
+run_mutation "pricer names: a stale catalog revives a removed sheet" \
+  crates/geode-pricer/src/store.rs \
+  '        self.forgotten.borrow_mut().insert(name.to_string());
+    }
+
+    fn set_known' \
+  '    }
+
+    fn set_known' \
+  geode-pricer a_removed_sheet_is_not_revived_by_a_stale_catalog
+
+run_mutation "pricer rm: y forgets a sheet opened since the question" \
+  crates/geode-pricer/src/tile.rs \
+  '        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {' \
+  '        let refusal = if false {' \
+  geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
+
+run_mutation "pricer rm: y forgets a sheet retiring since the question" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if self.shared.retiring.borrow().contains(&pending.sheet) {' \
+  '        } else if false {' \
+  geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
+
+run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.save_blocked {
+                return self.switch_sheet(name, true, cx);' \
+  '            if false {
+                return self.switch_sheet(name, true, cx);' \
+  geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
 # A date cell's field paints unframed. Mutated to the strip's frame, a
 # second rounded border sits inside the cursor's and the padding pushes
 # the day off the cell's right edge.
@@ -19082,13 +20380,37 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
 
+# The pricer's gutter follows `[ui] line_numbers` through the observed
+# `UiSettings` global. Mutated, the mirror never takes the new mode and
+# no gutter paints.
+run_mutation "pricer gutter: the settings observer applies the mode" \
+  crates/geode-pricer/src/tile.rs \
+  '                d.line_numbers = mode;' \
+  '' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# The tree column widens by the gutter, so the tree text keeps its room.
+run_mutation "pricer gutter: the tree column's width includes the gutter" \
+  crates/geode-pricer/src/delegate.rs \
+  '                width: px(TREE_WIDTH + self.gutter_px()),' \
+  '                width: px(TREE_WIDTH),' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# Relative numbers are re-derived when the cursor row moves. Mutated, the
+# stamp ignores the cursor and a move leaves the old distances painted.
+run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let stamp = (len, entry, cursor, mode);' \
+  '        let stamp = (len, entry, None, mode);' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
 if (( anchors_only )); then
-  # One pass: each file read once, every selected entry's anchor counted.
-  # Non-zero on any finding so this can gate a merge (MIN-2 of its own
-  # review); "nothing selected" is reported as such, never as a pass.
+  # Check anchors and test-name filters in one pass with per-file caches.
+  # Missing/ambiguous anchors, invalid filters, and an empty selection fail;
+  # loose filters and overlapping anchors remain warnings.
   python3 - "$anchors" <<'PY' || exit 1
 import collections, pathlib, re, sys
 
@@ -19164,9 +20486,8 @@ for name, file, anchor, pkg, filt in entries:
         bad_filters += 1
         print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
     elif len(matched) > 1 and filt not in matched:
-        # The named test never runs, so the verdict comes from whatever else
-        # the substring caught — the overlapping-defences lie this harness
-        # exists to prevent.
+        # Several function names match the substring but none is the exact
+        # requested name; require an unambiguous detecting-test declaration.
         bad_filters += 1
         print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
     elif len(matched) > 1:
@@ -19175,8 +20496,8 @@ for name, file, anchor, pkg, filt in entries:
         loose += 1
         print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
 
-# `replace(…, 1)` mutates the first match, so two entries on one (file,
-# anchor) mean the second defends nothing.
+# Shared source anchors may carry different replacements. Report the overlap
+# for review without treating it as proof that the mutations are redundant.
 by_anchor = collections.defaultdict(list)
 for name, file, anchor, _pkg, _filt in entries:
     by_anchor[(file, anchor)].append(name)
@@ -19214,8 +20535,8 @@ if shadowed_anchors:
 if warnings:
     print(f"  {', '.join(warnings)}")
     print("  (warnings; see the anchor-uniqueness follow-up)")
-# DUP and SHADOW stay warnings until the follow-up re-anchors them; adding
-# them here is the one-line change that makes them a gate.
+# Shared and overlapping anchors are advisory; only stale/ambiguous locations
+# and invalid test filters fail this check.
 sys.exit(1 if stale or ambiguous or bad_filters else 0)
 PY
 fi

@@ -1,12 +1,7 @@
-//! The panel's pure core (market-data spec §8.2/§8.4): no element, entity
-//! or window, tested without one.
-//!
-//! The division of labour is the one PHILOSOPHY §6 asks for. `spec`
-//! declares what a panel is; `matrix` turns one delivered `Snapshot` plus
-//! one `Draft` into prepared strings ONCE per delivery or edit, so a frame
-//! clones `SharedString`s and formats nothing; `draft` is the unsent work,
-//! keyed by grid cell and resolved across generations by row and column
-//! *label*, because an index means nothing once a new document arrives.
+//! Market-data model preparation and draft transitions, without entities
+//! or windows. `spec` defines compiled panels; `matrix` prepares and patches
+//! display cells; `draft` stores edits with the labels needed for rebase;
+//! `upload` assembles typed rows and compares delivered echoes.
 
 pub mod cursor;
 pub mod draft;
@@ -19,8 +14,7 @@ pub mod upload;
 
 pub use cursor::Cursor;
 pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};
-/// Moved to `geode-core` so the line pricer shares it (line-pricer Part 3,
-/// planning decision 1); re-exported so this crate's callers are unchanged.
+/// Shared numeric text nudging used by market-data and pricing editors.
 pub use geode_core::nudge::nudge_text;
 pub use geode_widgets::datefield::{
     DateTimeField, FieldKey, Precision, Segment, SegmentPaint, SegmentText, route,

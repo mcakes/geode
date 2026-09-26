@@ -73,6 +73,12 @@ completed. See [configuration writes](configuration.md#runtime-edits) and
 [keybinding editing](keymaps.md#editing-unbinding-and-reset) for failure and
 layering details.
 
+The default-source row derives its options from the same
+`SeriesSettings` global read by timeseries tiles: `(none)` followed by the
+configured fetch sources in document order. An absent global supplies no
+sources; the row still offers `(none)`. These are configuration entries, not a
+check that each adapter started successfully.
+
 ## Filtering, choice, and movement
 
 [`listfilter`](../../crates/geode-shell/src/listfilter.rs) ranks labels without
@@ -124,6 +130,33 @@ view, not a second matcher. For each next key it favors the shortest remaining
 sequence and then the last equal-length entry, suppressing a winning `none`.
 Hints for longer continuations do not guarantee the eventual dispatch;
 the matcher still decides after each key and context change.
+
+### Displaying keys
+
+Every key shown as a key is gpui-component's `Kbd`, reached through
+[`shell::kbd`](../../crates/geode-shell/src/shell/kbd.rs). That covers dialog
+footer hints, keybinding rows, tooltips, palette binding badges, which-key
+continuations, the status bar's pending keys, empty-state and section hints,
+and module menus and footers. `Kbd` owns the label and look: platform glyphs
+on macOS (`⌃⇧P`, `⎋`) and `Ctrl+Shift+P` elsewhere, with the key capitalised,
+so `g` reads `G` and `shift+g` reads `⇧G`.
+
+- A hint line that names keys inside prose writes them between backticks
+  (``"double-click or `ctrl+k` → Add a tile"``); `kbd::marked` paints each
+  backticked run as chips and the rest as text.
+- A module menu hint stored as a keymap spec goes through `kbd::menu_spec`.
+  A `:` command-line verb stays text because it is not a key, and so does a
+  spec naming `mod`, because the alias is the user's.
+- A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
+  does: the label without the chip's fill or padding, in the lane's colour,
+  so a highlighted row's keys follow the highlight.
+- A key named inside a sentence (a notice, a confirmation, a refusal) keeps
+  the keymap's lowercase spelling from `palette::render_binding`, since that
+  is what a user types into a keymap file.
+
+Hardcoded hints name the shipped key. A user rebinding does not change the
+empty-state hint's `ctrl+k` or a module menu's hint; the palette, keybinding
+rows, tooltips and the timeseries footer and menu read the live keymap.
 
 ## Per-tile command and find lines
 
@@ -249,11 +282,39 @@ Enter; they do not use Normal/Filter mode's keep-query Enter.
 ## Frame expression
 
 [`shell/scope_expr_view.rs`](../../crates/geode-shell/src/shell/scope_expr_view.rs)
-seeds a text draft from the current expression. Bare Enter trims and parses it;
-an empty draft clears the expression. A successful commit replaces only the
-expression in the current frame scope through undoable `set_scope`, then
-closes. Parse errors remain inline and typing clears the error. Escape applies
-nothing.
+edits the frame's expression in one of three modes, chosen by the door that
+opens it. Bare Enter trims and parses the draft in every mode.
+
+| Mode | Opened by | Seed | Enter | Empty Enter |
+|---|---|---|---|---|
+| Scope expression (whole) | `frame::scope_expression` | The whole expression | Replaces the expression | Clears it |
+| Edit scope term | A click on a toolbar term chip | That top-level `and` term | Replaces that term; the other terms keep their order | Removes that term |
+| Add scope expression | `frame::add_expression`, the `+` menu's "Expression…" row | Empty | Joins it to the current expression with `and`, or sets it when there is none | Closes without a change |
+
+The term and add modes show a muted note under the field saying what the
+commit touches. A successful commit changes only the expression in the frame
+scope, through undoable `set_scope`, then closes. Parse errors remain inline
+in every mode and typing clears the error. The term dialog remembers the term
+it was seeded with; if the scope changed while it was open so that its index
+no longer holds that term (gone, or a different term in its place), an edit
+or an empty (removing) commit refuses inline rather than touch whichever term
+now has that index. Escape applies nothing.
+`frame::clear_expression` drops the whole expression layer without a dialog;
+with no expression it does nothing. Neither new action has a default chord.
+
+The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
+"Expression…" (`frame::add_expression`), each row showing its action's live
+binding through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
+or the arrows move with wrap, Enter commits the highlighted row, Escape
+closes, and other bare keys are consumed. A chord passes to the matcher, and
+any dispatch closes the menu. A row click commits; a press of any button
+anywhere else closes the menu and reaches nothing beneath it, and while the
+menu is open the wheel does not reach the tiles beneath it either. Escape and
+an outside press cancel any chord prefix typed while the menu was open. A
+commit is a dispatch of the row's action, so the menu opens exactly what the
+palette row would. Opening the menu takes the shell root's focus; if the
+scope text field held focus, the menu's own close returns it there, and so
+does closing the dialog or picker one of its rows opened.
 
 Validation is syntax-only. The editor has no dataset against which to check
 column names, types, or operator compatibility, so an accepted expression may

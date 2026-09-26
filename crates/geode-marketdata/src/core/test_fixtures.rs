@@ -1,11 +1,6 @@
-//! Shared test-only fixtures (Task 3, spec §4.3): the dividend-schedule
-//! panel and a document shaped for it.
-//!
-//! Lifted out of `matrix.rs`'s own test module so `tile.rs`'s integration
-//! tests can drive the SAME flat, multi-typed-column panel through the
-//! real tile — `open_flat`'s own door — rather than building a second
-//! copy that could quietly drift from the pure-core one. `matrix.rs`'s
-//! tests import from here too, so there is exactly one `SCHEDULE`.
+//! Shared test fixtures for pure models and tile integration routes.
+//! Both use the same typed schedule spec and snapshots so editing, painting,
+//! and restoration tests cannot silently diverge in their document shape.
 
 #![cfg(test)]
 
@@ -28,8 +23,8 @@ pub(crate) fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
 fn meta(name: &str, attribution: Attribution) -> ColumnMeta {
     ColumnMeta {
         name: name.into(),
-        // A document snapshot is depth 0 only (spec §7), which is why
-        // `compile_document` emits exactly one attribution per column.
+        // Document snapshots have depth 0 only, so each column has one
+        // attribution entry.
         attribution_by_depth: vec![attribution],
         scope_semantics: ScopeSemantics::Direct,
     }
@@ -59,14 +54,8 @@ const SCHEDULE_AMOUNT_FORMAT: ColumnFormat = ColumnFormat {
     scale: Scale::None,
 };
 
-/// A dividend schedule (spec §4.3): one row per dividend, minted row
-/// identity (the trader does not name a row), three typed value columns
-/// — a date, a number at its own precision, and a status chosen from a
-/// fixed vocabulary — the shape [`crate::core::matrix::CellKind`] exists
-/// to paint and edit correctly.
-/// [`SCHEDULE`] with its row label withheld (`RowLabel::Hidden`) — the
-/// shipped `DIVIDEND`'s own shape, for the tests that pin what a hidden
-/// label changes: the table's columns, `/`, `yy`, and where `o` lands.
+/// [`SCHEDULE`] with minted row identities hidden. This exercises table
+/// columns, search, row copying, and insertion without a row-label column.
 pub(crate) const HIDDEN_SCHEDULE: PanelSpec = PanelSpec {
     kind: "sched_hidden",
     rows: RowAxis {
@@ -277,12 +266,9 @@ pub(crate) fn schedule_snapshot_with_null_status() -> Snapshot {
     )
 }
 
-/// A strike ladder (Task 8's review): one row per strike, the row
-/// identity TYPED as an integer — the shape that opens the TEXT row-label
-/// editor on `o` (the shipped specs are `Minted` and `Typed(Date)`, so
-/// without this the `(Text, RowLabel)` commit arm and `nudge`'s
-/// `RowLabel` arm had no fixture). One `F64` value column at the
-/// schedule's own four-place format.
+/// A strike ladder with integer row identities and one `F64` value column.
+/// It exercises the text row-label editor and its nudge/commit paths;
+/// the shipped specs use minted identities or typed dates.
 pub(crate) const LADDER: PanelSpec = PanelSpec {
     kind: "ladder",
     title: "Strike ladder",

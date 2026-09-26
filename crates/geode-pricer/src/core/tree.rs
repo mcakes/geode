@@ -47,16 +47,15 @@ impl Expansion {
         self.open.clear();
     }
 
-    /// Forget ids that no longer name a package (removed, or ungrouped).
-    /// For a sheet swapped in whole (a load). Edits keep the set as is:
-    /// ids are never reused, so a remembered id can only ever reopen the
-    /// package it named — which is what an undo that brings it back needs.
+    /// Prune IDs that no longer name packages after replacing a sheet on load. Edits
+    /// retain them because IDs are not reused: undo can restore a package's remembered
+    /// open state.
     pub fn retain_packages(&mut self, sheet: &Sheet) {
         self.open.retain(|id| names_package(sheet, *id));
     }
 
-    /// The open ids that name a package in `sheet` now: what the session
-    /// record carries, so it never holds a dead id.
+    /// Open IDs that currently name packages, used to omit deleted packages from
+    /// serialized session state without changing the retained expansion set.
     pub fn live_ids<'a>(&'a self, sheet: &'a Sheet) -> impl Iterator<Item = LineId> + 'a {
         self.ids().filter(|id| names_package(sheet, *id))
     }

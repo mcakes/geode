@@ -1,22 +1,12 @@
-//! The panel's `TableDelegate` (user ruling 2026-09-14: the body is
-//! gpui-component's table, for visual unity with the blotter — roadmap
-//! ruling 6's uniform-row-list form is superseded).
+//! TableDelegate over the panel's prepared grid. The tile owns authoritative
+//! cursor, editor, and choice state; this delegate holds synchronized paint-time
+//! mirrors and shares the model through Rc. Rendering does not decide edits,
+//! yanks, or navigation.
 //!
-//! It owns nothing the tile does not already have: the prepared
-//! [`MatrixModel`] as an `Rc` swapped wholesale on every rebuild, a mirror
-//! of the tile's cursor, and mirrors of the open cell editor and of a
-//! choice cell's open typeahead (painted under its cell). **The
-//! tile's own cursor stays the truth** — this is a paint-time copy, kept
-//! in step by `MarketDataTile::sync_cursor`, so nothing here decides
-//! anything a keystroke, a yank or a commit reads back.
-//!
-//! One structural difference from the model's own grid: the table's column
-//! 0 is the ROW-LABEL column (the row axis — `term` for CVI), so a value
-//! cell at model column `c` is table column `c + 1`. The cursor never
-//! enters column 0 (`h` at model column 0 stays put), which is why
-//! [`MatrixDelegate::model_col`] answers `None` for it rather than
-//! saturating to 0 — a click there moves the cursor's row and leaves its
-//! column alone.
+//! Panels with shown row labels insert a fixed label column at table index zero,
+//! shifting model columns by one. Hidden-label panels have no offset and pin the
+//! first value column instead. The cursor always uses model coordinates; it
+//! never enters the separate label column.
 
 use crate::core::matrix::RowState;
 use crate::core::{MatrixModel, PanelSpec};
@@ -35,55 +25,26 @@ use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
 use std::rc::Rc;
 
-/// The row-label column's width, and one value cell's. Fixed: a document's
-/// columns are a ladder the desk chose (spec §8.2 — "no horizontal
-/// virtualisation, since no sketched document has more than a few dozen
-/// columns").
-///
-/// **Columns are deliberately NOT resizable** (controller ruling
-/// 2026-09-14, review Minor 2), here and on `TableState::col_resizable`.
-/// A dragged width would have nowhere to live: a panel has no presentation
-/// document (`view_presentation.toml` belongs to a view), so the width
-/// would be this delegate's in-memory `column()` answer — and
-/// `TableState::refresh` re-prepares `col_groups` from exactly that. Since
-/// every model swap refreshes ([`crate::tile::MarketDataTile`]'s
-/// `install_model`), a drag would snap back on the next delivery (about
-/// every 5 s on the demo bus) or the next committed edit. A handle that
-/// undoes itself seconds later is worse than no handle; offer it again
-/// when a width has somewhere to be written.
+/// Fixed pixel widths for the label and value columns. Columns cannot be
+/// resized or moved: there is no persisted width state, and table refresh would
+/// replace transient widths on the next model install. These widths are not
+/// rem-scaled because column() has no Window from which to read the rem size.
 const LABEL_WIDTH: f32 = 128.0;
 const CELL_WIDTH: f32 = 84.0;
 
-/// The table column the row labels live in WHEN the spec shows them
-/// (`RowLabel::Shown`). Column 0, pinned left for the blotter's own
-/// reason (user ruling 2026-09-12 on the tree column): the row's identity
-/// must stay readable however far right the values scroll. Under
-/// `RowLabel::Hidden` there is no such column and the first value column
-/// takes its place, pin included — `MatrixDelegate::label_column` is the
-/// one flag every column arithmetic here reads.
+/// Index of the fixed row-label column when labels are shown. Hidden-label
+/// panels instead pin their first value column; offset() owns that distinction.
 pub(crate) const LABEL_COL: usize = 0;
 
-/// The table column pinned left — the row-label column, or under a hidden
-/// label the first value column — and so the one the line-number gutter
-/// widens and paints in: the numbers must stay beside the row's identity
-/// however far right the values scroll.
+/// Pinned table column: the row label when shown, otherwise the first value.
+/// The line-number gutter widens this column so it stays visible during
+/// horizontal scrolling without reducing the data cell's width.
 const PINNED_COL: usize = 0;
 
-/// What the tile's open editor looks like from the delegate: which cell it
-/// sits in (`col: None` is the row-label column, Task 8's row-label
-/// editor — built into the type and painted by `render_td`'s label arm
-/// through the same `render_editor` a value cell's editor uses, so the
-/// two arms cannot drift. `MarketDataTile::begin_label_edit` opens it on
-/// `o`/`shift+o` for a `RowIdentity::Typed` axis — CVI's `term`, a
-/// `Date` — landing on today's date on the trader's clock; `commit_row_label` renames
-/// the provisional row and opens its first cell) and what to paint
-/// there — the text `Input`, or the segmented date field's prepared
-/// segments plus the focus handle its keys route through.
-///
-/// A paint-time COPY, like the cursor mirror beside it: the tile's
-/// `Editing` is the truth, and `MarketDataTile::sync_cursor`/`sync_editor`
-/// re-mirror it on every change (a date field's segments change on every
-/// keystroke, which is why the field's own key path re-mirrors too).
+/// Paint-time editor mirror. Row and optional column use model coordinates;
+/// None identifies a typed row-label editor. Text inputs retain their entity,
+/// while date editors share prepared segments and the tile-owned focus handle.
+/// The tile synchronizes this mirror after editing state changes.
 #[derive(Clone)]
 pub(crate) struct DelegateEditor {
     pub row: usize,
@@ -104,13 +65,9 @@ pub(crate) enum DelegateEditorPaint {
     },
 }
 
-/// The open `Choice` cell's typeahead as the delegate paints it (dividend
-/// spec §4.4): the cell it hangs under, in model coordinates, and the
-/// prepared rows. A paint-time COPY like [`DelegateEditor`] — the tile's
-/// `Popup::Choice` is the truth, re-mirrored on every change through
-/// `MarketDataTile::sync_editor`; the `Rc` is the tile's own prepared
-/// paint, so a re-mirror is a refcount bump and `render_td` reads
-/// prepared strings.
+/// Choice-popup paint and its target cell in model coordinates. The tile
+/// owns Popup::Choice and refreshes this mirror through sync_editor; the delegate
+/// renders its shared prepared rows beneath the cell without reading tile state.
 #[derive(Clone)]
 pub(crate) struct DelegateChoice {
     pub row: usize,
@@ -118,15 +75,12 @@ pub(crate) struct DelegateChoice {
     pub paint: Rc<ChoicePaint>,
 }
 
-/// Every field is `pub(crate)`, never `pub` (review Minor 4): a model swap
-/// is only correct when it is paired with a `TableState::refresh`, and
-/// `MarketDataTile::install_model` is the one place that pairs them. Crate
-/// visibility is what keeps that invariant compiler-kept — a caller
-/// outside this crate could otherwise write `model` on its own and paint
-/// the previous document's columns.
+/// Crate-private state keeps external callers from replacing the model
+/// without the paired TableState::refresh. Structural model installs go through
+/// MarketDataTile::install_model so cached columns and headers stay synchronized.
 pub struct MatrixDelegate {
-    /// The prepared grid. An `Rc` swapped by the tile on every rebuild —
-    /// never cloned per frame, and never mutated in place.
+    /// Prepared grid shared with the tile. Rebuilds replace it; ordinary cell
+    /// commits can patch it after the tile temporarily removes the delegate's share.
     pub(crate) model: Rc<MatrixModel>,
     /// The row axis's name (`term`), painted as column 0's header while
     /// `label_column` holds.
@@ -172,13 +126,11 @@ pub struct MatrixDelegate {
     /// tile (`MarketDataTile::on_ui_settings`), which refreshes the table
     /// on a change: the pinned column's width includes the gutter.
     pub(crate) line_numbers: LineNumbers,
-    /// The gutter text per row, rebuilt by `ensure_numbers` only when
-    /// `numbers_stamp` changes, so a paint clones refcounts and never
-    /// formats a number.
+    /// Cached gutter text per painted row. `ensure_numbers` refreshes it during
+    /// rendering when the stamp changes; subsequent cells clone the prepared text.
     numbers: Vec<SharedString>,
-    /// What `numbers` was built for: the row count, the cursor row (only
-    /// `rel` reads it, so `on` stamps `usize::MAX` and a `j` rebuilds
-    /// nothing), and the mode.
+    /// Cache key: row count, mode, and cursor row for relative numbering.
+    /// Absolute numbering ignores cursor movement.
     numbers_stamp: Option<(usize, usize, LineNumbers)>,
 }
 
@@ -212,11 +164,10 @@ impl MatrixDelegate {
         gutter_px(self.line_numbers, self.model.rows.len())
     }
 
-    /// Rebuild `numbers` if anything it depends on changed. Numbers count
-    /// the grid's rows as painted — an inserted row and a struck deleted
-    /// one included — 1-based, as `Nj`/`Nk` count them. With the cursor
-    /// in the header strip there is no row for `rel` to measure from, so
-    /// it numbers absolutely until the cursor returns to the grid.
+    /// Rebuild numbers when the mode, row count, or relative cursor changes.
+    /// Count all painted rows, including inserts and marked deletions. Relative
+    /// mode shows distances except on the cursor row, which shows its absolute
+    /// number. With the cursor in the attribute strip, use absolute numbers.
     fn ensure_numbers(&mut self) {
         let mode = self.line_numbers;
         let len = self.model.rows.len();
@@ -261,21 +212,11 @@ impl MatrixDelegate {
             .filter(|e| e.row == row_ix && e.col == self.model_col(col_ix))
     }
 
-    /// One editor's element, painted in whichever cell it belongs to:
-    /// the text `Input`, or the strip's own segmented date field
-    /// (`header::render_date_field`, shared so a date cell and a date
-    /// attribute cannot paint or route keys differently). A tile that
-    /// has been dropped paints nothing — the caller falls back to the
-    /// cell's own text — since there is nothing left to route a key to.
-    ///
-    /// Both editors paint without a frame of their own and aligned as the
-    /// cell's text is (`align`), so opening an editor leaves the value
-    /// where it stood: the `Input`'s default is a left-aligned field inset
-    /// by its own padding and border over its own background, which jumped
-    /// a right-aligned number across the cell and hid the cell's draft
-    /// fill, and the date field's strip frame drew a second, rounded
-    /// border inside the cursor border. The cursor border already frames
-    /// the cell being edited.
+    /// Render a text input or shared date field aligned with its cell's text.
+    /// Both omit their own frame so the cell's cursor border and draft fill stay
+    /// visible. Text inputs remove horizontal padding; grid date fields use flush
+    /// segments. A date field needs a live tile for event routing; otherwise the
+    /// caller falls back to the cell's prepared text.
     fn render_editor(
         &mut self,
         editor: &DelegateEditor,
@@ -350,18 +291,15 @@ impl TableDelegate for MatrixDelegate {
         self.model.rows.len()
     }
 
-    /// Read only on prepare and `TableState::refresh` — which is why every
-    /// model swap on the tile goes through `install_model`.
+    /// Supply column metadata used by table preparation and refresh. Structural
+    /// model replacements must refresh the table's cached headers and column groups.
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let Some(model_col) = self.model_col(col_ix) else {
             return Column {
                 key: SharedString::from("__row_axis"),
                 name: self.row_axis.clone(),
                 align: TextAlign::Left,
-                // Not sortable: a document's rows are the desk's own
-                // ladder (the `/` find moves the cursor rather than
-                // narrowing, for the same reason — spec §8.3), and not
-                // movable, since the labels are the grid's identity.
+                // Preserve document row order and column identity: no sorting or movement.
                 sort: None,
                 width: px(LABEL_WIDTH + self.gutter_px()),
                 fixed: Some(ColumnFixed::Left),
@@ -381,11 +319,8 @@ impl TableDelegate for MatrixDelegate {
         Column {
             key: name.clone(),
             name,
-            // A document's values are numbers (`PanelSpec::value_type` is
-            // `f64`/`i64`), formatted by the panel's own `ColumnFormat`,
-            // so they read down the column's right edge — `render_td`
-            // does the aligning, since the component only carries this
-            // field for a delegate to read back.
+            // Right-align value-column headers. Value cells use the same alignment,
+            // including typed text/date/choice columns in flat panels.
             align: TextAlign::Right,
             sort: None,
             width: px(CELL_WIDTH
@@ -431,10 +366,9 @@ impl TableDelegate for MatrixDelegate {
             .child(column.name)
     }
 
-    /// One cell, and on the pinned column the line-number gutter beside
-    /// it (`[ui] line_numbers`): the gutter sits OUTSIDE the cell's own
-    /// element, so the cursor border, a draft state's fill and a deleted
-    /// row's strike stay on the data and never reach the number.
+    /// Paint a data cell with an optional gutter beside the pinned column.
+    /// The gutter is outside the cell element so cursor borders, draft fills,
+    /// and deletion strikes apply only to data.
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -475,14 +409,9 @@ impl TableDelegate for MatrixDelegate {
 }
 
 impl MatrixDelegate {
-    /// One prepared cell: its text, or the editor when this is the cell
-    /// being edited.
-    ///
-    /// Allocation discipline (PHILOSOPHY §6): nothing is formatted or
-    /// allocated per cell beyond the `debug_selector` closure, which gpui
-    /// drops unevaluated outside a test/`test-support` build. The text is
-    /// a `SharedString` clone (a refcount) out of the model the tile
-    /// prepared, and the colours are `Copy` theme reads.
+    /// Paint a prepared cell or its active editor. Normal cell text is cloned
+    /// from SharedString; date and choice editors share prepared paint. Debug
+    /// selectors identify coordinates without formatting cell values.
     fn render_cell(
         &mut self,
         row_ix: usize,
@@ -491,15 +420,9 @@ impl MatrixDelegate {
     ) -> Div {
         let theme = cx.theme();
         let Some(model_col) = self.model_col(col_ix) else {
-            // The row-label column: the label in the data face — it is
-            // what identifies the row — painted in the ROW's own state
-            // (spec §5.2): an inserted row's label takes the same tint
-            // its cells do and a deleted row's is struck through with
-            // them, so the row reads as one thing across the pinned
-            // column and the scrolling ones. The editor slot is here too
-            // (Task 8's row-label editor opens into it; nothing does
-            // yet), so the label arm and the value arm paint an editor
-            // through the one `render_editor`.
+            // Paint the row label in its row state, including insertion tint and
+            // deletion strike-through. Typed row-label editors use the same renderer as
+            // value-cell editors.
             let (label, state, sent) = self
                 .model
                 .rows
@@ -554,9 +477,7 @@ impl MatrixDelegate {
             .font_family(fonts::MONO)
             .whitespace_nowrap()
             .overflow_hidden()
-            // Lets a test locate this exact cell with `cx.debug_bounds`,
-            // the blotter's own I4 door; a gpui no-op in release, where
-            // the closure is dropped unevaluated.
+            // Identify this table cell in debug/test builds without formatting its value.
             .debug_selector(|| format!("marketdata-cell-{row_ix}-{col_ix}"))
             // The slice values read as their own block: a right border on
             // the last of them, so the ladder starts visibly after the
@@ -589,13 +510,8 @@ impl MatrixDelegate {
             .editor_at(row_ix, col_ix)
             .cloned()
             .and_then(|e| self.render_editor(&e, TextAlign::Right, theme));
-        // The choice popup hangs under THIS cell when it is the one being
-        // edited (dividend spec §4.4): a zero-size absolute child at the
-        // cell's bottom-left is the anchor `render_choice`'s `TopLeft`
-        // positions against — the header popups' own arrangement, with
-        // the cell as the anchor's frame instead of the header. Painted
-        // through `deferred`, so the table's clip never cuts it. A tile
-        // that has been dropped paints nothing, as `render_editor` does.
+        // Anchor the choice popup at its target cell's bottom-left. Deferred
+        // painting escapes the table clip; a dropped tile cannot receive popup events.
         let choice = self
             .choice
             .as_ref()
@@ -630,33 +546,13 @@ pub(crate) struct CellPaint {
     pub strike: bool,
 }
 
-/// The one answer to "what colour is a cell in this state", read by
-/// `render_td` and by the test that checks it against every bundled theme.
+/// Shared cell-color rules for rendering and bundled-theme contrast tests.
+/// Deleted rows override every flag: muted text, strike-through, no fill. Other
+/// cells keep foreground text, with fill precedence sent, inserted, edited.
 ///
-/// The STATE lives in the fill and the text is always the theme's own
-/// `foreground` (user report 2026-09-14: dirty cells were unreadable on
-/// most themes). The paired tokens look right but are not: `warning_foreground`
-/// is for text on a SOLID warning fill and falls back to `primary_foreground`
-/// — the background family — at the pinned rev, so over a 25% tint it was
-/// cream on cream (1.00:1 on Nord, 1.13:1 on Default Light); and
-/// `muted_foreground` is secondary text on the BACKGROUND, not on `muted`
-/// itself, where 15 bundled themes put it under 3:1. `foreground` is the
-/// one colour every theme author made readable on their own background,
-/// which a translucent tint or the muted band barely moves.
-///
-/// The ROW's state decides ahead of the cell's own flags (spec §5.2). A
-/// `Deleted` row's cells are struck through in the theme's own secondary
-/// text with no fill — the row is going, whatever edit a cell carries,
-/// and this is the one place `muted_foreground` is right: it is on the
-/// bare ground, the pairing the theme author made (unfloored, as every
-/// `Tone::Plain` run is). Then `sent`: a sent cell is also an edited one
-/// (the draft keeps its edits until the echo clears them, spec §9.4), and
-/// what it needs to say is that it is out the door — an inserted row's
-/// cells included. Then an `Inserted` row, every cell of which is
-/// `edited`: the `success` family at an 18% tint, so a new row reads as
-/// new rather than as a row full of changed numbers. The bundled-theme
-/// sweep holds `foreground` over that tint to the same 3:1 floor as the
-/// warning one; no theme needed flooring.
+/// Sent uses muted; inserted uses an 18% success tint; edited uses a 25% warning
+/// tint. Foreground text is tested over those actual backgrounds rather than
+/// using text tokens intended for solid status fills.
 pub(crate) fn cell_paint(theme: &Theme, sent: bool, edited: bool, state: RowState) -> CellPaint {
     if state == RowState::Deleted {
         return CellPaint {
@@ -707,13 +603,8 @@ pub(crate) mod tests {
         over(theme.table, to_rgb(theme.background))
     }
 
-    /// An edited or sent cell's text must be readable over its own fill on
-    /// EVERY bundled theme, at the same 3:1 floor Part 2c holds named
-    /// colours to. The first build painted an edited cell's text in
-    /// `warning_foreground` — the token for text on a SOLID warning fill,
-    /// which falls back to `primary_foreground` (the background family) at
-    /// the pinned rev — over a 25% tint of `warning`, so on Gruvbox Light
-    /// the text was the background colour on a barely-tinted background.
+    /// Check foreground contrast over edited, inserted, and sent fills on every
+    /// bundled theme, composited over the actual table/window background.
     #[gpui::test]
     fn dirty_and_sent_cells_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -736,13 +627,8 @@ pub(crate) mod tests {
                         failures.push(format!("{name}: {state} text at {ratio:.2}:1"));
                     }
                 }
-                // A deleted row's text is the theme's OWN secondary text
-                // on its own ground — exactly the pairing `Tone::Plain`
-                // paints every quiet header run in, unfloored (CLAUDE.md
-                // records nine themes ship it under 3:1; a theme-authoring
-                // matter). Asserted as "the same colour `Plain` uses" and
-                // nothing more: this sweep is about the fills this crate
-                // invents, not the theme's own pairs.
+                // Deleted rows use the theme's muted text on bare ground. Verify that
+                // pairing and strike-through separately from the marked-fill contrast checks.
                 let deleted = cell_paint(theme, false, false, RowState::Deleted);
                 assert_eq!(deleted.fill, None, "{name}: a deleted row has no fill");
                 assert_eq!(deleted.text, theme.muted_foreground, "{name}");
@@ -806,11 +692,8 @@ pub(crate) mod tests {
         assert_eq!(hidden.table_col(3), 3);
     }
 
-    /// A fresh delegate paints the row axis's name and nothing else: one
-    /// column, no rows. The panel's header says why (`no document
-    /// received for <key>`), so an empty grid needs no invented row.
-    /// A `gpui::test` only for the theme the tones derive from; the tile
-    /// handle is never upgraded here.
+    /// An empty shown-label delegate still exposes its row-axis header. The test
+    /// needs theme state but never upgrades its intentionally invalid tile handle.
     #[gpui::test]
     fn an_empty_model_still_names_its_row_axis(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

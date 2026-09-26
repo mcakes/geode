@@ -303,20 +303,11 @@ fn main() {
             })
             .detach();
 
-            // The data service's shutdown joins its own thread, which may
-            // wait out an in-flight ingest or discovery scan (`DataHandle::
-            // shutdown`'s own doc comment) — so it must run off the UI
-            // thread, never as a side effect of a `DataHandle` simply
-            // dropping on `main`'s own thread at quit.
+            // Unsaved sheets are saved, then the data service stops off the
+            // UI thread (`bridge::stop_at_quit`), never as a side effect of a
+            // `DataHandle` simply dropping on `main`'s own thread at quit.
             if let Some(bridge) = &bridge {
-                let handle = bridge.handle.clone();
-                cx.on_app_quit(move |cx| {
-                    let handle = handle.clone();
-                    cx.background_executor().spawn(async move {
-                        handle.shutdown();
-                    })
-                })
-                .detach();
+                bridge::stop_at_quit(bridge, cx);
             }
 
             // The demo bus's own shutdown (Task 10): stopped before
@@ -740,8 +731,8 @@ impl ModuleFactory for DiagnosticsFactoryHandle {
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
-/// views (line-pricer Part 2, planning decision 12 — a desk or user layer
-/// overrides a view by name), and the `--demo` layer.
+/// views (a desk or user layer overrides a view by name), the pricer's
+/// `pricer_sheets` dataset, and the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -750,6 +741,11 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_pricer::core::BUILTIN_VIEWS,
         )
         .expect("BUILTIN_VIEWS is well-formed TOML"),
+        // The pricer's sheets, a local document dataset every build
+        // declares. `datasets` merges per dataset name, so a demo, desk or
+        // user `datasets` doc adds its own datasets beside this one.
+        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
+            .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),
     ];
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
@@ -1120,6 +1116,61 @@ mod tests {
         assert_eq!(
             views.names().collect::<Vec<_>>(),
             vec!["vanilla", "barrier"]
+        );
+    }
+
+    /// The pricer's sheets live in a local document dataset every build
+    /// declares, demo or not: the builtin layer carries it, clean.
+    #[test]
+    fn the_builtin_layer_declares_pricer_sheets_as_a_local_dataset() {
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(
+            config.doc("datasets").expect("the builtin datasets doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let sheets = schema
+            .dataset(geode_pricer::core::PRICER_SHEETS_DATASET)
+            .expect("pricer_sheets is declared");
+        assert!(sheets.local, "a sheet is written by the app, not a feed");
+    }
+
+    /// `datasets` merges per dataset name, so a demo or desk `datasets`
+    /// doc adds its datasets beside the builtin `pricer_sheets` rather
+    /// than replacing the doc.
+    #[test]
+    fn a_demo_or_desk_datasets_doc_unions_with_the_builtin_pricer_sheets() {
+        let dir = tempfile::tempdir().unwrap();
+        let desk = dir.path().join("desk");
+        std::fs::create_dir_all(&desk).unwrap();
+        std::fs::write(
+            desk.join("datasets.toml"),
+            "config_version = 1\n[desk_only]\n[desk_only.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            desk: Some(desk),
+            user: None,
+        });
+        let (schema, _) = geode_core::schema::SchemaSpec::from_doc(
+            config.doc("datasets").expect("the merged datasets doc"),
+        );
+        for name in [
+            geode_pricer::core::PRICER_SHEETS_DATASET,
+            "risk_snapshot",
+            "desk_only",
+        ] {
+            assert!(schema.dataset(name).is_some(), "{name} is declared");
+        }
+        assert!(
+            schema
+                .dataset(geode_pricer::core::PRICER_SHEETS_DATASET)
+                .unwrap()
+                .local
         );
     }
 

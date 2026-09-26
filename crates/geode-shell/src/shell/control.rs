@@ -320,6 +320,9 @@ mod tests {
                     theme.background,
                     theme.secondary_foreground,
                 ),
+                // Also the timeseries range and frequency triggers'
+                // open state and the cursor's slot chip: the same fill,
+                // text and ground.
                 "stack marker (Tone::Neutral on a tile header)",
             ),
             (
@@ -358,19 +361,6 @@ mod tests {
                     theme.foreground,
                 ),
                 "timeseries slot chip (Tone::Danger on a tile background)",
-            ),
-            (
-                // The timeseries range popup's preset chips (spec
-                // §9.8): `Tone::Neutral` on the POPOVER surface, which
-                // is a different ground from the stack marker's tile
-                // background above and so a pairing of its own.
-                ControlInputs::new(
-                    theme,
-                    Rest::Filled(theme.secondary),
-                    theme.popover,
-                    theme.secondary_foreground,
-                ),
-                "range preset chip (Tone::Neutral on a popover)",
             ),
             // An UNFILLED chip — the timeseries tile's idle slot away
             // from the cursor — is a bare `muted_foreground` glyph on

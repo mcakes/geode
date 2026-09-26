@@ -1,31 +1,17 @@
-//! The pricer's text colours (line-pricer spec §8.2), derived once per
-//! theme and floored to `READABLE_RATIO` against the ground each paints
-//! on (planning decision 14): an own value in `foreground`, a stale
-//! result or an inherited shift `muted`, a failed row's cells in
-//! `Tone::DangerText`, a package row on `secondary` with its own
-//! floored trio, and the action menu's text on the popover and on its
-//! `accent` highlight. Resolved in `render_td` from the cell's `CellState`; the
-//! `GridModel` stays theme-free. The tile re-derives it when the theme
-//! global changes (an observer, never a per-cell check).
+//! Prepared grid-row and action-menu text colours, recomputed on theme changes.
+//! CellState selects own, muted stale/inherited, or failure text; package rows have a
+//! separate palette. GridModel remains independent of the theme.
 //!
-//! A row's text is floored against every ground the row can wear: its
-//! own (the table, or a package's `secondary`) and the two the table
-//! paints over it in place of that ground — `table_hover` under the
-//! pointer and the selected-row fill on the cursor row
-//! (`Paints::row_grounds`). Floored against its own ground alone, muted
-//! and danger text fell under the floor on hover or selection on 23
-//! bundled themes.
+//! Row text is adjusted against its base background and the table's hover and selection
+//! backgrounds, which replace that base. Menu text is adjusted against the popover or
+//! enabled-row highlight. The bundled-theme test checks these prepared colours on each
+//! background.
 //!
-//! Each floor moves toward whichever of pure black or pure white
-//! contrasts more with the ground it paints on (the market-data
-//! `FlooredTones` idiom, `geode-marketdata/src/tile.rs`) — one pole for
-//! the table ground, one for the package ground — never toward the
-//! colour's own theme anchor (`theme.foreground`). Floored toward its own
-//! anchor, an already-equal pair (`own`/`package_own` against a theme
-//! whose `foreground` already painted its ground, e.g. a monochrome
-//! theme) gives `readable_on` nothing to bisect toward and the floor is a
-//! no-op (review fix, 2026-09-24). Every colour clears `READABLE_RATIO`
-//! against one of the two poles, so this floor always lands.
+//! Adjust toward whichever of black or white has greater contrast with the background.
+//! Using the original text colour as the adjustment endpoint would fail when that
+//! colour already matches its background. The multi-background helper is bounded; it
+//! does not guarantee success for arbitrary combinations of backgrounds that require
+//! opposite endpoints.
 
 use crate::core::columns::CellState;
 use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
@@ -62,14 +48,9 @@ fn floor_toward_pole(c: Hsla, bg: Rgb) -> Hsla {
     to_hsla(readable_on(to_rgb(c), bg, pole(bg)))
 }
 
-/// Floor `c` against every ground in `grounds` — a row's text paints on
-/// its own ground, the table's hover ground and its selected-row ground,
-/// whichever the row is in, so it must read on all of them. Each pass
-/// floors against the ground `c` currently contrasts least with, toward
-/// that ground's pole; the grounds a theme gives one row share a pole in
-/// practice, so a move toward it never undoes an earlier floor. Bounded:
-/// a theme whose grounds split poles would stop at the last pass, and the
-/// full-theme sweep would name it.
+/// Adjust text against the lowest-contrast failing background on each pass, for at most
+/// grounds.len() passes. Bundled-theme tests check all resulting background pairs;
+/// incompatible backgrounds need not converge within this bound.
 fn floor_on_all(c: Hsla, grounds: &[Rgb]) -> Hsla {
     let mut c = c;
     for _ in 0..grounds.len() {
@@ -100,11 +81,9 @@ pub struct Paints {
     pub package_own: Hsla,
     pub package_muted: Hsla,
     pub package_danger: Hsla,
-    /// The action menu's text (`render_menu`): `popover_foreground` and
-    /// `muted_foreground` (disabled rows, the section header, the
-    /// trailing key lane) floored on the popover, and the highlighted
-    /// enabled row's `accent_foreground` and key lane floored on `accent`
-    /// over it (a disabled row never takes the fill).
+    /// Action-menu text for the popover and enabled-row accent background. The muted
+    /// variants serve disabled reasons, section headings, and default-key hints.
+    /// Disabled actions never receive the accent fill.
     pub menu_text: Hsla,
     pub menu_muted: Hsla,
     pub menu_active_text: Hsla,
@@ -138,10 +117,9 @@ impl Paints {
         }
     }
 
-    /// The table ground, and the two grounds the table itself paints on
-    /// a row over it, replacing the row's own: `[hover, selected]`. The
-    /// selected row wears `table_active`, or `accent` when the theme's
-    /// `list.active_highlight` is off (gpui-component's `TableState`).
+    /// Table hover and selection backgrounds composited over the table base. Selection
+    /// uses table_active when list.active_highlight is enabled, otherwise accent. Both
+    /// replace a package row's own background.
     pub(crate) fn row_grounds(theme: &Theme) -> [Rgb; 2] {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let selected = if theme.list.active_highlight {
@@ -211,8 +189,9 @@ mod tests {
                     ("package own", p.package_own, package),
                     ("package muted", p.package_muted, package),
                     ("package danger", p.package_danger, package),
-                    // The chevron paints `package_muted` on the package
-                    // ground (swept above); the menu's four on theirs.
+                    // Menu text uses its corresponding popover or accent background.
+                    // The row palette is also checked on hover and selection
+                    // backgrounds below.
                     ("menu text", p.menu_text, popover),
                     ("menu muted", p.menu_muted, popover),
                     ("menu active text", p.menu_active_text, active),

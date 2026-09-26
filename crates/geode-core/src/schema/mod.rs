@@ -47,7 +47,7 @@ pub struct SeriesRetention {
 /// paths so they agree on column positions.
 pub const SERIES_COLUMNS: [&str; 5] = ["source", "series_id", "ts", "received_at", "value"];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatasetSpec {
     pub name: String,
     pub columns: Vec<ColumnSpec>,
@@ -217,12 +217,9 @@ impl SchemaSpec {
         let mut out = SchemaSpec::default();
         let mut diags = Vec::new();
         for (ds_name, ds_value) in &doc.value {
-            // A document header, not a dataset. Without this skip the integer
-            // becomes a familyless, columnless `DatasetSpec` named
-            // `config_version`: the columnless check drops only documents, so
-            // it survives, reaches `apply_schema`, and appears in every
-            // dataset pick list — and the configuration that avoids it is the
-            // one `load_layer` warns about, since an absent stamp warns too.
+            // Skip the document version header. Treating its integer as a dataset would
+            // create an empty measures dataset named config_version and expose it to
+            // schema application and dataset pickers.
             if ds_name == "config_version" {
                 continue;
             }

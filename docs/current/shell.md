@@ -83,12 +83,12 @@ the focused occupant through `FindEvent`.
 ## Focus
 
 GPUI window focus and the tiling model's focused tile are separate state and
-must be reconciled deliberately. A tile mouse-down (a right press focuses
-exactly as a left one does, so a module's context menu opens in the tile whose
-keys it answers to, but arms no drag or double-click gesture) and every
-keyboard command that moves structural focus arms `pending_focus_restore`. The shell then
-returns window focus to the appropriate tile surface, except while that same
-occupant intentionally holds an insert-mode input.
+must be reconciled deliberately. Left and right tile presses focus the tile
+and arm `pending_focus_restore`; a right press does not start a drag or a
+double-click gesture. This gives a module's context menu the same tile's key
+context. Keyboard commands that move structural focus also arm restoration.
+The shell returns window focus to the appropriate tile surface, except while
+that occupant intentionally holds an insert-mode input.
 
 An occupant that closes a focused input must blur it before dropping its
 handle. Switching workspaces also restores focus immediately when the old
@@ -116,9 +116,10 @@ choice, or starting a Keybindings capture.
 `enter_filter`, `filter_exit`, and `exit_filter` own the snapshot and key rules;
 `sync_dialog_text` reconciles the resulting query and focus. Escape accepts
 modifiers, while the keep-query Enter must be unmodified. Restoring a different
-query resets selection and scroll to the first match; leaving unchanged text
-keeps selection. In Normal mode, subsequent Escape presses clear a query,
-return from a nested stage, then close the dialog.
+query resets the list toward the first match; object edit stages then settle
+on an eligible row under their [cursor rules](configuration-dialogs.md#stages-and-ownership).
+Leaving unchanged text keeps selection. In Normal mode, subsequent Escape
+presses clear a query, return from a nested stage, then close the dialog.
 
 Naming, open object value fields, Settings typeahead, and keybinding capture
 have their own commit/cancel handling before filter routing. They can focus
@@ -148,6 +149,27 @@ Scope text editing is one undoable session. The first real change records the
 base scope, subsequent keystrokes coalesce, and returning exactly to the base
 removes the no-op undo entry. Changes made through another surface during the
 session remain distinct.
+
+The toolbar's scope segment paints the dimension chips, then one chip per
+top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
+flatten on both sides; an `or`, a `not`, or a single comparison is one term),
+then the contradiction chip. The frame still holds one `Expr`; the terms are
+a view of it, and an edit rebuilds a left-folded `and` chain from the
+remaining terms (`Expr::from_conjuncts`). A term chip's body opens the
+expression dialog on that term; the `×` inside it drops that term alone
+(`Frame::drop_expression_term`). As on a dimension chip, the `×` occludes the
+body's hitbox, which is what keeps its press from also opening the dialog.
+Term chips are addressed by index, which is stable within one scope version;
+the term dialog also carries the term it was seeded with and refuses inline
+unless that term is still at its index at commit time. Every term
+edit, append, and clear goes through undoable `set_scope`.
+
+The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
+dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
+and each row shows its action's live binding, if any. The `+` holds its
+pressed fill while the menu is open. The menu is shell-owned transient state
+(`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
+dispatch the shell's string actions and label them from the shell keymap.
 
 ## Module hosting and delivery
 

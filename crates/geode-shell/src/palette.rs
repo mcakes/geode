@@ -27,7 +27,7 @@ const SCOPE_CATEGORY: &str = "Scope";
 /// badge, a fully qualified bundled theme name, or a live saved-scope name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteItem {
-    Action(ActionId, String, String, Option<String>),
+    Action(ActionId, String, String, Option<Vec<Keystroke>>),
     Theme(String),
     /// Saved-scope name, loaded into the frame when selected.
     Scope(String),
@@ -65,10 +65,10 @@ impl PaletteItem {
         }
     }
 
-    /// Rendered keybinding text (e.g. `"alt+p"`), if any — always `None`
-    /// for a theme or saved-scope row, since both are only ever reached by
-    /// selecting them in the palette itself.
-    pub fn binding(&self) -> Option<&str> {
+    /// The action's keybinding (one keystroke or a sequence), if any —
+    /// always `None` for a theme or saved-scope row, since both are only
+    /// ever reached by selecting them in the palette itself.
+    pub fn binding(&self) -> Option<&[Keystroke]> {
         match self {
             PaletteItem::Action(_, _, _, binding) => binding.as_deref(),
             PaletteItem::Theme(_) | PaletteItem::Scope(_) => None,
@@ -428,13 +428,11 @@ impl PaletteState {
     }
 }
 
-/// Render one keystroke back to display text: `mods+key`, modifiers in a
-/// fixed ctrl/alt/shift/cmd order, `+`-joined (e.g. `"ctrl+shift+p"`).
-/// Deliberately a standalone copy of `shell::status`'s pending-keystroke
-/// formatting rather than a shared call into it: that module pulls in
-/// `gpui`/`gpui_component`, and this module's pure core must not. `pub(
-/// crate)` so `shell::whichkey`'s pure core — equally gpui-free — can reuse
-/// it rather than adding a third copy.
+/// Render one keystroke back to the keymap's own spelling: `mods+key`,
+/// modifiers in a fixed ctrl/alt/shift/cmd order, `+`-joined (e.g.
+/// `"ctrl+shift+p"`). This is text for sentences, selectors and sort keys —
+/// what a trader would type into a keymap file. A key painted on its own
+/// goes through `shell::kbd` instead.
 pub(crate) fn render_keystroke(ks: &Keystroke) -> String {
     let mut parts = Vec::new();
     if ks.mods.ctrl {
@@ -467,12 +465,12 @@ pub fn render_binding(keystrokes: &[Keystroke]) -> String {
 /// Build binding badges once at palette open. Keep the first compiled
 /// binding encountered for each action ID. This is a display index: it neither
 /// evaluates contexts nor checks whether a later binding shadows that key.
-pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
+pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, Vec<Keystroke>> {
     let mut index = BTreeMap::new();
     for binding in keymap.bindings() {
         index
             .entry(binding.action.clone())
-            .or_insert_with(|| render_binding(&binding.keystrokes));
+            .or_insert_with(|| binding.keystrokes.clone());
     }
     index
 }
@@ -483,7 +481,7 @@ pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
 pub fn build_items(
     registry: &ActionRegistry,
     theme: &ThemeService,
-    bindings: &BTreeMap<ActionId, String>,
+    bindings: &BTreeMap<ActionId, Vec<Keystroke>>,
     saved: &geode_core::scopes::SavedScopes,
 ) -> Vec<PaletteItem> {
     let mut items: Vec<PaletteItem> = registry
@@ -524,8 +522,6 @@ use gpui::{
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
-
-use crate::fonts;
 
 /// Target panel width at the design rem size.
 const WIDTH: f32 = 560.0;
@@ -672,10 +668,7 @@ pub fn render(
                             row_paint.accent,
                         )),
                 );
-            let binding = div()
-                .font_family(fonts::MONO)
-                .text_color(theme.muted_foreground)
-                .child(item.binding().unwrap_or("").to_string());
+            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());
             list = list.child(row.child(label).child(binding));
         }
     }
@@ -737,7 +730,9 @@ mod tests {
             ActionId(id.to_string()),
             title.to_string(),
             category.to_string(),
-            binding.map(str::to_string),
+            binding.map(|spec| {
+                crate::keymap::parse_binding(spec, crate::keymap::Modifiers::NONE).unwrap()
+            }),
         )
     }
 
@@ -1243,7 +1238,10 @@ mod tests {
         );
         assert_eq!(item.title(), "Close tile");
         assert_eq!(item.category(), "Workspace");
-        assert_eq!(item.binding(), Some("ctrl+w"));
+        assert_eq!(
+            item.binding().map(render_binding).as_deref(),
+            Some("ctrl+w")
+        );
     }
 
     // -- render_binding / build_binding_index / build_items ---------------
@@ -1294,7 +1292,8 @@ mod tests {
         assert_eq!(
             bindings
                 .get(&ActionId("palette::toggle".to_string()))
-                .map(String::as_str),
+                .map(|keys| render_binding(keys))
+                .as_deref(),
             Some("ctrl+k")
         );
 
@@ -1331,7 +1330,10 @@ mod tests {
             .iter()
             .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::close_tile"))
             .unwrap();
-        assert_eq!(close.binding(), Some("ctrl+w"));
+        assert_eq!(
+            close.binding().map(render_binding).as_deref(),
+            Some("ctrl+w")
+        );
     }
 
     // -- split_label_indices ---------------------------------------------

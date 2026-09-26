@@ -1,7 +1,7 @@
 //! One ingest thread owns the writer and serializes all publication.
 //!
 //! Each dequeue prefers documents, then fetched series, then files. Documents
-//! and series are FIFO; files follow planned priority and descending source
+//! (publishes and local forgets, in one queue) and series are FIFO; files follow planned priority and descending source
 //! time. Running work finishes before priorities are reconsidered. Sustained
 //! higher-priority traffic can starve lower-priority work.
 //!
@@ -10,8 +10,12 @@
 //! refusal, or fixed capacity. Upstream coalescing does not bound these queues.
 //!
 //! Loads use fixed staging-table names, so concurrent file loads on the same
-//! store are unsafe. Shutdown joins running work but does not drain queued
-//! jobs. See `docs/current/data-path.md` for delivery and health contracts.
+//! store are unsafe. Shutdown finishes the running operation, then runs the
+//! queued local document work (`local`-source publishes and forgets) in
+//! queue order, each answering as usual, and drops the rest: feed
+//! documents, series and files are resent by their sources after a
+//! restart. See `docs/current/data-path.md` for delivery and health
+//! contracts.
 
 use crate::adapter::SeriesRows;
 use crate::health::Health;
@@ -20,8 +24,10 @@ use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
 use crate::store::document::{
-    DocumentPublishRequest, DocumentPublished, document_path, publish_document,
+    DocumentPublishRequest, DocumentPublished, document_generation_count, document_path,
+    forget_document, prune_orphan_provenance, publish_document,
 };
+use crate::store::retention::{RetentionPolicy, sweep};
 use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
@@ -82,9 +88,29 @@ pub enum IngestEvent {
         identity: String,
         reason: String,
     },
+    /// A forget deleted every generation of one document (`rows` payload
+    /// rows, live plus archive; zero when nothing held the key).
+    Forgotten {
+        dataset: String,
+        batch: String,
+        rows: usize,
+    },
+    /// A forget that deleted nothing: the dataset is undeclared or not
+    /// local, the delete failed and rolled back, or it panicked.
+    ForgetFailed {
+        dataset: String,
+        batch: String,
+        reason: String,
+    },
     /// The queue drained. Not a terminal state — more work may be submitted.
     PlanComplete,
 }
+
+/// Archive generations kept per local document after each local publish:
+/// with the live one, a sheet's history holds at most this many plus one.
+/// Local datasets have no configured retention and are written by autosave,
+/// so without a bound every edit burst would grow the archive forever.
+pub const LOCAL_KEEP_GENERATIONS: usize = 200;
 
 /// Nonblocking event delivery. `false` means refused; the runner continues
 /// without retrying the event. The callback can run under the queue lock and
@@ -103,6 +129,30 @@ pub struct DocumentJob {
     pub source_time: DateTime<Utc>,
     pub received_at: DateTime<Utc>,
     pub bytes: u64,
+}
+
+/// Delete one local document's whole history (every generation, its summary
+/// and provenance rows). Queued in the documents FIFO, so it runs after every
+/// publish submitted before it — including a save of the same key.
+#[derive(Debug, Clone)]
+pub struct ForgetJob {
+    pub dataset: String,
+    /// The document's key, joined (`join_key`).
+    pub batch: String,
+}
+
+/// One entry in the documents FIFO. Publishes and forgets share one queue so
+/// their relative order is exactly their submission order.
+#[derive(Debug)]
+enum DocumentWork {
+    Publish(DocumentJob),
+    Forget(ForgetJob),
+}
+
+impl From<DocumentJob> for DocumentWork {
+    fn from(job: DocumentJob) -> Self {
+        DocumentWork::Publish(job)
+    }
 }
 
 /// Owned fetched rows waiting for the serialized append operation.
@@ -124,7 +174,7 @@ struct Queue {
     /// coalescer upstream has already collapsed repeats of the same key,
     /// so everything still in here is distinct work, and a LIFO would
     /// reorder unrelated keys for no gain.
-    documents: VecDeque<DocumentJob>,
+    documents: VecDeque<DocumentWork>,
     /// Fetched series, taken after documents and ahead of files: a
     /// fetch was asked for by a trader watching a chart, a file was
     /// found by a poll.
@@ -216,7 +266,17 @@ impl IngestHandle {
     pub fn submit_document(&self, job: DocumentJob) {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        q.documents.push_back(job);
+        q.documents.push_back(DocumentWork::Publish(job));
+        cvar.notify_all();
+    }
+
+    /// Queue a forget behind every document already queued. No refusal
+    /// here: the runner itself refuses a dataset that is not local, with
+    /// `ForgetFailed`.
+    pub fn submit_forget(&self, job: ForgetJob) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.documents.push_back(DocumentWork::Forget(job));
         cvar.notify_all();
     }
 
@@ -230,6 +290,8 @@ impl IngestHandle {
         cvar.notify_all();
     }
 
+    /// Stop the runner and join it. Queued local writes (app publishes and
+    /// forgets) still run first; every other queued item is dropped.
     pub fn shutdown(&self) {
         {
             let (lock, cvar) = &*self.queue;
@@ -291,9 +353,21 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
 /// One unit of work the runner popped.
 #[derive(Debug)]
 enum Work {
-    Document(DocumentJob),
+    Document(DocumentWork),
     Series(SeriesJob),
     File(WorkItem),
+}
+
+/// The queued local writes — `LOCAL_SOURCE` publishes and every forget
+/// (forgets are local-only) — in queue order, leaving nothing queued.
+fn take_local_writes(q: &mut Queue) -> Vec<DocumentWork> {
+    q.documents
+        .drain(..)
+        .filter(|work| match work {
+            DocumentWork::Publish(job) => job.source == LOCAL_SOURCE,
+            DocumentWork::Forget(_) => true,
+        })
+        .collect()
 }
 
 /// Takes the next unit of work, **documents first, then series** (module
@@ -363,6 +437,12 @@ fn publish_one_document(
         return;
     };
 
+    let source_time = if job.source == LOCAL_SOURCE {
+        local_source_time(store, dataset, &batch, job.source_time)
+    } else {
+        job.source_time
+    };
+
     // Contain publication panics as this document's failure and continue. The
     // contained marker tells the process panic hook to log without a crash file.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -373,7 +453,7 @@ fn publish_one_document(
                     dataset,
                     source: &job.source,
                     rows: &job.rows,
-                    source_time: job.source_time,
+                    source_time,
                     received_at: job.received_at,
                     bytes: job.bytes,
                 },
@@ -420,10 +500,142 @@ fn publish_one_document(
             }
         }
     };
+    let published = matches!(event, IngestEvent::Published { .. });
     if !sink(event) {
         log_refused_event(
             refusal_logged,
             &format!("the document publish outcome for {}/{batch}", job.dataset),
+        );
+    }
+    if published && dataset.local {
+        sweep_local(store, dataset, &batch);
+    }
+}
+
+/// The source time a local save is published at: its own stamp, or just past
+/// the live generation's when the wall clock stepped back. The app's latest
+/// save is by definition its newest, and the writer is serialized, so it must
+/// become live — an archived-only save would still answer `LocalPublished`,
+/// telling the sheet it was stored while a reload shows the older content.
+/// A lookup failure keeps the job's stamp (the publish's own backfill guard
+/// then decides, as before) and is logged.
+fn local_source_time(
+    store: &Store,
+    dataset: &geode_core::schema::DatasetSpec,
+    batch: &str,
+    stamped: DateTime<Utc>,
+) -> DateTime<Utc> {
+    match Catalog::new(store.writer()).live_source_time(&dataset.name, batch, None) {
+        Ok(Some(live)) => stamped.max(live + chrono::Duration::microseconds(1)),
+        Ok(None) => stamped,
+        Err(e) => {
+            tracing::warn!(
+                target: "geode::ingest",
+                "reading the live source time of {}/{batch} failed; the save keeps its own stamp: {e}",
+                dataset.name,
+            );
+            stamped
+        }
+    }
+}
+
+/// Whether the document just saved holds more generations than a local
+/// document keeps (the archive bound plus the live one). A document only
+/// crosses the bound on its own publish, so checking the saved document alone
+/// is enough to know a sweep has work.
+fn local_needs_sweep(
+    store: &Store,
+    dataset: &geode_core::schema::DatasetSpec,
+    batch: &str,
+) -> Result<bool, StoreError> {
+    Ok(document_generation_count(store, dataset, batch)? > LOCAL_KEEP_GENERATIONS + 1)
+}
+
+/// Bound a local dataset's archive after a publish (`LOCAL_KEEP_GENERATIONS`
+/// per document), then prune the evicted generations' provenance. Gated on
+/// the saved document crossing the bound, so an ordinary autosave costs one
+/// summary count rather than a sweep of every sheet; once gated, the sweep
+/// covers the whole dataset. Runs on the writer, after the publish committed
+/// and its outcome was sent, so a failure never turns a stored save into a
+/// failed one: it is logged, and that document's next save retries (it is
+/// still past the bound). Returns whether a sweep ran and succeeded.
+fn sweep_local(store: &Store, dataset: &geode_core::schema::DatasetSpec, batch: &str) -> bool {
+    let policy = RetentionPolicy {
+        keep_generations: Some(LOCAL_KEEP_GENERATIONS),
+        keep_age: None,
+    };
+    let pairs = crate::store::ddl::table_pairs(dataset);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            if !local_needs_sweep(store, dataset, batch).map_err(|e| e.to_string())? {
+                return Ok(false);
+            }
+            sweep(store.writer(), dataset, &pairs, &policy, Utc::now())
+                .map_err(|e| e.to_string())?;
+            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;
+            Ok(true)
+        })
+    }));
+    let reason = match outcome {
+        Ok(Ok(swept)) => return swept,
+        Ok(Err(reason)) => reason,
+        Err(payload) => format!("panicked: {}", panic_payload_message(payload.as_ref())),
+    };
+    tracing::warn!(
+        target: "geode::ingest",
+        "retention sweep of local dataset '{}' failed (history is kept until the next publish sweeps): {reason}",
+        dataset.name,
+    );
+    false
+}
+
+/// Forget one local document under panic containment and report the outcome.
+/// A dataset that is undeclared or not `local` is refused here, not only at
+/// the service: deleting a feed's history is never a forget.
+fn forget_one_document(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    job: ForgetJob,
+) {
+    let failed = |reason: String| IngestEvent::ForgetFailed {
+        dataset: job.dataset.clone(),
+        batch: job.batch.clone(),
+        reason,
+    };
+    let event = match schema.dataset(&job.dataset) {
+        None => failed(format!("dataset '{}' is not declared", job.dataset)),
+        Some(ds) if !ds.local => failed(format!(
+            "dataset '{}' is not a local dataset; only a local document can be forgotten",
+            job.dataset
+        )),
+        Some(ds) => {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                geode_core::panic::contained(|| {
+                    forget_document(store, ds, &job.batch).map_err(|e| e.to_string())
+                })
+            }));
+            match outcome {
+                Ok(Ok(rows)) => IngestEvent::Forgotten {
+                    dataset: job.dataset.clone(),
+                    batch: job.batch.clone(),
+                    rows,
+                },
+                Ok(Err(reason)) => failed(reason),
+                Err(payload) => {
+                    let message = panic_payload_message(payload.as_ref());
+                    let path = document_path(LOCAL_SOURCE, &job.dataset, &job.batch);
+                    log_ingest_panic(&path, &message);
+                    failed(format!("forget panicked at {}: {message}", path.display()))
+                }
+            }
+        }
+    };
+    if !sink(event) {
+        log_refused_event(
+            refusal_logged,
+            &format!("the forget outcome for {}/{}", job.dataset, job.batch),
         );
     }
 }
@@ -519,6 +731,28 @@ fn run(
             let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if q.shutdown {
+                    let local = take_local_writes(&mut q);
+                    drop(q);
+                    // The app's own writes still queued are its user's last
+                    // edits (a save flushed at quit, a `:rm` just confirmed):
+                    // run them, in order, each answering as usual, before
+                    // stopping. Feed documents, series and files are dropped;
+                    // their sources resend them after a restart.
+                    for work in local {
+                        match work {
+                            DocumentWork::Forget(job) => {
+                                forget_one_document(&store, &schema, &sink, &refusal_logged, job)
+                            }
+                            DocumentWork::Publish(job) => publish_one_document(
+                                &store,
+                                &schema,
+                                &sink,
+                                publish,
+                                &refusal_logged,
+                                job,
+                            ),
+                        }
+                    }
                     return;
                 }
                 // Documents first, then series, then files; `None` means
@@ -552,7 +786,12 @@ fn run(
         // Started so autosave does not activate ingest progress; publication still
         // produces an outcome and the service's LoadEnded.
         let item = match work {
-            Work::Document(job) => {
+            // A forget is a local write like a local publish: no Started.
+            Work::Document(DocumentWork::Forget(job)) => {
+                forget_one_document(&store, &schema, &sink, &refusal_logged, job);
+                continue;
+            }
+            Work::Document(DocumentWork::Publish(job)) => {
                 if job.source == LOCAL_SOURCE {
                     // no Started/Loading for a local publish — see the
                     // doc comment above.
@@ -827,6 +1066,8 @@ mod tests {
                 IngestEvent::Failed { .. } => "failed",
                 IngestEvent::SeriesAppended { .. } => "series_appended",
                 IngestEvent::SeriesFailed { .. } => "series_failed",
+                IngestEvent::Forgotten { .. } => "forgotten",
+                IngestEvent::ForgetFailed { .. } => "forget_failed",
                 IngestEvent::PlanComplete => "drained",
             })
             .filter(|k| *k != "drained")
@@ -1794,9 +2035,11 @@ mod tests {
             ts("2026-08-30T07:00:00Z"),
             Priority::LatestRisk,
         ));
-        q.documents.push_back(job("cvi_params", spx()));
+        q.documents.push_back(job("cvi_params", spx()).into());
         match take_work(&mut q) {
-            Some(Work::Document(d)) => assert_eq!(d.rows.key, vec!["SPX.Z".to_string()]),
+            Some(Work::Document(DocumentWork::Publish(d))) => {
+                assert_eq!(d.rows.key, vec!["SPX.Z".to_string()])
+            }
             other => panic!("a document outranks a file, even a LatestRisk one: {other:?}"),
         }
         // The file is still queued — a document takes no file's turn away,
@@ -1867,6 +2110,53 @@ mod tests {
             IngestRunner::spawn_with(store, schema, sink, load_file, publish),
             rx,
         )
+    }
+
+    /// A publish slow enough that a shutdown lands while it runs.
+    fn slow_publish(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentPublished, crate::store::StoreError> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        publish_document(store, req)
+    }
+
+    /// A shutdown runs the local writes still queued (saves and forgets,
+    /// in order, each answering as usual) before the runner stops; a feed's
+    /// queued document is still dropped, as files and series are.
+    #[test]
+    fn shutdown_runs_queued_local_writes_and_drops_the_rest() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = spawn_channel_with_publish(store, schema, slow_publish);
+        let at = ts("2026-09-12T14:00:00Z");
+        handle.submit_document(local_job("a", &[1], at));
+        handle.submit_document(job("cvi_params", spx()));
+        handle.submit_document(local_job("b", &[1, 2], at));
+        handle.submit_document(local_job("c", &[1, 2, 3], at));
+        handle.submit_forget(ForgetJob {
+            dataset: "sheets".into(),
+            batch: "b".into(),
+        });
+        // Lands while `a` is publishing.
+        handle.shutdown();
+        let answered: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                IngestEvent::Published { batch, .. } => Some(format!("published {batch}")),
+                IngestEvent::Forgotten { batch, .. } => Some(format!("forgot {batch}")),
+                IngestEvent::Failed { batch, reason, .. } => panic!("{batch}: {reason}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answered,
+            ["published a", "published b", "published c", "forgot b"],
+            "the feed's document is dropped, the local writes all run"
+        );
+        assert_eq!(
+            count_in(&path, "select count(*) from sheets_document_live"),
+            1 + 3
+        );
     }
 
     fn boom_publish(
@@ -2028,7 +2318,7 @@ mod tests {
         // Populate all three queues in reverse priority order. This detects either
         // a document/series or a series/file ordering swap.
         let mut q = Queue::default();
-        q.documents.push_back(job("cvi_params", spx()));
+        q.documents.push_back(job("cvi_params", spx()).into());
         q.series
             .push_back(series_job("SPX.close", SeriesRows::default()));
         q.items.push(work_item(
@@ -2044,5 +2334,279 @@ mod tests {
         let third = take_work(&mut q).unwrap();
         assert!(matches!(third, Work::File(_)));
         assert!(take_work(&mut q).is_none());
+    }
+
+    // Local documents: forget and retention.
+
+    /// A store holding both the local `sheets` dataset and the non-local
+    /// CVI dataset, with the path kept so a test can reopen it after the
+    /// runner (which owns the store) has shut down.
+    fn local_store() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Store,
+        geode_core::schema::SchemaSpec,
+    ) {
+        use crate::store::ddl::tests_support::local_dataset;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        let store = Store::open(&path).unwrap();
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        for ds in [local_dataset(), cvi_dataset()] {
+            store.apply_schema(&ds).unwrap();
+            schema.datasets.push(ds);
+        }
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, path, store, schema)
+    }
+
+    fn local_job(sheet: &str, qty: &[i64], at: DateTime<Utc>) -> DocumentJob {
+        DocumentJob {
+            source: LOCAL_SOURCE.into(),
+            dataset: "sheets".into(),
+            rows: crate::store::ddl::tests_support::sheet_rows(sheet, qty),
+            source_time: at,
+            received_at: at,
+            bytes: 0,
+        }
+    }
+
+    fn count_in(path: &std::path::Path, sql: &str) -> i64 {
+        let store = Store::open(path).unwrap();
+        store.writer().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// The documents lane is one FIFO: a forget queued behind a save of the
+    /// same key runs after it, so the save's generation is deleted too —
+    /// what `:rm` after an unconfirmed autosave must mean.
+    #[test]
+    fn a_forget_queued_after_a_save_of_the_same_key_leaves_no_document() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_document(local_job("s", &[1, 2], ts("2026-09-12T14:00:00Z")));
+        handle.submit_forget(ForgetJob {
+            dataset: "sheets".into(),
+            batch: "s".into(),
+        });
+        match next_event(&rx) {
+            IngestEvent::Published { batch, .. } => assert_eq!(batch, "s"),
+            other => panic!("the save runs first: {other:?}"),
+        }
+        match next_event(&rx) {
+            IngestEvent::Forgotten {
+                dataset,
+                batch,
+                rows,
+            } => assert_eq!((dataset.as_str(), batch.as_str(), rows), ("sheets", "s", 2)),
+            other => panic!("{other:?}"),
+        }
+        handle.shutdown();
+        drop(rx);
+        for sql in [
+            "select count(*) from sheets_document_live",
+            "select count(*) from sheets_document_archive",
+            "select count(*) from generations where dataset = 'sheets'",
+            "select count(*) from file_generations where dataset = 'sheets'",
+        ] {
+            assert_eq!(count_in(&path, sql), 0, "{sql}");
+        }
+    }
+
+    /// The runner refuses a forget that is not for a declared local dataset
+    /// itself, not only behind the service's gate: `ForgetJob` is a public
+    /// door onto the writer, and deleting a feed's history is not a thing
+    /// any caller of it may do.
+    #[test]
+    fn a_forget_of_a_non_local_or_undeclared_dataset_fails_and_deletes_nothing() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_document(job("cvi_params", spx()));
+        assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        for dataset in ["cvi_params", "nonesuch"] {
+            handle.submit_forget(ForgetJob {
+                dataset: dataset.into(),
+                batch: "SPX.Z".into(),
+            });
+            match next_event(&rx) {
+                IngestEvent::ForgetFailed {
+                    dataset: d,
+                    batch,
+                    reason,
+                } => {
+                    assert_eq!((d.as_str(), batch.as_str()), (dataset, "SPX.Z"));
+                    assert!(reason.contains(dataset), "{reason}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        handle.shutdown();
+        drop(rx);
+        assert_eq!(
+            count_in(&path, "select count(*) from cvi_params_document_live"),
+            6
+        );
+    }
+
+    /// The app's latest save is by definition its newest: a local save
+    /// stamped at or before what is live (a wall-clock step-back) is moved
+    /// just past live on the writer instead of being archived, or the sheet
+    /// would be told "saved" while a reload shows the older content.
+    #[test]
+    fn a_local_save_older_than_live_is_still_published_live() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let future = ts("2026-09-12T15:00:00Z");
+        handle.submit_document(local_job("s", &[1], future));
+        handle.submit_document(local_job("s", &[2], ts("2026-09-12T14:00:00Z")));
+        for _ in 0..2 {
+            assert!(matches!(next_event(&rx), IngestEvent::Published { .. }));
+        }
+        handle.shutdown();
+        drop(rx);
+        assert_eq!(
+            count_in(&path, "select min(qty) from sheets_document_live"),
+            2,
+            "the latest save is live"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations \
+                 where dataset = 'sheets' and archived_only"
+            ),
+            0
+        );
+        let store = Store::open(&path).unwrap();
+        let live: DateTime<Utc> = store
+            .writer()
+            .query_row(
+                "select max(source_time) from sheets_document_live",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, future + chrono::Duration::microseconds(1));
+    }
+
+    /// The sweep is gated on the saved document crossing the bound, so a
+    /// save under it costs one small count, not a sweep of every sheet; the
+    /// sweep that does run also prunes the evicted generations' provenance.
+    #[test]
+    fn a_local_sweep_runs_only_past_the_bound_and_prunes_provenance() {
+        use crate::store::ddl::tests_support::local_dataset;
+        let (_dir, path, store, _schema) = local_store();
+        let ds = local_dataset();
+        let start = ts("2026-09-12T14:00:00Z");
+        let save = |i: usize| {
+            let at = start + chrono::Duration::seconds(i as i64);
+            publish_document(
+                &store,
+                &DocumentPublishRequest {
+                    dataset: &ds,
+                    source: LOCAL_SOURCE,
+                    rows: &crate::store::ddl::tests_support::sheet_rows("s", &[i as i64]),
+                    source_time: at,
+                    received_at: at,
+                    bytes: 0,
+                },
+            )
+            .unwrap();
+        };
+        for i in 0..=LOCAL_KEEP_GENERATIONS {
+            save(i);
+        }
+        assert!(
+            !local_needs_sweep(&store, &ds, "s").unwrap(),
+            "at the bound"
+        );
+        assert!(!sweep_local(&store, &ds, "s"), "no sweep under the bound");
+        save(LOCAL_KEEP_GENERATIONS + 1);
+        assert!(
+            local_needs_sweep(&store, &ds, "s").unwrap(),
+            "past the bound"
+        );
+        assert!(sweep_local(&store, &ds, "s"));
+        drop(store);
+        let bound = LOCAL_KEEP_GENERATIONS as i64 + 1;
+        for sql in [
+            "select count(*) from generations where dataset = 'sheets'",
+            "select count(*) from file_generations where dataset = 'sheets'",
+            "select count(*) from file_books",
+        ] {
+            assert_eq!(count_in(&path, sql), bound, "{sql}");
+        }
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations fg where dataset = 'sheets' \
+                 and not exists (select 1 from generations g \
+                 where g.dataset = fg.dataset and g.gen_id = fg.gen_id)"
+            ),
+            0,
+            "only evicted generations' provenance went"
+        );
+    }
+
+    /// Local documents are swept to the retention bound after each local
+    /// publish, per key; a feed's documents are never swept by that path.
+    #[test]
+    fn local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let n = LOCAL_KEEP_GENERATIONS + 5;
+        let start = ts("2026-09-12T14:00:00Z");
+        for i in 0..n {
+            let at = start + chrono::Duration::seconds(i as i64);
+            handle.submit_document(local_job("s", &[i as i64], at));
+            let mut feed = job("cvi_params", spx());
+            feed.source_time = at;
+            feed.received_at = at;
+            handle.submit_document(feed);
+        }
+        for _ in 0..2 * n {
+            match next_event(&rx) {
+                IngestEvent::Published { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        handle.shutdown();
+        drop(rx);
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(distinct gen_id) from sheets_document_archive"
+            ),
+            LOCAL_KEEP_GENERATIONS as i64,
+            "the archive keeps the bound"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from generations where dataset = 'sheets'"
+            ),
+            LOCAL_KEEP_GENERATIONS as i64 + 1,
+            "live plus the kept archive"
+        );
+        assert_eq!(
+            count_in(&path, "select min(qty) from sheets_document_archive"),
+            4,
+            "the oldest four generations went, not arbitrary ones"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(distinct gen_id) from cvi_params_document_archive"
+            ),
+            n as i64 - 1,
+            "a feed's history is not swept by a local publish"
+        );
+        assert_eq!(
+            count_in(
+                &path,
+                "select count(*) from file_generations where dataset = 'sheets'"
+            ),
+            LOCAL_KEEP_GENERATIONS as i64 + 1,
+            "provenance is pruned with the sweep"
+        );
     }
 }

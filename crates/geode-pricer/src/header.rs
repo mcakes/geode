@@ -17,13 +17,12 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, FontWeight, Hsla, IntoElement, SharedString, div};
+use gpui::{ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div};
 use gpui_component::{Theme, h_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
-/// The muted labels ahead of the header's two values (`view vanilla`,
-/// `pricer mock`), the market-data header's label/value pairs.
+/// Labels preceding the active view and pricer names in the header.
 pub(crate) const VIEW_LABEL: &str = "view";
 pub(crate) const PRICER_LABEL: &str = "pricer";
 
@@ -42,6 +41,8 @@ pub(crate) struct HeaderInputs<'a> {
     /// The tile's own notice, already chosen by precedence (a transient
     /// notice, then a view fallback); `None` lets a missing pricer speak.
     pub notice: Option<SharedString>,
+    /// The armed `:rm` confirm's question.
+    pub prompt: Option<SharedString>,
     /// The save state's own slot (a refused save, or a failed load that
     /// blocks saving). Separate from `notice` so a pricing notice can
     /// neither overwrite nor clear it; painted first, left of `notice`,
@@ -69,6 +70,8 @@ pub(crate) struct HeaderModel {
     pub time_stale: Option<SharedString>,
     pub notice: Option<SharedString>,
     pub notice_tone: NoticeTone,
+    /// The armed `:rm` confirm's question (see `HeaderInputs::prompt`).
+    pub prompt: Option<SharedString>,
     /// The save state (see `HeaderInputs::save`).
     pub save: Option<SharedString>,
 }
@@ -124,6 +127,7 @@ pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         time: time.map(Into::into),
         notice,
         notice_tone,
+        prompt: i.prompt,
         save: i.save,
     }
 }
@@ -140,6 +144,7 @@ impl HeaderModel {
         out.extend(self.shifts.iter().map(|s| s.to_string()));
         out.extend(self.save.iter().map(|s| s.to_string()));
         out.extend(self.notice.iter().map(|s| s.to_string()));
+        out.extend(self.prompt.iter().map(|s| s.to_string()));
         out.extend(self.pricing.iter().map(|s| s.to_string()));
         out.extend(self.failed.iter().map(|s| s.to_string()));
         out.push(PRICER_LABEL.to_string());
@@ -149,8 +154,7 @@ impl HeaderModel {
     }
 }
 
-/// A muted label and its value, parts of one reading (`view vanilla`,
-/// the market-data header's label/value pairs).
+/// Render a muted label beside its value, such as the active view name.
 fn pair(label: &'static str, value: SharedString, muted: Hsla, text: Hsla) -> impl IntoElement {
     h_flex()
         .gap_1()
@@ -171,6 +175,8 @@ pub(crate) struct HeaderChrome<'a> {
     pub menu_open: bool,
     /// The `⋯` tooltip's selector, built once with the tile.
     pub menu_tip: SharedString,
+    /// The armed `:rm` confirm's focus handle: the prompt tracks it.
+    pub confirm: Option<&'a FocusHandle>,
 }
 
 pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl IntoElement {
@@ -234,6 +240,27 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
                     .child(n),
             )
         })
+        // The armed `:rm` confirm (planning decision 14): the question in
+        // the primary text tone — a decision awaiting the trader, not a
+        // warning — on the element that holds the keyboard while it
+        // stands. Its `on_key_down` sits on the focused element and so
+        // runs before the shell root's listener; every key is the
+        // confirm's (`PricerTile::confirm_key`), so propagation stops.
+        .when_some(h.prompt.clone().zip(c.confirm), |el, (p, focus)| {
+            let tile = c.tile.clone();
+            el.child(
+                div()
+                    .track_focus(focus)
+                    .debug_selector(move || format!("pricer-remove-confirm-{tile_id}"))
+                    .text_color(theme.foreground)
+                    .child(p)
+                    .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                            cx.stop_propagation();
+                        }
+                    }),
+            )
+        })
         .when_some(h.pricing.clone(), |el, p| el.child(p))
         .when_some(h.failed.clone(), |el, f| {
             el.child(
@@ -257,24 +284,12 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
             },
             |el, t| el.child(div().when(stale, |el| el.text_color(warn)).child(t)),
         )
-        // `⋯` — the pointer's door onto the action menu, the click's own
-        // form of `.` (market-data's trigger, copied): a persistent fill
-        // while the menu is open, bare control states while closed.
+        // Toggle the action menu during capture, before its outside-click closer. A
+        // bubble-phase toggle would see the menu already closed and reopen it on the
+        // second click. Keep propagation so the shell's click-to-focus still runs.
         //
-        // On the CAPTURE phase, and it does NOT stop propagation: the
-        // menu's own `on_mouse_down_out` is a capture listener too and
-        // would close an open menu before a bubble handler here could
-        // ask whether one was open, so a second click would reopen it.
-        // Capturing first lets this toggle decide; the shell's bubble
-        // phase (click-to-focus) still runs, so a click on an unfocused
-        // tile focuses it and `mode == menu` reaches the right tile.
-        //
-        // It enters through `dispatch`, exactly as `.` does, so with an
-        // entry field or cell editor open it first closes them (blurring
-        // before the drop, without committing) and the closers may re-sync
-        // the cursor. That is benign and intended: the menu acts on the
-        // cursor row, and a click here must not leave a live field under
-        // an open menu any more than the key would.
+        // Use the same dispatch route as the menu key: cancel and blur any open field
+        // before opening the menu on the current cursor row.
         .child(
             div()
                 .id(ElementId::NamedInteger(
@@ -317,10 +332,8 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
         )
 }
 
-/// Always laid out, text or not, so the table's height never changes
-/// (spec §8.3). Every footer line is a user error or a failure, so it
-/// paints in danger text, at the status-line size the blotter's footer
-/// and the timeseries notice line use.
+/// Reserve footer height even without text so the table does not resize. Errors and
+/// line failures use danger text at the status-line font size.
 pub(crate) fn render_footer(text: Option<&SharedString>, theme: &Theme) -> impl IntoElement {
     h_flex()
         .w_full()
@@ -363,6 +376,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -387,6 +401,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -401,6 +416,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            prompt: None,
             save: None,
             settings: &settings(false),
             clock: Clock::utc(),
@@ -419,6 +435,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: None,
+            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),
@@ -437,6 +454,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some(LOADING.into()),
+            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),
@@ -446,6 +464,7 @@ mod tests {
         let h = prepare(HeaderInputs {
             sheet: &s,
             notice: Some("sheet 'book' was not found; opened empty".into()),
+            prompt: None,
             save: None,
             settings: &settings(true),
             clock: Clock::utc(),

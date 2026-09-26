@@ -700,7 +700,7 @@ Coarse-grain measures repeat exactly within their grain, which is what the inges
 split is tested against (`generate.rs:1-4`, `lib.rs:78-120`). These are fixtures designed
 by someone who knew which bug each one catches.
 
-**W7. The keymap is verified end-to-end through the production assembly.** 
+**W7. The keymap is verified end-to-end through the production assembly.**
 `the_whole_production_keymap_builds_with_no_diagnostics` (`main.rs:1282-1347`) builds the
 registry in `run`'s exact order, constructs the roster through the *real* `bridge::start`
 rather than a hand-kept list, splices the real module fragments, and asserts zero

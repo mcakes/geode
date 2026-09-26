@@ -20,7 +20,7 @@ Reader defaults, partial validation, and presentation rules are described in
 |---|---|
 | `config` | Builtin → Desk → User TOML loading, recursive merging with whole-object exceptions, and path provenance. File loading collects diagnostics; typed readers validate separately. `load_views` applies dataset and view presentation without rewriting definitions. TOML key order is preserved. |
 | `schema` | Dataset families (`measures`, `document`, `series`), columns, roles, grains, and family-specific validation. Readers may retain corrected objects with diagnostics. Grain `Ord` reads coarse < fine. |
-| `scope` | Dimension selections, text, expressions, and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. |
+| `scope` | Dimension selections, text, expressions, and impossible-state tracking. Components combine with AND within a query; across layers, dimensions intersect, expressions AND, and inner text replaces outer text. Expression parsing and schema validation are separate. `Expr::conjuncts` splits an expression into its top-level `and` terms and `Expr::from_conjuncts` rebuilds a left-folded chain from them, which is how the toolbar edits one term at a time. |
 | `scopes` | Saved scopes (`scopes.toml`). |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
@@ -31,7 +31,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |
 | `document` | The struct-of-arrays rows a parsed market-data document becomes, and the `DocumentKind` trait a parser implements. |
 | `source_config` | I/O-free source parsing: defaults, dataset-family routing, topic and timestamp-field validation, and field-addressed diagnostics. Source tables replace whole objects across layers. |
-| `egress_config` | I/O-free `egress.toml` parsing: adapter and per-document address templates (`{key}` joins the document key with `/`), field-addressed diagnostics, and target-dropping validation. Egress tables replace whole objects across layers, like `source_config`; restart-required, not hot-reloaded. |
+| `egress_config` | I/O-free upload-target parsing and field-addressed diagnostics. Invalid targets are skipped; address templates substitute raw key parts joined by `/`. Targets replace whole objects across layers. Runtime workers retain startup configuration until restart. |
 | `format` | Number formatting (scale, precision, grouping, negative style) shared by the blotter and the market-data panel. |
 | `colour` | Named colours from semantic tokens or OKLCH hue interpolation. Contrast correction targets 3:1 but may fall short for custom themes. Pure; callers supply `Anchors`/`Tokens`. |
 | `health` | The degradation vocabulary (`Ok`, `Pending`, `PendingTooLong`, `Degraded`, `Failed`). Roll up by `severity_rank`, never by the derived `Ord`. |

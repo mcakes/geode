@@ -538,15 +538,7 @@ fn build(
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx))
         .child(rows)
-        .child(hint_row(
-            hints,
-            hints_selector,
-            WIDTH,
-            muted,
-            theme.muted,
-            theme.border,
-            theme.radius,
-        ))
+        .child(hint_row(hints, hints_selector, WIDTH, muted, theme.border))
         .into_any_element()
 }
 

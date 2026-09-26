@@ -42,12 +42,9 @@ pub enum Applies {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnDef {
     pub name: &'static str,
-    /// The header a view shows when it sets no `label`: readable words
-    /// carrying the unit where the name alone hides it (`spot %`, `vol
-    /// pt`, matching the header chips `spot +2.0%` / `vol -1.0`), never
-    /// the snake_case config name. Each fits `default_width` in the mono
-    /// face at the largest font size
-    /// (`every_default_label_and_worst_case_value_fits_its_width`).
+    /// Default display label when the view supplies none, including units where needed.
+    /// Labels remain separate from configuration names and are checked against default
+    /// widths at the largest font size.
     pub label: &'static str,
     pub kind: ColumnKind,
     pub editable: bool,
@@ -82,10 +79,8 @@ pub(crate) const SHIFT: ColumnFormat = ColumnFormat {
 };
 /// A price: the measure default (two places, grouped, sign-coloured).
 const PRICE: ColumnFormat = ColumnFormat::MEASURE;
-/// A greek: four places, grouped, sign-coloured. Its columns are wide
-/// enough for `-1,234,567.8900` (see the fit test): a right-aligned cell
-/// that overflows loses its LEADING digits, which reads as a plausible
-/// wrong number rather than a clipped one.
+/// Greek format with four decimals, grouping, and sign colouring. Default widths are
+/// checked against representative large values such as -1,234,567.8900.
 const GREEK: ColumnFormat = ColumnFormat {
     precision: 4,
     thousands: true,

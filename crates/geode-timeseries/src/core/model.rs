@@ -552,19 +552,17 @@ impl Model {
         self.frequency = f;
         Ok(SETTING)
     }
-    /// `f` steps FINER (`finer = true`, toward `1m`), `F` coarser, `count` times, saturating.
-    pub fn step_frequency(
-        &mut self,
-        finer: bool,
-        count: usize,
+    /// What [`Model::set_frequency`] would refuse `f` with over the range
+    /// in force, without writing anything — the frequency menu asks it
+    /// per row when it opens, so a row it would refuse is disabled with
+    /// this same reason rather than failing when picked.
+    pub fn frequency_refusal(
+        &self,
+        f: Frequency,
         now: DateTime<Utc>,
         as_of: &AsOf,
-    ) -> Result<Changed, String> {
-        let mut f = self.frequency;
-        for _ in 0..count.max(1) {
-            f = if finer { f.prev() } else { f.next() };
-        }
-        self.set_frequency(f, now, as_of)
+    ) -> Result<(), String> {
+        self.check_cap(f, &self.range, now, as_of)
     }
     /// A range change refetches everything — `fetch_pending` selects
     /// by `SlotState` — so every SOURCE slot's state moves to
@@ -735,11 +733,9 @@ impl Model {
         self.view.reset(self.full);
         self.view_changed()
     }
-    /// The pointer's zoom (mouse pass, 2026-09-24): `factor > 1` zooms
-    /// in, `< 1` out, keeping the point `about` (0 = the visible left
-    /// edge, 1 = the right) where it is — the thing under the wheel
-    /// stays under the wheel. A non-finite or non-positive factor is a
-    /// no-op, as `View::zoom` already makes it.
+    /// Zoom about a fraction of the visible range: zero anchors the left edge,
+    /// one the right. Factors above one zoom in, below one zoom out. Nonpositive
+    /// or nonfinite factors leave the view unchanged.
     pub fn zoom_at(&mut self, factor: f64, about: f64) -> Changed {
         self.view.zoom(factor, about, self.full);
         self.view_changed()
@@ -949,13 +945,19 @@ mod tests {
             "{err}"
         );
         assert_eq!(m.frequency(), Frequency::H1, "refused in place");
-        // Stepping finer stops at the cap too.
-        m.step_frequency(true, 5, now(), &AsOf::Live).unwrap_err();
-        assert_eq!(m.frequency(), Frequency::H1);
-        m.step_frequency(true, 1, now(), &AsOf::Live).unwrap();
-        assert_eq!(m.frequency(), Frequency::M15);
-        m.step_frequency(false, 9, now(), &AsOf::Live).unwrap();
-        assert_eq!(m.frequency(), Frequency::W1, "saturates");
+        // The menu's question is the same check, answered without a
+        // write.
+        assert_eq!(
+            m.frequency_refusal(Frequency::M1, now(), &AsOf::Live)
+                .unwrap_err(),
+            err
+        );
+        assert_eq!(
+            m.frequency_refusal(Frequency::M15, now(), &AsOf::Live),
+            Ok(())
+        );
+        assert_eq!(m.frequency(), Frequency::H1, "asking writes nothing");
+        m.set_frequency(Frequency::W1, now(), &AsOf::Live).unwrap();
         // (Controller ruling 4) both source slots are Fetching from
         // add_source already; drop to Idle so the assertion below is
         // meaningful, then check set_range puts them back.

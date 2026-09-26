@@ -50,7 +50,8 @@ zsh scripts/mutation-check.sh --anchors-only      # validate every anchor, no Ca
 ```
 
 CI runs formatting, Clippy, tests, benchmark compilation, and the shell
-`test-support` check on macOS and Windows.
+`test-support` check on macOS and Windows. The macOS job also runs mutation
+anchor and test-name filter validation with `--anchors-only`.
 
 ## Dependency and ownership rules
 

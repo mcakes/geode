@@ -1,7 +1,23 @@
-//! Edit the frame's expression layer in the shared dialog Input.
-//! Enter parses and applies the draft; an empty field clears the expression.
-//! A parse error stays inline, and editing clears the error. Escape closes
-//! without applying. Each open seeds a fresh draft from the current frame.
+//! Edit the frame's expression layer in the shared dialog Input. The dialog
+//! has three modes ([`Mode`]), chosen by the door that opens it:
+//!
+//! - **Whole** (`frame::scope_expression`): seeded with the whole
+//!   expression; Enter replaces it and an empty field clears it.
+//! - **Term** (a click on one of the toolbar's term chips): seeded with
+//!   that top-level `and` term (`Expr::conjuncts`); Enter replaces that
+//!   term alone and an empty field removes it. The other terms keep their
+//!   order. The mode carries the seeded term: if the scope changed
+//!   underneath so that index no longer holds it, an edit or a removal
+//!   refuses inline rather than touch a different term.
+//! - **Add** (`frame::add_expression`, the toolbar's add-a-filter menu):
+//!   empty; Enter joins the typed expression to the current one with
+//!   `and` (or sets it when there is none), and an empty field closes
+//!   without a change.
+//!
+//! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
+//! error stays inline in every mode, and editing clears the error. Escape
+//! closes without applying. Each open seeds a fresh draft from the current
+//! frame.
 //!
 //! Validation here is syntax-only: there is no dataset, column, or operator
 //! compatibility check. A parsed expression can still fail a later query.
@@ -9,11 +25,12 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Window, div};
+use gpui::{AnyElement, App, Context, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use geode_core::scope::{Expr, parse_expr};
 
+use crate::frame::Frame;
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::ShellView;
@@ -26,13 +43,80 @@ use super::scale;
 // Pure core — no gpui.
 // ---------------------------------------------------------------------
 
-/// The dialog's state: only the last failed commit's message.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Which part of the expression the dialog edits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mode {
+    /// The whole expression.
+    Whole,
+    /// Top-level `and` term `index`, in `Expr::conjuncts` order, and the
+    /// term the dialog was seeded with. A commit edits the term only while
+    /// it is still `seeded` at `index`: the index alone could name a
+    /// different term after the scope changed underneath.
+    Term { index: usize, seeded: Expr },
+    /// A new expression joined to the current one with `and`.
+    Add,
+}
+
+impl Mode {
+    /// Term mode on term `index` of `expression`, or `None` when the
+    /// expression has no such term.
+    pub fn term(index: usize, expression: Option<&Expr>) -> Option<Mode> {
+        let seeded = expression?.conjuncts().get(index).map(|t| (*t).clone())?;
+        Some(Mode::Term { index, seeded })
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Mode::Whole => "Scope expression",
+            Mode::Term { .. } => "Edit scope term",
+            Mode::Add => "Add scope expression",
+        }
+    }
+
+    /// The one-line note under the field, if the mode needs one.
+    pub fn note(&self) -> Option<&'static str> {
+        match self {
+            Mode::Whole => None,
+            Mode::Term { .. } => Some("Edits this term only; the other terms stay."),
+            Mode::Add => Some("Joined to the current expression with and."),
+        }
+    }
+
+    fn hints(&self) -> &'static [Hint] {
+        match self {
+            Mode::Whole => WHOLE_HINTS,
+            Mode::Term { .. } => TERM_HINTS,
+            Mode::Add => ADD_HINTS,
+        }
+    }
+
+    /// The text the field opens with.
+    pub fn seed(&self, expression: Option<&Expr>) -> String {
+        match self {
+            Mode::Whole => expression.map(ToString::to_string).unwrap_or_default(),
+            Mode::Term { seeded, .. } => seeded.to_string(),
+            Mode::Add => String::new(),
+        }
+    }
+}
+
+/// The inline refusal when a term commit finds its term gone or changed.
+pub const TERM_GONE: &str = "This term is no longer in the scope expression";
+
+/// The dialog's state: its mode and the last failed commit's message.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ScopeExprState {
+    pub mode: Mode,
     pub error: Option<String>,
 }
 
-/// Trim and parse the draft, treating an empty value as clearing the layer.
+impl ScopeExprState {
+    pub fn new(mode: Mode) -> Self {
+        Self { mode, error: None }
+    }
+}
+
+/// Trim and parse the draft, treating an empty value as no expression.
 /// Errors label the parser's one-based byte offset as a column.
 pub fn commit_text(text: &str) -> Result<Option<Expr>, String> {
     let text = text.trim();
@@ -44,46 +128,86 @@ pub fn commit_text(text: &str) -> Result<Option<Expr>, String> {
         .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))
 }
 
+/// Apply `text` to `frame` as `mode` says. `Ok(changed)` means the dialog
+/// closes; `Err(message)` stays inline (a parse error, or [`TERM_GONE`]).
+/// Every change goes through `Frame::set_scope`, so undo sees it.
+pub fn apply(frame: &mut Frame, mode: &Mode, text: &str) -> Result<bool, String> {
+    let parsed = commit_text(text)?;
+    match mode {
+        Mode::Whole => {
+            let mut scope = frame.scope().clone();
+            scope.expression = parsed;
+            Ok(frame.set_scope(scope))
+        }
+        Mode::Term { index, seeded } => frame
+            .replace_expression_term(*index, seeded, parsed)
+            .map_err(|_| TERM_GONE.to_string()),
+        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),
+    }
+}
+
 // ---------------------------------------------------------------------
 // gpui: the modal.
 // ---------------------------------------------------------------------
 
 const WIDTH: f32 = 640.0;
 
-const HINTS: &[Hint] = &[
+const WHOLE_HINTS: &[Hint] = &[
     Hint::Key("enter"),
     Hint::Text("set · empty clears ·"),
     Hint::Key("escape"),
     Hint::Text("close"),
 ];
 
-/// Open the dialog seeded with the frame's current expression source. A
-/// no-op if a modal is already open, like every other `open` here. The
-/// seed is written AFTER the door (`open_shell_dialog_with_key` resets
-/// the field to empty), and `set_value` emits no `Change`, so the state
-/// starts with no error regardless.
-pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+const TERM_HINTS: &[Hint] = &[
+    Hint::Key("enter"),
+    Hint::Text("set · empty removes the term ·"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
+const ADD_HINTS: &[Hint] = &[
+    Hint::Key("enter"),
+    Hint::Text("add ·"),
+    Hint::Key("escape"),
+    Hint::Text("close"),
+];
+
+/// Open the dialog on term `index` of the frame's current expression (a
+/// term chip's click); a no-op when the expression has no such term.
+pub fn open_term(
+    view: &mut ShellView,
+    index: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let Some(mode) = Mode::term(index, view.frame.read(cx).scope().expression.as_ref()) else {
+        return;
+    };
+    open(view, mode, window, cx);
+}
+
+/// Open the dialog in `mode`, seeded from the frame's current expression.
+/// A no-op if a modal is already open, like every other `open` here. The
+/// seed is written AFTER the door (`open_shell_dialog_with_key` resets the
+/// field to empty), and `set_value` emits no `Change`, so the state starts
+/// with no error regardless.
+pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
     }
-    view.scope_expr_dialog = Some(ScopeExprState::default());
+    let seed = mode.seed(view.frame.read(cx).scope().expression.as_ref());
+    let title = mode.title();
+    view.scope_expr_dialog = Some(ScopeExprState::new(mode));
     dialog::open_shell_dialog_with_key(
         view,
         window,
         cx,
-        "Scope expression",
+        SharedString::new_static(title),
         build,
         Some(Rc::new(handle_key)),
         true,
     );
-    let seed = view
-        .frame
-        .read(cx)
-        .scope()
-        .expression
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
     view.dialog_input
         .update(cx, |input, cx| input.set_value(seed, window, cx));
 }
@@ -103,18 +227,19 @@ fn handle_key(
     if ks.mods != Modifiers::NONE || ks.key != "enter" {
         return false;
     }
+    let Some(mode) = shell.scope_expr_dialog.as_ref().map(|s| s.mode.clone()) else {
+        return false;
+    };
     let text = shell.dialog_input.read(cx).value().to_string();
-    match commit_text(&text) {
-        Ok(expression) => {
-            shell.frame.update(cx, |f, cx| {
-                let mut scope = f.scope().clone();
-                scope.expression = expression;
-                if f.set_scope(scope) {
-                    cx.notify();
-                }
-            });
-            shell.close_modal(window, cx);
+    let outcome = shell.frame.update(cx, |f, cx| {
+        let outcome = apply(f, &mode, &text);
+        if outcome == Ok(true) {
+            cx.notify();
         }
+        outcome
+    });
+    match outcome {
+        Ok(_) => shell.close_modal(window, cx),
         Err(message) => {
             if let Some(state) = shell.scope_expr_dialog.as_mut() {
                 state.error = Some(message);
@@ -134,6 +259,15 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
         .gap_2()
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx));
+    if let Some(note) = state.mode.note() {
+        column = column.child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "scope-expr-note".to_string())
+                .child(SharedString::new_static(note)),
+        );
+    }
     if let Some(err) = &state.error {
         // Use the chip paint helper so error text meets its readability floor.
         column = column.child(
@@ -146,13 +280,11 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
     }
     column
         .child(hint_row(
-            HINTS,
+            state.mode.hints(),
             "scope-expr-hints",
             WIDTH,
             theme.muted_foreground,
-            theme.muted,
             theme.border,
-            theme.radius,
         ))
         .into_any_element()
 }
@@ -160,6 +292,26 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::groupings::GroupingSlots;
+    use geode_core::scope::Scope;
+    use geode_core::scopes::SavedScopes;
+
+    fn frame_with(expr: Option<&str>) -> Frame {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        f.set_scope(Scope {
+            expression: expr.map(|t| parse_expr(t).unwrap()),
+            ..Scope::default()
+        });
+        f
+    }
+
+    fn terms(f: &Frame) -> Vec<String> {
+        f.scope()
+            .expression
+            .as_ref()
+            .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default()
+    }
 
     #[test]
     fn empty_clears_and_a_broken_expression_names_the_column() {
@@ -167,5 +319,100 @@ mod tests {
         assert!(commit_text("book = 'BK000'").unwrap().is_some());
         let err = commit_text("book =").unwrap_err();
         assert!(err.contains("at column"), "{err}");
+    }
+
+    fn term_mode(f: &Frame, index: usize) -> Mode {
+        Mode::term(index, f.scope().expression.as_ref()).expect("the term exists")
+    }
+
+    #[test]
+    fn each_mode_seeds_its_own_text() {
+        let e = parse_expr("a = 1 and (b = 2 or c = 3)").unwrap();
+        assert_eq!(
+            Mode::Whole.seed(Some(&e)),
+            "(a = 1) and ((b = 2) or (c = 3))"
+        );
+        assert_eq!(Mode::Whole.seed(None), "");
+        let term = Mode::term(1, Some(&e)).unwrap();
+        assert_eq!(term.seed(Some(&e)), "(b = 2) or (c = 3)");
+        assert_eq!(Mode::term(2, Some(&e)), None, "no such term");
+        assert_eq!(Mode::term(0, None), None);
+        assert_eq!(Mode::Add.seed(Some(&e)), "");
+    }
+
+    #[test]
+    fn whole_mode_replaces_and_empty_clears() {
+        let mut f = frame_with(Some("a = 1 and b = 2"));
+        assert_eq!(apply(&mut f, &Mode::Whole, "c = 3"), Ok(true));
+        assert_eq!(terms(&f), vec!["c = 3"]);
+        assert_eq!(apply(&mut f, &Mode::Whole, "  "), Ok(true));
+        assert_eq!(f.scope().expression, None);
+    }
+
+    #[test]
+    fn term_mode_replaces_only_its_term_and_empty_removes_it() {
+        let mut f = frame_with(Some("a = 1 and b = 2 and c = 3"));
+        let mode = term_mode(&f, 1);
+        assert_eq!(apply(&mut f, &mode, "x = 9"), Ok(true));
+        assert_eq!(terms(&f), vec!["a = 1", "x = 9", "c = 3"]);
+        let mode = term_mode(&f, 0);
+        assert_eq!(apply(&mut f, &mode, ""), Ok(true));
+        assert_eq!(terms(&f), vec!["x = 9", "c = 3"]);
+    }
+
+    /// The scope changed underneath with the same term count: index 1
+    /// holds `y = 2`, not the seeded `b = 2`, so an edit and a removal
+    /// both refuse, and so does an index that no longer exists.
+    #[test]
+    fn a_term_changed_underneath_refuses_edit_and_removal() {
+        let mut f = frame_with(Some("a = 1 and b = 2"));
+        let mode = term_mode(&f, 1);
+        f.set_scope(Scope {
+            expression: Some(parse_expr("x = 1 and y = 2").unwrap()),
+            ..Scope::default()
+        });
+        assert_eq!(apply(&mut f, &mode, "b = 3"), Err(TERM_GONE.to_string()));
+        assert_eq!(apply(&mut f, &mode, ""), Err(TERM_GONE.to_string()));
+        assert_eq!(terms(&f), vec!["x = 1", "y = 2"]);
+        f.set_scope(Scope {
+            expression: Some(parse_expr("x = 1").unwrap()),
+            ..Scope::default()
+        });
+        assert_eq!(apply(&mut f, &mode, "b = 3"), Err(TERM_GONE.to_string()));
+        assert_eq!(terms(&f), vec!["x = 1"]);
+    }
+
+    #[test]
+    fn add_mode_joins_with_and_sets_when_none_and_empty_changes_nothing() {
+        let mut f = frame_with(None);
+        assert_eq!(
+            apply(&mut f, &Mode::Add, "   "),
+            Ok(false),
+            "empty: no change"
+        );
+        assert_eq!(f.scope().expression, None);
+        assert_eq!(apply(&mut f, &Mode::Add, "a = 1"), Ok(true));
+        assert_eq!(terms(&f), vec!["a = 1"]);
+        assert_eq!(apply(&mut f, &Mode::Add, "b = 2 or c = 3"), Ok(true));
+        assert_eq!(
+            f.scope()
+                .expression
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("(a = 1) and ((b = 2) or (c = 3))"),
+            "existing and (new)"
+        );
+    }
+
+    #[test]
+    fn a_parse_error_changes_nothing_in_every_mode() {
+        let f0 = frame_with(Some("a = 1"));
+        for mode in [Mode::Whole, term_mode(&f0, 0), Mode::Add] {
+            let mut f = frame_with(Some("a = 1"));
+            let err = apply(&mut f, &mode, "book =").unwrap_err();
+            assert!(err.contains("at column"), "{mode:?}: {err}");
+            assert_eq!(terms(&f), vec!["a = 1"], "{mode:?}");
+        }
     }
 }

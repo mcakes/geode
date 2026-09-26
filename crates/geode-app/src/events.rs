@@ -1,12 +1,15 @@
 //! Coalesced state for UI delivery. Pending entries are keyed by event kind and
-//! recipient, source, or dataset/batch. Tagged outcomes retain the highest tag;
+//! recipient, source, dataset/batch, or (for local-write outcomes) arrival
+//! sequence. Tagged outcomes retain the highest tag;
 //! publications union affected books and keep the greatest generation ID.
 //! Replacing an entry preserves its position among other pending keys, so this
 //! is not a chronological event log. See `docs/current/request-delivery.md`.
 //!
 //! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
-//! uploads from the same tile never coalesce: each is a separate user action
-//! and the spec promises every upload exactly one answer, not just the latest.
+//! distinct uploads from the same tile remain separate. Coalescing by tile
+//! alone could hide an earlier upload's failure behind a later success.
+//! Local-write outcomes never coalesce at all (`Key::Local`): each is some
+//! writer's answer, delivered in the writer's order.
 //!
 //! A one-slot channel carries only wakeups. Full wakeup capacity does not refuse
 //! state, but pending entries have no fixed key-count cap. Sender acceptance
@@ -25,11 +28,20 @@ enum Key {
     Catalog(QueryKey),
     Price(QueryKey),
     /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
-    /// user actions and each answers exactly once. Keying on the tile would
+    /// user actions whose outcomes must remain distinct. Keying on the tile would
     /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.
     Upload(QueryKey, u64),
+    /// A local-write outcome — saved, save failed, forgotten, forget failed
+    /// — keyed by its arrival sequence, so none coalesces: every one is
+    /// delivered, in the writer's order. Its writer may be waiting on that
+    /// exact outcome (a sheet load deferred behind a queued save resumes only
+    /// on the save's answer), and a later forget or save of the same document
+    /// replacing it would leave that writer waiting forever. The count is
+    /// bounded by the writes the app queued, each one a user's edit burst
+    /// or command, not by an external feed's rate.
+    Local(u64),
     Published(String, String),
     Fetched(String, String, bool),
     Load,
@@ -38,7 +50,9 @@ enum Key {
     Diagnostics,
 }
 
-fn key(event: &DataEvent) -> Key {
+/// `seq` numbers local-write outcomes (see `Key::Local`); every other
+/// event ignores it.
+fn key(event: &DataEvent, seq: u64) -> Key {
     match event {
         DataEvent::Query(o) => Key::Query(o.key),
         DataEvent::Series(o) => Key::Series(o.key),
@@ -49,6 +63,10 @@ fn key(event: &DataEvent) -> Key {
         DataEvent::Published { dataset, batch, .. } => {
             Key::Published(dataset.clone(), batch.clone())
         }
+        DataEvent::LocalPublished { .. }
+        | DataEvent::LocalPublishFailed { .. }
+        | DataEvent::Forgotten { .. }
+        | DataEvent::ForgetFailed { .. } => Key::Local(seq),
         DataEvent::SeriesFetched {
             source,
             identity,
@@ -77,6 +95,8 @@ fn tag(event: &DataEvent) -> Option<u64> {
 struct Pending {
     events: HashMap<Key, DataEvent>,
     order: VecDeque<Key>,
+    /// The next `Key::Local` sequence number.
+    local_seq: u64,
 }
 
 #[derive(Debug)]
@@ -111,7 +131,10 @@ impl Sender {
         if self.wake.is_closed() {
             return Err(Closed);
         }
-        let key = key(&event);
+        let key = key(&event, pending.local_seq);
+        if matches!(key, Key::Local(_)) {
+            pending.local_seq += 1;
+        }
         if let Key::Fetched(source, identity, true) = &key {
             // Success clears an earlier failure. A failure AFTER a success must
             // retain both: the success triggers a requery for the appended span.
@@ -293,6 +316,63 @@ mod tests {
             rx.recv().await.unwrap(),
             DataEvent::Upload(o) if o.tag == 2 && o.result == Ok(())
         ));
+    }
+
+    #[gpui::test]
+    async fn every_local_write_outcome_is_delivered_in_order() {
+        // A writer may be waiting on any one of a document's outcomes (a
+        // sheet load deferred behind its save resumes only on that save's
+        // answer), so none is merged away: a save answered then forgotten
+        // delivers both, in the writer's order, and the `Published`
+        // invalidation of the same document stays its own entry.
+        let (tx, rx) = channel();
+        let published = |batch: &str, gen_id| DataEvent::LocalPublished {
+            dataset: "sheets".into(),
+            batch: batch.into(),
+            gen_id,
+        };
+        tx.try_send(published("a", 1)).unwrap();
+        tx.try_send(DataEvent::Published {
+            dataset: "sheets".into(),
+            batch: "a".into(),
+            gen_id: 1,
+            books: vec![None],
+        })
+        .unwrap();
+        tx.try_send(published("b", 2)).unwrap();
+        tx.try_send(DataEvent::Forgotten {
+            dataset: "sheets".into(),
+            batch: "a".into(),
+        })
+        .unwrap();
+        tx.try_send(DataEvent::LocalPublishFailed {
+            dataset: "sheets".into(),
+            batch: "a".into(),
+            reason: "full".into(),
+        })
+        .unwrap();
+        drop(tx);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::LocalPublished { batch, gen_id: 1, .. } if batch == "a"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Published { batch, .. } if batch == "a"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::LocalPublished { batch, gen_id: 2, .. } if batch == "b"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::Forgotten { batch, .. } if batch == "a"
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::LocalPublishFailed { batch, .. } if batch == "a"
+        ));
+        assert!(rx.recv().await.is_err());
     }
 
     #[gpui::test]

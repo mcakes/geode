@@ -37,13 +37,18 @@
 //! unmissable, per the same ruling). The `text "…"` chip is gone: the
 //! field shows the frame's text while unfocused and clears it with the
 //! component's own clear glyph (`Input::cleanable`).
+//!
+//! The scope's chips are the dimension chips, then one chip per
+//! top-level `and` term of the expression (mono text, the same `×`
+//! inside), then the contradiction chip. The `+` opens the add-a-filter
+//! menu ([`super::addfilter`]) rather than a picker directly.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Pixels, SharedString, Stateful,
-    Window, div, px,
+    AnyElement, App, Div, ElementId, Entity, Hsla, IntoElement, MouseButton, Pixels, SharedString,
+    Stateful, Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::separator::Separator;
@@ -105,17 +110,20 @@ fn chip(
         .debug_selector(selector)
 }
 
-/// A bare verb glyph on the title bar — the `+` pick door, the save door
-/// — the toolbar's answer to the guide's ghost button: no fill at rest,
-/// the control door's hover and pressed fills, the icon inheriting the
-/// box's text so it recolours with it. Data is a filled chip; a verb is
-/// not, which is what tells the two apart at a glance.
+/// A bare verb glyph on the title bar — the `+` add-a-filter door, the
+/// save door — the toolbar's answer to the guide's ghost button: no fill
+/// at rest, the control door's hover and pressed fills, the icon
+/// inheriting the box's text so it recolours with it. Data is a filled
+/// chip; a verb is not, which is what tells the two apart at a glance.
+/// `open` holds the pressed fill instead of answering the pointer, for a
+/// verb whose popup is up (the grouping readout's rule).
 fn verb(
     id: impl Into<ElementId>,
     icon: Icon,
     fg: Hsla,
     radius: Pixels,
     states: ControlPaint,
+    open: Option<&'static str>,
     selector: impl Fn() -> String + 'static,
 ) -> Stateful<Div> {
     div()
@@ -126,9 +134,19 @@ fn verb(
         .size(scale::design(GLYPH_BOX))
         .rounded(radius)
         .text_color(fg)
-        .child(icon.small())
         .debug_selector(selector)
-        .pointer_states(states)
+        .map(|el| match open {
+            // `open` is the pressed state's own debug selector, on the
+            // glyph painted inside the pressed fill (the grouping
+            // readout's `scope-grouping-open` chevron is the same guard).
+            Some(open_selector) => el.bg(states.pressed).text_color(states.pressed_text).child(
+                div()
+                    .flex()
+                    .debug_selector(move || open_selector.to_string())
+                    .child(icon.small()),
+            ),
+            None => el.pointer_states(states).child(icon.small()),
+        })
 }
 
 /// The inset hairline between two segments. gpui-component's
@@ -147,7 +165,7 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
         .child(Separator::vertical().color(colour))
 }
 
-/// Six separate mouse doors rather than a bundling struct (clippy's
+/// Separate mouse doors rather than a bundling struct (clippy's
 /// `too_many_arguments`, `-D warnings`-enforced) — `status_bar`'s own
 /// reasoning: `render.rs`'s one call site builds each as its own
 /// `cx.entity()`-capturing closure, and this body hands each to exactly
@@ -155,23 +173,29 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// benefit. `grouping_open` is whether the grouping picker is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes).
+/// `add_menu` is the add-a-filter menu's painted panel while it is open
+/// ([`super::addfilter::render`]); the `+` hangs it under itself and holds
+/// its pressed fill for as long as it is there. `on_term_open` and
+/// `on_term_close` take the expression term's index.
 #[allow(clippy::too_many_arguments)]
 pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     grouping_open: bool,
+    add_menu: Option<AnyElement>,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
-    on_pick: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_add: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
-    on_expr: impl Fn(&mut Window, &mut App) + Clone + 'static,
+    on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+    on_term_close: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
     // Muted/foreground for the rest (no raw colours) — the same scheme
-    // `keybindings_view::key_chip` uses for its own chips.
+    // `Kbd` paints its own key chips with.
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;
@@ -184,8 +208,8 @@ pub fn toolbar(
     // hover has to be distinct from THAT — exactly what the chip pairing
     // measures. The contradiction chip has no listener and takes none —
     // a hover fill promises a click (design guide, interaction states).
-    // The expression chip is clickable since 2026-09-20 (command-line
-    // locality spec §4.1) and takes the same `chip_states` pairing.
+    // The expression term chips and their `×`s take the same
+    // `chip_states` pairing as the dimension chips.
     let chip_states = control::paint(
         theme,
         control::Rest::Filled(chip_bg),
@@ -280,31 +304,68 @@ pub fn toolbar(
             ),
         );
     }
-    if let Some(expr) = &model.expr {
+    for (i, term) in model.terms.iter().enumerate() {
         has_chips = true;
-        // Clickable since 2026-09-20 (command-line locality spec §4.1): the
-        // mouse form of `frame::scope_expression`. The chip pairing is the
-        // selection chips' own (`chip_states`), already in `shipped()`.
-        let on_expr = on_expr.clone();
+        // One chip per top-level `and` term of the expression, after the
+        // dimension chips and in the same mould: the body opens the
+        // expression dialog on this term alone, the `×` inside it drops
+        // this term alone. The `×` `occlude()`s the body's hitbox exactly
+        // as a dimension chip's does (see the comment there), which is the
+        // whole reason a click on it does not ALSO open the dialog. The
+        // text is the mono face — expression source is code — named
+        // through `fonts::MONO` here rather than inherited from the
+        // readout, so the chip reads as code wherever it is placed.
+        let on_open = on_term_open.clone();
+        let on_close = on_term_close.clone();
+        let body_selector = term.selector.clone();
+        let close_selector = term.close_selector.clone();
         chips_row = chips_row.child(
             chip(
-                "scope-expr-chip".into(),
-                expr.clone(),
+                ElementId::NamedInteger(SharedString::new_static("scope-expr-chip"), i as u64),
+                term.label.clone(),
                 chip_fg,
                 chip_bg,
                 chip_radius,
-                || "scope-expr-chip".to_string(),
+                move || body_selector.to_string(),
             )
+            .font_family(fonts::MONO)
+            .pr_0p5()
             .tooltip(tips::tip_with(
-                SharedString::new_static("tip-scope-expr-chip"),
-                model.expr_full.clone().unwrap_or_default(),
-                Some("frame::scope_expression"),
-                Some(SharedString::new_static("click to edit")),
+                term.tip_selector.clone(),
+                term.full.clone(),
+                None,
+                Some(SharedString::new_static("click: edit this term")),
             ))
             .pointer_states(chip_states)
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                on_expr(window, cx)
-            }),
+                on_open(i, window, cx)
+            })
+            .child(
+                div()
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("scope-expr-chip-close"),
+                        i as u64,
+                    ))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(scale::design(GLYPH_BOX))
+                    .rounded(glyph_radius)
+                    .text_color(chip_fg)
+                    .child(Icon::new(IconName::Close).small())
+                    .debug_selector(move || close_selector.to_string())
+                    .occlude()
+                    .pointer_states(chip_states)
+                    .tooltip(tips::tip_with(
+                        term.close_tip_selector.clone(),
+                        SharedString::new_static("Remove this term"),
+                        None,
+                        None,
+                    ))
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        on_close(i, window, cx)
+                    }),
+            ),
         );
     }
     if let Some(named) = &model.impossible {
@@ -335,28 +396,40 @@ pub fn toolbar(
     }
 
     // The verbs, `gap_0p5` apart and one group gap after the chips. The `+`
-    // pick door (scope-save spec's amendment): a mouse door onto the
-    // dimension picker (`mod+p`/`frame::pick`) for a trader who has not
-    // memorised the chord — always painted, empty scope or not, since
-    // picking a dimension is exactly how a scope starts.
+    // opens the add-a-filter menu (a dimension through the picker, or an
+    // expression through the dialog's add mode) — always painted, empty
+    // scope or not, since adding a filter is exactly how a scope starts.
+    // The menu hangs from a box at the glyph's bottom-left, so it opens
+    // directly under the `+`; the glyph holds its pressed fill while the
+    // menu is up. No tooltip action: the menu names each row's own key.
+    let add_open = add_menu.is_some();
     let mut verbs = h_flex().gap_0p5().items_center().child(
-        verb(
-            "scope-pick-chip",
-            Icon::new(CatalogIcon::Plus),
-            chip_fg,
-            glyph_radius,
-            glyph_states,
-            || "scope-pick-chip".to_string(),
-        )
-        .tooltip(tips::tip(
-            "tip-scope-pick-chip",
-            "Pick a dimension",
-            Some("frame::pick"),
-            None,
-        ))
-        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            on_pick(window, cx)
-        }),
+        div()
+            .relative()
+            .child(
+                verb(
+                    "scope-pick-chip",
+                    Icon::new(CatalogIcon::Plus),
+                    chip_fg,
+                    glyph_radius,
+                    glyph_states,
+                    add_open.then_some("scope-pick-chip-open"),
+                    || "scope-pick-chip".to_string(),
+                )
+                .tooltip(tips::tip("tip-scope-pick-chip", "Add a filter", None, None))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_add(window, cx)
+                }),
+            )
+            .when_some(add_menu, |el, menu| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .top(scale::design(GLYPH_BOX))
+                        .child(menu),
+                )
+            }),
     );
     if model.savable {
         // The save door: the mouse form of `scope::save_current`,
@@ -376,6 +449,7 @@ pub fn toolbar(
                 chip_fg,
                 glyph_radius,
                 glyph_states,
+                None,
                 || "scope-save-chip".to_string(),
             )
             .tooltip(tips::tip(

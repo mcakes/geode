@@ -166,6 +166,9 @@ pub fn open_shell_dialog_with_key<F>(
     // Cancel the command line before the modal takes its key route; otherwise the line
     // would remain visible but unable to receive its own controls.
     view.cancel_command_line(window, cx);
+    // The scope bar's add-a-filter menu is transient chrome under a modal's
+    // key route; it never survives one opening.
+    view.add_filter_menu = None;
 
     // Recorded after the palette close above (which may itself have just
     // returned focus to the field) and before the dialog takes focus, for
@@ -655,16 +658,11 @@ pub(crate) fn render_modal(
 /// keystroke chips joined by separators. A selector gives each chip `<selector>-<key>`
 /// and the first chip the bare `<selector>`, allowing tests to inspect both groups and
 /// individual keys.
-pub(crate) fn hint_rows(
-    hints: &[Hint],
-    chip_fg: Hsla,
-    chip_bg: Hsla,
-    chip_radius: Pixels,
-) -> AnyElement {
+pub(crate) fn hint_rows(hints: &[Hint]) -> AnyElement {
     let chip = |spec: &str| {
         let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
             .expect("footer hint keystrokes are hardcoded valid");
-        super::keybindings_view::key_chip(&ks, chip_fg, chip_bg, chip_radius)
+        super::kbd::chip(&ks).into_any_element()
     };
     let mut lines = v_flex().gap_0p5();
     for (row, members) in footer::rows(hints) {
@@ -683,10 +681,18 @@ pub(crate) fn hint_rows(
             );
         // An empty row keeps a full row's height, so the footer never
         // grows or shrinks with the selected row's vocabulary: the label
-        // alone is a `text_xs` line, shorter than a chip, so an unpainted
-        // chip sets the height — `invisible` lays out and paints nothing.
+        // alone is a `text_xs` line, shorter than a hint, so an unpainted
+        // hint (a chip and its word, whichever is taller) sets the height —
+        // `invisible` lays out and paints nothing.
         if members.is_empty() {
-            line = line.child(div().invisible().child(chip("space")));
+            line = line.child(
+                h_flex()
+                    .invisible()
+                    .gap_1()
+                    .items_center()
+                    .child(chip("space"))
+                    .child(div().child("space")),
+            );
         }
         let last = members.len().saturating_sub(1);
         for (i, hint) in members.into_iter().enumerate() {

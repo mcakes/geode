@@ -12,11 +12,9 @@ use std::cell::RefCell;
 
 pub const PRICER_VIEWS_DOC: &str = "pricer_views";
 
-/// The two bundled views (spec §6.5). Part 3 pushes this into the
-/// builtin config layer with the factory (planning decision 12). Both end
-/// in `status`: a stale line's old numbers differ from fresh ones only by
-/// muted text, so the words `pricing…` (or a failure's reason) say it
-/// without colour.
+/// Bundled column sets installed through the factory's builtin documents. Both include
+/// status so pending pricing and failures are visible in text as well as through cell
+/// colours.
 pub const BUILTIN_VIEWS: &str = r#"[vanilla]
 columns = ["qty", "underlying", "expiry", "strike", "type", "spot_shift", "vol_shift",
            "price", "delta", "gamma", "vega", "theta", "rho", "status"]

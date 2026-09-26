@@ -1,16 +1,14 @@
-//! The rows a parsed document becomes (market-data spec §6.2). Lives in
-//! `geode-core` because both the data crate (which publishes them) and
-//! the demo generator (which produces them) need the type, and the data
-//! crate dev-depends on the generator — a trait or type in either would
-//! be a cycle. Struct-of-arrays, per PHILOSOPHY §6: nothing here is a row.
+//! Shared columnar document values, parser/writer traits, and schema checks.
+//! The data service, document kinds, and demo generators use these types without
+//! depending on each other. Columns hold row data; document keys and attributes
+//! hold one value for the whole document.
 
 use crate::schema::{ColumnRole, ColumnType, DatasetSpec};
 use chrono::NaiveDate;
 
-/// Joins the parts of a multi-column document key into the one string the
-/// store's `batch` column holds. ASCII unit separator: no dimension value
-/// may contain it (`DocumentRows::validate` refuses one that does), so the
-/// join is unambiguous and `split_key` is its exact inverse.
+/// Separator between parts of a stored document key. Joining and splitting
+/// preserves a nonempty key whose parts exclude this character. Validation
+/// checks the separator and key arity; loaded schemas require a nonempty key.
 pub const KEY_SEPARATOR: char = '\u{1f}';
 
 pub fn join_key(parts: &[String]) -> String {
@@ -70,7 +68,7 @@ impl Value {
     }
 }
 
-/// One parsed document, struct-of-arrays (market-data spec §6.2).
+/// One parsed document with columnar row data and document-level values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentRows {
     pub key: Vec<String>,                 // in the dataset's `key` order
@@ -95,18 +93,13 @@ impl DocumentRows {
         self.axes.first().map_or(0, |(_, c)| c.len())
     }
 
-    /// Every check `publish_document` needs before it touches the store:
-    /// key arity and separator-freedom, a non-empty row count, axis
-    /// names/order/types, value names/types/completeness, document-level
-    /// attribute names/types/completeness, and equal column lengths.
+    /// Validate the document family, key arity and reserved separator, nonempty
+    /// row count, axis order/types/uniqueness, value and attribute names/types,
+    /// required columns, and equal column lengths before publication.
     ///
-    /// The role filters below are `document_columns()`'s own, applied here
-    /// one rule at a time rather than by walking that helper's flat list:
-    /// each group has a different question to ask (an axis is matched
-    /// positionally against `ds.axes`, a value by name in either
-    /// direction, an attribute by name against a single `Value`) and a
-    /// different message to give, and a flat list has already thrown away
-    /// which group a column came from.
+    /// Axes are matched positionally against `ds.axes`; values and attributes are
+    /// matched by name. These checks do not reject duplicate value or attribute
+    /// names, and do not enforce kind-specific rules such as finite numbers.
     pub fn validate(&self, ds: &DatasetSpec) -> Result<(), String> {
         if !ds.is_document() {
             return Err(format!("dataset '{}' is not a document dataset", ds.name));
@@ -128,18 +121,10 @@ impl DocumentRows {
                 ds.axes.len()
             ));
         }
-        // A document with no rows is refused rather than published as an
-        // empty generation, because publishing one is silently destructive
-        // in two ways. The publish transaction archives and deletes the
-        // batch's live rows and inserts none, so the panel reads as "no
-        // document has ever arrived for this key" rather than "the feed
-        // sent an empty one" — and the generation it records in the
-        // summary is held by no table at all, which is exactly the
-        // invariant `store::ddl::assert_generations_match_tables` asserts
-        // and `retention::reconcile_generations` would later delete
-        // behind as-of's back. A dataset of this family always declares
-        // at least one axis (`schema::validate_dataset`), so `rows()`
-        // here reads a real axis's length, never a missing one.
+        // An empty generation would remove live rows while leaving no payload row
+        // that identifies the new generation. Readers could not distinguish it from
+        // a missing document, and retention would discard its catalog entry.
+        // Document schemas require an axis, so `rows()` reads that axis's length.
         if self.rows() == 0 {
             return Err("document has no rows".to_string());
         }
@@ -149,14 +134,9 @@ impl DocumentRows {
                     "axis {i} is '{name}', dataset declares '{declared}'"
                 ));
             }
-            // A message, not a panic: `schema::validate_document` refuses
-            // a dataset whose `axes` names an undeclared column, so no
-            // schema-loaded spec reaches this — but a spec built in code
-            // can, and this runs on the ingest thread, where a panic
-            // costs the whole load and says less than a line naming the
-            // column. `store::document::cell_source` answers the very
-            // same "declared but absent" shape the same way, with
-            // `StoreError::Document`; the two stay symmetrical.
+            // Hand-built schemas can name an undeclared axis even though the schema
+            // reader rejects that shape. Return a column-specific error instead of
+            // panicking on the ingest thread.
             let Some(spec) = ds.column(declared) else {
                 return Err(format!("axis '{name}' is not a declared column"));
             };
@@ -177,20 +157,12 @@ impl DocumentRows {
                 ));
             }
         }
-        // No two rows may carry the same axis tuple. Nothing downstream
-        // can tell two such rows apart: the store has no uniqueness
-        // constraint over (batch, axes), and the panel addresses a cell by
-        // its tuple — so a document that MERGED two copies of the same
-        // element (a feed sending `<cviParams>` or a `<slice>` twice, the
-        // defect this check exists for) would publish as a perfectly
-        // healthy generation with some cells silently doubled.
+        // The panel addresses cells by axis tuple, while storage has no uniqueness
+        // constraint over those axes. Reject duplicates before they can publish as
+        // ambiguous or double-counted cells.
         //
-        // Sorted row indices rather than a hash set of tuples: one `Vec`
-        // for the whole document instead of a key allocation per row, and
-        // O(n log n) comparisons over the columns in place (PHILOSOPHY §6
-        // — the receiver thread runs this per message). Every axis is
-        // known to be `rows` long by the loop above, so every index below
-        // is in range.
+        // Sorting row indices uses one buffer and O(n log n) comparisons without
+        // allocating a tuple per row. The preceding length check makes indexing safe.
         if let Some((a, b)) = self.first_duplicate_rows() {
             let tuple = self
                 .axes
@@ -317,10 +289,9 @@ fn cmp_cell(col: &Column, a: usize, b: usize) -> std::cmp::Ordering {
     }
 }
 
-/// What a parser reports beside the rows: element paths it did not
-/// recognise. The receiver logs each once per source (spec §6.3) rather
-/// than once per document, so a feed sending one stray element on every
-/// message does not flood the log.
+/// Parsed rows and paths of unrecognized elements. The subscription receiver
+/// deduplicates these paths per source before logging, so repeated extensions
+/// do not flood the log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedDocument {
     pub rows: DocumentRows,
@@ -349,32 +320,23 @@ impl std::fmt::Display for WriteError {
     }
 }
 
-/// A market-data document format (spec §6): what its parser recognises
-/// coming in and its writer produces going out (the round-trip publish
-/// path, spec §6.5), plus the columns it can feed — checked once against
-/// the dataset it is paired with, at source-open time, rather than on
-/// every parsed document. Lives in `geode-core`, not `geode-data`,
-/// because `geode-data` dev-depends on the demo generator (which will
-/// produce `DocumentRows`) — a trait in the data crate would be a cycle;
-/// `geode-data`'s registry (`geode_data::documents::DocumentRegistry`)
-/// sees only this trait, never a parser crate.
+/// A document format's parser, writer, and column vocabulary. The data service
+/// registers this trait without depending on a concrete parser crate. Source
+/// startup checks the kind's columns against its configured dataset; individual
+/// parsed documents still require shape validation before publication.
 pub trait DocumentKind: Send + Sync {
     fn name(&self) -> &'static str;
-    /// The columns this kind produces — key parts, axes, values,
-    /// attributes — with their types, checked against the dataset it
-    /// feeds when the source opens (spec §6.4).
+    /// Columns produced by this kind: keys, axes, values, and attributes.
+    /// Source startup checks their names and types against the dataset.
     fn columns(&self) -> &[(&'static str, ColumnType)];
     fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError>;
     fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError>;
 }
 
-/// The load-time check in spec §6.4: every column the kind produces is
-/// declared on the dataset with the same type, and every column the
-/// dataset declares (key, axes, values, document-level attributes) is
-/// one the kind produces. Both directions, so a document can be staged
-/// in `document_columns()` order by construction — a mismatch caught
-/// here at source-open time is a config diagnostic, never a per-row
-/// surprise discovered on the ingest thread.
+/// Check that a document dataset and kind declare the same column names and
+/// types in both directions. Source startup reports a mismatch as a configuration
+/// diagnostic. This check does not compare column order or validate individual
+/// rows; publication uses the dataset's order and validates each document.
 pub fn check_kind_against(kind: &dyn DocumentKind, ds: &DatasetSpec) -> Result<(), String> {
     if !ds.is_document() {
         return Err(format!("dataset '{}' is not a document dataset", ds.name));
@@ -622,12 +584,8 @@ role = "attribute"
         );
     }
 
-    /// Minor 7: a `DatasetSpec` whose `axes` names a column its `columns`
-    /// does not hold is a message, not a panic. `validate_document`
-    /// refuses that shape at load, so no schema-loaded spec reaches it —
-    /// but a hand-built one does, and `store::document::cell_source`
-    /// deliberately answers the very same "declared but absent" shape with
-    /// `StoreError::Document` rather than unwinding the ingest thread.
+    /// An undeclared axis in a hand-built schema returns a diagnostic instead of
+    /// panicking. Schema loading normally rejects this shape before publication.
     #[test]
     fn validate_refuses_an_axis_the_dataset_does_not_declare_as_a_column() {
         let mut ds = cvi();
