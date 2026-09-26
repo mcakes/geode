@@ -19487,6 +19487,94 @@ run_mutation "main: the builtin layer omits pricer_sheets" \
   '' \
   geode-app the_builtin_layer_declares_pricer_sheets_as_a_local_dataset
 
+# A shutdown runs the queued local writes (the user's last edits) before
+# the runner stops, and only those.
+run_mutation "runner: shutdown drops the queued local writes" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    let local = take_local_writes(&mut q);' \
+  '                    let local: Vec<DocumentWork> = Vec::new();' \
+  geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
+
+run_mutation "runner: shutdown also runs a feed's queued document" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            DocumentWork::Publish(job) => job.source == LOCAL_SOURCE,' \
+  '            DocumentWork::Publish(_job) => true,' \
+  geode-data shutdown_runs_queued_local_writes_and_drops_the_rest
+
+# At quit every unsaved sheet is saved before the data service stops.
+run_mutation "quit: the data hook stops the service without flushing sheets" \
+  crates/geode-app/src/bridge.rs \
+  '        pricer.flush_all(cx);' \
+  '        let _ = &pricer;' \
+  geode-app quitting_saves_every_unsaved_sheet_before_the_data_service_stops
+
+run_mutation "pricer: flush_all flushes no tile" \
+  crates/geode-pricer/src/content.rs \
+  '                t.flush_save();' \
+  '' \
+  geode-pricer flush_all_saves_every_unsaved_sheet_now
+
+run_mutation "pricer: a flush skips a sheet whose save failed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.dirty || self.save_failed {' \
+  '        if self.dirty {' \
+  geode-pricer flush_all_saves_every_unsaved_sheet_now
+
+# A deferred load starts only after the LAST queued save of its sheet.
+run_mutation "pricer: the first save outcome releases the name" \
+  crates/geode-pricer/src/content.rs \
+  '            Some(n) if *n > 1 => {' \
+  '            Some(n) if *n > 1000 => {' \
+  geode-pricer a_load_behind_two_queued_saves_waits_for_both_answers
+
+run_mutation "pricer: a save outcome resumes a load with saves still queued" \
+  crates/geode-pricer/src/content.rs \
+  '        if !settled {' \
+  '        if false {' \
+  geode-pricer a_load_behind_two_queued_saves_waits_for_both_answers
+
+run_mutation "pricer: a save refused at submission is counted as queued" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.save_refused = true;
+            self.save_notice = Some(NOT_SAVED.into());' \
+  '            self.shared.save_queued(&self.sheet.name);
+            self.save_refused = true;
+            self.save_notice = Some(NOT_SAVED.into());' \
+  geode-pricer a_save_refused_at_submission_leaves_no_load_waiting
+
+# `pricer_sheets` keeps the app's declaration: its tables are written
+# positionally, so a layer's redeclaration would misplace values.
+run_mutation "data_setup: a redeclared pricer_sheets is kept" \
+  crates/geode-app/src/bridge.rs \
+  '    diagnostics.extend(pin_pricer_sheets(&mut schema, config));' \
+  '' \
+  geode-app a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error
+
+run_mutation "reload: a redeclared pricer_sheets is kept" \
+  crates/geode-app/src/bridge.rs \
+  '                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));' \
+  '                    let _ = &mut schema;' \
+  geode-app a_reload_ignores_and_reports_a_redeclared_pricer_sheets
+
+run_mutation "pin: an identical redeclaration of pricer_sheets is reported" \
+  crates/geode-app/src/bridge.rs \
+  '    if slot.is_some_and(|i| schema.datasets[i] == declared) {' \
+  '    if false {' \
+  geode-app a_layer_redeclaring_pricer_sheets_identically_is_silent
+
+# A local dataset is neither a view's nor a source's to name.
+run_mutation "views dialog: a local dataset is offered" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        .filter(|d| !d.local)' \
+  '        .filter(|d| !d.name.is_empty())' \
+  geode-shell the_dataset_choice_offers_no_local_dataset
+
+run_mutation "sources dialog: a local dataset is offered" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        .filter(|d| !d.local)' \
+  '        .filter(|d| !d.name.is_empty())' \
+  geode-shell the_dataset_choice_offers_no_local_dataset
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
