@@ -212,9 +212,10 @@ pub(crate) struct Shared {
     /// a read submitted now could return the previous generation).
     ///
     /// Added when `save` answers `true`, removed by the FIRST outcome for
-    /// the name, whichever save it describes. Outcomes coalesce
-    /// latest-wins, so two queued saves may produce one outcome or two: a
-    /// per-name count could stay above zero forever. The first outcome
+    /// the name, whichever save it describes. An outcome does not say which
+    /// save it answers, and a store other than the app's mailbox-backed one
+    /// need not deliver one per save, so a per-name count could stay above
+    /// zero forever. The first outcome
     /// un-reserves early only when a second save of the same name is
     /// still queued behind it — a narrow window in which the name reads
     /// as known (a confirmed save of it just landed) or free (the first
