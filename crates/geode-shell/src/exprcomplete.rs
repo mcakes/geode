@@ -132,7 +132,15 @@ impl ExprCompletion {
         }
     }
 
+    /// Every column's values are requested under one pool key, and the
+    /// pool keeps only the newest request per key: a replaced pending
+    /// request or an interrupted running one never replies. So at most one
+    /// request is outstanding; any other column still `Loading` is
+    /// forgotten here, or it would say "loading values…" forever and
+    /// `refresh` would never ask again. Ready and Failed entries stay.
     pub fn mark_loading(&mut self, column: &str, tag: u64, vocab: &ExprVocab) {
+        self.values
+            .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));
         self.values
             .insert(column.to_string(), Values::Loading { tag });
         self.rebuild(vocab);
@@ -406,6 +414,46 @@ mod tests {
         assert_eq!(labels(&c), ["'EMEA'", "'O''Neil'"]);
         assert_eq!(c.rows()[0].detail, "12");
         assert_eq!(c.hint(), "value for book · 2 values");
+    }
+
+    #[test]
+    fn a_second_columns_request_forgets_the_first_so_it_is_asked_again() {
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.region]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\n\
+             [risk.columns.desk]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\n",
+        )
+        .unwrap();
+        let (schema, diagnostics) = SchemaSpec::from_doc(&merge_docs("datasets", &[datasets]));
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let v = ExprVocab::new(&schema, &DerivedDimensions::default());
+        let mut c = ExprCompletion::default();
+        c.refresh("desk = ", 7, &v);
+        c.mark_loading("desk", 1, &v);
+        assert!(c.deliver("desk", 1, Ok(vec![("D1".into(), 1)]), &v));
+        assert_eq!(c.refresh("book = ", 7, &v), Refresh::Request("book".into()));
+        c.mark_loading("book", 2, &v);
+        let text = "book = 'A' and region = ";
+        assert_eq!(
+            c.refresh(text, text.len(), &v),
+            Refresh::Request("region".into())
+        );
+        c.mark_loading("region", 3, &v);
+        assert!(
+            !c.deliver("book", 2, Ok(vec![("A".into(), 1)]), &v),
+            "the pool dropped book's request when region's replaced it"
+        );
+        assert_eq!(
+            c.refresh("book = ", 7, &v),
+            Refresh::Request("book".into()),
+            "returning to book asks again"
+        );
+        assert_eq!(
+            c.refresh("desk = ", 7, &v),
+            Refresh::Changed,
+            "a delivered column is kept"
+        );
     }
 
     #[test]
