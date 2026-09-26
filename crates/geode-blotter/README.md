@@ -38,6 +38,15 @@ cargo bench -p geode-blotter   # the pure core
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.
+- Every mouse selection gesture reaches the tile as a `CellPointer`, and
+  only through `pointer`. A cell or gutter press records `drag_origin`; the
+  row's own mouse-down (`render_tr`) reports a press at the cursor's column
+  only when no cell caught it, so a click on the filler beside the cells is
+  a plain click too. The table's `SelectRow` never touches the selection:
+  it arrives on mouse-up after the press already moved the cursor, and the
+  keyboard's echo carries the cursor's own row.
+- Summary strings, the `× selected` extent, and the `†`/`‡` legend flags
+  are prepared in `refresh_selection`; render only reads them.
 - `apply_snapshot` rebuilds the column plan on every delivery and swaps on
   inequality. Do not reinstate a cheaper gate.
 - A sort and the cursor are held by column name, not plan position.

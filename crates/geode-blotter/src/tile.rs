@@ -10,7 +10,7 @@ use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::grid::selection::{Lost, SelectKind, UNSUMMABLE_LEGEND, UNSUMMABLE_MARK};
+use geode_core::grid::selection::{Lost, SelectKind, UNSUMMABLE_LEGEND};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
@@ -76,8 +76,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::collapse_all", "Collapse all"),
     ("blotter::visual_rows", "Select rows"),
     ("blotter::visual_block", "Select cells"),
-    ("blotter::escape", "Leave visual / clear narrowing"),
-    ("blotter::yank", "Yank rows as TSV"),
+    ("blotter::escape", "Clear selection / narrowing"),
+    ("blotter::yank", "Yank selection as TSV"),
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
@@ -1546,6 +1546,12 @@ impl BlotterTile {
             })
     }
 
+    /// The tile's current notice or error text, as the footer shows it.
+    #[cfg(test)]
+    pub fn error_text(&self) -> Option<String> {
+        self.error.as_ref().map(|(e, _)| e.clone())
+    }
+
     /// The per-dataset freshness readout exactly as `render` builds it —
     /// the `"{dataset} {short_time}"` strings, in the same `f.as_of`
     /// order, read through the SAME `try_global` door `render` uses —
@@ -1553,11 +1559,6 @@ impl BlotterTile {
     /// for the global itself (review finding, Task 7: no test installed
     /// `AppClock` before this, so a tile that ignored it would have
     /// passed everything else).
-    #[cfg(test)]
-    pub fn error_text(&self) -> Option<String> {
-        self.error.as_ref().map(|(e, _)| e.clone())
-    }
-
     #[cfg(test)]
     pub(crate) fn freshness_texts(&self, cx: &App) -> Vec<String> {
         let clock = cx
@@ -1844,25 +1845,17 @@ impl gpui::Render for BlotterTile {
             .when(!delegate.summary.is_empty(), |f| {
                 f.child(aggregates::strip(&delegate.summary, theme))
             });
-        if delegate.summary.is_empty()
-            && let Some(r) = &delegate.resolved
-        {
-            footer =
-                footer.child(div().child(format!("{} × {} selected", r.rows.len(), r.cols.len())));
+        if let Some(extent) = &delegate.selection_extent {
+            footer = footer.child(div().child(extent.clone()));
         }
         // The dagger legend also covers a selection summary that carries
         // one: a per-row cell can be plain while the group it is folded
         // into is not (e.g. a determined-non-additive column at depth 1).
-        let show_dagger =
-            delegate.any_determined || delegate.summary.iter().any(|c| c.text.contains('†'));
+        let show_dagger = delegate.any_determined || delegate.summary_non_additive;
         if show_dagger {
             footer = footer.child(div().child("† shown for this row, do not total"));
         }
-        if delegate
-            .summary
-            .iter()
-            .any(|c| c.text.contains(UNSUMMABLE_MARK))
-        {
+        if delegate.summary_unsummable {
             footer = footer.child(div().child(UNSUMMABLE_LEGEND));
         }
         if !delegate.semi_joined.is_empty() {
@@ -2781,6 +2774,16 @@ mod tests {
             .center()
     }
 
+    /// [`centre`]'s element bounds, for a point beside the element.
+    fn centre_bounds(
+        cx: &mut gpui::VisualTestContext,
+        sel: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        cx.run_until_parked();
+        cx.debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} not painted"))
+    }
+
     #[gpui::test]
     fn shift_click_extends_a_block_from_the_cursor(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
@@ -2800,6 +2803,94 @@ mod tests {
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
             .unwrap();
         assert_eq!(r.rows, 0..2);
+    }
+
+    /// A plain press on a row's area outside every cell — the trailing
+    /// filler column past the last one — is still a plain click (spec §5):
+    /// it clears a live selection and moves the cursor to that row, on
+    /// the cursor's own row as much as on another. Only `render_td` cells
+    /// used to report a press, so the table's own `SelectRow` moved the
+    /// cursor under a selection that stayed live.
+    #[gpui::test]
+    fn a_plain_click_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let last = h.tile.read_with(&cx, |t, cx| {
+            t.table()
+                .read(cx)
+                .delegate()
+                .plan
+                .as_ref()
+                .unwrap()
+                .columns
+                .len()
+                - 1
+        });
+        let beside = |cx: &mut gpui::VisualTestContext, row: usize| {
+            let sel: &'static str =
+                Box::leak(format!("blotter-cell-{row}-{last}").into_boxed_str());
+            let b = centre_bounds(cx, sel);
+            gpui::point(b.right() + gpui::px(40.), b.center().y)
+        };
+        let state = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.selection.is_some(), d.cursor.row)
+            })
+        };
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down"); // rows 0..=1, cursor on 1
+        assert_eq!(state(&mut cx), (true, 1), "fixture");
+
+        let at = beside(&mut cx, 1);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(state(&mut cx), (false, 1), "same row: the click clears");
+
+        act(&h, &mut cx, "blotter::visual_rows");
+        let at = beside(&mut cx, 2);
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            state(&mut cx),
+            (false, 2),
+            "another row: the click clears and moves"
+        );
+    }
+
+    /// A selection over no measure column shows its extent instead of a
+    /// summary, prepared when the selection changes (render only reads
+    /// it) and gone when the selection clears.
+    #[gpui::test]
+    fn a_selection_without_measures_prepares_its_extent(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_block"); // the tree column only
+        act(&h, &mut cx, "blotter::down");
+        let extent = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.summary.is_empty(), d.selection_extent.clone())
+            })
+        };
+        assert_eq!(extent(&mut cx), (true, Some("2 × 1 selected".into())));
+        act(&h, &mut cx, "blotter::escape");
+        assert_eq!(extent(&mut cx), (true, None));
+    }
+
+    /// The keyboard's own `SelectRow` echo (`sync_cursor` →
+    /// `set_selected_row`) must never read as a plain click: `V j j`
+    /// keeps its selection through every echo.
+    #[gpui::test]
+    fn the_cursor_echo_never_clears_a_keyboard_selection(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::visual_rows");
+        act(&h, &mut cx, "blotter::down");
+        act(&h, &mut cx, "blotter::down");
+        cx.run_until_parked();
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .expect("the selection survives its echoes");
+        assert_eq!(r.rows, 0..3);
     }
 
     #[gpui::test]

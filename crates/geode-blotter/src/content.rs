@@ -25,6 +25,12 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Retired action ids and their successors: a user keymap that still names
+/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
+/// `blotter::visual` selected whole rows, which is exactly what
+/// `blotter::visual_rows` does; `blotter::visual_block` is new.
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::visual_rows")];
+
 /// This module's default bindings (market-data documents §8.4), handed to
 /// the app through [`ModuleFactory::default_keymap`] and spliced above the
 /// shell's own `BUILTIN_KEYMAP` — where, until Part 3, these very two
@@ -267,6 +273,9 @@ impl ModuleFactory for BlotterFactory {
                 category: "Blotter".to_string(),
             });
         }
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
+        }
     }
 
     fn create(
@@ -386,6 +395,49 @@ mod tests {
                 MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
                 other => panic!("{spec}: expected a match, got {other:?}"),
             }
+        }
+    }
+
+    /// A user keymap written before the selection split still binds:
+    /// the old `blotter::visual` WAS the row selection (grid selection
+    /// spec ruling 1), so the factory registers it as a rename of
+    /// `blotter::visual_rows` and the binding resolves there with a
+    /// warning instead of being dropped.
+    #[test]
+    fn a_user_binding_on_the_retired_visual_id_binds_visual_rows() {
+        let (handle, _rx) = geode_data::DataHandle::for_tests();
+        let factory = BlotterFactory::new(
+            handle,
+            Vec::new(),
+            NamedColours::default(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        );
+        let mut registry = ActionRegistry::default();
+        factory.register_actions(&mut registry);
+        let doc = geode_core::config::LayerDoc::builtin(
+            "keymap",
+            "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"shift+x\" = \"blotter::visual\"\n",
+        )
+        .unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("blotter::visual_rows")),
+            "the rename warns, naming the current id: {diags:?}"
+        );
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").pair("mode", "normal").counts(),
+        ];
+        let keystroke = parse_keystroke("shift+x", default_mod()).unwrap();
+        match Matcher::default().press(&keymap, keystroke, &stack) {
+            MatchResult::Matched { action, .. } => assert_eq!(action.0, "blotter::visual_rows"),
+            other => panic!("expected the renamed binding, got {other:?}"),
         }
     }
 

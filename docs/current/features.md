@@ -84,8 +84,9 @@ with its count, min, and max, and the footer adds "‡ this column does not add
 up". Attribution alone cannot decide this: a `max` measure's values belong to
 their rows, yet the total of two maxima is meaningless.
 
-The mouse reaches the same states the keyboard does. A plain click clears any
-selection and moves the cursor; shift+click extends one, starting a block
+The mouse reaches the same states the keyboard does. A plain click anywhere
+on a row, including the empty space beside its cells, clears any selection
+and moves the cursor; shift+click extends one, starting a block
 from the cursor or, from the line-number gutter, rows. A drag selects
 continuously, and whether it selects rows or a block is decided by where the
 press that started it landed — the gutter starts rows, a cell starts a

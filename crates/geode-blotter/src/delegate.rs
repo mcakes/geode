@@ -14,7 +14,7 @@ use crate::core::plan::{ColumnKind, ColumnPlan};
 use crate::core::select::summarize;
 use geode_core::attribution::Attribution;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
-use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection};
+use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection, UNSUMMABLE_MARK};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
@@ -98,6 +98,15 @@ pub struct BlotterDelegate {
     /// The footer's per-column aggregates over `resolved`, rebuilt
     /// alongside it.
     pub summary: Vec<AggregateCell>,
+    /// The footer's `"{rows} × {cols} selected"` readout, shown when a
+    /// live selection covers no measure column (so `summary` is empty);
+    /// `None` otherwise. Prepared with `summary` so render formats
+    /// nothing.
+    pub selection_extent: Option<SharedString>,
+    /// Whether any `summary` cell refuses a total with `†` / `‡`, so
+    /// render shows each legend without scanning the strings per frame.
+    pub summary_non_additive: bool,
+    pub summary_unsummable: bool,
     /// Set by `refresh_selection` when a live selection's anchor row —
     /// or a block's anchor column — is no longer displayed and the
     /// selection was cleared as a result, naming which one; taken by the
@@ -246,6 +255,9 @@ impl BlotterDelegate {
             selection: None,
             resolved: None,
             summary: Vec::new(),
+            selection_extent: None,
+            summary_non_additive: false,
+            summary_unsummable: false,
             selection_lost: None,
             anchor_hint: 0,
             sort: None,
@@ -538,6 +550,17 @@ impl BlotterDelegate {
                 .collect(),
             _ => Vec::new(),
         };
+        self.selection_extent = match &resolved {
+            Some(r) if self.summary.is_empty() => {
+                Some(format!("{} × {} selected", r.rows.len(), r.cols.len()).into())
+            }
+            _ => None,
+        };
+        self.summary_non_additive = self.summary.iter().any(|c| c.text.contains('†'));
+        self.summary_unsummable = self
+            .summary
+            .iter()
+            .any(|c| c.text.contains(UNSUMMABLE_MARK));
         self.resolved = resolved;
     }
 
@@ -1237,6 +1260,29 @@ impl TableDelegate for BlotterDelegate {
         div()
             .id(("row", row_ix))
             .when(tint, |el| el.bg(cx.theme().selection.opacity(0.35)))
+            // A press on the row outside every cell — the trailing filler
+            // column, row padding — is still a plain click (spec §5): it
+            // reports a press at the cursor's column so the tile's one
+            // pointer door clears or extends exactly as a cell press
+            // would. The row bubbles after its cells, so a press a cell or
+            // the gutter already caught has set `drag_origin` and is not
+            // reported twice; this press arms no drag.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    if d.drag_origin.is_some() {
+                        return;
+                    }
+                    let col = d.cursor.col;
+                    cx.emit(CellPointer::Press {
+                        row: row_ix,
+                        col,
+                        shift: e.modifiers.shift,
+                        gutter: false,
+                    });
+                }),
+            )
     }
 
     fn render_td(
@@ -2047,6 +2093,76 @@ mod tests {
     /// moves — `ColumnPlan::move_column` refuses `from == 0 || to ==
     /// 0`), so only the cell cache needs to be repainted, immediately,
     /// for the window that was already on screen.
+    #[gpui::test]
+    fn a_header_column_move_keeps_a_block_on_its_column_names(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+             [[t.columns]]\nname = \"a\"\n[[t.columns]]\nname = \"b\"\n\
+             [[t.columns]]\nname = \"c\"\n[[t.columns]]\nname = \"d\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let f = || TestColumn::F64(vec![Some(1.0), Some(2.0)]);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("a"), f()),
+                (dim("b"), f()),
+                (dim("c"), f()),
+                (dim("d"), f()),
+            ],
+            1,
+        ));
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| TableState::new(BlotterDelegate::new(), window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let table = window.root(&mut vcx).unwrap();
+        let names = |d: &BlotterDelegate| -> Vec<String> {
+            let plan = d.plan.as_ref().unwrap();
+            d.resolved
+                .as_ref()
+                .unwrap()
+                .cols
+                .clone()
+                .map(|c| plan.columns[c].name.clone())
+                .collect()
+        };
+        table.update_in(&mut vcx, |t, window, cx| {
+            let d = t.delegate_mut();
+            d.apply_snapshot(snap, &view, &["lhu".to_string()]);
+            // Plan: [tree, a, b, c, d]. Anchor on `a`, cursor on `b`.
+            d.cursor.col = 1;
+            d.start_selection(SelectKind::Block);
+            d.cursor.col = 2;
+            d.refresh_selection();
+            assert_eq!(names(d), ["a", "b"], "fixture");
+
+            // `d`, outside the block, moves to its left edge.
+            d.move_column(4, 1, window, cx);
+            assert_eq!(names(t.delegate()), ["a", "b"], "an outside move");
+
+            // The cursor's own column `b` moves to the far right: the
+            // block still runs from the anchor `a` to the cursor on `b`.
+            let d = t.delegate_mut();
+            let from = d.plan.as_ref().unwrap().position_of("b").unwrap();
+            d.move_column(from, 4, window, cx);
+            let got = names(t.delegate());
+            assert_eq!(
+                (
+                    got.first().map(String::as_str),
+                    got.last().map(String::as_str)
+                ),
+                (Some("a"), Some("b")),
+                "the block's edges stay on the anchor's and the cursor's columns: {got:?}"
+            );
+        });
+    }
+
     #[gpui::test]
     fn move_column_refills_the_window_immediately(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

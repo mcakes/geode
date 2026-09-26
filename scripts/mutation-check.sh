@@ -20885,6 +20885,27 @@ run_mutation "grid selection: the snapshot keeps the compiler's summable mark" \
   geode-data \
   only_a_plain_sum_measure_is_marked_summable
 
+run_mutation "blotter selection: a press beside the cells is a plain click" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    if d.drag_origin.is_some() {' \
+  '                    if true {' \
+  geode-blotter \
+  a_plain_click_beside_the_cells_clears_the_selection
+
+run_mutation "blotter selection: the retired visual id renames to visual_rows" \
+  crates/geode-blotter/src/content.rs \
+  '            let _ = registry.register_rename(old, new);' \
+  '            let _ = (old, new);' \
+  geode-blotter \
+  a_user_binding_on_the_retired_visual_id_binds_visual_rows
+
+run_mutation "blotter selection: the extent is prepared with the summary" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(r) if self.summary.is_empty() => {' \
+  '            Some(r) if false => {' \
+  geode-blotter \
+  a_selection_without_measures_prepares_its_extent
+
 run_mutation "blotter selection: a shift press starts a selection" \
   crates/geode-blotter/src/tile.rs \
   '                } => (row, col, Some(kind_for(gutter))),' \
