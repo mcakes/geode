@@ -19553,6 +19553,68 @@ run_mutation "sources dialog: a local dataset is offered" \
   '        .filter(|d| !d.name.is_empty())' \
   geode-shell the_dataset_choice_offers_no_local_dataset
 
+# ---- Pricer sheets: the last storage contracts ----------------------------
+
+# A forget deletes one document: the WHERE is the batch, never the dataset.
+run_mutation "forget: every document's live rows go" \
+  crates/geode-data/src/store/document.rs \
+  '        &format!("delete from \"{}\" where batch = ?", tables.live),' \
+  '        &format!("delete from \"{}\" where batch = ? or true", tables.live),' \
+  geode-data forget_removes_one_document_and_its_history_and_nothing_else
+
+# The local bound is 200 archived generations, not fewer.
+run_mutation "runner: the local sweep keeps fewer than the bound" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        keep_generations: Some(LOCAL_KEEP_GENERATIONS),' \
+  '        keep_generations: Some(LOCAL_KEEP_GENERATIONS - 1),' \
+  geode-data local_publishes_are_swept_to_the_retention_bound_and_feeds_are_not
+
+run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.shared.refuse_retiring(&name)?;
+        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
+        }
+        if !self.shared.taken(&name) {' \
+  '        self.shared.refuse_retiring(&name)?;
+        if !self.shared.taken(&name) {' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+# Every key under the armed confirm is the confirm's alone.
+run_mutation "pricer rm: a key under the confirm reaches the tile too" \
+  crates/geode-pricer/src/header.rs \
+  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                            cx.stop_propagation();' \
+  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+# The table's own escape would clear its selection and stop the key before
+# the tile's cancel closes the entry field.
+run_mutation "pricer init: DataTable keeps its own escape" \
+  crates/geode-pricer/src/lib.rs \
+  '            "escape",
+' \
+  '' \
+  geode-app escape_after_a_committed_line_closes_the_entry_field
+
+run_mutation "pricer retiring: a restore opens a sheet being removed" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(n) if shared.refuse_retiring(n).is_err() => {' \
+  '            Some(n) if false => {' \
+  geode-pricer a_restore_of_a_retiring_name_opens_a_fresh_sheet
+
+run_mutation "pricer save origin: a renamed-from name's failure claims lost edits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.rename_from.as_deref() == Some(sheet) {' \
+  '        if false {' \
+  geode-pricer a_failed_save_of_the_renamed_from_name_claims_no_lost_edits
+
+run_mutation "pricer save: a failed load's block hides the lost-edits notice" \
+  crates/geode-pricer/src/tile.rs \
+  '            Some(lost) => format!("{blocked}; {lost}").into(),' \
+  '            Some(_lost) => blocked,' \
+  geode-pricer a_waiting_loads_failure_keeps_the_lost_edits_notice
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
