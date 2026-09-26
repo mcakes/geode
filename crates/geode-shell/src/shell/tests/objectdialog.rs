@@ -4557,6 +4557,32 @@ fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The grip is the member row's drag handle: a press on it arms the drag
+/// and nothing else, so a column can be reordered by the mouse without
+/// the press opening that column's stage the way a press on the row's
+/// body does.
+#[gpui::test]
+fn pressing_a_member_rows_grip_does_not_open_its_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let grip = cx
+        .debug_bounds("objectdialog-grip-npv")
+        .expect("npv is one of tree's own columns and paints a grip");
+    cx.simulate_mouse_down(
+        gpui::point(grip.origin.x + gpui::px(3.0), grip.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "a press on the grip leaves the dialog on the view's edit stage"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Task 8: the object dialog to the mock — crumb, badges, grip and tick,
 // section headers (§18.1).
@@ -6872,6 +6898,55 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         dialog_state(&shell, &cx, |s| s.mode),
         DialogMode::Normal,
         "the stage opens in normal mode whatever mode enter arrived in"
+    );
+}
+
+/// A column-stage row names the layer its value comes from and no
+/// destination: every field there writes the same overlay, so a per-row
+/// `pres` says nothing. The layer badge sits in a slot of one width, so a
+/// row that gains or lacks a badge keeps its value where every other
+/// row's is.
+#[gpui::test]
+fn the_column_stage_badges_the_layer_in_one_aligned_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[(
+        "dataset_presentation",
+        "[risk_snapshot.columns.npv]\nscale = \"k\"\n",
+    )]);
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-scale")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_none()
+    );
+    for selector in [
+        "objectdialog-dest-label",
+        "objectdialog-dest-width",
+        "objectdialog-dest-scale",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector}: the column stage paints no destination badge"
+        );
+    }
+    let scale = cx
+        .debug_bounds("objectdialog-value-scale")
+        .expect("scale paints a value");
+    let width = cx
+        .debug_bounds("objectdialog-value-width")
+        .expect("width paints a value");
+    assert_eq!(
+        scale.right(),
+        width.right(),
+        "a badged row's value lines up with an unbadged row's"
     );
 }
 

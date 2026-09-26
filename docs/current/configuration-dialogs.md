@@ -47,6 +47,13 @@ and membership or order operations for lists. Keyboard and pointer routes
 share the mutation helpers. A pending destructive confirmation blocks other
 row mutations, including clicks and drops.
 
+A member row of an ordered list drags from its `⋮` grip, not its body: a press
+on a Views member row opens that column's stage, so a gesture started there
+would leave the list before it could move anything. The grip's press arms the
+drag and does nothing else. Available rows have no grip and open nothing on a
+press, so the whole row stays their drag handle. Any row of the list is a drop
+target.
+
 In Edit, Column, and Values, `Draft::is_cursor_stop` determines which rows can
 hold selection. A row qualifies when it supports a row-specific command or
 opens a Column or Values stage. Display-only text, list headers, multi-choice
@@ -75,6 +82,12 @@ Column and Values stages stash the parent fields and fold changes back into
 the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
 its read-only summaries from configuration with pending edits included.
+
+Edit-stage rows carry a `doc` or `pres` badge naming where the row writes. A
+Column stage's fields all write one overlay, so its rows instead name the
+layer their value comes from (`desk`, `dataset`, or `view`; none for the kind
+default). That badge sits in a slot as wide as the widest layer name, so a
+badge appearing mid-edit does not shift the row's value.
 
 ## Definitions and presentation
 
