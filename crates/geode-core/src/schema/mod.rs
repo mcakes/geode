@@ -47,7 +47,7 @@ pub struct SeriesRetention {
 /// paths so they agree on column positions.
 pub const SERIES_COLUMNS: [&str; 5] = ["source", "series_id", "ts", "received_at", "value"];
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DatasetSpec {
     pub name: String,
     pub columns: Vec<ColumnSpec>,

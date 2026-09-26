@@ -5,7 +5,7 @@
 
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
-use geode_core::config::{Config, Diagnostic, Severity, load_views};
+use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::egress_config;
 use geode_core::query::{CatalogParams, DistinctOutcome};
@@ -21,7 +21,9 @@ use geode_data::{
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_pricer::content::{PricerFactory, PricerSettings};
-use geode_pricer::core::{PRICER_SHEETS_DATASET, PRICER_VIEWS_DOC, Views};
+use geode_pricer::core::{
+    PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_VIEWS_DOC, Views,
+};
 use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
 use geode_shell::module::{Delivery, UploadDelivery};
@@ -72,8 +74,9 @@ pub fn data_setup(
     // A direct parse would omit the trader's effective presentation settings.
     config.doc("views")?;
     let mut diagnostics = Vec::new();
-    let (schema, d) = SchemaSpec::from_doc(datasets);
+    let (mut schema, d) = SchemaSpec::from_doc(datasets);
     diagnostics.extend(d);
+    diagnostics.extend(pin_pricer_sheets(&mut schema, config));
     let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
@@ -172,6 +175,51 @@ pub fn data_setup(
         pricer_views,
         pricer_settings,
         pricer_key: pricer_config_key(config),
+    })
+}
+
+/// Keep `pricer_sheets` exactly as the app declares it. Its tables are
+/// created once and written positionally (`insert … select *`), so a desk
+/// or user layer redeclaring it with other columns, or the same columns in
+/// another order, would put sheet values into the wrong columns of an
+/// existing database while reads by name decode a plausible wrong sheet.
+/// A redeclaration that differs is replaced by the builtin one and
+/// reported as an error naming the layer and file; an identical one is
+/// accepted silently.
+fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnostic> {
+    let builtin = LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
+        .expect("PRICER_SHEETS_DECLARATION is well-formed TOML");
+    let (alone, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[builtin]));
+    let declared = alone
+        .dataset(PRICER_SHEETS_DATASET)
+        .expect("PRICER_SHEETS_DECLARATION declares pricer_sheets")
+        .clone();
+    let slot = schema
+        .datasets
+        .iter()
+        .position(|d| d.name == PRICER_SHEETS_DATASET);
+    if slot.is_some_and(|i| schema.datasets[i] == declared) {
+        return None;
+    }
+    match slot {
+        Some(i) => schema.datasets[i] = declared,
+        None => schema.datasets.push(declared),
+    }
+    let redeclared = config
+        .layered_docs("datasets")
+        .iter()
+        .rev()
+        .find(|d| d.layer != Layer::Builtin && d.table.contains_key(PRICER_SHEETS_DATASET));
+    Some(Diagnostic {
+        severity: Severity::Error,
+        layer: redeclared.map(|d| d.layer),
+        file: redeclared.map(|d| d.file.clone()),
+        message: format!(
+            "`{PRICER_SHEETS_DATASET}` is declared by the app; this redeclaration is ignored \
+             (its table's columns are fixed, and a different column list would put sheet \
+             values in the wrong columns)"
+        ),
+        path: Some(format!("datasets.{PRICER_SHEETS_DATASET}")),
     })
 }
 
@@ -634,14 +682,20 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // Refresh the factory's validation schema from current config. Dataset-only
                 // edits require restart and do not emit ConfigReloaded; a later eligible
                 // reload can update this factory before the service's schema is rebuilt.
-                if let Some(schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0) {
+                let mut pin_diags = Vec::new();
+                if let Some(mut schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0)
+                {
+                    pin_diags.extend(pin_pricer_sheets(&mut schema, config));
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
                 handle.replace_views(views, dims);
                 // The config borrow has ended; diagnostics can now be updated through cx.
-                let reload_diags: Vec<Diagnostic> =
-                    presentation_diags.into_iter().chain(colour_diags).collect();
+                let reload_diags: Vec<Diagnostic> = presentation_diags
+                    .into_iter()
+                    .chain(colour_diags)
+                    .chain(pin_diags)
+                    .collect();
                 if !reload_diags.is_empty() {
                     diagnostics.update(cx, |dg, cx| {
                         let before = dg.version();
@@ -3524,6 +3578,126 @@ role = "key"
             ),
             PathBuf::from("/var/geode/x.duckdb"),
             "config wins even over demo"
+        );
+    }
+
+    /// A desk layer's `datasets.toml` whose body is `pricer_sheets`
+    /// declared as `declaration`, and the sources loading it over the
+    /// builtin layer.
+    fn with_desk_pricer_sheets(dir: &Path, declaration: &str) -> (ConfigSources, PathBuf) {
+        let desk = dir.join("desk");
+        std::fs::create_dir_all(&desk).unwrap();
+        let file = desk.join("datasets.toml");
+        std::fs::write(&file, format!("config_version = 1\n{declaration}")).unwrap();
+        let sources = ConfigSources {
+            builtin: crate::builtin_layer(Some(dir)),
+            desk: Some(desk),
+            user: None,
+        };
+        (sources, file)
+    }
+
+    /// `pricer_sheets` with two same-typed columns swapped: reads by name
+    /// would decode it, but positional inserts into an existing table would
+    /// put each value in the other's column.
+    fn reordered_pricer_sheets() -> String {
+        geode_pricer::core::PRICER_SHEETS_DECLARATION
+            .replace("columns.kind]", "columns.SWAP]")
+            .replace("columns.template]", "columns.kind]")
+            .replace("columns.SWAP]", "columns.template]")
+    }
+
+    fn pricer_sheets_pin_diagnostic(diags: &[Diagnostic]) -> Option<&Diagnostic> {
+        diags
+            .iter()
+            .find(|d| d.severity == Severity::Error && d.message.contains("pricer_sheets"))
+    }
+
+    /// The app owns `pricer_sheets`: its tables are created once and
+    /// written positionally, so a desk or user redeclaration that differs
+    /// is ignored, with an error naming the layer, its file and why.
+    #[test]
+    fn a_layer_redeclaring_pricer_sheets_differently_is_ignored_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sources, file) = with_desk_pricer_sheets(dir.path(), &reordered_pricer_sheets());
+        let config = Config::load(&sources);
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        let builtin = crate::builtin_layer(None);
+        let (alone, _) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &builtin
+                .into_iter()
+                .filter(|d| d.name == "datasets")
+                .collect::<Vec<_>>(),
+        ));
+        assert!(
+            setup.config.schema.dataset(PRICER_SHEETS_DATASET)
+                == alone.dataset(PRICER_SHEETS_DATASET),
+            "the service runs the app's declaration"
+        );
+        let d = pricer_sheets_pin_diagnostic(&setup.diagnostics).expect("an error diagnostic");
+        assert_eq!(d.layer, Some(geode_core::config::Layer::Desk));
+        assert_eq!(d.file.as_deref(), Some(file.as_path()));
+        assert!(d.message.contains("ignored"), "{}", d.message);
+        assert!(d.message.contains("wrong columns"), "{}", d.message);
+    }
+
+    #[test]
+    fn a_layer_redeclaring_pricer_sheets_identically_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sources, _) =
+            with_desk_pricer_sheets(dir.path(), geode_pricer::core::PRICER_SHEETS_DECLARATION);
+        let config = Config::load(&sources);
+        let setup = data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        assert!(
+            pricer_sheets_pin_diagnostic(&setup.diagnostics).is_none(),
+            "{:?}",
+            setup.diagnostics
+        );
+    }
+
+    /// A reload re-reads `datasets` for the blotter's validation schema:
+    /// the redeclaration is ignored there too, and reported.
+    #[gpui::test]
+    fn a_reload_ignores_and_reports_a_redeclared_pricer_sheets(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (sources, _) = with_desk_pricer_sheets(dir.path(), &reordered_pricer_sheets());
+        let window = open_test_window(cx, test_shell_services_with_sources(sources));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let reported = diagnostics.read_with(&vcx, |d, _| {
+            let diags: Vec<Diagnostic> =
+                d.data_diagnostics.iter().map(|(_, d)| d.clone()).collect();
+            pricer_sheets_pin_diagnostic(&diags).is_some()
+        });
+        assert!(
+            reported,
+            "the reload path must report the ignored redeclaration"
         );
     }
 
