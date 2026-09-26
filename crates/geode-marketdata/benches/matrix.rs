@@ -27,6 +27,7 @@ fn meta(name: &str, attribution: Attribution) -> ColumnMeta {
         name: name.into(),
         attribution_by_depth: vec![attribution],
         scope_semantics: ScopeSemantics::Direct,
+        summable: false,
     }
 }
 

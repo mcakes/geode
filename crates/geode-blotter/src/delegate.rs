@@ -1430,6 +1430,7 @@ mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 4],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         }
     }
     fn s(v: &str) -> Option<String> {
@@ -1967,6 +1968,7 @@ mod tests {
                         name: "lhu".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::Dict(vec![None, s("L1"), s("SPX"), s("SPX"), s("SPX"), s("SPX")]),
                 ),
@@ -1975,6 +1977,7 @@ mod tests {
                         name: "underlying_ref".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::Dict(vec![None, None, s("A"), s("B"), s("C"), s("D")]),
                 ),
@@ -1983,6 +1986,7 @@ mod tests {
                         name: "row_depth".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::I32(vec![0, 1, 2, 2, 2, 2]),
                 ),
@@ -1991,6 +1995,7 @@ mod tests {
                         name: "delta01".into(),
                         attribution_by_depth: (0..4).map(determined).collect(),
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::F64(vec![
                         Some(9.0),

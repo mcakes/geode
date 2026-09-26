@@ -71,6 +71,15 @@ the selection spans a single measure column. A column carrying a
 of a sum or mean — an explicit refusal rather than a plausible but wrong
 total.
 
+Whether a column adds up at all is a separate fact, decided by the query
+compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
+only a plain measure whose schema aggregate is `sum` is summable. A `min`,
+`max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
+a joined column, and anything unmarked are not. Such a column shows `Σ —‡`
+with its count, min, and max, and the footer adds "‡ this column does not add
+up". Attribution alone cannot decide this: a `max` measure's values belong to
+their rows, yet the total of two maxima is meaningless.
+
 The mouse reaches the same states the keyboard does. A plain click clears any
 selection and moves the cursor; shift+click extends one, starting a block
 from the cursor or, from the line-number gutter, rows. A drag selects

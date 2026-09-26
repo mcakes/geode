@@ -73,6 +73,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: vec![Attribution::Additive; 3],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let snap = Snapshot::for_tests(
             vec![

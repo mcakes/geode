@@ -1096,6 +1096,7 @@ mod tests {
             // attribution entry.
             attribution_by_depth: vec![attribution],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         }
     }
 

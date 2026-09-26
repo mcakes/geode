@@ -20801,10 +20801,17 @@ run_mutation "grid selection: an ancestor in the selection hides the row" \
 
 run_mutation "grid selection: a non-additive value suppresses the sum" \
   crates/geode-core/src/grid/selection.rs \
-  '        let totals = self.count > 0 && !self.non_additive;' \
-  '        let totals = self.count > 0;' \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.unsummable;' \
   geode-core \
   a_non_additive_value_suppresses_sum_and_mean_but_not_extremes
+
+run_mutation "grid selection: an unsummable column never totals" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.non_additive;' \
+  geode-core \
+  an_unsummable_column_never_totals_and_always_shows_extremes
 
 run_mutation "grid selection: a lost anchor row resolves to None" \
   crates/geode-core/src/grid/selection.rs \
@@ -20835,6 +20842,34 @@ run_mutation "blotter selection: summarize goes through top_most" \
   '    let _ = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
   geode-blotter \
   a_group_with_its_child_sums_the_group_once
+
+run_mutation "blotter selection: only a summable column totals" \
+  crates/geode-blotter/src/core/select.rs \
+  '            let mut acc = if column.summable {' \
+  '            let mut acc = if true {' \
+  geode-blotter \
+  a_max_measure_over_sibling_groups_shows_no_sum
+
+run_mutation "blotter selection: the plan carries the summable mark" \
+  crates/geode-blotter/src/core/plan.rs \
+  '                summable: meta.is_some_and(|m| m.summable),' \
+  '                summable: meta.is_some(),' \
+  geode-blotter \
+  a_derived_column_shows_no_sum
+
+run_mutation "grid selection: only a plain sum measure compiles summable" \
+  crates/geode-data/src/query/compile.rs \
+  '                summable: matches!(' \
+  '                summable: true || matches!(' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
+
+run_mutation "grid selection: the snapshot keeps the compiler's summable mark" \
+  crates/geode-data/src/query/pool.rs \
+  '            summable: c.summable,' \
+  '            summable: true,' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
 
 run_mutation "blotter selection: a shift press starts a selection" \
   crates/geode-blotter/src/tile.rs \

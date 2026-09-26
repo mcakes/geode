@@ -10,7 +10,7 @@ use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::grid::selection::SelectKind;
+use geode_core::grid::selection::{SelectKind, UNSUMMABLE_LEGEND, UNSUMMABLE_MARK};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
@@ -1855,6 +1855,13 @@ impl gpui::Render for BlotterTile {
         if show_dagger {
             footer = footer.child(div().child("† shown for this row, do not total"));
         }
+        if delegate
+            .summary
+            .iter()
+            .any(|c| c.text.contains(UNSUMMABLE_MARK))
+        {
+            footer = footer.child(div().child(UNSUMMABLE_LEGEND));
+        }
         if !delegate.semi_joined.is_empty() {
             footer = footer.child(div().child(format!(
                 "⋈ scoped by membership on {}: whole entities that qualify, not their share",
@@ -1995,6 +2002,8 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            // The fixture's measures are plain sum measures.
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         vec![
             (
@@ -2065,6 +2074,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -2115,6 +2125,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: matches!(n, "delta01" | "daily_trading_pnl"),
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -2492,6 +2503,7 @@ mod tests {
             name: "lhu".into(),
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let provenance = Provenance {
             datasets: vec![Freshness {
@@ -2712,6 +2724,7 @@ mod tests {
             name: "lhu".into(),
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let stale_snapshot = Arc::new(Snapshot::for_tests(
             vec![(meta1, TestColumn::Dict(vec![Some("X".into())]))],
@@ -3433,6 +3446,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let snap = Arc::new(Snapshot::for_tests(
             vec![
@@ -4436,6 +4450,7 @@ mod tests {
             name: n.into(),
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -4491,6 +4506,7 @@ mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         };
         let mut lhu: Vec<Option<String>> = vec![None];
         let mut depth: Vec<i32> = vec![0];

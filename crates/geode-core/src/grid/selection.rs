@@ -126,6 +126,9 @@ pub struct ColumnAggregate {
     /// Some contributing value must never be totalled
     /// (`Attribution::DeterminedNonAdditive`).
     pub non_additive: bool,
+    /// The column itself does not add up — a min/max/any measure or a
+    /// derived expression — whatever each value's attribution says.
+    pub unsummable: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -135,9 +138,19 @@ pub struct Accumulator {
     min: Option<f64>,
     max: Option<f64>,
     non_additive: bool,
+    unsummable: bool,
 }
 
 impl Accumulator {
+    /// An accumulator for a column that never totals (see
+    /// `ColumnMeta::summable`): count and extremes only.
+    pub fn unsummable() -> Self {
+        Self {
+            unsummable: true,
+            ..Self::default()
+        }
+    }
+
     pub fn add(&mut self, value: Option<f64>, additive: bool) {
         let Some(v) = value.filter(|v| !v.is_nan()) else {
             return;
@@ -150,7 +163,7 @@ impl Accumulator {
     }
 
     pub fn finish(&self) -> ColumnAggregate {
-        let totals = self.count > 0 && !self.non_additive;
+        let totals = self.count > 0 && !self.non_additive && !self.unsummable;
         ColumnAggregate {
             count: self.count,
             sum: totals.then_some(self.sum),
@@ -158,13 +171,26 @@ impl Accumulator {
             min: self.min,
             max: self.max,
             non_additive: self.non_additive,
+            unsummable: self.unsummable,
         }
     }
 }
 
 /// The footer text for one column (spec §3.3), formatted with that
 /// column's own `ColumnFormat`. `extremes` adds `min`/`max` (a selection
-/// covering a single numeric column).
+/// covering a single numeric column); an unsummable column always shows
+/// them, since they are all it has to say.
+///
+/// Two markers refuse a total, each with its own footer legend: `†` for
+/// a column whose selected cells are shown for their row but must not be
+/// totalled (the grid marks those cells `†` too), and `‡` for a column
+/// that does not add up at all. `‡` wins: a max column is unsummable
+/// whatever its cells' attribution.
+/// The footer's mark for a column that does not add up; the footer shows
+/// [`UNSUMMABLE_LEGEND`] whenever a summary carries it.
+pub const UNSUMMABLE_MARK: char = '‡';
+pub const UNSUMMABLE_LEGEND: &str = "‡ this column does not add up";
+
 pub fn describe(
     agg: &ColumnAggregate,
     format: &crate::view::ColumnFormat,
@@ -173,14 +199,18 @@ pub fn describe(
     use crate::format::format_number;
     let f = |v: f64| format_number(v, format).text;
     let mut parts: Vec<String> = Vec::new();
-    if agg.non_additive {
+    if agg.unsummable {
+        parts.push(format!("Σ —{UNSUMMABLE_MARK}"));
+    } else if agg.non_additive {
         parts.push("Σ —†".into());
     } else if let (Some(s), Some(m)) = (agg.sum, agg.mean) {
         parts.push(format!("Σ {}", f(s)));
         parts.push(format!("μ {}", f(m)));
     }
     parts.push(format!("n {}", agg.count));
-    if extremes && let (Some(lo), Some(hi)) = (agg.min, agg.max) {
+    if (extremes || agg.unsummable)
+        && let (Some(lo), Some(hi)) = (agg.min, agg.max)
+    {
         parts.push(format!("min {}", f(lo)));
         parts.push(format!("max {}", f(hi)));
     }
@@ -308,6 +338,21 @@ mod tests {
         assert!(g.non_additive);
         assert_eq!((g.sum, g.mean), (None, None));
         assert_eq!((g.count, g.min, g.max), (2, Some(5.0), Some(7.0)));
+    }
+
+    #[test]
+    fn an_unsummable_column_never_totals_and_always_shows_extremes() {
+        use crate::view::ColumnFormat;
+        let mut a = Accumulator::unsummable();
+        a.add(Some(5.0), true);
+        a.add(Some(4.0), true);
+        let g = a.finish();
+        assert!(g.unsummable);
+        assert_eq!((g.sum, g.mean), (None, None));
+        assert_eq!(
+            describe(&g, &ColumnFormat::MEASURE, false),
+            "Σ —‡ · n 2 · min 4.00 · max 5.00"
+        );
     }
 
     #[test]

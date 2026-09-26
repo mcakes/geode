@@ -446,6 +446,7 @@ pub(crate) fn run_snapshot(
             name: c.name.clone(),
             attribution_by_depth: c.attribution_by_depth.clone(),
             scope_semantics: c.scope_semantics.clone(),
+            summable: c.summable,
         })
         .collect();
     Snapshot::from_batches(batches, meta, grouping.to_vec(), provenance)
@@ -481,6 +482,7 @@ mod tests {
                 name: "v".into(),
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+                summable: false,
             }]
             .into_iter()
             .map(|m| crate::query::compile::CompiledColumn {
@@ -488,6 +490,7 @@ mod tests {
                 grain: None,
                 attribution_by_depth: m.attribution_by_depth,
                 scope_semantics: m.scope_semantics,
+                summable: false,
             })
             .collect(),
             stalest_input: Vec::new(),
@@ -791,6 +794,7 @@ mod tests {
                 name: "underlying_ref".into(),
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+                summable: false,
             }],
             vec!["underlying_ref".into()],
             Provenance::default(),
@@ -842,6 +846,7 @@ mod tests {
                 name: "qty".into(),
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+                summable: false,
             }],
             vec!["qty".into()],
             Provenance::default(),

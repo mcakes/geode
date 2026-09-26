@@ -1,7 +1,8 @@
 //! The blotter's selection summary (grid selection spec §3.3, §4.3):
 //! per selected measure column, the aggregate over the selection's
 //! top-most rows only — a group row already carries its children's
-//! total — with non-additive cells refusing a sum.
+//! total — with non-additive cells, and columns that do not add up
+//! (min/max/any measures, derived expressions), refusing a sum.
 
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
@@ -33,7 +34,14 @@ pub fn summarize(
         .into_iter()
         .map(|c| {
             let column = &plan.columns[c];
-            let mut acc = Accumulator::default();
+            // Attribution says whether a value belongs to its row, not
+            // whether the column adds up: only the compiler's summable
+            // mark may produce a Σ.
+            let mut acc = if column.summable {
+                Accumulator::default()
+            } else {
+                Accumulator::unsummable()
+            };
             if let Some(idx) = column.index {
                 for &r in &rows {
                     let additive = plan.attribution(c, tree.depth(r)) == Attribution::Additive;
@@ -58,10 +66,16 @@ mod tests {
 
     // Root 9; L1 5 (child SPX 5); L2 4. `det` is DeterminedNonAdditive at depth 1.
     fn fixture() -> (Snapshot, ColumnPlan, Vec<u32>) {
+        // Only `delta01` and `det` are plain sum measures; `peak` is a
+        // `max` measure and `ratio` a derived expression, both marked not
+        // summable by the compiler even though their attribution is
+        // additive.
+        let summable = |n: &str| matches!(n, "delta01" | "det");
         let meta = |n: &str, a: Vec<Attribution>| ColumnMeta {
             name: n.into(),
             attribution_by_depth: a,
             scope_semantics: ScopeSemantics::Direct,
+            summable: summable(n),
         };
         let add = || vec![Attribution::Additive; 3];
         let snap = Snapshot::for_tests(
@@ -95,11 +109,21 @@ mod tests {
                     ),
                     TestColumn::F64(vec![Some(1.0), Some(2.0), Some(2.0), Some(2.0)]),
                 ),
+                (
+                    meta("peak", add()),
+                    TestColumn::F64(vec![Some(5.0), Some(5.0), Some(4.0), Some(5.0)]),
+                ),
+                (
+                    meta("ratio", add()),
+                    TestColumn::F64(vec![Some(9.0), Some(2.5), Some(2.0), Some(5.0)]),
+                ),
             ],
             2,
         );
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n\
-            [[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"det\"\n";
+            [[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"det\"\n\
+            [[t.columns]]\nname = \"peak\"\n\
+            [[t.columns]]\nname = \"ratio\"\nkind = \"derived\"\nsql = \"delta01 / det\"\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let view = geode_core::view::ViewSpec::from_doc(&doc).0.remove(0);
         let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
@@ -133,6 +157,49 @@ mod tests {
             .find(|(l, _)| l == &plan.columns[det].label)
             .unwrap();
         assert!(text.starts_with("Σ —†"), "{text}");
+    }
+
+    fn text_of(name: &str, rows: (usize, usize)) -> String {
+        let (snap, plan, shown) = fixture();
+        let at = plan.position_of(name).unwrap();
+        let r = resolve(
+            SelectKind::Rows,
+            (rows.0, 0),
+            (rows.1, 0),
+            plan.columns.len(),
+        );
+        let s = summarize(&snap, &plan, &shown, &r);
+        s.into_iter()
+            .find(|(l, _)| l == &plan.columns[at].label)
+            .unwrap()
+            .1
+    }
+
+    #[test]
+    fn a_max_measure_over_sibling_groups_shows_no_sum() {
+        // L1 and L2 (display rows 1..=3; SPX folds into L1). Their maxima
+        // are 5 and 4: a footer printing Σ 9.00 would total two maxima.
+        let text = text_of("peak", (1, 3));
+        assert!(text.starts_with("Σ —‡"), "{text}");
+        assert!(!text.contains("μ"), "{text}");
+        assert!(
+            text.contains("min 4.00") && text.contains("max 5.00"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_derived_column_shows_no_sum() {
+        // `delta01 / det` over L1 and L2: the ratios 2.5 and 2.0 do not add.
+        let text = text_of("ratio", (1, 3));
+        assert!(text.starts_with("Σ —‡"), "{text}");
+        assert!(!text.contains("4.50"), "{text}");
+    }
+
+    #[test]
+    fn a_sum_measure_still_sums_beside_unsummable_columns() {
+        let text = text_of("delta01", (1, 3));
+        assert!(text.starts_with("Σ 9.00 · μ 4.50"), "{text}");
     }
 
     #[test]
