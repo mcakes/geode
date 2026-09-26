@@ -1354,6 +1354,27 @@ role = "key"
         services: ShellServices,
     ) -> WindowHandle<Root> {
         cx.update(gpui_component::init);
+        open_shell_window(cx, services)
+    }
+
+    /// [`open_test_window`] for a window hosting a pricer tile: the
+    /// pricer's `DataTable` key overrides are installed after
+    /// `gpui_component::init`, as `main` installs them — gpui gives the
+    /// later binding precedence, so the reverse order would let the
+    /// table's own `escape`/arrow bindings beat the tile's.
+    fn open_pricer_test_window(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> WindowHandle<Root> {
+        cx.update(gpui_component::init);
+        cx.update(geode_pricer::init);
+        open_shell_window(cx, services)
+    }
+
+    fn open_shell_window(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> WindowHandle<Root> {
         cx.update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
@@ -1703,8 +1724,7 @@ role = "key"
         use geode_shell::diagnostics::fnv1a;
         let services = test_shell_services_with_a_pricer_tile();
         let tail = services.action_tail.clone();
-        cx.update(geode_pricer::init);
-        let window = open_test_window(cx, services);
+        let window = open_pricer_test_window(cx, services);
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -1723,6 +1743,43 @@ role = "key"
         assert!(
             !dispatched("workspace::duplicate_horizontal"),
             "a capital typed into the entry field ran a shell binding"
+        );
+    }
+
+    /// `escape` after committing a line closes the entry field that
+    /// `enter` left open on the next line. The committed line is the
+    /// table's selection, and `DataTable`'s own `escape` → `Cancel` would
+    /// clear that selection and stop the key; the pricer's init rebinds it
+    /// to `NoAction`, which wins only when installed after
+    /// `gpui_component::init` — the order `main` uses.
+    #[gpui::test]
+    fn escape_after_a_committed_line_closes_the_entry_field(cx: &mut gpui::TestAppContext) {
+        let (handle, _rx) = DataHandle::for_tests();
+        let (services, tiles) =
+            with_a_pricer_tile_on(test_shell_services(), test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let mode = |vcx: &mut gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| {
+                t.key_context().get("mode").unwrap_or("").to_string()
+            })
+        };
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        assert_eq!(
+            mode(&mut vcx),
+            "insert",
+            "fixture: enter leaves the next line's entry field open"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(
+            mode(&mut vcx),
+            "normal",
+            "the first escape after a committed line left the entry field open"
         );
     }
 
@@ -1891,8 +1948,7 @@ role = "key"
             PricerSettings::default(),
         ));
         let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer.clone(), "a");
-        cx.update(geode_pricer::init);
-        let window = open_test_window(cx, services);
+        let window = open_pricer_test_window(cx, services);
         let (bridge, tx) = test_bridge_with_pricer(handle, pricer);
         cx.update(|cx| attach(&bridge, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -2082,8 +2138,7 @@ role = "key"
             bridge.pricer.clone(),
             sheet,
         );
-        cx.update(geode_pricer::init);
-        let window = open_test_window(cx, services);
+        let window = open_pricer_test_window(cx, services);
         cx.update(|cx| attach(&bridge, window, cx));
         (bridge, window, tiles)
     }
@@ -2201,9 +2256,16 @@ role = "key"
             // so a second one may open it.
             vcx.executor().advance_clock(Duration::from_secs(2));
             vcx.run_until_parked();
-            // The first tile still has its next line's entry field open, so
-            // `:` would be typed into it: its command goes by the tile's route.
-            run_command(&mut vcx, &first, "new");
+            // `escape` closes the next line's entry field `enter` left
+            // open; `:new` is then typed through the shell's command line.
+            vcx.simulate_keystrokes("escape");
+            vcx.run_until_parked();
+            type_command(&mut vcx, "new");
+            assert_eq!(
+                first.read_with(&vcx, |t, _| t.sheet().name.clone()),
+                "untitled-1",
+                "the typed :new reached the first tile"
+            );
             let shell = window
                 .read_with(&vcx, |root, _| root.view().clone().downcast::<ShellView>())
                 .unwrap()
