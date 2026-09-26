@@ -211,21 +211,18 @@ pub(crate) struct Shared {
     /// waits for the answer (reads and saves run on different lanes, so
     /// a read submitted now could return the previous generation).
     ///
-    /// Added when `save` answers `true`, removed by the FIRST outcome for
-    /// the name, whichever save it describes. An outcome does not say which
-    /// save it answers, and a store other than the app's mailbox-backed one
-    /// need not deliver one per save, so a per-name count could stay above
-    /// zero forever. The first outcome
-    /// un-reserves early only when a second save of the same name is
-    /// still queued behind it — a narrow window in which the name reads
-    /// as known (a confirmed save of it just landed) or free (the first
-    /// failed), and a load may read the first save's generation rather
-    /// than the second's.
-    pub(crate) pending_saves: RefCell<BTreeSet<String>>,
+    /// Counted per name: one per `save` that answered `true` (a save the
+    /// store refused at submission is never counted), less one per
+    /// outcome. The data tier answers every admitted local publish exactly
+    /// once and the app's mailbox delivers every answer, so the count is
+    /// exact: the name is released, and a load waiting on it starts, only
+    /// once the LAST queued save has answered — a read after an earlier
+    /// one could return that older generation.
+    pub(crate) pending_saves: RefCell<BTreeMap<String, usize>>,
     /// The tile that queued each name's latest save: its outcome is that
     /// tile's, not the current holder's (a tile that moved on via `:e`
     /// leaves its name to another). Latest origin wins per name; kept
-    /// after the outcome so a second coalesced outcome still routes.
+    /// after the outcome so a later outcome still routes.
     pub(crate) save_origins: RefCell<BTreeMap<String, TileId>>,
     /// Names whose document is about to be forgotten — a `:name`'s old
     /// name from the rename until its forget is answered, and a confirmed
@@ -307,8 +304,38 @@ impl Shared {
     /// the store, or with a save queued and unconfirmed.
     pub(crate) fn taken(&self, name: &str) -> bool {
         self.store.contains(name)
-            || self.pending_saves.borrow().contains(name)
+            || self.save_pending(name)
             || self.retiring.borrow().contains(name)
+    }
+
+    /// Whether a save of `name` is queued and unanswered.
+    pub(crate) fn save_pending(&self, name: &str) -> bool {
+        self.pending_saves.borrow().contains_key(name)
+    }
+
+    /// A save of `name` was queued (`save` answered `true`).
+    pub(crate) fn save_queued(&self, name: &str) {
+        *self
+            .pending_saves
+            .borrow_mut()
+            .entry(name.to_string())
+            .or_default() += 1;
+    }
+
+    /// One queued save of `name` answered; `true` when none is left. An
+    /// answer with none counted (nothing this app queued) leaves none.
+    pub(crate) fn save_settled(&self, name: &str) -> bool {
+        let mut pending = self.pending_saves.borrow_mut();
+        match pending.get_mut(name) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            _ => {
+                pending.remove(name);
+                true
+            }
+        }
     }
 
     /// `Err("sheet 'x' is being removed")` for a retiring name.
@@ -324,7 +351,7 @@ impl Shared {
     /// queued save's name is included: its document is on its way.
     pub(crate) fn sheet_names(&self) -> Vec<String> {
         let mut names: BTreeSet<String> = self.store.names().into_iter().collect();
-        names.extend(self.pending_saves.borrow().iter().cloned());
+        names.extend(self.pending_saves.borrow().keys().cloned());
         for gone in self.retiring.borrow().iter() {
             names.remove(gone);
         }
@@ -374,7 +401,7 @@ impl PricerFactory {
                 settings: RefCell::new(settings),
                 store,
                 open: RefCell::new(BTreeSet::new()),
-                pending_saves: RefCell::new(BTreeSet::new()),
+                pending_saves: RefCell::new(BTreeMap::new()),
                 save_origins: RefCell::new(BTreeMap::new()),
                 retiring: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
@@ -506,10 +533,10 @@ impl PricerFactory {
     /// as its latest queued save's; if it moved on, a failure is painted
     /// on it and an `Ok` is nothing to it. A closed origin leaves the
     /// outcome to the store (the data tier's error diagnostic is the
-    /// record of a failure). Then any tile waiting to load `sheet` on this
-    /// save starts its load.
+    /// record of a failure). Once no save of `sheet` is left queued, any
+    /// tile waiting to load it starts its load.
     pub fn save_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
-        self.shared.pending_saves.borrow_mut().remove(sheet);
+        let settled = self.shared.save_settled(sheet);
         if answer.is_ok() {
             self.shared.store.note_saved(sheet);
         }
@@ -523,6 +550,9 @@ impl PricerFactory {
                     t.left_save_answered(sheet, answer, cx)
                 }
             });
+        }
+        if !settled {
+            return;
         }
         for tile in tiles {
             tile.update(cx, |t, cx| {

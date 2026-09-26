@@ -415,7 +415,7 @@ impl PricerTile {
         let load_tag = 1;
         // A save of this name still queued (a closed tile's flush): the
         // read waits for its answer (see `load_waiting`).
-        let load_waiting = shared.pending_saves.borrow().contains(&name);
+        let load_waiting = shared.save_pending(&name);
         let answer = if load_waiting {
             Loaded::Pending
         } else {
@@ -1293,10 +1293,7 @@ impl PricerTile {
             return true;
         };
         if self.shared.store.save(&self.sheet.name, rows) {
-            self.shared
-                .pending_saves
-                .borrow_mut()
-                .insert(self.sheet.name.clone());
+            self.shared.save_queued(&self.sheet.name);
             self.shared
                 .save_origins
                 .borrow_mut()
@@ -1539,12 +1536,7 @@ impl PricerTile {
         self.load_cancelled = false;
         self.loading = true;
         self.end_refusals();
-        if self
-            .shared
-            .pending_saves
-            .borrow()
-            .contains(&self.sheet.name)
-        {
+        if self.shared.save_pending(&self.sheet.name) {
             self.load_waiting = true;
             self.notice = Some(LOADING.into());
             self.rebuild(cx);
@@ -6997,6 +6989,58 @@ pub(crate) mod tests {
         assert_eq!(h.sheet_len(&vcx), 5);
         assert_eq!(stored(&h).qty(0), 7);
         assert!(h.notice(&vcx).is_none());
+    }
+
+    /// Two saves of one name queued: the load waits for both answers, not
+    /// the first — a read after only the first could return that older
+    /// generation, and the next save would make it the latest.
+    #[gpui::test]
+    fn a_load_behind_two_queued_saves_waits_for_both_answers(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert!(
+            h.store
+                .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+        );
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 6 });
+        vcx.update(|_, cx| h.factory.flush_all(cx));
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        // Leaving flushes the second save of `book`.
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        let before = loads_of(&h.store, "book");
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(
+            loads_of(&h.store, "book"),
+            before,
+            "one save of `book` is still queued"
+        );
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(
+            loads_of(&h.store, "book"),
+            before + 1,
+            "asked once, after both"
+        );
+        assert_eq!(h.sheet_len(&vcx), 5);
+        assert_eq!(stored(&h).qty(0), 7);
+    }
+
+    /// A save the store refused at submission is never counted as queued:
+    /// nothing will answer it, so a load of the name must not wait for it.
+    #[gpui::test]
+    fn a_save_refused_at_submission_leaves_no_load_waiting(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 9 });
+        let store = h.store.clone();
+        store.set_refusing(true);
+        let before = loads_of(&store, "book");
+        let p = parts(&h);
+        // Close the tile: its flush is refused.
+        close(h, vcx);
+        store.set_refusing(false);
+        let (restored, _content, vcx2) = restore_tile(&p, cx, TILE + 5, "book");
+        assert_eq!(loads_of(&store, "book"), before + 1, "read at once");
+        assert!(!restored.read_with(&vcx2, |t, _| t.loading));
     }
 
     /// A tile closed with its flush queued: a new tile restoring the name
