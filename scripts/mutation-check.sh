@@ -18735,6 +18735,98 @@ run_mutation "mdedit: the value editor keeps the cell's alignment" \
   '                    .text_align(TextAlign::Left)' \
   geode-marketdata the_editor_keeps_the_value_right_aligned
 
+# ---- timeseries colour picker: absolute colours and the component bridge ----
+
+# `#rrggbb` is an absolute colour wherever a colour name is accepted, so a
+# `[colours]` name may never start with `#`.
+run_mutation "colours: a name starting with '#' is reserved" \
+  crates/geode-core/src/colour/mod.rs \
+  '                || name.starts_with(RESERVED_PREFIX)' \
+  '                || false' \
+  geode-core a_name_starting_with_a_hash_is_reserved
+
+# A featured swatch maps back to the theme-following colour it was built
+# from; mutated, every pick is absolute and stops following the theme.
+run_mutation "timeseries colour picker: a featured exact match keeps its palette or named colour" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '    match featured.iter().find(|(f, _)| *f == h) {' \
+  '    match featured.iter().find(|_| false) {' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# Anything off the featured row is absolute, not the nearest featured one.
+run_mutation "timeseries colour picker: a non-featured pick is Custom" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        None => Colour::Custom(Rgb8::from_hsla(h)),' \
+  '        None => Colour::Palette(0),' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# `#rrggbb` is exactly six digits: short, long and alpha forms are refused.
+run_mutation "timeseries colour picker: hex parse refuses the wrong length" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  '        if digits.len() < 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  geode-timeseries malformed_hex_is_refused
+
+# A session `#…` string is an absolute colour, never read as a name.
+run_mutation "timeseries colour picker: a session #rrggbb reads back as Custom" \
+  crates/geode-timeseries/src/core/session.rs \
+  '        Some(Value::String(n)) if n.starts_with(geode_core::colour::RESERVED_PREFIX) => {' \
+  '        Some(Value::String(n)) if false => {' \
+  geode-timeseries a_custom_colour_round_trips_as_hex
+
+# `:colour s1 #…` is parsed as hex before any name lookup, and a malformed
+# one names the form.
+run_mutation "timeseries colour picker: :colour reads a # word as hex" \
+  crates/geode-timeseries/src/commands.rs \
+  '    if word.starts_with(geode_core::colour::RESERVED_PREFIX) {' \
+  '    if false {' \
+  geode-timeseries a_colour_word_is_an_index_a_hex_or_a_known_name
+
+# An absolute colour paints as itself — no theme, no floor.
+run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        Colour::Custom(c) => c.to_hsla(),' \
+  '        Colour::Custom(_) => palette.colour(0),' \
+  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+
+# The Colour… row's verb opens the picker.
+run_mutation "timeseries colour picker: the menu row opens the picker" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            "pick_colour" => self.open_colour_picker(window, cx),' \
+  '            "pick_colour" => false,' \
+  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+
+# A pick lands on the slot the picker was opened for, not the cursor.
+run_mutation "timeseries colour picker: a Change applies to the target slot" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if let Ok(changed) = self.model.set_colour(pick.target, colour) {' \
+  '        if let Ok(changed) = self.model.set_colour(self.model.cursor_slot().map_or(0, |s| s.number), colour) {' \
+  geode-timeseries a_pick_lands_on_the_target_slot_even_after_the_cursor_moves
+
+# A close the component makes itself (escape, click-out, a commit) closes
+# the tile's popup and its insert mode.
+run_mutation "timeseries colour picker: the component's close closes the popup" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {' \
+  '            if false {' \
+  geode-timeseries escape_closes_the_picker_unchanged_and_gives_the_keyboard_back
+
+# The picker's popover and hex field count as the tile's own keyboard
+# holders, which is what keeps typed keys off the tile's verbs and what
+# the closer's blur is gated on.
+run_mutation "timeseries colour picker: the popover's focus is the tile's" \
+  crates/geode-timeseries/src/popup.rs \
+  '                .contains_focused(window, cx),' \
+  '                .contains_focused(window, cx) && false,' \
+  geode-timeseries a_swatch_commit_blurs_the_picker_before_dropping_it
+
+# A `:remove` of the picker's target closes it.
+run_mutation "timeseries colour picker: removing the target closes the picker" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.close_orphaned_colour_picker(window, cx);' \
+  '' \
+  geode-timeseries removing_the_target_slot_closes_the_picker
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
