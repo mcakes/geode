@@ -74,8 +74,8 @@ The bar keeps today's `Entry { place, .. }` and the pure half in
   becomes the next leg of that package. On a package row, it becomes the
   package's first leg. A leg place opens its package.
 - **Changed:** with no cursor row, the new line goes at the **end** of
-  the sheet (`Place::Root { at: roots }`), where today it goes at the
-  start.
+  the sheet (`Place::Root { at: sheet.len() }`, a flat index), where
+  today it goes at the start.
 - After each successful `enter`, the place advances by `next_place`,
   exactly as now, so a run of `enter`s builds a block in the order it was
   typed. The cursor moves to each new line.
@@ -83,11 +83,19 @@ The bar keeps today's `Entry { place, .. }` and the pure half in
   `true`.
 
 Since no placeholder row shows the landing point any more, the bar shows
-it: a muted label in front of the field reads `after <row>` (the row
-before the place, spelled by its line number when `line_numbers` is on,
-and otherwise by its shorthand cut with `…`), `into <tag>` for the first
-leg of a package, or `at end`. The label is rebuilt when the place
-changes, never per frame.
+it as a muted label in front of the field (`core::entry::target_label`,
+from the place alone):
+
+- `Root { at }` with `at == sheet.len()`: `at end`.
+- `Root { at }` otherwise: `after <root>`, where `<root>` is the root
+  that owns flat row `at - 1`.
+- `Leg { package, leg: 0 }`: `into <TAG>`, the package's template token.
+- `Leg { package, leg }`: `after <leg>`, flat row `package + leg`.
+
+A row is named by its shorthand, or by its template token when the
+shorthand is empty or spans several lines (a custom package). The label
+cuts with `…` at the bar's width. It is rebuilt when the place changes,
+never per frame.
 
 ### 4.3 Keys in the bar
 
@@ -136,8 +144,8 @@ Tests go through production routes (keys, clicks, focus):
   on that row.
 - Typing into the bar fires no shell binding.
 - `shift+o` is unbound.
-- The bar's target label reads `after …`, `into CS` and `at end` in the
-  three cases.
+- The bar's target label reads `after …`, `into CS` and `at end` for
+  the places in §4.2.
 - Find matches shorthand text that no visible column shows. A package
   whose legs no longer match the template is found by an underlying.
 - Column 0 paints the template token on a package row and nothing on a
