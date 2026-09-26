@@ -398,6 +398,42 @@ const BENCH_VIEWS: &str = "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"bo
      [[tree.columns]]\nname = \"delta\"\n\
      [[tree.columns]]\nname = \"vega\"\n";
 
+/// One keystroke's refresh with 20,000 categorical values loaded: lex,
+/// context, rank and cap. A categorical column's dictionary bounds its
+/// size, and 20,000 is well past the demo's largest.
+fn bench_expr_complete(c: &mut Criterion) {
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::dimensions::DerivedDimensions;
+    use geode_core::schema::SchemaSpec;
+    use geode_core::scope::complete::ExprVocab;
+    use geode_shell::exprcomplete::ExprCompletion;
+
+    let mut group = c.benchmark_group("expr_complete");
+    group.sample_size(30);
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let (schema, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[datasets]));
+    let vocab = ExprVocab::new(&schema, &DerivedDimensions::default());
+    let values: Vec<(String, u64)> = (0..20_000).map(|i| (format!("BK{i:05}"), 1)).collect();
+    group.bench_function("refresh_20k_values", |b| {
+        let mut done = ExprCompletion::default();
+        done.refresh("book = '", 8, &vocab);
+        done.mark_loading("book", 1, &vocab);
+        done.deliver("book", 1, Ok(values.clone()), &vocab);
+        let mut flip = false;
+        b.iter(|| {
+            // Alternate the typed text so `refresh` never short-circuits.
+            flip = !flip;
+            let text = if flip { "book = 'BK1" } else { "book = 'BK12" };
+            black_box(done.refresh(black_box(text), text.len(), &vocab))
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_config_edit,
@@ -406,6 +442,7 @@ criterion_group!(
     bench_dropzones,
     bench_matcher,
     bench_palette,
-    bench_session
+    bench_session,
+    bench_expr_complete
 );
 criterion_main!(benches);

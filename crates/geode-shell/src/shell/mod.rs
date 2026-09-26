@@ -16,6 +16,7 @@ pub mod commandline_view;
 pub mod control;
 pub mod dialog;
 mod drag;
+pub(crate) mod expr_suggest;
 mod hot_reload;
 mod input;
 pub mod kbd;
@@ -210,6 +211,12 @@ pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 /// same reservation reasoning. `deliver_distinct` routes on it.
 pub const SCOPES_KEY: QueryKey = QueryKey(u64::MAX - 3);
 
+/// The scope expression suggestions' distinct-values requests (both the
+/// frame dialog and the Scopes dialog's `expression` field). Routed by
+/// [`ShellView::deliver_distinct`] to `expr_suggest::deliver`, which drops
+/// any reply whose tag is not its column's latest.
+pub const EXPR_KEY: QueryKey = QueryKey(u64::MAX - 4);
+
 /// One column a dimension picker can open: every categorical
 /// column of every dataset, plus every derived dimension. `role` is
 /// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
@@ -269,6 +276,21 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
         });
     }
     out
+}
+
+/// Every column a scope expression may name, for the expression
+/// suggestions and their schema check. Cached on the shell and rebuilt
+/// when datasets or dimensions reload.
+pub fn expr_vocab(config: &Config) -> geode_core::scope::complete::ExprVocab {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    geode_core::scope::complete::ExprVocab::new(&schema, &dims)
 }
 
 /// Every column a grouping slot may name, in schema order — the query
@@ -612,6 +634,10 @@ pub struct ShellView {
     /// Columns added later remain reachable through the two-stage `frame::pick`
     /// flow even though they have no new per-column palette action.
     pickable: Vec<Pickable>,
+    /// Cached [`expr_vocab`] for the current datasets and dimensions: the
+    /// scope expression suggestions' columns. Reload rebuilds it beside
+    /// `pickable` and re-ranks an open expression field against it.
+    expr_vocab: std::rc::Rc<geode_core::scope::complete::ExprVocab>,
     /// State for the open dimension picker. Created by `picker::open` and
     /// cleared on modal close.
     picker: Option<picker::PickerState>,
@@ -642,6 +668,9 @@ pub struct ShellView {
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
     /// one dialog over.
     choice_dialog_scroll: ScrollHandle,
+    /// Scroll state for the scope expression suggestions' row list. Refresh
+    /// scrolls it to the top; a highlight move follows the lit row.
+    expr_scroll: ScrollHandle,
     /// State for the open config-object dialog, shared across config domains.
     /// Created by [`objectdialog::render::open`] and cleared on close. The stage
     /// machine and provenance data contain no GPUI types; scrolling is separate.
@@ -845,6 +874,15 @@ impl ShellView {
                 scope_expr_view::on_query_changed(state);
             }
             cx.notify();
+        })
+        .detach();
+        // Expression suggestions follow the caret as well as the text. A
+        // caret moved by an arrow or a click emits no `Change`, but the
+        // input notifies, so observe it. `expr_suggest::refresh` skips
+        // unchanged text and caret, so the cursor blink's notify costs one
+        // comparison.
+        cx.observe(&dialog_input, |view, _input, cx| {
+            expr_suggest::refresh(view, cx)
         })
         .detach();
 
@@ -1121,6 +1159,7 @@ impl ShellView {
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
+        let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
 
         Self {
             services,
@@ -1181,6 +1220,7 @@ impl ShellView {
             egress_baseline,
             pricing_baseline,
             pickable,
+            expr_vocab,
             picker: None,
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
@@ -1190,6 +1230,7 @@ impl ShellView {
             scope_expr_dialog: None,
             choice_dialog: None,
             choice_dialog_scroll: ScrollHandle::new(),
+            expr_scroll: ScrollHandle::new(),
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
@@ -1418,11 +1459,16 @@ impl ShellView {
         &self.dialog_input
     }
 
-    /// Deliver a distinct-value reply from the app bridge. `SCOPES_KEY` routes
+    /// Deliver a distinct-value reply from the app bridge. `EXPR_KEY` routes
+    /// to the open expression field's suggestions. `SCOPES_KEY` routes
     /// to the object dialog's Values stage. Other replies reach the dimension
     /// picker only if it is open in Values stage and both column and latest
     /// request tag match. Stale replies cause no mutation or notification.
     pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
+        if outcome.key == EXPR_KEY {
+            expr_suggest::deliver(self, outcome, cx);
+            return;
+        }
         if outcome.key == SCOPES_KEY {
             objectdialog::deliver_values(self, outcome, cx);
             return;

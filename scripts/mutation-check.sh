@@ -677,8 +677,8 @@ run_mutation "enum: a stale value degrades rather than failing the query" \
 
 run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
   crates/geode-core/src/scope/mod.rs \
-  'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
-  'if false {' \
+  '                if dims.get(column).is_some()' \
+  '                if false' \
   geode-core \
   an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry
 
@@ -21554,6 +21554,133 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if c.nothing_loaded() {' \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
+
+# ---- Scope expression suggestions: the caret reader.
+# After an operator the caret wants a value; reading it as a finished term
+# would offer and/or where values belong.
+run_mutation "expr suggest: after an operator comes a value" \
+  crates/geode-core/src/scope/complete.rs \
+  '            (St::Op(_), _, Some(_)) => St::Term,' \
+  '            (St::Op(_), _, Some(_)) => St::Operand,' \
+  geode-core \
+  context_agrees_with_the_parser_on_every_prefix
+
+# A derived dimension refuses ordering; accepting it would let `desk < 'EQ'`
+# through to a query the compiler then rejects.
+run_mutation "expr suggest: derived ordering is flagged" \
+  crates/geode-core/src/scope/expr.rs \
+  '    (!matches!(op, "=" | "!=" | "<>")).then(|| {' \
+  '    (false).then(|| {' \
+  geode-core \
+  check_flags_unknown_columns_and_derived_ordering
+
+# A reply from a superseded request must never fill the list.
+run_mutation "expr suggest: a stale values reply is dropped" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        if self.values.get(column) != Some(&Values::Loading { tag }) {' \
+  '        if self.values.get(column).is_none() {' \
+  geode-shell \
+  a_categorical_value_position_requests_once_and_lists_after_delivery
+
+# Quotes inside a value are doubled; a bare quote would end the string early.
+run_mutation "expr suggest: an inserted value escapes its quotes" \
+  crates/geode-shell/src/exprcomplete.rs \
+  "    format!(\"'{}'\", value.replace('\\'', \"''\"))" \
+  "    format!(\"'{}'\", value)" \
+  geode-shell \
+  a_value_with_a_quote_is_escaped_when_inserted
+
+# Operators follow the column type: a bool column offers no ordering.
+run_mutation "expr suggest: operators follow the column type" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        Some(ValueKind::Bool) => &["=", "!="],' \
+  '        Some(ValueKind::Bool) => &["=", "!=", "<"],' \
+  geode-shell \
+  operators_follow_the_column_type
+
+# The input observer is what follows a caret moved without typing.
+run_mutation "expr suggest: the list follows a moved caret" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            expr_suggest::refresh(view, cx)' \
+  '            let _ = (view, cx);' \
+  geode-shell \
+  a_moved_caret_is_followed_before_tab_writes
+
+# Add mode keeps the frame's expression in the values request.
+run_mutation "expr suggest: add mode narrows by the current expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => current.expression.clone(),' \
+  '        Mode::Add => None,' \
+  geode-shell \
+  add_mode_requests_values_under_the_current_expression
+
+# Enter refuses an unknown column once a schema exists.
+run_mutation "expr suggest: enter refuses an unknown column" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Err(w.message);' \
+  '        let _ = w;' \
+  geode-shell \
+  enter_refuses_an_unknown_column
+
+# A row click inserts it.
+run_mutation "expr suggest: a row click inserts" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    on_click(&label, window, cx);' \
+  '                    let _ = (&label, window, cx);' \
+  geode-shell \
+  clicking_a_row_inserts_it_and_typing_continues
+
+# The Scopes draft must learn the inserted text, or sync_dialog_text
+# restores the old query after the key.
+run_mutation "expr suggest: a Scopes insert reaches the draft" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        draft.set_query(text);' \
+  '        let _ = text;' \
+  geode-shell \
+  the_scopes_expression_field_suggests_and_tab_inserts
+
+# A Scopes expression naming an unknown column is refused at Enter, not
+# saved for the reader to drop later.
+run_mutation "expr suggest: a Scopes expression refuses an unknown column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        return Err(format!("expression: {}", w.message));' \
+  '                        let _ = w;' \
+  geode-shell \
+  the_scopes_expression_field_refuses_an_unknown_column
+
+# One pool key, newest request wins: another column left Loading never
+# gets a reply, so it must be forgotten and asked again on return.
+run_mutation "expr suggest: a second column's request forgets the first" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));' \
+  '            .retain(|_, _| true);' \
+  geode-shell \
+  a_second_columns_request_forgets_the_first_so_it_is_asked_again
+
+# A double-click's second press must not accept a row of the rebuilt list.
+run_mutation "expr suggest: a double-click inserts once" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    if event.click_count > 1 {' \
+  '                    if event.click_count > 99 {' \
+  geode-shell \
+  double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# The old expression is blanked before the draft's scope is read, or an
+# unreadable one drops the selections from the values narrowing.
+run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '    blanked.source.remove("expression");' \
+  '    let _ = &mut blanked;' \
+  geode-shell \
+  expression_scope_keeps_the_selections_under_an_unreadable_expression
+
+# An accept is a range replace so it stays in the input's undo history.
+run_mutation "expr suggest: a Scopes insertion undoes" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        s.replace(write.text.clone(), window, cx);' \
+  '        s.set_value(write.text.clone(), window, cx);' \
+  geode-shell \
+  the_scopes_expression_field_undoes_an_insertion
 
 # ---- Modal Back button: the pointer route for Escape's back rung
 

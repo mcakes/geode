@@ -230,3 +230,20 @@ as such. Ticking values updates the parent scope's source; unticking the last
 one removes that dimension constraint. Selection summaries are presentation
 only: persistence dirtiness also compares source values so two different
 selections with identical truncated summaries still produce a write.
+
+## Scope expression field
+
+The Scopes domain's `expression` field carries the same suggestion list as
+the frame's expression dialogs — see [input-and-dialogs.md's Frame
+expression](input-and-dialogs.md#frame-expression) for the rows, operators,
+value rules, and keys, all of which apply here while the field is open. It
+narrows its values request by the edited scope's own dimension selections
+and text filter, with no expression (the field is replacing it), and the
+frame's as-of.
+
+Enter commits the field, as any other text field does, and refuses an
+unknown column or a bad operator on a derived dimension with an `expression:`
+notice, keeping the field open; escape reverts the field's text instead of
+committing it. Both keep the object dialog's own text-entry contract; only
+tab, the arrows, and ctrl+p/ctrl+n additionally serve the suggestion list
+while this field is open.
