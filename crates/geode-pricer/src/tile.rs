@@ -375,6 +375,16 @@ pub struct PricerTile {
     editor_window: Option<AnyWindowHandle>,
     /// The `.` action menu: `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
+    /// The line a press that closed the entry bar resolved. Closing the
+    /// bar moves the table up on screen, so the second press of the same
+    /// double-click lands on a different painted row; this carries the
+    /// first press's line to it. Every press takes it (see `pressed`), so
+    /// it lives for exactly one following press.
+    click_anchor: Option<Option<LineId>>,
+    /// `click_anchor`, taken by the latest press: read only by that
+    /// press's own `DoubleClickedCell` (every press emits `SelectCell`
+    /// first, which overwrites it).
+    pressed: Option<Option<LineId>>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -638,6 +648,8 @@ impl PricerTile {
             editor: None,
             editor_window: None,
             menu: None,
+            click_anchor: None,
+            pressed: None,
         };
         this.resolve_plan();
         this.rebuild(cx);
@@ -879,13 +891,17 @@ impl PricerTile {
 
     /// `o`: the entry bar under the header, the field focused (entry-bar
     /// spec §4.1). Lines land below the cursor row; a leg place opens
-    /// its package so what lands is visible.
+    /// its package so what lands is visible. With the bar already open
+    /// (a palette dispatch) it does nothing: the typed text, focus and
+    /// place stay.
     fn open_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.entry.is_some() {
+            return;
+        }
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
-        self.close_entry(window, cx);
         let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
@@ -1980,13 +1996,16 @@ impl PricerTile {
             self.cancel_remove(window, cx);
         }
         // Any verb but the fields' own closes an open field first (a
-        // palette dispatch can arrive while one is open).
+        // palette dispatch can arrive while one is open). `add_below`
+        // keeps an open bar: it is the bar's own opener (spec §4.1).
         let field_verb = matches!(
             verb,
             "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
         );
         if !field_verb {
-            self.close_entry(window, cx);
+            if verb != "add_below" {
+                self.close_entry(window, cx);
+            }
             self.close_editor(window, cx);
         }
         // Any verb but the menu's own closes an open menu (a palette
@@ -3165,6 +3184,13 @@ impl PricerTile {
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
                 // so only a real cell click — `SelectCell` — closes a field.
                 let line = self.line_at(*row);
+                // Closing the bar moves the table up on screen between the
+                // two presses of one double-click: hand this press's line
+                // to the next press only, whatever row that one lands on.
+                self.pressed = self.click_anchor.take();
+                if self.entry.is_some() {
+                    self.click_anchor = Some(line);
+                }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
                 if let Some(id) = line {
@@ -3180,11 +3206,18 @@ impl PricerTile {
             // Double-click uses the same edit route as i. SelectCell has already
             // cancelled the previous field; the tree column opens no editor.
             TableEvent::DoubleClickedCell(row, col) => {
-                let line = self.line_at(*row);
+                // A line handed on by a first press that closed the bar
+                // wins: the row now under the pointer slid up there.
+                let line = match self.pressed.take() {
+                    Some(line) => line,
+                    None => self.line_at(*row),
+                };
                 self.close_entry(window, cx);
                 let Some(id) = line else {
                     return;
                 };
+                // Before the tree-column return: this press's `SelectCell`
+                // moved the cursor to the row that slid up.
                 self.cursor.line = Some(id);
                 self.sync_cursor(cx);
                 let Some(c) = SheetDelegate::plan_col(*col) else {
@@ -4589,15 +4622,17 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "insert");
     }
 
+    /// Spec §4.1: `o` (here a palette dispatch) while the bar is open
+    /// does nothing.
     #[gpui::test]
-    fn a_palette_add_while_the_bar_is_open_reopens_it_at_the_cursor(cx: &mut gpui::TestAppContext) {
+    fn a_palette_add_while_the_bar_is_open_keeps_it_and_its_text(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "half typed");
         h.dispatch(&mut vcx, "add_below", None);
         assert_eq!(h.mode(&mut vcx), "insert");
         assert!(focused(&mut vcx));
-        assert_eq!(h.entry_text(&vcx).as_deref(), Some(""));
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("half typed"));
     }
 
     /// A refused insert puts the place back even when the refused spec
@@ -6339,19 +6374,70 @@ pub(crate) mod tests {
         assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
     }
 
+    /// A real double-click is two presses at one screen point. The first
+    /// closes the bar and the table moves up under the pointer, so the
+    /// second lands on a lower row; the editor still opens on the row the
+    /// first press hit.
     #[gpui::test]
     fn a_double_click_on_a_row_while_the_bar_is_open_edits_that_row(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
         h.dispatch(&mut vcx, "add_below", None);
-        let at = centre_of(&mut vcx, "pricer-cell-2-2");
+        let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-cell-0-4")
+                .is_some_and(|b| !b.contains(&at)),
+            "the table moved up under the pointer"
+        );
         click_at(&mut vcx, at, 2);
         h.draw(&mut vcx);
-        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
+        assert_eq!(h.cursor(&vcx), Some((0, 3)), "on A's strike");
         assert_eq!(h.mode(&mut vcx), "insert", "the cell editor opened");
-        assert!(
-            h.tile
-                .read_with(&vcx, |t, _| t.entry.is_none() && t.editor.is_some())
-        );
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"), "A's strike");
+        assert!(h.tile.read_with(&vcx, |t, _| t.entry.is_none()));
+    }
+
+    /// The closing press's line is handed to the next press only: a later
+    /// double-click at the same spot edits the row painted there now.
+    #[gpui::test]
+    fn a_later_double_click_at_the_same_spot_edits_the_row_painted_there(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        let (row, _) = h.cursor(&vcx).expect("a cursor row");
+        assert_ne!(row, 0, "the row painted there now, not A");
+        assert_eq!(h.mode(&mut vcx), "insert");
+        let expected = ["5000", "4000", "3000"][row];
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some(expected));
+    }
+
+    /// A tree-column double-click opens nothing, but the cursor stays on
+    /// the row the first press hit, not the one that slid up.
+    #[gpui::test]
+    fn a_tree_column_double_click_while_the_bar_is_open_keeps_that_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-0"); // A's shorthand
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "on A");
     }
 
     // Empty state, labels, action menu, and pointer trigger.

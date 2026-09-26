@@ -93,6 +93,10 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   and a click in the grid (a chevron included) cancels an open editor without
   committing it. A date segment's mouse-down stops propagation, so a click
   aimed into the field selects a segment rather than cancelling it.
+- A press that closes the entry bar hands its resolved line to the next
+  press only: the bar's close moves the table up on screen, so the second
+  press of the same double-click lands on a lower row. A double-click
+  (and its tree-column cursor move) uses the handed-on line.
 - The expiry always edits in `geode_widgets::datefield`'s pure field; the
   tile owns its focus handle (what `holds_focus` and the shell's insert
   predicate read) and routes keys through `datefield::route` in

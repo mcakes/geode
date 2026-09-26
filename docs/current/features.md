@@ -490,7 +490,10 @@ radius, or horizontal padding. Their text sits where the cell's text sat
 (numbers right-aligned, text left) at the row's height, and the cell's cursor
 border is the only frame. The date field's segments are flush.
 
-A grid click closes an open editor or the entry bar, then acts on the row it hit.
+A grid click closes an open editor or the entry bar, then acts on the row it
+hit. Closing the bar moves the table up on screen, so a double-click whose
+first press closed it edits the line that press hit, not the row that slid
+under the pointer; the hand-off lasts for the next press only.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 

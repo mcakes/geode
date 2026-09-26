@@ -110,8 +110,10 @@ never per frame.
   the field (a parse error with `(column n)`), not in the footer. Any
   edit to the text clears the message.
 - **Clicking the table** closes the bar and then handles the click
-  normally. There is no longer a placeholder row, so no row index shifts
-  when the bar closes.
+  normally. Closing the bar moves the table up on screen, so a
+  double-click's second press uses the line its first press hit rather
+  than the row that slid under the pointer; that hand-off lasts for the
+  next press only.
 - **Any other verb or `:` command** closes the bar first, as today's
   `close_entry` does.
 - The bar's field counts as insert focus to the shell, as today's entry
@@ -125,7 +127,7 @@ never per frame.
   row fill in `render_tr`, and the entry handling in `number_rows` and
   the gutter count.
 - The tile paths that re-read a clicked row after the entry closes (the
-  chevron, cell, double-click and tree-column cases).
+  chevron, cell and placeholder cases).
 
 ## 5. Tests
 

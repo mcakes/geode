@@ -19313,6 +19313,32 @@ run_mutation "pricer entry bar: the label stays on the first place" \
   '' \
   geode-pricer o_lands_below_the_cursor_row_and_the_label_says_so
 
+# Closing the bar moves the table up on screen between the two presses of
+# one double-click: without the hand-off the second press edits a lower
+# row.
+run_mutation "pricer entry bar: the double-click ignores the closing press's line" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take();' \
+  '                self.pressed = None;' \
+  geode-pricer a_double_click_on_a_row_while_the_bar_is_open_edits_that_row
+
+# The hand-off is for the very next press only: kept longer, a later
+# double-click at the same spot edits the line that used to be there.
+run_mutation "pricer entry bar: the closing press's line outlives the next press" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.pressed = self.click_anchor.take();' \
+  '                self.pressed = self.click_anchor;' \
+  geode-pricer a_later_double_click_at_the_same_spot_edits_the_row_painted_there
+
+# The handed-on line reaches the cursor before the tree-column return.
+run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.cursor.line = Some(id);
+                self.sync_cursor(cx);
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
+
 run_mutation "pricer cell: an empty shift commits zero" \
   crates/geode-pricer/src/core/cell.rs \
   '    if t.is_empty() {
