@@ -71,8 +71,6 @@ use gpui::prelude::*;
 use gpui::{App, IntoElement, Pixels, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use crate::fonts;
-
 /// Overlay panel width, in pixels.
 const WIDTH: f32 = 220.0;
 /// Gap kept from the right/bottom edges of the viewport / status bar.
@@ -110,12 +108,7 @@ pub fn render(
                 .w_full()
                 .justify_between()
                 .gap_3()
-                .child(
-                    div()
-                        .font_family(fonts::MONO)
-                        .text_color(theme.muted_foreground)
-                        .child(render_keystroke(keystroke)),
-                )
+                .child(super::kbd::chip(keystroke))
                 .child(div().child(title_for(registry, action))),
         );
     }

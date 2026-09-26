@@ -150,9 +150,7 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
             "scope-expr-hints",
             WIDTH,
             theme.muted_foreground,
-            theme.muted,
             theme.border,
-            theme.radius,
         ))
         .into_any_element()
 }

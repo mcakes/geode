@@ -880,9 +880,7 @@ impl TimeseriesTile {
             .unwrap_or(&empty);
         for row in &mut rows {
             if let menu::MenuRow::Action { id, hint, .. } = row {
-                *hint = geode_shell::tips::chord_for(bindings, &id.0)
-                    .map(|ks| geode_shell::palette::render_binding(&ks).into())
-                    .unwrap_or_default();
+                *hint = geode_shell::tips::chord_for(bindings, &id.0).unwrap_or_default();
             }
         }
         rows

@@ -749,9 +749,7 @@ fn build(
             "picker-hints",
             WIDTH,
             theme.muted_foreground,
-            theme.muted,
             theme.border,
-            theme.radius,
         ))
         .into_any_element()
 }
@@ -763,9 +761,7 @@ pub(crate) fn hint_row(
     selector: &'static str,
     width: f32,
     fg: Hsla,
-    chip_bg: Hsla,
     border: Hsla,
-    radius: Pixels,
 ) -> AnyElement {
     let children: Vec<AnyElement> = hints
         .iter()
@@ -773,7 +769,7 @@ pub(crate) fn hint_row(
             Hint::Key(spec) => {
                 let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
                     .expect("footer hint keystrokes are hardcoded valid");
-                super::keybindings_view::key_chip(&ks, fg, chip_bg, radius)
+                super::kbd::chip(&ks).into_any_element()
             }
             Hint::Text(text) => div().child(*text).into_any_element(),
         })
@@ -966,7 +962,7 @@ mod tests {
             !columns.contains(&Hint::Key("tab")),
             "the columns stage has nothing to tick"
         );
-        // Every `Hint::Key` must be a spelling `key_chip` can render, or
+        // Every `Hint::Key` must be a spelling `kbd::chip` can render, or
         // `hint_row` panics at paint time on a hardcoded string.
         for hint in columns.iter().chain(values) {
             if let Hint::Key(spec) = hint {

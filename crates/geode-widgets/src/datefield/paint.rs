@@ -2,7 +2,7 @@
 //! face with the three states — rest, active, typing — separators
 //! between, an optional suffix after. Every colour is the host's, handed
 //! in as a [`SegmentPaint`]: the painter never reads `cx.theme()`, so it
-//! can be called from a closure that cannot borrow it (the `key_chip`
+//! can be called from a closure that cannot borrow it (the old `key_chip`
 //! precedent), and a host derives its colours once (the panel's
 //! `FlooredTones`, the shell's chip/control doors) rather than per paint.
 

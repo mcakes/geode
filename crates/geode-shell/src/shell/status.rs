@@ -124,21 +124,11 @@ pub fn status_bar(
                 .child(format!("{count}")),
         );
     }
-    // Built only when there is something to show: `format_keystroke`
-    // allocates a `Vec` and a `String` per keystroke, and this ran on every
-    // frame the app ever painted, pending or not.
+    // Built only when there is something to show: each chip formats its
+    // label, and this runs on every frame the app ever paints, pending or
+    // not.
     if !pending.is_empty() {
-        let pending_text = pending
-            .iter()
-            .map(format_keystroke)
-            .collect::<Vec<_>>()
-            .join(" ");
-        bar = bar.left(
-            div()
-                .font_family(fonts::MONO)
-                .text_color(theme.muted_foreground)
-                .child(pending_text),
-        );
+        bar = bar.left(super::kbd::binding(pending));
     }
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
@@ -278,48 +268,4 @@ pub fn status_bar(
                     ),
             )
         })
-}
-
-/// Minimal, status-strip-grade rendering of one keystroke (`ctrl+shift+g`).
-/// Not a general-purpose formatter — good enough to show "what's pending".
-fn format_keystroke(ks: &Keystroke) -> String {
-    let mut parts = Vec::new();
-    if ks.mods.ctrl {
-        parts.push("ctrl");
-    }
-    if ks.mods.alt {
-        parts.push("alt");
-    }
-    if ks.mods.shift {
-        parts.push("shift");
-    }
-    if ks.mods.cmd {
-        parts.push("cmd");
-    }
-    parts.push(&ks.key);
-    parts.join("+")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::keymap::Modifiers;
-
-    #[test]
-    fn format_keystroke_renders_modifiers_and_key() {
-        let ks = Keystroke {
-            mods: Modifiers::NONE,
-            key: "g".to_string(),
-        };
-        assert_eq!(format_keystroke(&ks), "g");
-
-        let ks = Keystroke {
-            mods: Modifiers::CTRL.union(Modifiers {
-                shift: true,
-                ..Modifiers::NONE
-            }),
-            key: "g".to_string(),
-        };
-        assert_eq!(format_keystroke(&ks), "ctrl+shift+g");
-    }
 }

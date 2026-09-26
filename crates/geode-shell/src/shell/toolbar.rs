@@ -171,7 +171,7 @@ pub fn toolbar(
 ) -> impl IntoElement {
     let theme = cx.theme();
     // Muted/foreground for the rest (no raw colours) — the same scheme
-    // `keybindings_view::key_chip` uses for its own chips.
+    // `Kbd` paints its own key chips with.
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
     let chip_radius = theme.radius;

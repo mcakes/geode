@@ -1001,7 +1001,7 @@ fn build(
             ],
         }
     };
-    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints);
 
     let footer = v_flex()
         .w(scale::design(WIDTH))

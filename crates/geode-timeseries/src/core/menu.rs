@@ -12,6 +12,7 @@
 
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
+use geode_shell::keymap::Keystroke;
 use gpui::SharedString;
 
 use super::model::Model;
@@ -24,7 +25,7 @@ pub enum MenuRow {
         title: SharedString,
         /// The live chord, resolved by the tile at open; empty when the
         /// keymap has none.
-        hint: SharedString,
+        hint: Vec<Keystroke>,
         enabled: Result<(), &'static str>,
         /// `None` for a verb; `Some(on)` for a toggle, which paints a
         /// tick (or a same-width blank) ahead of its title.
@@ -50,7 +51,7 @@ fn action(
     MenuRow::Action {
         id: ActionId(id.to_string()),
         title: title.into(),
-        hint: SharedString::default(),
+        hint: Vec::new(),
         enabled,
         checked: None,
     }
@@ -60,7 +61,7 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
     MenuRow::Action {
         id: ActionId(id.to_string()),
         title: SharedString::new_static(title),
-        hint: SharedString::default(),
+        hint: Vec::new(),
         enabled: Ok(()),
         checked: Some(on),
     }

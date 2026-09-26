@@ -1515,3 +1515,56 @@ fn tab_in_the_palette_leaves_the_query_field_focused(cx: &mut gpui::TestAppConte
         "and the palette is still open"
     );
 }
+
+/// Keys on screen paint as gpui-component's `Kbd` (`shell::kbd`), whose
+/// `kbd:{keystroke}` selector is the probe: the pending `g` of `g g`
+/// paints one (status strip and which-key overlay), and the palette's
+/// binding column paints the action's `g g` as chips. Nothing paints
+/// `kbd:g` outside those two states, so each assertion is its route's.
+#[gpui::test]
+fn pending_keys_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| {
+                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    let draw = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        })
+    };
+    draw(&mut cx);
+    assert!(
+        cx.debug_bounds("kbd:g").is_none(),
+        "sanity: no key painted yet"
+    );
+
+    cx.simulate_keystrokes("g");
+    draw(&mut cx);
+    assert!(
+        cx.debug_bounds("kbd:g").is_some(),
+        "the pending `g` paints as a Kbd chip"
+    );
+    cx.simulate_keystrokes("escape");
+    draw(&mut cx);
+    assert!(
+        cx.debug_bounds("kbd:g").is_none(),
+        "sanity: the pending chip is gone once the sequence is cancelled"
+    );
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("Test gg");
+    draw(&mut cx);
+    assert!(
+        cx.debug_bounds("kbd:g").is_some(),
+        "the palette's binding column paints `g g` as Kbd chips"
+    );
+}

@@ -1161,9 +1161,10 @@ pub(crate) fn render_menu(
                 ..
             } => {
                 let disabled = enabled.is_err();
-                let trailing: SharedString = match enabled {
-                    Err(r) => (*r).into(),
-                    Ok(()) => hint.clone(),
+                // A disabled row says why; an enabled one shows its keys.
+                let trailing = match enabled {
+                    Err(r) => div().child(*r).into_any_element(),
+                    Ok(()) => geode_shell::shell::kbd::binding(hint).into_any_element(),
                 };
                 let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
                 let lit = i == m.highlighted && !disabled;

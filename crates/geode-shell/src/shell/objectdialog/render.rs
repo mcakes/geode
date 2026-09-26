@@ -54,7 +54,8 @@ use super::super::{SCOPES_KEY, ShellEvent, ShellView};
 use super::super::colours as colour_theme;
 use super::super::control::{self, PointerStates as _};
 use super::super::dialog;
-use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
+use super::super::kbd;
+use super::super::keybindings_view::{highlighted_text, split_label_indices};
 use super::super::scale;
 
 /// Browse row height estimate used to size its capped viewport. Scroll following uses
@@ -2730,9 +2731,6 @@ fn build(
     let theme = cx.theme();
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
 
     // the merged `colours.toml` AND the theme's own anchors/tokens, read once for the
     // whole list rather than once per row — every browse row's swatch resolves its own
@@ -3008,7 +3006,7 @@ fn build(
             ],
         }
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line = dialog::hint_rows(&hints);
     let footer = v_flex()
         .w(scale::design(WIDTH))
         .gap_1()
@@ -3072,7 +3070,7 @@ fn build(
             let name = state.confirm_target.clone().unwrap_or_default();
             confirm_row(confirm, &name, entity, cx)
         }
-        None => browse_action_bar(state, &rows, &visible, entity, cx),
+        None => browse_action_bar(state, &rows, &visible, entity),
     };
 
     v_flex()
@@ -3122,13 +3120,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // by a button's height and `escape` would shift it back.
         (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (false, None) => action_bar(shell, entity, cx),
+        (false, None) => action_bar(shell, entity),
     };
     let theme = cx.theme();
     let row_paint = super::super::listrow::row_paint(theme);
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     // Pointer states for the two controls a row carries besides itself:
     // the steppable value chip (a filled chip) and the tick (a bare glyph).
     // Both sit on `popover`, the modal panel's fill. The tick hands in
@@ -3926,7 +3923,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         hints.extend(leave(back));
         hints
     };
-    let hint_line = dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line = dialog::hint_rows(&hints);
     // One fixed-height line shows the latest notice, otherwise selected-field help.
     // Keep it blank during confirmation, but retain grammar help during text entry.
     // Fixed line height and truncation prevent footer movement.
@@ -4085,11 +4082,7 @@ fn field_value(field: &super::Field) -> String {
 /// other verb in Geode's dialogs has one; an `outline` button is the mock's own
 /// local-command-bar look, and the destructive ones are `danger` rather than merely
 /// worded strongly.
-fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> AnyElement {
-    let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
+fn action_bar(shell: &ShellView, entity: &Entity<ShellView>) -> AnyElement {
     let mut bar = h_flex()
         .w(scale::design(WIDTH))
         .gap_2()
@@ -4114,7 +4107,7 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                    .child(kbd::chip(&ks))
                     .child(action.label.clone()),
             )
             .on_click(move |_event, window, cx| {
@@ -4139,7 +4132,6 @@ fn browse_action_bar(
     rows: &[ObjectRow],
     visible: &[crate::listfilter::Ranked],
     entity: &Entity<ShellView>,
-    cx: &mut App,
 ) -> AnyElement {
     let naming = matches!(state.stage, Stage::Naming);
     let writable = state.domain.writable(&state.stage);
@@ -4156,10 +4148,6 @@ fn browse_action_bar(
     if !offers_n && !offers_c && !offers_d && !offers_r {
         return div().into_any_element();
     }
-    let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     let mut bar = h_flex().w(scale::design(WIDTH)).gap_2().items_center();
     if offers_n {
         let ks = crate::keymap::parse_keystroke("n", Modifiers::NONE).expect("valid");
@@ -4176,7 +4164,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                                .child(kbd::chip(&ks))
                                 .child(label),
                         )
                         .on_click(move |_event, window, cx| {
@@ -4218,7 +4206,7 @@ fn browse_action_bar(
                             h_flex()
                                 .gap_1p5()
                                 .items_center()
-                                .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                                .child(kbd::chip(&ks))
                                 .child("Copy this scope"),
                         )
                         .on_click(move |_event, window, cx| {
@@ -4264,7 +4252,7 @@ fn browse_action_bar(
                         h_flex()
                             .gap_1p5()
                             .items_center()
-                            .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                            .child(kbd::chip(&ks))
                             .child(label),
                     )
                     .on_click(move |_event, window, cx| {

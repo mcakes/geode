@@ -3936,6 +3936,22 @@ run_mutation "palette: the usage bonus is added to the match score" \
   '                scored.push((i, score, indices));' \
   geode-shell an_empty_query_lists_used_items_first_by_bonus_then_registry_order
 
+# Every key on screen is a `Kbd` (`shell::kbd`). The palette's binding
+# column painting nothing leaves no `kbd:g` chip for the bound row.
+run_mutation "kbd: the palette's binding column paints its keys" \
+  crates/geode-shell/src/palette.rs \
+  '            let binding = crate::shell::kbd::binding(item.binding().unwrap_or_default());' \
+  '            let binding = crate::shell::kbd::binding(&[]);' \
+  geode-shell pending_keys_and_palette_bindings_paint_as_kbd
+
+# A module menu's `:` verb is not a key: parsing `:upload` as one would
+# paint a chip reading `:upload`'s last segment instead of the verb.
+run_mutation "kbd: a command-line verb hint stays text" \
+  crates/geode-shell/src/shell/kbd.rs \
+  "    if spec.is_empty() || spec.starts_with(':') {" \
+  '    if spec.is_empty() {' \
+  geode-shell a_spec_names_keys_unless_it_is_a_command_verb
+
 # Recency must be bucketed by age, not flat: reading every record as
 # just-used leaves frequency alone to rank, and a command used once this
 # minute no longer outranks one used once a month ago.

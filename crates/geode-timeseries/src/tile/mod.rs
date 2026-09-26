@@ -196,7 +196,7 @@ pub struct TimeseriesTile {
     /// the range dialog's segments in its own key handler, never
     /// formatted in `render`.
     popup: Option<Popup>,
-    footer: SharedString,
+    footer: Vec<header::FooterHint>,
     /// The chart surface's last painted bounds (`tile::pointer`).
     chart_bounds: ChartBounds,
     /// The pointer gesture in progress, if any (`tile::pointer`).
@@ -249,7 +249,7 @@ impl TimeseriesTile {
         // The footer names live chords, so a keymap reload re-resolves
         // it — once, here, never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
-            this.footer = header::footer_text(cx);
+            this.footer = header::footer_hints(cx);
             cx.notify();
         })
         .detach();
@@ -402,7 +402,7 @@ impl TimeseriesTile {
             title,
             stack: None,
             popup: None,
-            footer: header::footer_text(cx),
+            footer: header::footer_hints(cx),
             chart_bounds: ChartBounds::default(),
             drag: None,
             colour_picker: None,
@@ -1174,7 +1174,7 @@ impl Render for TimeseriesTile {
             })
             .when_some(expr_field, |el, f| el.child(f))
             .child(body)
-            .child(header::render_footer(self.footer.clone(), theme))
+            .child(header::render_footer(&self.footer, theme))
     }
 }
 

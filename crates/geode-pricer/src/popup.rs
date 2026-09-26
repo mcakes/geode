@@ -5,11 +5,11 @@
 use crate::paint::Paints;
 use crate::tile::PricerTile;
 use geode_shell::choice::ChoiceList;
-use geode_shell::shell::scale;
+use geode_shell::shell::{kbd, scale};
 use gpui::prelude::*;
 use gpui::{
-    Anchor, AnchoredPositionMode, App, Div, Entity, Hsla, MouseButton, SharedString, anchored,
-    deferred, div, px,
+    Anchor, AnchoredPositionMode, AnyElement, App, Div, Entity, Hsla, MouseButton, SharedString,
+    anchored, deferred, div, px,
 };
 use gpui_component::{ActiveTheme as _, ThemeStyled as _, h_flex, v_flex};
 
@@ -272,7 +272,9 @@ pub(crate) fn render_menu(
             move |_, _window, cx| tile.update(cx, |t, cx| t.close_menu(cx))
         });
     for (i, item) in m.items.iter().enumerate() {
-        let (title, lane, enabled, tick): (SharedString, &'static str, bool, Option<bool>) =
+        // The trailing lane: an enabled action's key (or `:` verb) as
+        // chips, a disabled one's reason as text.
+        let (title, lane, enabled, tick): (SharedString, AnyElement, bool, Option<bool>) =
             match item {
                 MenuItem::Separator => {
                     // `PopupMenu`'s own separator (the market-data list's).
@@ -303,10 +305,12 @@ pub(crate) fn render_menu(
                     enabled,
                     ..
                 } => match enabled {
-                    Ok(()) => ((*title).into(), *hint, true, None),
-                    Err(why) => ((*title).into(), *why, false, None),
+                    Ok(()) => ((*title).into(), kbd::spec(hint), true, None),
+                    Err(why) => ((*title).into(), why.into_any_element(), false, None),
                 },
-                MenuItem::View { name, current } => (name.clone(), "", true, Some(*current)),
+                MenuItem::View { name, current } => {
+                    (name.clone(), "".into_any_element(), true, Some(*current))
+                }
             };
         let paint = menu_row_paint(i == m.highlighted, enabled, paints, theme.accent);
         let row = h_flex()

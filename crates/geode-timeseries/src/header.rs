@@ -18,9 +18,11 @@
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
+use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::StackHandle;
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates};
+use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
@@ -159,19 +161,22 @@ pub(crate) fn cursor_is_source(model: &Model) -> Option<u8> {
 }
 
 /// The footer's hint row: each verb's live chord where the keymap has
-/// one, the shipped key otherwise. Resolved on a `Chords` change, never
-/// per frame.
+/// one, the shipped binding otherwise. Resolved on a `Chords` change,
+/// never per frame.
 const FOOTER_HINTS: &[(&str, &str, &str)] = &[
     ("timeseries::add", "a", "add"),
     ("timeseries::expr", "x", "expr"),
-    ("timeseries::list", "L", "series"),
+    ("timeseries::list", "shift+l", "series"),
     ("timeseries::range", "r", "range"),
     ("timeseries::freq_finer", "f", "freq"),
-    ("timeseries::density", "D", "density"),
+    ("timeseries::density", "shift+d", "density"),
     ("timeseries::percentiles", "p", "percentiles"),
 ];
 
-pub(crate) fn footer_text(cx: &App) -> SharedString {
+/// One footer hint: the verb's keys, then its word.
+pub(crate) type FooterHint = (Vec<Keystroke>, &'static str);
+
+pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
     let empty = Vec::new();
     let bindings = cx
         .try_global::<Chords>()
@@ -180,14 +185,12 @@ pub(crate) fn footer_text(cx: &App) -> SharedString {
     FOOTER_HINTS
         .iter()
         .map(|(action, shipped, word)| {
-            let key = chord_for(bindings, action)
-                .map(|ks| geode_shell::palette::render_binding(&ks))
-                .unwrap_or_else(|| (*shipped).to_string());
-            format!("{key} {word}")
+            let keys = chord_for(bindings, action).unwrap_or_else(|| {
+                parse_binding(shipped, Modifiers::NONE).expect("shipped footer keys are valid")
+            });
+            (keys, *word)
         })
-        .collect::<Vec<_>>()
-        .join(" · ")
-        .into()
+        .collect()
 }
 
 pub(crate) fn render_header(
@@ -492,17 +495,27 @@ pub(crate) fn render_expr_field(f: &ExprField, theme: &Theme) -> impl IntoElemen
         })
 }
 
-pub(crate) fn render_footer(text: SharedString, theme: &Theme) -> impl IntoElement {
+pub(crate) fn render_footer(hints: &[FooterHint], theme: &Theme) -> impl IntoElement {
+    let last = hints.len().saturating_sub(1);
     h_flex()
         .w_full()
         .h(scale::design(FOOTER_HEIGHT))
         .items_center()
+        .gap_1()
         .px_2()
         .text_xs()
         .text_color(theme.muted_foreground)
         .border_t_1()
         .border_color(theme.border)
-        .child(text)
+        .overflow_hidden()
+        .children(hints.iter().enumerate().map(|(i, (keys, word))| {
+            let word: SharedString = if i == last {
+                SharedString::new_static(word)
+            } else {
+                format!("{word} ·").into()
+            };
+            kbd::hint(keys, word)
+        }))
 }
 
 /// The chart's place while the tile holds no slot: the hint naming

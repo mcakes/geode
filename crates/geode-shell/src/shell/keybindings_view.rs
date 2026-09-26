@@ -20,8 +20,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, Pixels,
-    SharedString, StyledText, Window, div,
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, SharedString,
+    StyledText, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -46,6 +46,7 @@ use crate::vimnav;
 
 use super::ShellView;
 use super::dialog;
+use super::kbd;
 use super::scale;
 
 // ---------------------------------------------------------------------
@@ -367,24 +368,6 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
             .map(|s| dialog::mode_pill(s.mode, cx))
             .unwrap_or_else(|| div().into_any_element())
     });
-}
-
-/// Shared muted keystroke chip, using [`palette::render_keystroke`]'s lowercase labels
-/// and the data font. Used by binding rows and dialog footer hints.
-pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla, radius: Pixels) -> AnyElement {
-    div()
-        .font_family(crate::fonts::MONO)
-        .text_xs()
-        .text_color(fg)
-        .bg(bg)
-        .px_1()
-        .py_0p5()
-        .min_w_5()
-        .text_center()
-        .rounded(radius)
-        .flex_shrink_0()
-        .child(palette::render_keystroke(ks))
-        .into_any_element()
 }
 
 /// Whether the displayed binding gives `d` a removal or shadow target. An unbound row
@@ -968,10 +951,6 @@ fn action_block(
             cx,
         );
     }
-    let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     // (chip spelling, the verb `arm_verb` reads, label)
     let mut verbs: Vec<(&'static str, char, &'static str)> = Vec::new();
     if state.listening.is_none() {
@@ -1002,7 +981,7 @@ fn action_block(
                 h_flex()
                     .gap_1p5()
                     .items_center()
-                    .child(key_chip(&ks, chip_fg, chip_bg, chip_radius))
+                    .child(kbd::chip(&ks))
                     .child(label),
             )
             .on_click(move |_event, window, cx| {
@@ -1027,12 +1006,9 @@ fn build(
     };
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let theme = cx.theme();
-    // Copied out so [`key_chip`] and the render closures below don't have
-    // to hold the `theme` borrow.
+    // Copied out so the render closures below don't have to hold the
+    // `theme` borrow.
     let row_paint = super::listrow::row_paint(theme);
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
 
     // The list renders ONLY the rows that survive the filter. Safe
     // because row click handlers are keyed by `ActionId`, not position
@@ -1093,26 +1069,11 @@ fn build(
                     .child("listening…")
                     .into_any_element()
             } else {
-                h_flex()
-                    .gap_1()
-                    .children(
-                        pending
-                            .iter()
-                            .map(|ks| key_chip(ks, chip_fg, chip_bg, chip_radius)),
-                    )
-                    .into_any_element()
+                kbd::binding(pending).into_any_element()
             }
         } else {
             match row.current.as_ref() {
-                Some(bound) => h_flex()
-                    .gap_1()
-                    .children(
-                        bound
-                            .keystrokes
-                            .iter()
-                            .map(|ks| key_chip(ks, chip_fg, chip_bg, chip_radius)),
-                    )
-                    .into_any_element(),
+                Some(bound) => kbd::binding(&bound.keystrokes).into_any_element(),
                 None => div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
@@ -1149,13 +1110,13 @@ fn build(
         );
     }
 
-    // Keystroke chips for the footer hints — the same [`key_chip`]
-    // rendering the rows use, so key names in helper text look like the
-    // keys they mean. A chip renders exactly one keystroke.
+    // Keystroke chips for the footer hints — the same [`kbd::chip`]
+    // the rows use, so key names in helper text look like the keys they
+    // mean. A chip renders exactly one keystroke.
     let chip = move |spec: &str| {
         let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
             .expect("footer hint keystrokes are hardcoded valid");
-        key_chip(&ks, chip_fg, chip_bg, chip_radius)
+        kbd::chip(&ks).into_any_element()
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
@@ -1210,7 +1171,7 @@ fn build(
             ],
         }
     };
-    let hint_line: AnyElement = super::dialog::hint_rows(&hints, chip_fg, chip_bg, chip_radius);
+    let hint_line: AnyElement = super::dialog::hint_rows(&hints);
     let footer = v_flex()
         .w(scale::design(WIDTH))
         .gap_1()

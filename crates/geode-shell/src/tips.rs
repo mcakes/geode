@@ -164,16 +164,12 @@ pub fn tip_with(
     }
 }
 
-/// The content: title, then the chord as `key_chip`s (one per
-/// keystroke of a sequence), then the detail line, muted. Chip colours
-/// are the keybindings dialog's own (`muted_foreground` on `muted`).
+/// The content: title, then the chord as `Kbd` chips (one per
+/// keystroke of a sequence), then the detail line, muted.
 /// Selectors: `{selector}` on the root, `{selector}-title` on the title,
 /// `{selector}-chord-{ctrl+k}` on each chip — what the hover tests read.
 pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let chip_fg = theme.muted_foreground;
-    let chip_bg = theme.muted;
-    let chip_radius = theme.radius;
     let chord_row = model.chord.as_ref().map(|keys| {
         let mut row = h_flex().gap_1().items_center();
         for ks in keys {
@@ -184,12 +180,7 @@ pub(crate) fn render_tip(model: &TipModel, selector: SharedString, cx: &App) -> 
                         let selector = selector.clone();
                         move || format!("{selector}-chord-{text}")
                     })
-                    .child(crate::shell::keybindings_view::key_chip(
-                        ks,
-                        chip_fg,
-                        chip_bg,
-                        chip_radius,
-                    )),
+                    .child(crate::shell::kbd::chip(ks)),
             );
         }
         row

@@ -418,12 +418,7 @@ fn build(
         .pt_2()
         .border_t_1()
         .border_color(theme.border)
-        .child(dialog::hint_rows(
-            &hints,
-            theme.muted_foreground,
-            theme.muted,
-            theme.radius,
-        ));
+        .child(dialog::hint_rows(&hints));
 
     v_flex()
         .gap_2()
