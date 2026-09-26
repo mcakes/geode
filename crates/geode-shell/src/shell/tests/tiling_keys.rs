@@ -7,6 +7,75 @@
 
 use super::*;
 
+/// A maximised tile reads differently from a workspace's only tile: the
+/// status bar's fullscreen segment appears on `mod+f` (alt+f here, the
+/// test mod alias) even for a lone tile, its tooltip names the key, and a
+/// click on it restores the layout through the same action.
+#[gpui::test]
+fn the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("status-fullscreen").is_none(),
+        "a lone tile that is not maximised shows no segment"
+    );
+
+    cx.simulate_keystrokes("alt-f");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().tree().fullscreen().is_some()
+    }));
+    let seg = cx
+        .debug_bounds("status-fullscreen")
+        .expect("a maximised lone tile shows the segment");
+
+    cx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("tip-status-fullscreen-chord-alt+f")
+            .is_some(),
+        "the tooltip names the fullscreen key"
+    );
+
+    cx.simulate_mouse_down(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .fullscreen()),
+        None,
+        "the click restores the layout"
+    );
+    assert!(cx.debug_bounds("status-fullscreen").is_none());
+}
+
 /// The empty-workspace hint (`"ctrl+k → Add a tile"`) paints
 /// when there are no tiles. gpui's test API (`painted_quads`) has no way
 /// to inspect painted *text* content directly, so this asserts what it

@@ -17,6 +17,11 @@ newly active member.
 navigation use its subdivision rules. `tiles()` includes inactive stack
 members for retention and persistence; `visible_tiles()` selects active
 members but does not itself apply the fullscreen filter used by `layout`.
+`slot_count()` counts the slots `layout` would paint unmaximised, without
+allocating. `Workspace::fullscreen_hidden` uses it to report how many
+tiles a fullscreen main-tree tile hides: the tree's other slots plus
+every visible dock's slots, since fullscreen paints no dock. It returns
+`None` when nothing is fullscreen, and `Some(0)` for a lone maximised tile.
 
 Visible docks reserve space even when empty. Left and right consume fractions
 of the full content width; bottom consumes a fraction of the full height in

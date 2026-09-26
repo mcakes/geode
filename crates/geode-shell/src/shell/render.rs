@@ -1012,6 +1012,21 @@ impl Render for ShellView {
                 view.open_module("diagnostics", window, cx);
             });
         };
+        // Clicking the fullscreen segment restores the layout through the
+        // same action `mod+f` and a tile double-click dispatch.
+        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();
+        let fullscreen_click_entity = cx.entity();
+        let on_fullscreen_click = move |window: &mut Window, cx: &mut App| {
+            fullscreen_click_entity.update(cx, |view, cx| {
+                view.dispatch(
+                    &crate::actions::ActionId("workspace::fullscreen_tile".into()),
+                    None,
+                    window,
+                    cx,
+                );
+                cx.notify();
+            });
+        };
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
@@ -1022,6 +1037,8 @@ impl Render for ShellView {
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,
+            fullscreen_hidden,
+            on_fullscreen_click,
             bar_model.as_of.as_deref(),
             bar_model.as_of_full.as_ref(),
             self.services.theme.active_name(),
