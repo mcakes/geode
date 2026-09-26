@@ -364,6 +364,10 @@ mod tests {
             Some(240)
         );
         assert!(config.get("colors", "stale").is_none());
+        assert!(
+            config.doc("colours").is_none() && config.layered_docs("colours").is_empty(),
+            "the ignored file is dropped, not kept under its old name"
+        );
         assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
         let d = &config.diagnostics[0];
         assert_eq!(d.severity, Severity::Warning);
