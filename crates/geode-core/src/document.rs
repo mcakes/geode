@@ -568,11 +568,8 @@ role = "attribute"
         assert!(err.contains("document has no rows"), "{err}");
     }
 
-    /// Ledger (ii): the undeclared-attribute branch — the mirror of
-    /// "attribute 'x' is missing". A document carrying an attribute the
-    /// dataset never declared has nowhere to put it: `document_columns()`
-    /// would omit it, so the value would be dropped silently rather than
-    /// stored.
+    /// An undeclared attribute has no storage column. Reject it before
+    /// publication rather than silently dropping its value.
     #[test]
     fn validate_refuses_an_attribute_the_dataset_does_not_declare() {
         let mut r = sample();

@@ -1,4 +1,4 @@
-//! The expression language (timeseries spec §7, ruling 8): arithmetic
+//! The expression language: arithmetic
 //! over named series, nothing else. A hand-written recursive-descent
 //! parser, pure; the resolved tree names slots only, so an identity
 //! never reaches the compiler as text. A reference is a series name —
@@ -52,7 +52,7 @@ pub struct ParseError {
     pub message: String,
 }
 
-/// The boundary, said where a trader would cross it (spec §7).
+/// Error text describing the supported arithmetic grammar.
 pub const ARITHMETIC_ONLY: &str = "arithmetic only: + - * / and parentheses";
 
 /// The deepest a unary-minus/parenthesis nest may go before `parse`

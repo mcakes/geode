@@ -1,8 +1,6 @@
-//! The timeseries viewer's shared vocabulary (timeseries spec §6.1,
-//! §6.4): what a tile asks for and what the query answers. Below both
-//! `geode-shell` and `geode-data` for the reason `query.rs` gives — the
-//! two may never depend on each other, and the module builds these
-//! while the compiler consumes them.
+//! Shared timeseries requests and results. Tiles construct requests and the
+//! data layer compiles them; the shell routes outcomes without depending on
+//! the data crate. Source names are resolved to slot IDs before compilation.
 
 pub mod expr;
 
@@ -11,8 +9,8 @@ use crate::query::{AsOf, QueryKey};
 use chrono::{DateTime, Utc};
 use std::time::Instant;
 
-/// The display frequency a series is bucketed to (spec ruling 2: applied
-/// by DuckDB on query, never sent to the source).
+/// Display bucket width, applied by the query engine after fetching source
+/// points. Fetch requests do not carry this display frequency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Frequency {
     M1,
@@ -73,7 +71,7 @@ impl Frequency {
     }
 
     /// How many buckets `[from, to)` spans at this frequency, a partial
-    /// bucket counting as one. What the cap (spec §6.3) is measured on.
+    /// bucket counting as one. Used to check the request point cap.
     pub fn buckets_in(self, from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
         let secs = (to - from).num_seconds();
         if secs <= 0 {
@@ -98,7 +96,7 @@ impl Frequency {
     }
 }
 
-/// How the rows inside one bucket become one value (spec ruling 2).
+/// How the rows inside one bucket become one value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BucketRule {
     #[default]
@@ -157,7 +155,7 @@ pub struct SeriesSpec {
     pub kind: SlotKind,
 }
 
-/// One tile's whole question (spec §6.1): every slot in one round trip.
+/// One tile's series request: every slot in one round trip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeriesParams {
     pub key: QueryKey,
@@ -177,7 +175,7 @@ pub struct SeriesParams {
     pub bins: Option<u32>,
 }
 
-/// The most buckets one request may ask for (spec §6.3).
+/// The maximum estimated bucket count for a request's range and frequency.
 pub const SERIES_POINT_CAP: u64 = 500_000;
 pub const MIN_BINS: u32 = 4;
 pub const MAX_BINS: u32 = 200;
@@ -205,7 +203,7 @@ fn describe_span(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
     }
 }
 
-/// The refusal a capped request is answered with (spec §6.3):
+/// The refusal message for a request exceeding the point cap:
 /// `1m over 3y is 1,170,000 points; the cap is 500,000`.
 pub fn cap_message(
     frequency: Frequency,
@@ -222,9 +220,9 @@ pub fn cap_message(
     )
 }
 
-/// What a source slot's data is worth (spec §6.4): the coverage hull,
-/// the newest fetch, and the load lane's word. `None`s throughout for an
-/// expression slot.
+/// Source coverage hull, newest fetch time, and load health. A coverage hull
+/// can include gaps and does not guarantee a point in every bucket.
+/// Expression slots have `None` in every field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlotProvenance {
     pub loaded: Option<(DateTime<Utc>, DateTime<Utc>)>,
@@ -309,7 +307,7 @@ mod tests {
             0,
             "to before from is empty"
         );
-        // the spec's own example: 1m over 3y
+        // A one-minute frequency over three years exceeds the point cap.
         let three_years = Utc.with_ymd_and_hms(2029, 1, 5, 0, 0, 0).unwrap();
         assert!(Frequency::M1.buckets_in(from, three_years) > SERIES_POINT_CAP);
     }

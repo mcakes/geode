@@ -1,15 +1,13 @@
-//! The in-process log (spec §4.1–4.3): a fixed ring every subscriber
-//! layer feeds, read by the diagnostics tile; `[log]` levels; the
-//! control the shell uses to change them at runtime.
+//! Bounded in-process log storage, tracing integration, and runtime level control.
+//! The diagnostics tile reads the ring; `[log]` configures Geode target levels.
 use crate::config::{Config, Diagnostic, Severity};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 pub use tracing::Level;
 use tracing_subscriber::filter::Targets;
 
-/// The seven targets every subscriber layer and `[log]` key name (by
-/// suffix, e.g. `ingest` → `geode::ingest`) know about. `geode::pricing`
-/// is the pricing worker's (line-pricer spec §10.2).
+/// Geode tracing targets configurable by their suffix in `[log]`, such as
+/// `ingest` for `geode::ingest`.
 pub const TARGETS: [&str; 7] = [
     "geode::ingest",
     "geode::query",
@@ -37,12 +35,9 @@ struct RingInner {
 
 pub struct Ring {
     inner: Mutex<RingInner>,
-    /// Test-only instrumentation (fix round 1, MIN-9/MAJ-3): counts how
-    /// many slots `drain_since` actually examines, so a test can prove
-    /// its early-break scan really is bounded by what's new rather than
-    /// by the ring's full capacity — a mutation that keeps the right
-    /// *output* but scans everything every time would pass every other
-    /// test in this file and be invisible without this.
+    /// Test-only count of slots examined by `drain_since`. Checks scan cost
+    /// separately from returned values: a full-ring scan could produce the same
+    /// records while wasting work on every tail read.
     #[cfg(test)]
     drain_visits: std::sync::atomic::AtomicU64,
 }
@@ -69,9 +64,9 @@ impl Ring {
             .len()
     }
 
-    /// Overwrites the oldest slot once full; never blocks a writer for
-    /// longer than one copy. `seq` is assigned here, contiguous, so two
-    /// threads racing on `push` cannot produce a gap or a duplicate.
+    /// Insert a record, overwriting the oldest slot when full. Assign contiguous
+    /// sequence numbers under the mutex so concurrent writers cannot duplicate or
+    /// skip a number. Readers also hold this mutex while cloning records.
     pub fn push(&self, mut r: Record) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.seq += 1;
@@ -86,17 +81,12 @@ impl Ring {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).seq
     }
 
-    /// The smallest `seq` still retained, or `None` if nothing has been
-    /// pushed yet (fix round 1, MIN-9): a reader whose own `since` has
-    /// already been overwritten can compare against this to know it was
-    /// lapped, and by how much (`oldest_seq() - since` records lost),
-    /// rather than silently getting a short list with no gap marker.
+    /// The oldest retained sequence number, or `None` before the first write.
+    /// A reader whose last consumed sequence is `since` has lost
+    /// `oldest.saturating_sub(since.saturating_add(1))` unread records.
     ///
-    /// The slot at `head` is the next one `push` will overwrite, which
-    /// makes it the oldest *surviving* record once the ring has wrapped
-    /// (every slot written at least once); before the first wrap, `head`
-    /// itself is still empty and the oldest record sits at index 0 (the
-    /// first slot ever written).
+    /// After wrapping, `head` points to the oldest retained slot; before wrapping,
+    /// the first slot holds the oldest record.
     pub fn oldest_seq(&self) -> Option<u64> {
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match &g.records[g.head] {
@@ -105,30 +95,14 @@ impl Ring {
         }
     }
 
-    /// Records with `seq > since`, oldest first, into `out` (cleared
-    /// first). The reader owns the buffer: a tile following the tail
-    /// reuses one `Vec` for its life, so a hit allocates nothing beyond
-    /// the record clones themselves — though each matching record's
-    /// `message: String` clone is itself a heap allocation, made while
-    /// the ring's mutex is held (the mutex is never held for
-    /// *formatting* — that already happened in `RingLayer::on_event`,
-    /// before `push` — but "held for a copy" does mean a large drain
-    /// holds the lock against writers for as long as those allocations
-    /// take).
+    /// Copy retained records with `seq > since` into `out`, oldest first, clearing
+    /// its previous contents. Reusing `out` avoids repeated buffer allocation;
+    /// cloning each record's message can still allocate while the mutex is held.
+    /// Formatting happens before insertion, outside this lock.
     ///
-    /// Slots are `seq`-ascending walking forward from `head` (the
-    /// oldest surviving slot once wrapped; before the first wrap, `head`
-    /// itself is empty and the run of real slots `0..head` holds
-    /// ascending `seq` `1..=head` — see [`Self::oldest_seq`]'s doc
-    /// comment for the same fact stated the other way around). Walking
-    /// *backward* from the newest slot instead therefore visits records
-    /// in strictly *descending* `seq`, which means the scan can stop the
-    /// moment it reaches one at or before `since` — everything further
-    /// back is even older. The common case this earns its keep for is a
-    /// reader following the tail: `since` is usually within a handful of
-    /// the latest `seq`, so a full-capacity scan (4096 slots at the
-    /// shipped size) would otherwise re-examine thousands of records
-    /// this call was never going to return, every single call.
+    /// Walk backward from the newest record and stop at the first empty slot or
+    /// sequence at or before `since`, then reverse the output. A reader following
+    /// the tail examines only new records plus the stopping slot, up to ring capacity.
     pub fn drain_since(&self, since: u64, out: &mut Vec<Record>) {
         out.clear();
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -260,11 +234,8 @@ impl LogLevels {
         let Some(value) = config.get("app", "log") else {
             return (levels, diags);
         };
-        // MIN-3 (fix round 1): `log = "debug"` — the obvious typo for
-        // `[log]\ndefault = "debug"` — used to be silently accepted with
-        // no effect at all, the exact failure this function's own
-        // per-key handling below already guards against one level down
-        // ("a typo must not silence a target").
+        // A scalar `log = "debug"` is not a `[log]` table. Diagnose it instead
+        // of silently leaving default levels in effect.
         let Some(table) = value.as_table() else {
             diags.push(warn(
                 "[log]: expected a table, e.g. [log]\\ndefault = \"info\"".to_string(),
@@ -303,27 +274,16 @@ impl LogLevels {
             levels.targets.retain(|(k, _)| k != key);
             levels.targets.push((key.clone(), level));
         }
-        // Phase 4b Task 4 fix round 1, MIN-10: sorted so `LogLevels`'
-        // derived `PartialEq` compares order-insensitively — `Diagnostics::
-        // set_levels`'s no-op guard otherwise reads two `[log]` tables with
-        // the same keys in a different file order as "changed" and
-        // re-applies `LevelControl::set` for nothing.
+        // Canonical target order makes derived equality independent of TOML key
+        // order, so an unchanged configuration does not reapply the runtime filter.
         levels.targets.sort();
         (levels, diags)
     }
 
-    /// A global `Targets` filter: everything *not* under `geode` (every
-    /// third-party crate, including gpui) is capped at `warn`, `geode`
-    /// itself (every target under [`TARGETS`], absent a more specific
-    /// override) follows `self.default`, and each configured per-target
-    /// override wins over both (fix round 1, MIN-6 — `Targets` matches
-    /// by longest matching prefix, so `with_target("geode", …)` then
-    /// `with_target("geode::ingest", …)` composes the way `[log]`'s
-    /// `default` + per-suffix keys already read). Before this, `[log]
-    /// default = "trace"` (a real, supported value) would have raised
-    /// every third-party crate's callsites to `trace` too — nothing in
-    /// this dependency tree does that today, but the day one does, its
-    /// records would evict `geode`'s own from the ring.
+    /// Build a global filter: targets outside `geode` are capped at `warn`,
+    /// `geode` follows `self.default`, and configured target overrides take
+    /// precedence through longest-prefix matching. Verbose Geode logging therefore
+    /// does not enable verbose third-party records that could crowd out the ring.
     pub fn to_targets(&self) -> Targets {
         let mut t = Targets::new()
             .with_default(Level::WARN)
@@ -338,17 +298,13 @@ impl LogLevels {
         let mut out = self.clone();
         out.targets.retain(|(k, _)| k != target);
         out.targets.push((target.to_string(), level));
-        out.targets.sort(); // MIN-10 — see the same sort in `from_doc`
+        out.targets.sort(); // Match the canonical order produced by `from_doc`.
         out
     }
 }
 
-/// Runtime control over the installed subscriber's level filter — the
-/// palette's `Set log level…` (`:level` on a tile's command line
-/// reached the same control until command-line locality closed that
-/// route 2026-09-20) goes through this rather than touching the
-/// subscriber directly, so the shell never names
-/// `tracing_subscriber::reload` itself.
+/// Runtime control over the installed subscriber's level filter. Shell actions
+/// use this interface without depending on `tracing_subscriber::reload`.
 pub trait LevelControl: Send + Sync {
     fn set(&self, levels: &LogLevels) -> Result<(), String>;
 }
@@ -484,12 +440,9 @@ mod tests {
         assert!(diags[0].message.contains("bogus"));
     }
 
-    /// Phase 4b Task 4 fix round 1, MIN-10: two `[log]` tables naming the
-    /// same targets at the same levels in a different key order must
-    /// compare equal — `Diagnostics::set_levels`'s no-op guard relies on
-    /// `LogLevels`'s derived `PartialEq`, and `targets` is a `Vec`
-    /// (order-sensitive by construction) unless both `from_doc` and
-    /// `with` canonicalise it.
+    /// Equivalent target settings compare equal regardless of file order.
+    /// Both parsing and `with` must canonicalize the vector so consumers can
+    /// skip unchanged level updates.
     #[test]
     fn targets_in_a_different_file_order_compare_equal() {
         let a = crate::config::test_support::config_from(
@@ -511,11 +464,10 @@ mod tests {
         assert_eq!(via_with, levels_a);
     }
 
-    // ---- Fix round 1 --------------------------------------------------
+    // ---- Configuration validation and filtering -----------------------
 
-    /// MIN-3: `log = "debug"` (present, but not a table — the obvious
-    /// typo for `[log]\ndefault = "debug"`) must warn, not silently do
-    /// nothing.
+    /// A scalar `log = "debug"` warns and leaves defaults in effect;
+    /// configuration requires a `[log]` table.
     #[test]
     fn log_present_but_not_a_table_is_a_warning() {
         let cfg = crate::config::test_support::config_from(
@@ -528,9 +480,8 @@ mod tests {
         assert!(diags[0].message.contains("table"));
     }
 
-    /// MIN-6: a target outside `geode` (every third-party crate,
-    /// including gpui) is capped at `warn` regardless of `[log]
-    /// default`; `geode`'s own targets follow `default` as before.
+    /// Targets outside `geode` stay capped at `warn` when Geode's default is
+    /// more verbose. Geode targets follow the configured default.
     #[test]
     fn to_targets_caps_non_geode_targets_at_warn_regardless_of_default() {
         let levels = LogLevels {
@@ -552,8 +503,7 @@ mod tests {
         );
     }
 
-    // ---- MAJ-3: RingLayer / MessageVisitor, proved against a real
-    // subscriber rather than only by reading the match arms. -----------
+    // ---- Tracing subscriber and structured message fields --------------
 
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -598,11 +548,8 @@ mod tests {
         assert_eq!(records[0].message, "structured plain=x debug=\"y\"");
     }
 
-    /// MAJ-3's harness entry (in `scripts/mutation-check.sh`) mutates
-    /// `record_str`'s non-message branch away; this is the test that
-    /// mutation names — kept here as an explicit assertion on the exact
-    /// failure mode (a non-message field silently vanishing) rather than
-    /// only exercising it as a side effect of the test just above.
+    /// A structured string field remains in the recorded message with its name
+    /// and value, independently of the primary message text.
     #[test]
     fn a_non_message_str_field_is_not_dropped() {
         let records = logged(8, || {
@@ -616,7 +563,7 @@ mod tests {
         );
     }
 
-    // ---- MIN-9: drain_since's early break, and oldest_seq -------------
+    // ---- Bounded tail reads and overwritten-record detection -----------
 
     #[test]
     fn drain_since_stops_scanning_once_it_reaches_records_at_or_before_since() {

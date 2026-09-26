@@ -1727,13 +1727,8 @@ npv = 120
             "a name the view lacks invents no column presentation"
         );
     }
-    /// The view-level half of the same rule, and the one the brief named
-    /// alongside the column case. A desk that renames or retires a view
-    /// leaves exactly this behind in a trader's personal file: a table
-    /// keyed to a name nothing answers to. It is skipped **with a
-    /// warning** rather than silently, because the warning is the only
-    /// thing that ever says why a personalisation stopped applying — and
-    /// it must not touch the views that do exist.
+    /// A personal overlay for an unknown view is skipped with a warning,
+    /// explaining why its settings do not apply. Other views remain unchanged.
     #[test]
     fn a_view_the_config_lacks_is_a_warning_not_an_error() {
         let (mut views, _) = ViewSpec::from_doc(&doc("[tree]\ndataset = \"risk_snapshot\"\n\
@@ -1888,8 +1883,8 @@ npv = 120
         );
     }
 
-    /// Unknown column keys warn, while `color` remains an accepted alias.
-    /// Shared property readers alone only diagnose malformed known keys.
+    /// Unknown column keys warn. `color` is accepted without a warning;
+    /// malformed values still use the shared property reader's diagnostics.
     #[test]
     fn dataset_presentation_warns_for_an_unknown_key_inside_a_column_table() {
         let (spec, diags) = DatasetPresentationSpec::from_doc(&dataset_doc(
