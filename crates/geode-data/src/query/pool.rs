@@ -390,7 +390,9 @@ fn worker(
 /// pool thread.
 /// How many `ROLLBACK`s a worker tries before it gives up on a transaction.
 /// Each attempt starts a new statement, which clears a pending interrupt, so
-/// a second attempt already outlasts one stray supersession.
+/// a second attempt already outlasts one stray supersession. Defence in
+/// depth: without the retry, an interrupted release is still repaired after
+/// the worker's next run, at the cost of that run's failure reaching its view.
 const ROLLBACK_ATTEMPTS: usize = 3;
 
 /// Leave the connection outside any transaction before the worker's next

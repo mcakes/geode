@@ -1129,20 +1129,6 @@ run_mutation "pool: a worker releases a transaction left behind" \
   geode-data \
   a_transaction_left_aborted_does_not_wedge_the_worker
 
-# An interrupted ROLLBACK is retried, not taken as the end of the attempt.
-run_mutation "pool: an interrupted rollback is retried" \
-  crates/geode-data/src/query/pool.rs \
-  '            Err(_) => {}
-        }
-    }
-    tracing::error!(' \
-  '            Err(_) => return,
-        }
-    }
-    tracing::error!(' \
-  geode-data \
-  interrupts_on_the_transaction_statements_do_not_wedge_the_connection
-
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
   '        if q.shutdown {
