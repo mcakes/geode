@@ -7,10 +7,10 @@
 //! header paints is built once, in the tile's `rebuild_chrome`, and
 //! `render_header` only clones `SharedString`s and `Hsla`s.
 //!
-//! A slot's swatch COLOUR is prepared here too, which is why `prepare`
+//! A slot's swatch COLOR is prepared here too, which is why `prepare`
 //! takes a resolver: deriving one costs a `Palette::from_theme` (five
 //! readability floors, each a possible OKLab bisection) plus twenty-eight
-//! `Hsla -> Rgb` conversions for the named-colour wheel, and doing that
+//! `Hsla -> Rgb` conversions for the named-color wheel, and doing that
 //! in `render` would pay it every frame for a value that only moves when
 //! the model or the theme does. The tile rebuilds the header on both, the
 //! theme behind `theme_signature`.
@@ -81,7 +81,7 @@ pub(crate) struct Chip {
     pub tip_selector: SharedString,
     /// The swatch's own tooltip selector, likewise prepared.
     pub swatch_tip_selector: SharedString,
-    /// The slot's colour, already resolved against the theme — see the
+    /// The slot's color, already resolved against the theme — see the
     /// module doc for why this is not a `Color` the painter resolves.
     pub swatch: Hsla,
     pub number: u8,
@@ -104,7 +104,7 @@ impl HeaderModel {
     pub(crate) fn prepare(
         model: &Model,
         default_source: Option<&str>,
-        colour_of: &dyn Fn(&Color) -> Hsla,
+        color_of: &dyn Fn(&Color) -> Hsla,
     ) -> HeaderModel {
         let cursor = model.cursor();
         let chips = model
@@ -114,7 +114,7 @@ impl HeaderModel {
             .map(|(i, s)| {
                 // Failed outranks fetching outranks the cursor: a slot
                 // that cannot load is the one thing worth the strip's
-                // strongest colour, whatever else is true of it.
+                // strongest color, whatever else is true of it.
                 let (tone, filled, tooltip) = match &s.state {
                     SlotState::Failed(why) => {
                         (Tone::Danger, true, Some(SharedString::from(why.clone())))
@@ -131,7 +131,7 @@ impl HeaderModel {
                     tooltip,
                     tip_selector: format!("tip-timeseries-chip-{}", s.number).into(),
                     swatch_tip_selector: format!("tip-timeseries-swatch-{}", s.number).into(),
-                    swatch: colour_of(&s.color),
+                    swatch: color_of(&s.color),
                     number: s.number,
                 }
             })
@@ -221,7 +221,7 @@ pub(crate) struct HeaderPopups {
     pub range_open: bool,
     /// The frequency menu is up.
     pub freq_open: bool,
-    /// The open colour picker: the slot number it targets and the
+    /// The open color picker: the slot number it targets and the
     /// component element, which takes that chip's swatch position.
     pub color_picker: Option<(u8, AnyElement)>,
     /// The range menu or the dates editor, hung under the range trigger.
@@ -448,7 +448,7 @@ pub(crate) fn render_header(
             // chip that vanished would leave nothing to press again.
             .when(chip.hidden, |d| d.opacity(0.5).line_through())
             // Use the visibility target normally, or the component's trigger while a
-            // colour picker is open for this slot. The component owns its trigger press.
+            // color picker is open for this slot. The component owns its trigger press.
             .child(swatch)
             .child(chip.label.clone())
             .child(
@@ -658,8 +658,8 @@ mod tests {
     /// A resolver with no theme behind it: the palette index straight
     /// into the hue, so a test can tell one slot's swatch from another's
     /// without a window.
-    fn stub(colour: &Color) -> gpui::Hsla {
-        match colour {
+    fn stub(color: &Color) -> gpui::Hsla {
+        match color {
             Color::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Color::Named(_) => gpui::black(),
             Color::Custom(c) => c.to_hsla(),

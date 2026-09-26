@@ -18175,7 +18175,7 @@ run_mutation "timeseries: a colours reload reaches an open tile" \
     }
 }' \
   geode-timeseries \
-  a_reloaded_colours_doc_reaches_an_open_tile
+  a_reloaded_colors_doc_reaches_an_open_tile
 
 # One entry for the PAIR of defences behind a removed pair leaving no
 # ghost (Task 7, review round 1, I-2): `prune_in_flight` is the
@@ -20459,7 +20459,7 @@ run_mutation "timeseries colour picker: a pick of the painted colour is a no-op"
   crates/geode-timeseries/src/tile/popups.rs \
   '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
   '        if false {' \
-  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+  geode-timeseries a_pick_of_the_color_already_painted_is_a_no_op
 
 # The pick context outlives the popup: the hex field's `enter` closes the
 # popover before its commit arrives.
@@ -20467,7 +20467,7 @@ run_mutation "timeseries colour picker: the pick context survives the close" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
   '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
-  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+  geode-timeseries a_typed_hex_commits_an_absolute_color_and_hands_focus_back
 
 # The Colours dialog refuses a `#` name up front...
 run_mutation "colours dialog: a name starting with '#' is reserved" \
@@ -20510,14 +20510,14 @@ run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
   crates/geode-timeseries/src/tile/mod.rs \
   '        Color::Custom(c) => c.to_hsla(),' \
   '        Color::Custom(_) => palette.colour(0),' \
-  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+  geode-timeseries a_featured_pick_keeps_the_theme_following_color_and_anything_else_is_absolute
 
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
   '            "pick_color" => self.open_color_picker(window, cx),' \
   '            "pick_color" => false,' \
-  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+  geode-timeseries the_color_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
 run_mutation "timeseries colour picker: a Change applies to the target slot" \

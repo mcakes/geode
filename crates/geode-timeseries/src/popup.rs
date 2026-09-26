@@ -74,7 +74,7 @@ const RANGE_HINT: &str = "`tab` switches · `enter` applies · `escape` goes bac
 /// Mutually exclusive transient state. Series and Menu add their popup pair
 /// to normal-mode context (a menu also its `menu` kind pair). Picker, Expr,
 /// Range (the custom dates editor), and Color use insert routing; Range and
-/// the component colour picker also own their focused key handlers.
+/// the component color picker also own their focused key handlers.
 pub(crate) enum Popup {
     Series(SeriesPopup),
     Picker(PickerState),
@@ -83,9 +83,9 @@ pub(crate) enum Popup {
     /// Fieldless menu — the action list, the range menu or the frequency menu
     /// ([`MenuKind`]) — routed through `popup == menu` and a `menu` kind pair.
     Menu(MenuState),
-    /// Component colour picker anchored at one slot's chip. The header renders
+    /// Component color picker anchored at one slot's chip. The header renders
     /// its trigger in place of that chip's swatch; the component owns the popover.
-    Color(ColourPick),
+    Color(ColorPick),
 }
 
 /// Which popup is up, without its state: what a painted popup's outside-press
@@ -101,9 +101,9 @@ pub(crate) enum PopupKind {
     Color,
 }
 
-/// Header paint state for a colour picker: target slot number, featured swatches
+/// Header paint state for a color picker: target slot number, featured swatches
 /// resolved at open, and the reusable component state.
-pub(crate) struct ColourPick {
+pub(crate) struct ColorPick {
     pub target: u8,
     pub swatches: Vec<Hsla>,
     pub picker: Entity<ColorPickerState>,
@@ -464,7 +464,7 @@ impl SeriesPopup {
         model: &Model,
         result: Option<&SeriesResult>,
         default_source: Option<&str>,
-        colour_of: &dyn Fn(&Color) -> Hsla,
+        color_of: &dyn Fn(&Color) -> Hsla,
     ) -> SeriesPopup {
         let rows = model
             .slots()
@@ -482,7 +482,7 @@ impl SeriesPopup {
                     source_rule: source_rule.into(),
                     axis: s.axis.letter(),
                     state: state_text(s.number, &s.state, result),
-                    swatch: colour_of(&s.color),
+                    swatch: color_of(&s.color),
                     hidden: !s.visible,
                 }
             })
@@ -1077,8 +1077,8 @@ mod tests {
     use geode_core::series::{BucketRule, SlotProvenance, SlotResult};
 
     /// Map palette indices to distinct hues for window-free swatch assertions.
-    fn stub(colour: &Color) -> Hsla {
-        match colour {
+    fn stub(color: &Color) -> Hsla {
+        match color {
             Color::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Color::Named(_) => gpui::black(),
             Color::Custom(c) => c.to_hsla(),

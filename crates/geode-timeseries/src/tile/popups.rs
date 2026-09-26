@@ -1057,7 +1057,7 @@ impl TimeseriesTile {
             state.set_value(seed, window, cx);
             state.set_open(true, cx);
         });
-        self.popup = Some(Popup::Color(ColourPick {
+        self.popup = Some(Popup::Color(ColorPick {
             target,
             swatches,
             picker,
@@ -1121,7 +1121,7 @@ impl TimeseriesTile {
         if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {
             return;
         }
-        let color = colour_from_pick(h, &pick.featured);
+        let color = color_from_pick(h, &pick.featured);
         if let Ok(changed) = self.model.set_color(pick.target, color) {
             self.apply_changed(changed, cx);
         }

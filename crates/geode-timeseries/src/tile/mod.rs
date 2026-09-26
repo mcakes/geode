@@ -51,11 +51,11 @@ use crate::core::complete::expand_unique;
 use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{
-    Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+    Range, Rgb8, chart, color_from_pick, menu, request, resolve, session, within_a_step,
 };
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
+    ColorPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
     PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
     render_series_popup,
 };
@@ -90,7 +90,7 @@ struct ChartKey {
     /// Read by `Model::label` for a slot whose source is not the default.
     default_source: Option<String>,
     /// The two inputs to `color_fn`: a slot's color is resolved INTO
-    /// the chart model, so a theme change or a reloaded `colours.toml`
+    /// the chart model, so a theme change or a reloaded `colors.toml`
     /// (a fresh `Arc`, which is what `set_colours` swaps in) is a chart
     /// change.
     theme: [Hsla; 28],
@@ -1082,7 +1082,7 @@ impl Render for TimeseriesTile {
                     target,
                     div()
                         .debug_selector(move || {
-                            format!("timeseries-colour-picker-{tile_id}-{target}")
+                            format!("timeseries-color-picker-{tile_id}-{target}")
                         })
                         .child(
                             ColorPicker::new(&c.picker)
