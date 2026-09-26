@@ -21417,6 +21417,18 @@ run_mutation "launch: an unfocused add is launched" \
   '            if active.contains(&id) {' \
   geode-shell an_add_that_is_not_focused_on_its_first_render_is_not_launched
 
+run_mutation "launch: open_with lists kinds that do not accept the context" \
+  crates/geode-shell/src/shell/input.rs \
+  '                            .is_some_and(|f| context.covered_by(f.accepts()))' \
+  '                            .is_some()' \
+  geode-shell g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context
+
+run_mutation "launch: a pick reads the context at commit" \
+  crates/geode-shell/src/shell/choicedialog.rs \
+  '                .and_then(|f| f.launch_state(&context));' \
+  '                .and_then(|f| f.launch_state(&geode_core::launch::LaunchContext { underlying: Some("NDX".into()) }));' \
+  geode-shell the_context_is_captured_when_the_dialog_opens
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

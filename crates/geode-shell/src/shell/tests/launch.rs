@@ -158,3 +158,168 @@ fn a_launched_tile_keeps_the_keyboard_it_takes(cx: &mut gpui::TestAppContext) {
     });
     assert!(held, "tile {new:?}'s launched input holds the keyboard");
 }
+
+/// Binds `g m` in the recorder's own context beside a competing `g g`, as
+/// the blotter and pricer fragments do, so the sequence matcher has a real
+/// prefix to resolve.
+const LAUNCH_FRAGMENT: &str = "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"g g\" = \"rec::noop\"\n\"g m\" = \"tile::open_with\"\n";
+
+/// A roster of "rec" (the source: reports `context`, accepts the
+/// underlying, ships `g m`) and "plain" (accepts nothing). Returns rec's
+/// log and its shared context cell.
+fn launch_services(
+    context: LaunchContext,
+) -> (
+    ShellServices,
+    Log,
+    std::rc::Rc<std::cell::RefCell<LaunchContext>>,
+) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(LAUNCH_FRAGMENT);
+    rec.accepts = &[ContextField::Underlying];
+    *rec.launch_context.borrow_mut() = context;
+    let log = rec.log.clone();
+    let cell = rec.launch_context.clone();
+    let plain = RecordingFactory::new("plain");
+    let services = services_with_recorders(vec![rec, plain]);
+    assert!(
+        services.keymap_fragment_diagnostics.is_empty(),
+        "{:?}",
+        services.keymap_fragment_diagnostics
+    );
+    (services, log, cell)
+}
+
+fn spx() -> LaunchContext {
+    LaunchContext {
+        underlying: Some("SPX".into()),
+    }
+}
+
+fn underlying_state(u: &str) -> toml::Table {
+    let mut t = toml::Table::new();
+    t.insert(
+        "underlying".into(),
+        toml::Value::Array(vec![toml::Value::String(u.into())]),
+    );
+    t
+}
+
+fn dialog_target(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> Option<crate::shell::choicedialog::Target> {
+    shell.read_with(cx, |s, _| {
+        s.choice_dialog.as_ref().map(|d| d.target.clone())
+    })
+}
+
+/// `g m` on a tile with an underlying opens `Open SPX in…` listing only
+/// the accepting kind; `enter` splits a new tile whose `create` received
+/// the factory's translated state.
+#[gpui::test]
+fn g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log, _cell) = launch_services(spx());
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKindWith { ref context, .. })
+                if *context == spx()
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
+    );
+    assert!(vcx.debug_bounds("tile-choice-Rec").is_some());
+    assert!(
+        vcx.debug_bounds("tile-choice-Plain").is_none(),
+        "a kind accepting nothing is not listed"
+    );
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    let tiles = shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 2, "a pick splits");
+    let new = focused(&shell, &vcx);
+    let expected = underlying_state("SPX");
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Created(t, Some(s)) if *t == new && *s == expected)),
+        "{:?}",
+        log.borrow()
+    );
+}
+
+/// The context is read when the dialog opens: a cursor move on the source
+/// while it is open does not change what the pick creates.
+#[gpui::test]
+fn the_context_is_captured_when_the_dialog_opens(cx: &mut gpui::TestAppContext) {
+    let (services, log, cell) = launch_services(spx());
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    *cell.borrow_mut() = LaunchContext {
+        underlying: Some("NDX".into()),
+    };
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    let new = focused(&shell, &vcx);
+    let expected = underlying_state("SPX");
+    assert!(
+        log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Created(t, Some(s)) if *t == new && *s == expected)),
+        "{:?}",
+        log.borrow()
+    );
+}
+
+/// An empty context falls back to the plain tile-kind picker.
+#[gpui::test]
+fn g_m_with_an_empty_context_opens_the_plain_tile_picker(cx: &mut gpui::TestAppContext) {
+    let (services, _log, _cell) = launch_services(LaunchContext::default());
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    assert!(
+        matches!(
+            dialog_target(&shell, &vcx),
+            Some(crate::shell::choicedialog::Target::TileKind { .. })
+        ),
+        "{:?}",
+        dialog_target(&shell, &vcx)
+    );
+}
+
+/// No accepting kind: no dialog, and the notice names why.
+#[gpui::test]
+fn g_m_with_no_accepting_kind_shows_the_notice(cx: &mut gpui::TestAppContext) {
+    let mut rec = RecordingFactory::new("rec");
+    rec.fragment = Some(LAUNCH_FRAGMENT);
+    *rec.launch_context.borrow_mut() = spx();
+    let services = services_with_recorders(vec![rec]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("g m");
+    draw(&mut vcx);
+    assert!(dialog_target(&shell, &vcx).is_none());
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.notice),
+        Some(crate::shell::input::NO_MODULE_OPENS)
+    );
+}

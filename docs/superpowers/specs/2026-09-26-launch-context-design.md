@@ -111,7 +111,8 @@ handled in `ShellView`'s action dispatch beside `tile::add`:
    - The rows are the kinds whose factory `accepts()` covers every set
      field of the context, in roster order.
    - With no such kind, the dialog does not open. The shell shows the
-     notice `no module opens on {underlying}`.
+     notice `no module opens on the context at the cursor` (the shell's
+     notice is a static string).
 4. **Commit.** Close the modal, then call `add_tile(kind,
    AddPlacement::Split(None), factory.launch_state(&ctx))`. The context was
    captured when the dialog opened, so moving the source tile's cursor
@@ -215,7 +216,9 @@ At the lowest layer that proves each fact, through production routes:
     `Open SPX in…`, listing only the accepting kinds.
   - Enter creates a split whose `create` received the translated table.
   - With an empty context, `g m` opens the plain tile-kind picker.
-  - With no accepting kind, `g m` shows the notice and no dialog.
+  - With no accepting kind, `g m` shows the notice `no module opens on
+    the context at the cursor` (the shell's notice is a static string)
+    and no dialog.
   - Moving the source cursor after the dialog opens doesn't change the
     committed context.
 - **Shell, GPUI: `launched`.**
