@@ -472,8 +472,9 @@ the same reason.
 
 The underlying, type, and barrier-type cells edit through a typeahead. The
 underlying list offers the sheet's own underlyings and also takes free text.
-Ranking is a case-insensitive subsequence match, so the top-ranked option is
-only a guess: `enter` commits the highlighted underlying only when the query
+Ranking is the shared fuzzy match (see
+[input and dialogs](input-and-dialogs.md#filtering-choice-and-movement)), so
+the top-ranked option is only a guess: `enter` commits the highlighted underlying only when the query
 equals it (in any case) or the highlight was moved with `up`/`down` or a row
 click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and

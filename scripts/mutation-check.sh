@@ -3925,6 +3925,40 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
   '                    cell = fresh.or(cont).map(|s| s + base);' \
   geode-shell indices_are_contiguous_for_a_prefix_match
 
+# Multi-word queries match word by word in any order: `scope clear`
+# finds "Clear scope". Dropping the per-word path leaves only the literal
+# whole-query subsequence, which requires the typed order.
+run_mutation "palette: query words match in any order" \
+  crates/geode-shell/src/palette.rs \
+  '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
+  '        { let _ = alone; None };' \
+  geode-shell words_typed_out_of_order_still_match
+
+# When the words' best alignments collide, each is placed again on the
+# characters earlier words left free. Ignoring the claimed set re-places
+# `til` on the prefix `tile` already holds, and `til tile` stops matching.
+run_mutation "palette: colliding words are placed on free characters" \
+  crates/geode-shell/src/palette.rs \
+  '        let (s, ix) = align(words[w], candidate, title_len, Some(&claimed))?;' \
+  '        let (s, ix) = align(words[w], candidate, title_len, None)?;' \
+  geode-shell colliding_words_are_placed_again_on_free_characters
+
+# Words in the typed order rank above the same words reversed; with no
+# literal space between them only the per-word order bonus separates them.
+run_mutation "palette: words in the typed order earn the order bonus" \
+  crates/geode-shell/src/palette.rs \
+  '        score += ORDER_BONUS;' \
+  '        score += 0;' \
+  geode-shell words_in_order_without_a_literal_space_between_them_earn_the_order_bonus
+
+# One candidate letter cannot stand for two typed ones: `scope scope`
+# must not match a candidate holding "scope" once.
+run_mutation "palette: out-of-order words claim distinct characters" \
+  crates/geode-shell/src/palette.rs \
+  '    if indices.windows(2).any(|w| w[0] == w[1]) {' \
+  '    if false {' \
+  geode-shell words_claim_distinct_characters
+
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
   '                    if let Ok(true) = f.load_scope(&name) {' \
