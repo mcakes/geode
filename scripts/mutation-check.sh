@@ -1183,9 +1183,9 @@ run_mutation "pool: a worker releases a transaction left behind" \
   crates/geode-data/src/query/pool.rs \
   '        release_transaction(&conn);
 
-        // The stale check' \
+        // Check staleness' \
   '
-        // The stale check' \
+        // Check staleness' \
   geode-data \
   a_transaction_left_aborted_does_not_wedge_the_worker
 
@@ -16369,8 +16369,8 @@ run_mutation "series: dedupe ignores the pair filter" \
 # an empty fetch, the coverage row is never written.
 run_mutation "series: coverage is not recorded for an empty fetch" \
   crates/geode-data/src/store/series.rs \
-  '    // 4. Coverage, always.' \
-  '    // 4. Coverage, always.
+  '    // Record coverage even when deduplication leaves no new rows.' \
+  '    // Record coverage even when deduplication leaves no new rows.
     if req.rows.is_empty() {
         return Ok(SeriesAppended { appended, swept: 0 });
     }' \

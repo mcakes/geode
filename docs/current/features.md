@@ -56,10 +56,15 @@ registers the concrete CVI and dividend kinds.
 delivery or structural edit. Ordinary cell commits patch it when possible;
 editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base identified by the document's source time
-**and the store generation the read named**. The default Hold policy retains
-the base snapshot when available after a document with a different generation
-arrives. `:auto` selects how later deliveries resolve such a transition:
+Edits live in a `Draft` whose `DocumentBase` contains source time and an
+optional store generation. Different source times indicate different data;
+equal times also differ when both generations are known and unequal. If
+either generation is unknown, comparison falls back to source time and
+cannot detect a same-time republish. When a document exists at the selected
+as-of, production queries report its generation for live and historical reads.
+
+The default Hold policy retains the base snapshot when available after a
+differing delivery. `:auto` selects how unsent edits handle the transition:
 
 | Policy | Effect on unsent edits |
 |---|---|
@@ -76,22 +81,26 @@ incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
 
-A base is a generation, not an instant. A historical delivery puts the draft
-Behind, and so does a corrected republish at the same source time: the
-generation differs even when the time does not. Such a delivery always produces
-a notice naming the republish, because the `update HH:MM` badge and the
-source-time chip both carry the base's own time and would otherwise report
-nothing new — held, the notice offers `:rebase` and `:revert`; automatically
-rebased, it says the edits were moved, since nothing is left pending. A
-disclosure the policy already made, of replaced or dropped work, outranks it.
-Returning to the base generation, or a redelivery of the same one, is not a
-republish and says nothing. A document read names its generation under both
-live and historical as-of, so an open draft normally has one; where nothing
-named it — a session file written before the generation was saved — the
-comparison falls back to source time alone, which cannot see a republish.
+An older historical generation can put a draft Behind just as a newer live
+generation can. Returning to the base restores Editing. A same-time republish
+that changes the draft's state produces a notice because its timestamp alone
+cannot show the change: Hold offers `:rebase` and `:revert`; automatic rebase
+reports that the edits moved. Replacement and dropped-edit notices take
+precedence. Redelivery of the same generation and returning to the base do
+not produce a republish notice.
 
-The module supports numeric, date, text, and closed-choice
-cells, row insertion/deletion, and kind-specific actions. See the
+Base-snapshot retention and same-day group-guard capture require exact
+equality of the source-time/generation pair. They do not use the weaker
+unknown-generation fallback: a snapshot with a known generation cannot be
+assumed to be a saved base whose generation is unknown.
+
+The module supports numeric, date, text, and closed-choice cells, row
+insertion/deletion, and kind-specific actions. Integer cells parse directly
+to `i64` and retain that type through drafts and upload assembly, preserving
+values above 2^53. Bumps on integer cells use checked integer addition and
+refuse fractional deltas or integer overflow; all candidate results are
+validated before any edit is written. Bump deltas themselves are parsed as
+`f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
 
@@ -112,9 +121,12 @@ within an unchanged-size group remains undetectable and can move an edit to
 the wrong dividend.
 
 Session drafts store cell edits with row and column labels, allowing restore
-to resolve them against a delivered grid. Attribute serialization has a type
-ambiguity: a text attribute that looks like an ISO date restores as a Date.
-The saved draft therefore does not preserve every attribute value's type.
+to resolve them against a delivered grid. `base` stores source time and
+`base_generation` stores the generation when known. Parked drafts use the
+same encoding, preserving identity across underlying switches. A missing
+`base_generation` restores as unknown and uses the source-time comparison
+fallback. Attribute serialization has a separate type ambiguity: a text
+attribute that looks like an ISO date restores as a Date.
 
 ### Uploads
 
@@ -146,13 +158,13 @@ notice naming it and leaves the visible draft alone. Session restoration also
 restores nonempty drafts as Editing; upload status and echo tracking are not
 saved.
 
-A Sent draft compares the next delivered generation against the submitted
-document once that generation differs from the base — a different source time,
-or the same time at a different store generation. Comparison ignores row order
-and minted row labels, compares attributes, and allows one ULP for
-floating-point values.
-Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
-the next edit. This is a content match, without an upstream correlation id.
+A Sent draft checks a delivery against the submitted document once its base
+differs by the source-time/generation rule above. Reusing a cached differing
+echo requires exact pair equality, including whether the generation is
+known. Content comparison ignores row order and minted row labels, compares
+attributes, and allows one ULP for floating-point values. Matching contents
+clear the draft and show `sent HH:MM, confirmed HH:MM` until the next edit.
+This is a content match, without an upstream correlation id.
 
 Different contents retain the draft over its base and show `echo differs
 (N rows)`; an attribute mismatch counts as one additional row. An uncomparable

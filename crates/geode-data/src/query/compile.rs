@@ -1,9 +1,9 @@
-//! Compile one statement for every level of a view's rollup tree. Aggregate
-//! each measure at its own grain, then join at group cardinality to prevent
-//! coarser measures from multiplying across finer rows.
+//! Compile a view's rollup levels through the requested maximum depth into
+//! one statement. Aggregate each measure at its own grain, then join at group
+//! cardinality to prevent coarser measures from multiplying across finer rows.
 //!
-//! Every level arrives in one snapshot, keeping expand/collapse on the 8 ms
-//! pure-UI budget instead of requiring a new query under the 50 ms budget.
+//! The caller can request one level beyond the expanded tree so a single-step
+//! expansion uses the existing snapshot. Deeper levels require a new query.
 
 use crate::query::scope_sql::{DictionaryCache, Era, compile_scope_cached};
 use crate::store::StoreError;
@@ -38,12 +38,10 @@ pub struct CompiledQuery {
     /// the data's age, not the requested instant: equal requested timestamps
     /// can conceal inputs whose actual generations differ by weeks.
     pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
-    /// The generation a historical read resolved, when exactly one names it.
-    /// A document request pins one partition and therefore one generation
-    /// (see `query::document`'s `gen_id = N` predicate); a view request
-    /// resolves one generation per partition, which no scalar names, so it
-    /// stays `None`. A live read leaves it `None` too: the store answers
-    /// that from the catalog, which the plan does not carry.
+    /// Selected generation for a historical document request, or `None` if
+    /// no generation matches. Historical views leave this unset because each
+    /// partition resolves independently. Live queries obtain their generation
+    /// marker from the catalog during execution in `query::read`.
     pub resolved_generation: Option<i64>,
 }
 
@@ -84,27 +82,17 @@ fn finest_carrying(
         .find(|g| carries_all(ds, *g, columns, dims))
 }
 
-/// The already-compiled columns a derived expression names.
+/// Find compiled columns referenced by a derived SQL expression.
 ///
-/// The expression is raw SQL, not the scope grammar, so there is no parse
-/// tree to walk. Identifier-like tokens are matched against the columns
-/// the view has already produced, which is exactly the set a derived
-/// column is allowed to reference. Tokenising rather than substring
-/// matching is what keeps `delta01` out of `delta01_usd`, and skipping
-/// quoted text keeps a column name inside a string literal from counting.
+/// Identifier tokens are matched against columns already produced by the view.
+/// Token boundaries distinguish `delta01` from `delta01_usd`; quoted strings
+/// and SQL comments cannot introduce references.
 ///
-/// Over-matching is the safe direction and under-matching is not, which
-/// decides how this fails. A name that is really a SQL keyword or function
-/// pulls in a *weaker* marker, never a stronger one — the meet is monotone
-/// — so a false positive can only blank a cell that did not have to be
-/// blanked. A false *negative* hands out `Additive`/`Direct`, the
-/// strongest claim available, about an expression nobody analysed. So
-/// every uncertain case here resolves toward matching more.
-///
-/// Comments are stripped before scanning. Without that, one apostrophe in
-/// prose — `-- don't sum this across pairs` — opened a string that never
-/// closed and swallowed every identifier after it, and the empty result
-/// took the branch that claims `Additive` at every level.
+/// Uncertain tokens conservatively match more columns. Attribution is combined
+/// by a meet, so a false positive can weaken a marker and blank an otherwise
+/// valid cell. A missed reference could incorrectly claim additive or direct
+/// attribution. Unbalanced quoting therefore falls back to all prior columns.
+/// Comments are stripped first so apostrophes in prose cannot hide later names.
 fn referenced_columns<'a>(sql: &str, columns: &'a [CompiledColumn]) -> Vec<&'a CompiledColumn> {
     let stripped = strip_sql_comments(sql);
 
@@ -330,14 +318,10 @@ pub fn compile_view(
     )
 }
 
-/// [`compile_view`], but resolving the text filter's catalog facts
-/// through a `DictionaryCache` the caller supplies, so the ENUM types of
-/// `view.dataset` and each (type, needle) pattern's matches are resolved
-/// once per statement rather than once per measure grain plus once for
-/// the spine plus once for the interned-columns check. `pub(crate)`
-/// rather than exported: `compile_view`'s own signature is the public
-/// contract, unchanged; this exists so a test can pass its own cache and
-/// assert on `DictionaryCache::lookups`.
+/// Compile with a caller-supplied dictionary cache. Dataset ENUM types and
+/// pattern matches are reused across measure grains, spine queries and the
+/// interned-column check. Tests supply a cache to verify lookup counts;
+/// [`compile_view`] creates a fresh cache for each statement.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_view_with_cache(
     conn: &Connection,
@@ -374,15 +358,10 @@ pub(crate) fn compile_view_with_cache(
     // joins must all read the same relations.
     let era = resolved.era();
 
-    // The spine is the set of `(grouping tuple, depth)` rows the tree has,
-    // and it is assembled from the aggregates rather than scanned from one
-    // table. A spine scanned from the finest table only has rows for
-    // entities that table holds — a cash-only book has position rows and
-    // no underlying rows, so it was in the grand total and on no row
-    // beneath it, and the children did not sum to their parent. Each
-    // aggregate already knows its groups at every level it carries; the
-    // spine is their union, and the grand-total row is a constant so a
-    // scope selecting nothing still yields the one row a tree always has.
+    // The spine contains the tree's `(grouping tuple, depth)` rows. Union
+    // those rows from every grain's aggregates so entities present only at a
+    // coarse grain, such as cash positions without underlyings, remain visible.
+    // A constant grand-total row preserves the root even for an empty scope.
     let mut spine_sources: Vec<String> = vec![if depth == 0 {
         "select 0 as row_depth".to_string()
     } else {
@@ -583,10 +562,8 @@ pub(crate) fn compile_view_with_cache(
         }
     }
 
-    // Depths no measure grain carries — a view with no measures, or one
-    // grouped by a column finer than every measure it shows — are scanned
-    // from the finest declared grain that carries them, exactly as the
-    // whole spine once was.
+    // For depths no measure grain carries, scan the finest declared grain
+    // that carries the grouping columns. This also covers views with no measures.
     let missing: Vec<usize> = (1..=depth).filter(|d| !covered[*d]).collect();
     if !missing.is_empty() {
         let spine_grain = finest_carrying(ds, materialized, dims).ok_or_else(|| {
@@ -1360,12 +1337,9 @@ kind = "dimension"
 
     #[test]
     fn rows_arrive_shallowest_first_when_the_view_declares_no_sort() {
-        // The blotter flattens the tree by walking the rows in order and
-        // assumes a parent is already placed when its children arrive.
-        // Most views declare no sort, so this is the ordinary path, and
-        // without an ORDER BY the order is whatever the plan happens to
-        // produce. Widened past the two-row fixture, because a handful of
-        // rows can come back depth-ordered by luck.
+        // Tree flattening requires parents before children, including views
+        // without an explicit sort. Use enough rows that incidental output order
+        // is unlikely to mask a missing depth order.
         let (_d, store) = fixture();
         let mut inserts = String::new();
         for i in 0..40 {
@@ -2051,9 +2025,8 @@ kind = "measure"
 
     #[test]
     fn as_of_survives_a_value_that_has_since_left_live() {
-        // The ENUMs are rebuilt from live on every ingest, so an archived
-        // row holding a retired value cannot be cast through them. This
-        // failed outright with a conversion error, not a wrong number.
+        // Live ENUMs can omit retired values present in archived rows.
+        // Historical reads must bypass those ENUM casts to retain such values.
         let (_d, store) = hostile_fixture();
         let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
             .unwrap()
@@ -2106,11 +2079,9 @@ kind = "measure"
 
     #[test]
     fn a_partition_with_history_at_only_one_grain_is_not_dropped() {
-        // A generation is a file and a file publishes every grain, but a
-        // partition can exist at one grain and not another — a cash-only
-        // book has no underlying rows. Resolving the generation set from
-        // the spine grain alone deleted those partitions from every
-        // grain's answer, silently.
+        // A published file can contain a partition at only one grain: a cash-only
+        // book has no underlying rows. Historical resolution must include it
+        // without requiring membership in the spine's grain.
         let (_d, store) = hostile_fixture();
         let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
             .unwrap()
@@ -2275,11 +2246,9 @@ kind = "measure"
 
     #[test]
     fn a_finer_and_a_direct_predicate_bind_to_their_own_placeholders() {
-        // Scoping by book *and* underlying is the most ordinary thing a
-        // trader does. The finer predicate is emitted last, inside the
-        // semi-join wrapper, while its value was bound first — so the two
-        // values swapped, `book = 'SPX'` matched nothing, and the coarse
-        // measure came back blank beside a correct fine-grained one.
+        // The finer predicate appears inside a semi-join after the direct book
+        // predicate. Bound values must follow that SQL order so each predicate
+        // receives its own value and coarse measures remain populated.
         let (_d, store) = fixture();
         let scope = Scope {
             dimensions: vec![
@@ -2484,12 +2453,9 @@ kind = "measure"
 
     #[test]
     fn scoping_to_an_underlying_that_sorts_second_in_its_pair_keeps_the_position() {
-        // The single most common trader action, on the real schema. The
-        // pair table's `underlying_ref` is `least(u1, u2)`, so a predicate
-        // applied to it directly misses every pair where SPX sorts second
-        // — every pair, on a worst-of over NDX/RUT/SPX. The spine and the
-        // semi-join probe both did exactly that, and the tree came back
-        // as a lone total row with a blank PnL.
+        // The pair table stores `least(u1, u2)` as `underlying_ref`. Filtering
+        // that column alone misses an underlying that sorts second in its pair.
+        // Both the spine and the semi-join must retain SPX and its position PnL.
         let (_d, store) = pair_fixture();
         let scope = Scope {
             dimensions: vec![geode_core::scope::DimensionSelection {
@@ -2539,9 +2505,9 @@ kind = "measure"
 
     #[test]
     fn the_underlying_level_shows_every_underlying_not_the_first_of_each_pair() {
-        // Unscoped, the same fixture: a spine on the pair table showed RUT
-        // (the pair's `least`) and never SPX, and SPX's delta joined to
-        // nothing while still counting in the total.
+        // An unscoped spine must include both underlying rows. Scanning only
+        // the pair table's `least` key would omit SPX while still including its
+        // delta in the grand total.
         let (_d, store) = pair_fixture();
         let q = compile_view(
             store.writer(),
@@ -2649,10 +2615,8 @@ kind = "measure"
                 scope_semantics: c.scope_semantics.clone(),
             })
             .collect();
-        // DuckDB emits `row_depth` as Int32, not Int64. Pinned here
-        // because the whole test turns on the snapshot being able to read
-        // it: matching only Int64 made depth_of_row return None for every
-        // real result while every Int64-based fixture passed.
+        // DuckDB emits `row_depth` as Int32. Check the real result type so
+        // snapshot depth reads are exercised beyond Int64-only fixtures.
         assert_eq!(
             format!(
                 "{:?}",
@@ -2970,14 +2934,9 @@ kind = "measure"
 
     #[test]
     fn a_column_name_inside_a_string_literal_is_not_a_reference() {
-        // A label that happens to mention a column must not inherit that
-        // column's markers.
-        //
-        // The literal needs a separator after the name. Without one the
-        // closing quote's `current.clear()` discards it anyway, so a
-        // single-token literal passes whether or not the `in_string` guard
-        // is there — the first version of this test proved nothing, and
-        // the mutation harness is what said so.
+        // A string mentioning a column must not inherit that column's markers.
+        // Include a separator after the name: it exercises the string guard
+        // before the closing quote clears the token buffer.
         let (_d, store) = fixture();
         let mut v = view();
         v.columns.push(ViewColumn::Derived {
@@ -3027,10 +2986,9 @@ kind = "measure"
 
     #[test]
     fn a_measure_predicate_is_evaluated_at_the_measures_own_grain() {
-        // `delta01 > 5` from position grain: the probe has to be the
-        // underlying table, where the column is. Probing the spine's
-        // grain instead was a binder error the moment the spine was a
-        // grain that lacked the column — every grain but one.
+        // A `delta01 > 5` scope at position grain must probe the underlying
+        // table, where that measure exists. Choosing the spine grain could
+        // reference a column absent from its table.
         let (_d, store) = pair_fixture();
         let scope = Scope {
             expression: Some(geode_core::scope::parse_expr("delta01 > 15").unwrap()),
@@ -3098,10 +3056,8 @@ kind = "measure"
 
     #[test]
     fn a_cash_only_position_has_a_row_at_the_lhu_level() {
-        // A position with trading PnL and no greeks — a cash line, a fee.
-        // The spine was scanned from the finest table, which has no row
-        // for it, so its 900 was in the grand total and on no row beneath
-        // it: the children did not sum to their parent.
+        // A cash position has trading PnL and no underlying rows. Its 900 must
+        // appear below the total so the visible children sum to their parent.
         let (_d, store) = fixture();
         store
             .writer()
@@ -3160,9 +3116,8 @@ kind = "measure"
 
     #[test]
     fn a_view_with_no_measures_still_has_every_level() {
-        // Nothing to assemble the spine from, so it is scanned from the
-        // finest grain carrying the grouping — the shape the whole spine
-        // once had.
+        // Without measure aggregates, build the spine by scanning the finest
+        // grain carrying the grouping columns.
         let (_d, store) = fixture();
         let mut v = view();
         v.columns.clear();
@@ -3624,17 +3579,10 @@ kind = "measure"
 
     #[test]
     fn compile_view_with_no_measures_resolves_the_dictionary_once_via_the_spine() {
-        // With no measure columns (`a_view_with_no_measures_still_has_
-        // every_level`'s fixture), every level is scanned from the spine
-        // fallback alone, and the interned-columns check is the *only*
-        // other catalog consumer -- so this is the shape that actually
-        // exercises, and protects, the spine's own `compile_scope_cached`
-        // call. (A measure-grain call running first would always
-        // pre-warm whatever the spine needs, since the dictionary
-        // resolution is dataset-wide, not grain-specific -- making a
-        // spine-only bypass invisible to a count taken after the whole
-        // statement compiles, as `compile_view_over_two_grains_...`
-        // above cannot observe it either.)
+        // With no measures, the spine fallback is the first dictionary-cache
+        // consumer and the interned-column check is the only later consumer.
+        // This isolates the spine's cache use: a measure-grain lookup would
+        // otherwise warm the dataset-wide entry before the spine reads it.
         let (_d, store) = fixture();
         let s = schema_with_a_textual_dictionary(&store);
         let mut v = view();

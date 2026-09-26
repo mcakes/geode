@@ -384,16 +384,26 @@ contributing file, and a view with multiple inputs is as fresh as its stalest
 input. That avoids labeling a partial or joined answer with the newest
 contributor's timestamp.
 
-Provenance also reports the generation each dataset was read from. A live read
-names the newest live generation of the partition asked about (a document read)
-or of the whole dataset (a view read); a historical document read names the
-generation its as-of pinned. A historical view read reports no generation,
-because its era resolves one generation per partition and no single ID names
-that answer. An absent generation means unknown — a dataset that has never
-loaded, or a read that cannot name one — never unchanged: a reader deciding
-whether the data under it moved then falls back to source time, and must treat
-that as the weaker test it is, because a corrected republish keeps its source
-time and differs only by generation.
+Provenance reports source time and generation separately. Corrected republishes
+can share a source time while taking different generation IDs. Planning,
+provenance lookup, and row execution share one reader transaction, so these
+values describe the same database snapshot.
+
+| Read | Generation reported |
+|---|---|
+| Live document | Newest live-published generation of the requested key's partition. |
+| Historical document | Generation selected for that key at the requested instant. |
+| Live view | Greatest live-published generation ID across each input dataset, regardless of query scope. |
+| Historical view | `None`; each partition resolves independently. |
+
+A live view's dataset-wide value is a publication change marker; it does not
+name every partition's generation. Archive-only arrivals do not advance live
+markers. Document reads report no generation when none matches, including a
+historical request before the document's first retained generation.
+
+An absent generation means unknown, not unchanged. The document panel compares
+known generation IDs as well as source times. Its source-time fallback cannot
+distinguish corrected republishes at the same source time.
 
 Health is keyed by **source**. Discovery and load outcomes occupy separate
 lanes because a clean, content-blind poll cannot prove that the last publish

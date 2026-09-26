@@ -22,13 +22,14 @@ pub type BookFreshness = Vec<(Option<String>, DateTime<Utc>)>;
 pub struct FileGeneration {
     pub file_id: FileId,
     pub dataset: String,
-    /// Filename with its date component removed, identifying the batch across
-    /// business dates. Dataset and book complete the partition key.
+    /// Replacement batch: a filename with its date component removed for files,
+    /// or the document key for documents. Dataset and book complete the key.
     pub batch: String,
     pub path: PathBuf,
     pub size: u64,
     pub mtime: DateTime<Utc>,
-    /// From the sentinel. Orders generations and drives as-of.
+    /// Source timestamp from the file sentinel or document publication request.
+    /// Orders history; generation IDs break ties for corrected republishes.
     pub source_time: DateTime<Utc>,
     pub gen_id: i64,
     pub loaded_at: DateTime<Utc>,
@@ -44,10 +45,10 @@ pub struct FileGeneration {
     pub health: Health,
 }
 
-/// An attribute column whose value for one entity disagrees across files.
-/// The within-file equivalent is `ingest::split::Conflict`; this one is
-/// counted per *entity* rather than per grain group, because the whole
-/// point is that one entity appears under several keys.
+/// An attribute that has conflicting values for the same entity across live
+/// rows. Counts entities rather than full grain keys, so an instrument held
+/// in several books is counted once. Within-file conflicts are represented by
+/// `ingest::split::Conflict`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeConflict {
     pub grain: Grain,
@@ -164,14 +165,10 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// The newest generation recorded, or 0 when nothing has loaded.
-    ///
-    /// Read-only, and read once: `ensure_gen_id_sequence` asks
-    /// it at `ensure_tables` to place the ID sequence above recorded
-    /// history, which must not consume an id to do. It aggregates the whole
-    /// catalog and names no dataset or partition, so it is not an answer to
-    /// what a read was as of or which generation served it — those are
-    /// [`Catalog::live_generation`] and [`Catalog::dataset_generation`].
+    /// Greatest recorded generation ID across the catalog, or 0 when empty.
+    /// Sequence initialization uses this without consuming an ID. It does not
+    /// identify a particular dataset or partition; use [`Self::live_generation`]
+    /// or [`Self::dataset_generation`] for live-read provenance.
     pub fn latest_gen_id(&self) -> Result<i64, StoreError> {
         let sql = "select coalesce(max(gen_id), 0) from file_generations";
         self.conn
@@ -251,12 +248,9 @@ impl<'a> Catalog<'a> {
         let file_id: i64 = row.get(0).unwrap();
         let health_label: String = row.get(10).unwrap();
         let health_reason: Option<String> = row.get(11).unwrap();
-        // NULL for rows written before the column existed, which is a
-        // real state: such a generation was recorded under the old rule,
-        // where every recorded generation counted toward freshness. Read
-        // as `Option` so the migration case is expressible, but not
-        // `unwrap_or`-ed over the *error* — a missing column is a bug in
-        // this query, not a value.
+        // A NULL value denotes a legacy catalog row and reads as false, preserving
+        // its contribution to live freshness. Decode errors are distinct from NULL
+        // and must not silently become that compatibility default.
         let archived_only: bool = row.get::<_, Option<bool>>(12).unwrap().unwrap_or(false);
         let found = FileGeneration {
             archived_only,
@@ -334,13 +328,11 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// One partition's newest live generation — [`Self::live_source_time`]'s
-    /// identity, over the same rows under the same filters.
+    /// Greatest live-published generation ID for one dataset/batch/book
+    /// partition, excluding archive-only arrivals. Uses the same partition
+    /// filters as [`Self::live_source_time`]. `None` means no matching record.
     ///
-    /// A corrected republish keeps its source time and takes a new
-    /// generation ID, so this is the only thing that distinguishes the two
-    /// for a reader holding unsent work over the older one. `None` before
-    /// the partition's first load.
+    /// The ID distinguishes corrected republishes that share a source time.
     pub fn live_generation(
         &self,
         dataset: &str,
@@ -378,14 +370,13 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// A dataset's newest live generation, across every partition.
+    /// Greatest live-published generation ID across a dataset's partitions,
+    /// excluding archive-only arrivals. `None` means no matching record.
     ///
-    /// The maximum, where [`Self::dataset_as_of`] takes the minimum, because
-    /// the two answer different questions. `as_of` reports how stale an answer
-    /// is and so must name its stalest input; the generation reports whether
-    /// this is the same data as last time, and a minimum would not move when
-    /// a single partition republished — exactly the change a reader of this
-    /// field exists to see. `None` before the dataset's first load.
+    /// A live republish in any partition advances this marker, even if its
+    /// source time stays unchanged. [`Self::dataset_as_of`] instead reports
+    /// the stalest contributing source time. The marker does not identify
+    /// every partition's generation or restrict itself to a query's scope.
     pub fn dataset_generation(&self, dataset: &str) -> Result<Option<i64>, StoreError> {
         let sql = "select max(gen_id) from file_generations
                    where dataset = ? and coalesce(archived_only, false) = false";
@@ -490,9 +481,8 @@ impl<'a> Catalog<'a> {
                 ))
             })
             .map_err(err)?;
-        // Propagated, never swallowed, for `resolve_generations`' own
-        // reason: a row dropped here reports a degraded source as clean,
-        // which is the exact failure this function exists to prevent.
+        // Propagate row errors: dropping an unhealthy row could report a degraded
+        // source as clean.
         let mut out = Vec::new();
         for row in rows {
             let (batch, label, reason) = row.map_err(err)?;
@@ -689,15 +679,10 @@ mod tests {
         }
     }
 
-    /// A document-level attribute (`grain: None`) must never be folded
-    /// into `attributes` at any measure grain. This is the one call this
-    /// dataset shape cannot make honestly today (a document dataset never
-    /// reaches `attribute_conflicts`), so a schema-shaped test cannot see
-    /// a regression here — only a query issued against a table this
-    /// dataset never created can. `store()` never runs `create_table_sql`,
-    /// so if the filter ever matched `spot_ref` here, `.unwrap()` would
-    /// panic on the missing `risk_snapshot_position_live` table instead of
-    /// this test quietly passing.
+    /// A grainless document attribute must not enter a measure-grain conflict
+    /// query. This hand-built schema has no payload table, so accidentally
+    /// selecting its attribute fails on the missing table instead of passing
+    /// with an empty result.
     #[test]
     fn attribute_conflicts_ignores_a_document_level_attribute() {
         let (_d, store) = store();
@@ -751,9 +736,7 @@ mod tests {
 
     #[test]
     fn the_newest_recorded_generation_is_reported_without_consuming_an_id() {
-        // Freshness reporting reads the newest generation; it must not
-        // allocate, or merely asking how fresh a dataset is would burn an
-        // id on every query.
+        // Reading the greatest recorded generation must not consume an ID.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
         assert_eq!(cat.latest_gen_id().unwrap(), 0, "nothing recorded yet");
@@ -772,11 +755,8 @@ mod tests {
 
     #[test]
     fn a_database_that_predates_the_sequence_continues_above_its_generations() {
-        // `CREATE SEQUENCE IF NOT EXISTS ... START 1` on a database that
-        // already holds generations would hand out ids that are already in
-        // use, which is the collision this change exists to remove — with
-        // every existing partition as the victim rather than a crashed
-        // load.
+        // A catalog with recorded generations but no allocator sequence must
+        // initialize the sequence above every recorded ID.
         let (_d, store) = store();
         {
             // A catalog as it looked before the sequence: rows carrying
@@ -803,12 +783,9 @@ mod tests {
 
     #[test]
     fn the_migration_skips_the_id_a_crashed_pre_sequence_load_could_hold() {
-        // The old allocator peeked `max(gen_id) + 1` before writing the
-        // catalog row, so a load that published and then failed to record
-        // left rows stamped with an id the catalog never learned about.
-        // Starting the sequence at `latest + 1` would hand that exact id
-        // out again — the migration reproducing, once, the collision it
-        // exists to remove.
+        // A pre-sequence database can contain payload rows stamped with
+        // `max_recorded + 1` but no matching catalog entry after a failed load.
+        // Sequence initialization must skip that potentially orphaned ID.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
         for i in 1..=3 {
@@ -986,12 +963,8 @@ mod tests {
 
     #[test]
     fn the_bookless_partition_has_freshness_of_its_own() {
-        // Rows whose book is NULL are an ordinary part of the feed (2a
-        // reports them rather than dropping them) and publish as their own
-        // partition, `book is null`. But `file_books` had no row for them,
-        // and `book_freshness` inner-joins it — so their staleness was
-        // either invisible or, on a file that also carries real books,
-        // silently reported as those books' staleness instead.
+        // Bookless rows form a partition with its own freshness. A NULL entry in
+        // `file_books` keeps that partition visible to the freshness join.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
 
@@ -1024,20 +997,13 @@ mod tests {
 
     #[test]
     fn the_backfill_guard_sees_the_bookless_partition() {
-        // `live_source_time` took `&str`, so nothing could ask what was
-        // live for `book is null`, and the load folded the guard over its
-        // named books only. Reachable whenever a batch's books change
-        // between generations: v1 writes [A] plus unattributed, v2 writes
-        // [B] plus unattributed, the guard asks only about B, B was never
-        // live, so it publishes — overwriting the bookless partition v1
-        // left live at a newer source time.
+        // The backfill guard must read the bookless partition independently of
+        // named books. Named books can change between generations while bookless
+        // rows continue to occupy the same partition.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        // Two generations of one batch, at *different* times and covering
-        // different partitions. Asking with the same time for both would
-        // let a query that matched the wrong partition return the right
-        // answer by accident — which is exactly what an earlier version of
-        // this fixture did, and the mutation harness is what said so.
+        // Different source times for the two partitions make incorrect partition
+        // matching observable; equal times would return the expected answer anyway.
         let mut named = record("MIXED", &["BK000"], ts("2026-08-30T14:00:00Z"));
         named.gen_id = cat.reserve_gen_id().unwrap();
         cat.record(&named).unwrap();
@@ -1072,13 +1038,8 @@ mod tests {
 
     #[test]
     fn the_bookless_partition_is_in_the_unscoped_as_of_but_not_a_named_scope() {
-        // The headline as-of is what consumers actually read
-        // (`service.rs` calls `dataset_as_of(dataset, &[])` on every live
-        // query), and the roll-up of the bookless partition into it is the
-        // whole point of making that partition visible. It was asserted
-        // nowhere: the freshness test stops at `book_freshness`, and the
-        // scoping test records no bookless data at all — so both
-        // directions of this rule could be inverted with the suite green.
+        // Unscoped dataset freshness includes the bookless partition. A scope
+        // of named books excludes it, so both paths need distinct expected times.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
 
@@ -1114,18 +1075,9 @@ mod tests {
 
     #[test]
     fn a_generation_that_never_went_live_does_not_move_freshness() {
-        // The backfill guard files an older file as history without it
-        // ever being current, but `record` runs regardless — so its
-        // `file_books` rows counted toward `book_freshness`, which has no
-        // live/archive distinction. A file that never contributed a single
-        // live row could therefore drag the dataset's headline as-of
-        // backwards, and `service.rs` reads that unscoped on every live
-        // query.
-        //
-        // Pre-existing, but the bookless partition made it far more
-        // reachable: `None` is a partition almost every real file has, so
-        // an archived-only generation nearly always introduces a
-        // (batch, book) pair that nothing live covers.
+        // Archive-only arrivals retain catalog and `file_books` records for
+        // provenance, but cannot affect live freshness. Include a bookless
+        // partition introduced only by backfill to exercise that exclusion.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
 
@@ -1161,10 +1113,8 @@ mod tests {
 
     #[test]
     fn a_catalog_written_before_archived_only_gains_the_column() {
-        // `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so
-        // a database written by an older build would keep the old shape
-        // and every insert would fail on column count. The ALTER is what
-        // makes `ensure_tables` a migration rather than a first-run.
+        // Opening an older catalog must add `archived_only` to its existing
+        // table. `CREATE TABLE IF NOT EXISTS` alone leaves the old shape unchanged.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         store
@@ -1195,17 +1145,9 @@ mod tests {
 
     #[test]
     fn the_backfill_guard_does_not_read_another_datasets_source_times() {
-        // `batch` is the filename with its date component removed, so two
-        // datasets whose source files share a naming stem produce the same
-        // batch. Without the dataset filter the guard for one read the
-        // other's source times, and a legitimately new file was filed as
-        // history — no error, no degradation, just data that never went
-        // live.
-        //
-        // The first mutation entry for this was a false positive: it bound
-        // `dataset` to `fg.batch`, which broke batch matching rather than
-        // dataset scoping, so it was "caught" for the wrong reason and
-        // this case had no test at all.
+        // Different datasets can share a filename stem and therefore a batch.
+        // The backfill guard must filter by dataset as well as batch and book,
+        // or another dataset's newer source time could reject a valid publish.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
 

@@ -1,6 +1,7 @@
-//! The picker's distinct-values query (Phase 4 spec §3.4): per value,
-//! how many rows the current scope would leave, over every dataset
-//! carrying the column, under the same era routing every query uses.
+//! Distinct values and scoped row counts for the dimension picker.
+//!
+//! Contributions from each dataset carrying the column are combined under
+//! the same live or as-of routing used by other queries.
 
 use crate::query::as_of::{generation_predicate, resolve_generations};
 use crate::query::compile::{CompiledColumn, CompiledQuery, era_for};
@@ -26,10 +27,8 @@ pub fn compile_distinct(
     compile_distinct_with_cache(conn, schema, dims, params, &mut DictionaryCache::default())
 }
 
-/// [`compile_distinct`], but resolving the text filter's catalog facts
-/// through a `DictionaryCache` the caller supplies. `pub(crate)` only —
-/// exists so a test can pass its own cache and read `DictionaryCache::
-/// lookups`; `compile_distinct`'s own signature is the public contract.
+/// Compile with a caller-supplied dictionary cache. Tests use this entry
+/// point to inspect lookup counts; public callers use [`compile_distinct`].
 pub(crate) fn compile_distinct_with_cache(
     conn: &Connection,
     schema: &SchemaSpec,
@@ -40,19 +39,11 @@ pub(crate) fn compile_distinct_with_cache(
     let base = dims.base_column(&params.column);
     let mut selects: Vec<String> = Vec::new();
     let mut all_params: Vec<Value> = Vec::new();
-    // One cache across the loop below, for the same reason
-    // `compile_view` holds one across its grains. It happens to save
-    // nothing *here*: `enum_type_name` is dataset-qualified
-    // ("{dataset}_{column}_enum"), so two different datasets never share
-    // a key and every iteration is a fresh miss. It costs nothing either
-    // — one `HashMap` lookup before each real query — so the call site
-    // stays uniform with `compile_view` rather than special-casing the
-    // one place a cache is not sharing anything.
+    // One cache covers this statement's compilation. ENUM type names are
+    // dataset-qualified, so entries from different datasets cannot collide.
     for ds in &schema.datasets {
-        // A document dataset has no grain, so the grain search below can
-        // never find it a table: it took its own arm or the picker showed
-        // a document-only dimension nothing at all (market-data spec
-        // §3.3).
+        // Document datasets have their own relation and no grain to find in
+        // the measure-dataset search below.
         if ds.is_document() {
             if let Some((select, select_params)) =
                 document_select(conn, ds, dims, params, base, cache)?
@@ -84,9 +75,8 @@ pub(crate) fn compile_distinct_with_cache(
             // `compile_view` gives its own `from`; a scope term routed to
             // another grain fails to bind without it.
             "select {value_expr} as value, count(*) as n from {} base where {} group by 1",
-            // `era.relation` already applies the generation predicate to
-            // both sides it reads (Phase 4a's as-of baseline fix); the
-            // scope predicate alone is left for the caller to apply.
+            // `era.relation` applies generation predicates to its tables; this
+            // query adds only the scope predicate.
             era.era().relation(&ds.name, grain),
             scope.predicate,
         ));
@@ -117,52 +107,23 @@ pub(crate) fn compile_distinct_with_cache(
 }
 
 /// One document dataset's contribution to the distinct-values union, or
-/// `None` if it does not carry `base` as a dimension at all.
+/// `None` when `base` is not a dimension of that dataset.
 ///
-/// Shaped exactly like the measure arms' contribution — `select <value> as
-/// value, count(*) as n from <relation> where <predicate> group by 1` —
-/// because the outer query unions them and every branch of a union has to
-/// agree on its column set.
+/// Only document identity dimensions contribute values. Axes identify rows
+/// within a document; attributes and values are not document keys. Each
+/// contribution returns `(value, n)` so the outer query can sum counts with
+/// those from measure datasets.
 ///
-/// Only a `Dimension` column counts. A document dataset's dimensions are
-/// its identity key (`schema::validate_document` refuses an unkeyed one),
-/// and an axis is row identity *within* one document rather than
-/// something the frame groups or scopes by — the same rule
-/// `groupable_columns` states (market-data spec §3.3). An axis or a value
-/// is therefore not offered here, even though the picker's own list is
-/// categorical-and-any-role: a categorical *attribute* no grain can group
-/// by is likewise not offered by the measure arms.
+/// Scope terms use the shared selection, text, and expression lowering
+/// helpers directly: document datasets have one table and no grain routing.
+/// A text filter with no matching term emits `false`, including when the
+/// dataset declares no textual columns.
 ///
-/// **The whole scope is applied, lowered grain-free** (market-data spec
-/// §4.5, Part 2 Task 1): the dimension selections `applicable_to` keeps,
-/// the text filter, and the expression filter. `compile_scope` is still the
-/// only place a *grain* routes one of them — `route`, `evaluable_at`,
-/// `membership` and `Era::relation` all speak of a `Grain` this family does
-/// not have — but routing is only ever the question of *where* a term is
-/// evaluated, and a document dataset is one table, so every one of those
-/// steps is a no-op here. What is left is the term itself, and the term is
-/// shared rather than restated: `selection_clause` for a selection,
-/// `scope_sql::text_column_term` for a textual column, `scope_sql::
-/// render_expr` for an expression conjunct.
-///
-/// Two rules carry over from the measure path because the direction of the
-/// error matters more than the rule:
-///
-/// * A text filter with no term surviving — every categorical column's
-///   dictionary dropped the needle, or the dataset declares no textual
-///   column at all — compiles to a literal `false`. A needle over a dataset
-///   that cannot be searched matches **nothing**, never everything;
-///   widening there is exactly the over-count Part 1 disclosed, and it
-///   widens hardest at the moment the trader has narrowed hardest.
-/// * A selection or expression conjunct naming a column this dataset has no
-///   storage for is **dropped**, not compiled and not collapsed to `false`
-///   (`Scope::applicable_to` for selections, the `stored` check below for
-///   conjuncts). A frame-wide `:filter book = 'BK001'` must not fail the
-///   whole picker query with a binder error on the one dataset that has no
-///   `book`, and `false` would claim the document dataset holds no such rows
-///   rather than that the question never reaches it. The widening that
-///   leaves is the disclosed, deliberate one `ScopeSemantics::
-///   NotApplicable` exists to report once Part 2's panel produces it.
+/// Selections and top-level expression conjuncts naming columns absent from
+/// storage are dropped. For example, a frame-wide book filter does not apply
+/// to a document dataset without a book column; treating it as false would
+/// hide that dataset's values. This query returns counts without reporting
+/// the dropped terms in attribution metadata.
 fn document_select(
     conn: &Connection,
     ds: &DatasetSpec,
@@ -201,19 +162,13 @@ fn document_select(
         }
     };
 
-    // `applicable_to` drops the selections this dataset has no column for
-    // and names them (market-data spec §3.4). Dropping them is what keeps
-    // a scope aimed at the measure datasets — a book selection, say —
-    // from compiling into a predicate on a column the document table does
-    // not have.
+    // Drop selections on columns the document table does not store, such
+    // as a book selection aimed only at measure datasets.
     let (scope, _dropped) = params.scope.applicable_to(ds, dims);
     let mut clauses: Vec<String> = Vec::new();
     let mut sql_params: Vec<Value> = Vec::new();
-    // Whether anything past the dimension selections is worth compiling.
-    // Correctness does not need it — `false and <anything>` is still false —
-    // but the text filter's dictionary rewrite costs real catalog
-    // round-trips, and buying them for a predicate already known to select
-    // nothing is a cost with no answer attached.
+    // Skip dictionary lookups and expression compilation once selections
+    // are known to match nothing.
     let mut nothing_matches = scope.impossible;
     // A contradiction selects nothing and must say so in SQL, exactly as
     // `compile_scope` does: the contradicted dimension has already been
@@ -509,13 +464,9 @@ grain = "instrument"
         s
     }
 
-    /// Review round 1, Minor 5: `compile_distinct` is the only call site
-    /// where one `DictionaryCache` spans more than one dataset, and it
-    /// had no coverage of that shape with a text scope at all —
-    /// `two_dataset_fixture`'s schema declares no textual column, so the
-    /// text block never touched the cache in any existing `distinct`
-    /// test. Same data as `two_dataset_fixture`, but `book` is textual
-    /// (and its ENUM built) in both `risk` and `ref`.
+    /// The two-dataset fixture with textual, categorical `book` and its ENUM
+    /// built in both `risk` and `ref`. One distinct query therefore exercises
+    /// a dictionary cache spanning two datasets.
     fn two_dataset_fixture_with_textual_book() -> Fixture {
         let schema = schema_with_textual_book();
         let dir = tempfile::tempdir().unwrap();
@@ -581,10 +532,8 @@ grain = "instrument"
                     TIMESTAMPTZ '2026-08-10T00:00:00Z');",
             )
             .unwrap();
-        // `compile_distinct` resolves each dataset's era through
-        // `era_for`, which now reads the `generations` summary rather
-        // than scanning tables directly -- rebuild it from this raw
-        // fixture's tables ("ref" has none, so its summary stays empty).
+        // `era_for` reads the `generations` summary. Rebuild it from this raw
+        // fixture's tables; `ref` has no generations.
         for ds in &f.schema.datasets {
             crate::store::ddl::rebuild_generations(
                 f.conn(),
@@ -596,9 +545,8 @@ grain = "instrument"
         f
     }
 
-    /// `two_dataset_fixture` with a `[dimensions]` doc mapping `book` to
-    /// a derived `desk` dimension (Phase 4a §3.4's `compile_distinct`
-    /// derived-dimension branch): BK000 -> NORTH, BK001 -> SOUTH.
+    /// The two-dataset fixture with a derived `desk` mapping:
+    /// BK000 -> NORTH, BK001 -> SOUTH.
     fn two_dataset_fixture_with_desk_dims() -> Fixture {
         let mut f = two_dataset_fixture();
         let doc = merge_docs(
@@ -655,14 +603,9 @@ grain = "instrument"
         assert!(all.iter().map(|(_, n)| n).sum::<u64>() > 8);
     }
 
-    /// A scope term on a column the picked dimension's own grain does not
-    /// carry is routed through `membership`'s `exists (… probe where
-    /// probe.k is not distinct from base.k …)`, which names the outer
-    /// relation `base` — the alias `compile_view` gives its `from`.
-    /// `compile_distinct` shipped without it (2026-09-19, seen on the
-    /// scope chip: `Referenced table "base" not found`): picking `book`
-    /// while scoped on an instrument-grain `currency` probed the
-    /// instrument table from an unaliased position table.
+    /// A scope term on another grain correlates its membership probe with
+    /// the outer `base` alias. Picking book while scoped on instrument-grain
+    /// currency exercises that alias from the position relation.
     #[test]
     fn distinct_under_a_scope_probing_a_finer_grain_aliases_its_relation_as_base() {
         let f = two_dataset_fixture();
@@ -704,12 +647,8 @@ grain = "instrument"
 
     #[test]
     fn distinct_with_a_text_scope_over_two_datasets_resolves_each_dictionary_once() {
-        // Review round 1, Minor 5. Both `risk` and `ref` declare `book`
-        // textual, so this is the one place in the crate a
-        // `DictionaryCache` genuinely spans two datasets' own dictionary
-        // resolves in a single call (it saves nothing between them --
-        // `enum_type_name` is dataset-qualified -- but the shape was
-        // untested until now).
+        // Both datasets declare textual book, so one statement resolves two
+        // dataset-qualified dictionaries through the same cache.
         let f = two_dataset_fixture_with_textual_book();
         let params = DistinctParams {
             key: QueryKey(1),
@@ -722,14 +661,9 @@ grain = "instrument"
             as_of: AsOf::Live,
         };
 
-        // The cache must be invisible to the result: what `compile_
-        // distinct` actually runs (one shared, internally-created cache)
-        // must agree with an explicitly cache-mediated compile using a
-        // cache this test controls -- and both must land on the counts
-        // an un-cached compile would produce (the same BK000-only totals
-        // `distinct_counts_values_under_the_given_scope_and_unions_
-        // datasets` above gets from a dimension selection on "BK000",
-        // since the text needle "bk000" narrows to exactly that book).
+        // The public wrapper and an explicit cache must yield the same counts.
+        // The text needle `bk000` selects the same book as the dimension
+        // selection in the scoped-counts test.
         let via_public = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
         assert_eq!(
             via_public,
@@ -784,7 +718,7 @@ grain = "instrument"
 
     /// A measure dataset and a document dataset sharing one dimension
     /// column, with different spellings on each side, plus a dimension
-    /// only the document dataset has (market-data spec §3.3).
+    /// only the document dataset has.
     ///
     /// `risk` carries `underlying_ref` as an underlying-grain dimension
     /// key; `cvi_params` is a document dataset keyed on `(underlying_ref,
@@ -950,10 +884,8 @@ role = "attribute"
         f
     }
 
-    /// Important 3 (final fix wave): `compile_distinct` located a column
-    /// through `ds.grains()` alone, so a document dataset — which has no
-    /// grain — contributed nothing. A shared column showed only the
-    /// measure dataset's values.
+    /// A shared dimension combines values and counts from both measure and
+    /// document datasets, even though the latter has no grain.
     #[test]
     fn distinct_unions_a_document_datasets_values_with_a_measure_datasets() {
         let f = document_fixture();
@@ -974,9 +906,8 @@ role = "attribute"
         );
     }
 
-    /// The other half of Important 3: a dimension only a document dataset
-    /// declares used to fail the whole query with "no dataset carries",
-    /// because no grain carried it anywhere.
+    /// A dimension declared only by a document dataset still has a valid
+    /// distinct-values query without any measure-grain contribution.
     #[test]
     fn distinct_over_a_document_only_dimension_returns_its_values() {
         let f = document_fixture();
@@ -992,11 +923,9 @@ role = "attribute"
         );
     }
 
-    /// An axis is row identity *within* one document, never a frame
-    /// dimension (market-data spec §3.3, `groupable_columns`), so it is
-    /// not a column the picker can offer values for — the same answer a
-    /// measure dataset gives for a measure. Unknown to every dataset, the
-    /// request is an error rather than an empty list.
+    /// An axis identifies rows within one document, not a frame dimension,
+    /// so the document dataset does not offer distinct values for it. A
+    /// request with no contributing dataset returns an error.
     #[test]
     fn distinct_over_a_document_dataset_offers_no_axis_values() {
         let f = document_fixture();
@@ -1068,11 +997,9 @@ role = "attribute"
         assert_eq!(rows, vec![("EQ1".to_string(), 6)]);
     }
 
-    /// A selection on a column the document dataset has no column for is
-    /// dropped (`Scope::applicable_to`, market-data spec §3.4) rather than
-    /// compiled into a predicate on a column that does not exist — the
-    /// dataset contributes its values unnarrowed, and the measure dataset
-    /// beside it is narrowed as always.
+    /// A selection on an absent document column is dropped by
+    /// `Scope::applicable_to`. The document contributes its values unnarrowed,
+    /// while a measure dataset carrying that column applies the selection.
     #[test]
     fn a_selection_the_document_dataset_lacks_is_dropped_not_a_binder_error() {
         let f = document_fixture();
@@ -1093,16 +1020,10 @@ role = "attribute"
         );
     }
 
-    /// Part 2 Task 1 (the item Part 1 parked): the text filter is lowered
-    /// grain-free over the document table, so a text-filtered picker no
-    /// longer counts every document regardless of the needle.
-    ///
-    /// `cvi_params.underlying_ref` is textual and categorical, so the
-    /// needle goes through its ENUM dictionary rather than a row scan —
-    /// the same rewrite the measure path uses. `risk` declares no textual
-    /// column at all, so it contributes nothing under the same
-    /// `false`-if-nothing-searchable rule `compile_scope` has always
-    /// applied: the whole answer is the one document the needle keeps.
+    /// Document text filters use the same dictionary rewrite as measure
+    /// filters. `cvi_params.underlying_ref` is textual and categorical, so its
+    /// ENUM supplies matching values. `risk` has no textual column and
+    /// contributes no rows; the answer comes only from the matching document.
     #[test]
     fn a_text_filter_narrows_a_document_datasets_contribution() {
         let f = document_fixture();
@@ -1115,13 +1036,8 @@ role = "attribute"
             ..base_params()
         };
         let compiled = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap();
-        // The needle really went through the ENUM dictionary rather than a
-        // row scan: `publish_document` refreshes the type for every
-        // categorical column, so the rewrite is available here and taking it
-        // is the §7.1 half of this change (Phase 4a measured the row-scan
-        // form at 63ms where the dictionary form is 20.6ms). Both forms
-        // return the same rows, so only the statement text can tell them
-        // apart.
+        // `publish_document` refreshes categorical ENUM types. Check SQL to
+        // verify the dictionary rewrite, since a row scan returns the same rows.
         assert!(
             compiled.sql.contains("string_split"),
             "the document arm's text term must be the dictionary IN, not an ILIKE row scan: {}",
@@ -1140,11 +1056,8 @@ role = "attribute"
         );
     }
 
-    /// The other half of the rule, and the direction that matters: a
-    /// needle over a dataset that cannot be searched matches NOTHING, never
-    /// everything. Without it a document dataset would widen to its full
-    /// row count exactly when the trader has narrowed hardest — the
-    /// over-count Part 1 disclosed.
+    /// A text filter over a dataset without searchable columns matches no
+    /// rows. Omitting the filter would incorrectly count every document.
     #[test]
     fn a_text_filter_on_a_document_dataset_with_no_textual_column_contributes_nothing() {
         let mut f = document_fixture();
@@ -1196,16 +1109,12 @@ role = "attribute"
         );
     }
 
-    /// An expression conjunct naming a column the document dataset has no
-    /// storage for is DROPPED, exactly as `applicable_to` drops such a
-    /// dimension selection (market-data spec §3.4) — not compiled into a
-    /// binder error that would fail the whole picker query, and not
-    /// collapsed to `false`, which would claim the document dataset holds
-    /// no such rows rather than that the question does not reach it.
+    /// An expression conjunct on a column absent from document storage is
+    /// dropped, just like an inapplicable dimension selection. It must neither
+    /// cause a binder error nor suppress all document rows.
     ///
-    /// `:filter book = 'BK001'` is the standing case: a frame-wide filter
-    /// on a measure-side column, with the picker open on a column the
-    /// document dataset shares.
+    /// A frame-wide `:filter book = 'BK001'` applies only to measure datasets
+    /// carrying book, even when the picked dimension is shared with documents.
     #[test]
     fn an_expression_the_document_dataset_lacks_a_column_for_is_dropped_not_an_error() {
         let f = document_fixture();
@@ -1229,17 +1138,10 @@ role = "attribute"
         );
     }
 
-    /// D2 (final fix wave, T2 deferred): `DistinctParams.column` naming a
-    /// derived dimension must take `compile_distinct`'s `derived_case`
-    /// branch — the values returned are the derived labels (`NORTH`/
-    /// `SOUTH`), with counts summed across every source value each label
-    /// covers, not the source `book` values themselves. Compared against
-    /// the same fixture's own `book` query rather than hand-computed
-    /// counts, so this doesn't also have to pin `compile_distinct`'s
-    /// per-dataset grain selection (which `book`, carried at every
-    /// grain, is subject to regardless of whether it's requested
-    /// directly or through a derived dimension): whatever `book` itself
-    /// returns, `desk` must return the same total, just relabeled.
+    /// A derived dimension returns mapped labels with counts summed across
+    /// the source values each label covers. Compare against a query for the
+    /// source book column so both requests use the same per-dataset grains:
+    /// desk must preserve book's total while relabeling values.
     #[test]
     fn compile_distinct_over_a_derived_dimension_groups_by_its_labels() {
         let f = two_dataset_fixture_with_desk_dims();

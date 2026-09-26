@@ -384,20 +384,9 @@ mod tests {
 
     #[test]
     fn two_orphaned_candidates_with_different_reasons_are_both_named() {
-        // Same severity (both `Orphaned` -> `Degraded`), different
-        // reasons: `Health`'s derived `Ord` would fall through to
-        // comparing the reason STRING and, with "b" sorting after "a",
-        // silently drop "a.csv" from the detail entirely (not even
-        // merged in) under the old `*w == h` / `*w > h` comparison.
-        //
-        // This is the only pair of candidates that CAN demonstrate
-        // `severity_rank` beating the reason-string tie-break: two
-        // different variants (e.g. `Degraded` vs `PendingTooLong`)
-        // already compare correctly under the derived `Ord`, since it
-        // only falls through to the reason string once both sides are
-        // the same variant. This test alone carries "rank, not reason
-        // text" — see the next test's comment for why a
-        // different-variant fixture cannot.
+        // Equal-severity candidates with different reasons must both appear in
+        // the detail. Using derived `Health::Ord` would compare reason text and
+        // select only one; different-variant candidates would not expose that error.
         let candidates = vec![
             candidate(
                 "b.csv",
@@ -428,22 +417,9 @@ mod tests {
 
     #[test]
     fn a_higher_rank_candidate_replaces_the_names_accumulated_at_a_lower_rank() {
-        // Review round 1's Major: a `Degraded`-vs-`PendingTooLong`
-        // fixture can never demonstrate "rank, not reason text" — those
-        // are different variants, and `Health`'s derived `Ord` already
-        // orders different variants correctly (it only falls through to
-        // the reason string once both sides are the SAME variant, which
-        // the test above covers). Hand-tracing the OLD `*w == h` /
-        // `*w > h` code against this exact fixture lands on the same
-        // answer as the fixed code either way, so no string choice here
-        // could have told the two implementations apart.
-        //
-        // What this fixture DOES pin, honestly: two ties accumulate at
-        // the lower rank (`PendingTooLong`, `a.csv` then `b.csv`), and a
-        // later, strictly higher-rank candidate (`Orphaned` -> Degraded,
-        // `c.csv`) must discard both accumulated names rather than
-        // append beside them — `worst` only ever holds candidates at
-        // the CURRENT worst rank.
+        // Two PendingTooLong candidates accumulate details at the same rank.
+        // A later Orphaned candidate has higher severity and must replace both
+        // names, keeping only candidates at the current worst rank.
         let candidates = vec![
             candidate("a.csv", CandidateState::PendingTooLong),
             candidate("b.csv", CandidateState::PendingTooLong),

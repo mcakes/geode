@@ -167,12 +167,12 @@ impl PivotIndex {
     }
 }
 
-/// A delivered snapshot's document generation, from the first provenance
-/// dataset. `None` when that dataset has never loaded, in which case there
-/// is nothing for a draft to be based on.
+/// Read the first provenance dataset's source time and generation as a
+/// [`DocumentBase`]. Return `None` if the dataset or its source time is absent;
+/// retain an unknown generation as `None` within a dated base.
 ///
-/// The one reader of provenance in this crate: the tile and the model must
-/// never derive a base two different ways.
+/// The tile and prepared model share this extraction so they agree on the
+/// identity of a delivered document.
 pub(crate) fn base_of(snapshot: &Snapshot) -> Option<DocumentBase> {
     let freshness = snapshot.provenance().datasets.first()?;
     Some(DocumentBase {

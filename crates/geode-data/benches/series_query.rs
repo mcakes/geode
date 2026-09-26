@@ -1,23 +1,14 @@
-//! The series query at a million rows (timeseries spec §11.3) against
-//! the §7.1 requery budget of 50 ms: four identities of one-minute bars
-//! over a year (250 sessions × 1,000 bars = 250,000 rows each,
-//! 1,000,000 in the table), asked for at `1d` over the year (one slot,
-//! and four slots plus a ratio expression) and at `1m` over a month
-//! with percentiles and bins on.
+//! Series query round trips over one million stored rows: four identities,
+//! each with 250,000 one-minute bars. Cases request daily output over a year
+//! for one slot or four slots plus a ratio, and minute output over a month with
+//! percentiles and bins.
 //!
-//! Rows go in through `append_series` in day-sized chunks — the shape a
-//! fetch source produces — once per bench process, untimed. The TIMED
-//! half is `DataService::series` plus the wait for its
-//! `DataEvent::Series`: the whole round trip a tile pays, compilation,
-//! the pool's hop and DuckDB's work included, which is the number §7.1
-//! is written about.
+//! Setup appends the data in day-sized chunks outside timing. Each timed call
+//! submits through DataService and waits for its Series event, including
+//! compilation, queueing, and DuckDB execution but excluding UI painting.
 //!
-//! The schema is the minimal `[series] family = "series"` rather than
-//! the demo config's, deliberately: the demo dataset declares
-//! `retention`/`history` windows, and a bench that appends a year of
-//! 2025 bars under their own `received_at` would have the history sweep
-//! delete the table out from under it. Nothing here depends on a
-//! dataset's presentation, so the minimal doc is the honest fixture.
+//! The fixture declares a minimal series dataset without retention or history
+//! windows, keeping every seeded row available throughout the benchmark.
 
 use chrono::{DateTime, Duration, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};

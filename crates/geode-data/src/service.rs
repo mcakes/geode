@@ -3491,10 +3491,8 @@ mod tests {
         );
         let ndx_generation = ndx.provenance().datasets[0].generation;
 
-        // NDX.Z was published before the third publish (SPX.Z's second), so
-        // a dataset-wide maximum would answer with SPX.Z's newest generation
-        // for NDX.Z too. The fixture's single document could not catch that:
-        // this pair is what tells the two apart.
+        // NDX.Z predates SPX.Z's second publish. A dataset-wide maximum
+        // would incorrectly report SPX.Z's generation for both documents.
         assert!(spx_generation.is_some() && ndx_generation.is_some());
         assert_ne!(spx_generation, ndx_generation);
         assert!(

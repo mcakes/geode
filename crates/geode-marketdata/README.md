@@ -10,12 +10,12 @@ painted document with its draft and asks for confirmation. Bare `y` submits;
 any other key cancels and is consumed. The frame and painted generation must
 both be live, and the tile allows only one outstanding upload.
 
-Transport success marks an unchanged Editing draft Sent. A later document
-generation — a different source time, or the same time at a different store
-generation — is compared separately: a matching echo clears the draft, while a
-different echo retains it over its base. Switching underlying gives up that
-draft's echo check; an outstanding outcome for another underlying is only a
-notice. Request admission and transport success do not establish publication.
+Transport success marks an unchanged Editing draft Sent. A delivery with a
+different source time, or the same time and a different known generation,
+is checked separately against the sent document: a matching echo clears the
+draft, while a different echo retains it over its base. Switching underlying
+gives up that draft's echo check; an outstanding outcome for another
+underlying is only a notice. Request admission and transport success do not establish publication.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#market-data-documents).
@@ -25,7 +25,7 @@ Current behavior and rationale:
 | Module | Holds |
 |---|---|
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
-| `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. `DocumentBase` (source time and store generation) is the base a delivery is compared against. |
+| `core::draft` | Typed edits, label-based rebase, same-date group guards, and `DocumentBase` identity (source time plus optional store generation). |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
 | `core::cursor`, `core::menu` | Grid navigation and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |
@@ -58,6 +58,15 @@ cargo bench -p geode-marketdata    # matrix model and draft
   redelivery or the first usable delivery after a restore. Without the saved
   base snapshot, a restored Behind draft paints the delivered grid while its
   unresolved cell edits remain withheld.
+- `DocumentBase::differs_from` compares source time and, when both are known,
+  store generations. Unknown generations fall back to source time, so they
+  cannot detect a same-time republish. Retaining a base snapshot, capturing
+  its group sizes, and reusing an echo verdict require exact pair equality.
+  Sessions and parked drafts preserve known IDs in `base_generation`.
+- Numeric cells keep their declared type through editing, draft persistence,
+  and upload assembly. Integer parsing avoids a floating-point round trip;
+  integer bumps validate all results before applying any edits and refuse
+  fractional deltas or addition overflow. Bump deltas are parsed as `f64`.
 - `close_popup_with_window` is the one popup closer; it and `close_editor`
   blur only when their own field is focused, and `close_editor` blurs
   before dropping the `InputState`, in that order and both halves.

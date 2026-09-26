@@ -3,20 +3,14 @@
 
 pub mod scope_sql;
 
-// `Era` is re-exported deliberately. Every site that names a relation or
-// builds a WHERE clause must go through it, and five review rounds found
-// defects at sites that had reached for `TableKind::Live` instead — the
-// single most repeated defect class in phase 2b. Leaving it reachable only
-// via `scope_sql` made the wrong thing the convenient one.
+// Use `Era` to select grain relations and apply their generation filters,
+// including in membership probes. This keeps every part of an as-of query
+// on the same resolved generations.
 //
-// `DictionaryCache` and `compile_scope_cached` are deliberately NOT
-// re-exported here: nothing outside `geode-data` compiles several grains
-// of one statement, so nothing outside it needs a cache that can outlive
-// a single call — and `DictionaryCache`'s own doc warns against holding
-// one across statements at all (ingest rebuilds the ENUM types on every
-// publish). `compile_scope`'s unchanged public signature is the seam
-// every other crate uses; `compile_view` and `compile_distinct` (below)
-// reach the cache through `crate::query::scope_sql::` directly.
+// Dictionary caching stays internal to compilation. `compile_scope` creates
+// its own cache; the view and distinct compilers share one while building
+// a statement. Publication rebuilds ENUM types, so caches must not outlive
+// that statement.
 pub use scope_sql::{Era, ScopeSql, compile_scope};
 pub mod compile;
 

@@ -1,15 +1,13 @@
 # geode-data
 
-`DataService`, the only door to data in Geode. It discovers sources,
-ingests them into one persistent DuckDB database, keeps freshness and
-health, and answers queries as immutable columnar `Snapshot`s over a
-channel. No other crate opens a file or a socket; modules hold a
-`DataHandle` and ask.
+`DataService` owns data-source ingestion, persistent DuckDB storage, and
+query execution. Modules submit requests through `DataHandle`; results,
+publication events, and health updates return through an event sink. Source
+transports and database connections stay outside the UI modules.
 
-This crate depends on `geode-core` alone. It never depends on the shell,
-on a module or on a parser crate: document kinds arrive as
-`geode_core::document::DocumentKind` trait objects that `geode-app`
-registers at startup.
+Its only production workspace dependency is `geode-core`. The app supplies
+concrete document parsers, adapters, and pricers through shared traits, keeping
+the data crate independent of the shell and feature modules.
 
 Current behavior and rationale:
 [`docs/current/data-path.md`](../../docs/current/data-path.md).
@@ -50,7 +48,8 @@ for capacity, coalescing, and worker shutdown behavior.
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
-| `query` | The query path: scope to bound SQL, the grain-aware view compiler, the read pool (latest-wins per key, stale results dropped), as-of routing against the archive, the picker's distinct values, the document request, the catalog request. |
+| `query` | Scope lowering, grain-aware view compilation, distinct values, document and series queries, catalog reads, and the read pool. View/document planning, provenance, and execution share a worker transaction; superseded results are dropped. |
+| `pricing` | App-supplied pricer registry and a separate bounded worker queue. Queued batches coalesce by key; cancellation stops a running batch at the next line boundary. |
 | `documents` | The `DocumentKind` registry the app fills. |
 | `egress` | Startup target resolution, service-thread document serialization, and per-target upload workers with eight waiting jobs. Refusals and completed transport calls emit keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |
@@ -64,9 +63,9 @@ for capacity, coalescing, and worker shutdown behavior.
 
 ```sh
 cargo test -p geode-data
-cargo bench -p geode-data      # ingest, query, publish_document, append_series
-zsh scripts/mutation-check.sh  # run after touching the compiler, scope lowering,
-                               # as-of routing, publish, retention or discovery
+cargo bench -p geode-data      # ingestion, document/series writes, view/series queries
+zsh scripts/mutation-check.sh --anchors-only
+zsh scripts/mutation-check.sh --changed  # mutations for changed source files
 ```
 
 The requery budget and current reference measurements are in
@@ -93,18 +92,16 @@ often tripped:
 - Generation summaries cover all live/archive pairs, including NULL-book
   partitions. As-of selection and retention break source-time ties by the
   greatest generation ID so corrected republishes win consistently.
-- Provenance names the generation a read actually used, because source time
-  alone cannot see a corrected republish. The catalog answers the live cases:
-  `live_generation` for one partition's newest and `dataset_generation` for a
-  whole dataset's, the maximum where `dataset_as_of` takes the minimum, since
-  this field reports whether the data changed rather than how stale it is. A
-  historical document read reports the `gen_id` it pinned and a historical view
-  read reports none, its era having resolved one generation per partition.
-  `latest_gen_id` stays an internal sequence helper: `ensure_tables` reads it
-  once to start the generation ID sequence above recorded history, and nothing
-  else calls it. A load allocates from that sequence through `reserve_gen_id`
-  and `record` stores the ID it was given. `latest_gen_id` aggregates the whole
-  catalog, so it names no partition and is not a freshness answer.
+- Document provenance reports the selected partition's generation ID, for
+  live and historical reads. This distinguishes corrected republishes that
+  share a source time. Live views report `dataset_generation`, the maximum
+  live-published ID across the dataset; their freshness time instead reports
+  the stalest input. Historical views have no scalar generation identity.
+  `None` means unknown, not unchanged. See
+  [freshness and provenance](../../docs/current/data-path.md#freshness-health-and-delivery).
+- `reserve_gen_id` allocates publication IDs from the store sequence, and
+  `record` stores the supplied ID. `latest_gen_id` reads the catalog-wide
+  maximum for sequence initialization; it is not a read's freshness marker.
 - Live/archive retention has a transactional storage API but no production
   scheduler for measure or feed-published document datasets. Local datasets
   are swept on the writer after a local publish takes its document past

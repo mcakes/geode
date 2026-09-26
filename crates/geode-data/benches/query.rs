@@ -1,10 +1,9 @@
-//! Requery benchmarks against spec §7.1's central contract: **<50ms
-//! end-to-end at 1M rows** for a regroup, refilter or scope change.
+//! Service requery latency against the 50 ms budget at one million rows.
 //!
-//! Measures the shape the app actually runs — grouped three levels deep,
-//! across two measure grains, scoped — not a bare `select`. Getting that
-//! wrong is exactly the mistake phase 2a's first benchmark run made, and
-//! it reported healthy numbers for a fixture a thousandth of the size.
+//! Fixtures exercise grouped views across two measure grains, book scopes,
+//! text filters, bounded expansion, and historical reads. Timing includes
+//! submission through DataService and waiting for the result, but excludes UI
+//! painting. See `docs/current/performance.md` for measured reference values.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::config::{LayerDoc, merge_docs};
@@ -102,10 +101,9 @@ source_name = "ModelCode"
     SchemaSpec::from_doc(&doc).0
 }
 
-/// `schema()` plus the plain-string key columns made textual too — the
-/// residual a dictionary rewrite cannot remove, since a key column's
-/// vocabulary is not small enough to be an ENUM (spec §3.5). Measures
-/// what the text filter costs when it cannot avoid a row scan.
+/// Mark plain-string key columns as textual as well. Unlike categorical
+/// ENUMs, these columns require row scans for text filtering, exposing the
+/// cost that dictionary lookup cannot remove.
 fn schema_with_textual_keys() -> SchemaSpec {
     let mut s = schema();
     let ds = s.datasets.first_mut().expect("risk_snapshot declared");
@@ -263,13 +261,10 @@ fn reopen(
     .unwrap()
 }
 
-/// Ingest `rows` rows twice into a fresh database — the same source, a
-/// second time with every sentinel's `as_of` pushed an hour later — so
-/// every partition's first generation is superseded and moves to the
-/// archive (spec §4.3), and a query `AsOf::At` a moment between the two
-/// reads the archive era for real instead of an empty one. Returns the
-/// service plus `between`, an instant strictly after the first
-/// generation's latest sentinel and strictly before the second's.
+/// Build live and archived generations by ingesting the same source twice,
+/// with the second set of sentinel times one hour later. Return the service
+/// and an instant after all first-generation times but before the second set,
+/// so historical benchmarks read populated archive tables.
 fn service_with_history(
     rows: usize,
 ) -> (
@@ -363,8 +358,7 @@ fn service_with_history(
     (db, src, service, rx, loaded, between)
 }
 
-/// Submit and block until the snapshot arrives — the end-to-end path the
-/// §7.1 budget is written against, minus the paint.
+/// Measure request submission through snapshot receipt, excluding UI painting.
 fn requery(
     svc: &DataService,
     rx: &std::sync::mpsc::Receiver<geode_data::DataEvent>,
@@ -451,15 +445,13 @@ fn bench_requery(c: &mut Criterion) {
             requery(&svc, &rx, "tree", &Scope::default(), usize::MAX),
         );
 
-        // The §7.1 contract: three levels, two measure grains, scoped.
+        // Three grouping levels across two measure grains, with a book scope.
         group.bench_function(format!("{rows}_rows_grouped_scoped"), |b| {
             b.iter(|| black_box(requery(&svc, &rx, "tree", &book_scope(), usize::MAX)))
         });
 
-        // The same view bounded to what a collapsed tree actually shows:
-        // one level open, so one more is materialized. This is the shape
-        // the blotter opens with, and the one the §7.1 budget has to hold
-        // for on every keystroke.
+        // Bound expansion to one open level plus its children, matching the
+        // initial collapsed-tree query shape.
         group.bench_function(format!("{rows}_rows_grouped_scoped_depth_2"), |b| {
             b.iter(|| black_box(requery(&svc, &rx, "tree", &book_scope(), 2)))
         });
@@ -487,17 +479,14 @@ fn bench_requery(c: &mut Criterion) {
             b.iter(|| black_box(requery(&svc, &rx, "tree", &Scope::default(), usize::MAX)))
         });
 
-        // The unscoped tree is the one shape that misses the §7.1 budget
-        // unbounded — it materializes every leaf. Bounded to what a
-        // collapsed tree shows, the scan is unchanged but the result is
-        // not, which is the whole claim depth bounding makes.
+        // Compare depth-bounded unscoped output with full leaf materialization.
+        // The source scan is unchanged; fewer result rows cross the query boundary.
         group.bench_function(format!("{rows}_rows_unscoped_depth_2"), |b| {
             b.iter(|| black_box(requery(&svc, &rx, "tree", &Scope::default(), 2)))
         });
 
-        // The text filter (spec §3.4-3.5), permanent bench cases and the
-        // §7.1 gate: a broad match, a narrow one, and no match at all —
-        // each unscoped, depth-bounded, and combined with a book scope.
+        // Text filters with broad, narrow, and zero matches, each tested
+        // unscoped, depth-bounded, and with a book scope.
         for (label, needle) in [("broad", "bk00"), ("narrow", "bk007"), ("none", "zzz")] {
             let text_only = Scope {
                 text: Some(needle.to_string()),
@@ -535,11 +524,9 @@ fn bench_requery(c: &mut Criterion) {
         }
         svc.shutdown();
 
-        // The as-of case: same zero-match, depth-2 shape, but scoped to an
-        // instant that reads `archive union all live` (spec §3.5 as
-        // amended). A real archive, not an empty one — the fixture
-        // ingests the source twice so every partition has a superseded
-        // generation to read.
+        // Historical zero-match query at depth two. The fixture has two
+        // published generations per partition, so the live/archive union
+        // contains real historical data.
         let (_db3, _src3, svc, rx, loaded3, between) = service_with_history(rows);
         assert!(loaded3 > 0, "history fixture ingested nothing");
         {
@@ -582,14 +569,10 @@ fn bench_requery(c: &mut Criterion) {
     group.finish();
 }
 
-/// Times `resolve_generations` alone, now that it reads the `generations`
-/// summary rather than scanning every grain's archive and live table
-/// (docs/perf.md, "the as-of baseline" and "the generations summary
-/// table"). A fresh 20,000-row database ingested 50 times, the sentinel
-/// shifted one hour per pass (the `service_with_history` pattern,
-/// looped), timed at an instant after every load — rows stay small on
-/// purpose; it is the *generation count*, not the row count, this
-/// isolates.
+/// Time `resolve_generations` against the generation summary catalog. Setup
+/// publishes a 20,000-row fixture 50 times, advancing source time one hour per
+/// pass. Resolution runs at an instant after every load; the small row count
+/// keeps this focused on generation count rather than payload volume.
 fn bench_resolve(c: &mut Criterion) {
     let mut group = c.benchmark_group("resolve");
     group.sample_size(20);

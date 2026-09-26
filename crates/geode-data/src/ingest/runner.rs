@@ -1,8 +1,9 @@
 //! One ingest thread owns the writer and serializes all publication.
 //!
 //! Each dequeue prefers documents, then fetched series, then files. Documents
-//! (publishes and local forgets, in one queue) and series are FIFO; files follow planned priority and descending source
-//! time. Running work finishes before priorities are reconsidered. Sustained
+//! (publishes and local forgets, in one queue) and series are FIFO; files
+//! follow planned priority and descending source time. Running work finishes
+//! before priorities are reconsidered. Sustained
 //! higher-priority traffic can starve lower-priority work.
 //!
 //! File submissions deduplicate queued/in-flight path, size, and source time;

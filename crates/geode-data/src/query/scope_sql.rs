@@ -1,22 +1,17 @@
-//! Scope to SQL (spec §6.2). Three predicate kinds composed with AND,
-//! every value bound rather than spliced.
+//! Scope compilation with bound values and grain-aware predicates.
 //!
-//! Dimension selections bind one delimiter-joined varchar and split it in
-//! SQL. duckdb-rs cannot bind a list parameter — `Value::List` binding is
-//! an explicit error, verified against 1.10505. A connection-local temp
-//! table was the first design and does not work here: compilation happens
-//! on the service's connection and execution on a pool worker's, and temp
-//! tables are connection-local. `string_split` keeps the statement text
-//! stable regardless of selection size, so the prepared plan stays
-//! cacheable, which was the temp table's other reason for existing.
+//! Dimension selections, text filters, and expression filters are combined
+//! with AND. Selections bind one delimiter-joined varchar and split it in
+//! SQL: duckdb-rs does not support binding a `Value::List`. This keeps the
+//! statement text independent of selection size and avoids connection-local
+//! auxiliary tables.
 //!
-//! A predicate naming a column this grain's table does not carry is
-//! evaluated against the grain that does, as a membership test on the
-//! keys the two grains share. When those keys do not pin the other
-//! grain's entity the result is marked `SemiJoined`: "positions that have
-//! SPX risk" is not "the SPX share of the position" (spec §6.3). When they
-//! do — an instrument attribute tested from underlying grain — the
-//! predicate is functionally determined and stays `Direct`.
+//! A predicate on a column absent from the requested grain is evaluated at
+//! a grain carrying it, using the keys the two grains share. If those keys
+//! do not identify the probe grain's entity, the result is `SemiJoined`:
+//! "positions that have SPX risk" does not mean the SPX share of each
+//! position. When the shared keys identify the entity, such as an instrument
+//! attribute tested from underlying grain, the result stays `Direct`.
 
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
@@ -41,26 +36,15 @@ pub struct ScopeSql {
     pub semantics: ScopeSemantics,
 }
 
-/// Which tables a query reads and the generation filter that goes with
-/// them (spec §6.5). Passed down so the semi-join probe reads the same
-/// era as its caller — a probe left on live inside an as-of query mixes
-/// today's data into a historical answer, and does it silently.
+/// Tables and generation filter used by a query and its membership probes.
 ///
-/// `generations` is the predicate `relation` applies itself, not a filter
-/// callers apply afterward — every other site that used to `and` it onto
-/// its own predicate has been deleted (Phase 4a's as-of baseline fix), so
-/// `relation` is the sole applier **in every era**, `Live` included: a
-/// `Live` era carrying `Some(predicate)` is filtered exactly like an
-/// `Archive` era, even though no production path constructs one today
-/// (`Era::live()` and `era_for`'s `AsOf::Live` arm both leave it `None`).
-/// An arm that silently dropped a predicate it was handed would be a
-/// trapdoor for the next caller who builds a `Live` era with one — this
-/// type is `pub` with `pub` fields precisely so a future optimisation
-/// (reading only `live` when every resolved generation is current) can
-/// reach for it directly. Under `Archive`, both sides are always read,
-/// filtered independently: a historical answer can include both currently
-/// live generations and older archived ones. Production planning and execution
-/// now share one read transaction, as do all grains of a file publication.
+/// [`Era::relation`] applies `generations` itself, including for a `Live`
+/// era with a supplied predicate. Callers add scope predicates separately.
+/// An `Archive` era reads both live and archive, filtering each: an as-of
+/// answer can include current generations alongside older archived ones.
+/// Passing the same era to every probe keeps current rows from leaking into
+/// a historical answer. Production planning and execution share one read
+/// transaction.
 #[derive(Clone, Copy)]
 pub struct Era<'a> {
     pub kind: TableKind,
@@ -77,24 +61,12 @@ impl Era<'_> {
 
     /// The relation a query reads for one grain under this era.
     ///
-    /// Live reads the live table and nothing else — filtered by
-    /// `generations` too, if the caller set it, exactly like the archive
-    /// side; today's callers never do (`Era::live()` and `era_for`'s
-    /// `AsOf::Live` arm both leave it `None`), but `relation` is the sole
-    /// applier of the predicate now that every caller-side application has
-    /// been deleted (Phase 4a's as-of baseline fix), so an era carrying a
-    /// predicate must never have it silently dropped by whichever arm
-    /// happens to run. As-of reads the archive **and** live: the
-    /// generation a partition holds *now* is in live and nowhere else, so
-    /// a query as of any moment after that generation was published —
-    /// including "as of an hour ago" for a book that refreshed this
-    /// morning — has to find it there. Reading the archive alone answers
-    /// such a query with the partition's *previous* generation, or with
-    /// nothing at all for a partition published only once, and says
-    /// nothing either way. The generation predicate — applied to *both*
-    /// sides here, not by the caller — is what keeps the two sides from
-    /// both contributing; live carries `gen_id` and `source_time`
-    /// precisely so it can be filtered the same way (§4.2).
+    /// `Live` reads only the live table, applying `generations` when present.
+    /// `Archive` unions archive and live, applying the predicate to both.
+    /// The current generation exists only in live and may still be the correct
+    /// generation for an as-of timestamp after its publication. Reading archive
+    /// alone would return an older generation or omit a partition published
+    /// only once.
     pub fn relation(&self, dataset: &str, grain: Grain) -> String {
         match self.kind {
             TableKind::Live => match self.generations {
@@ -117,8 +89,7 @@ impl Era<'_> {
 }
 
 /// Whether `column` can be evaluated on `grain`'s own rows: a dimension
-/// key it carries, a carried dimension it carries (spec §3.3), or a
-/// measure or attribute declared at it.
+/// key or carried dimension, or a measure or attribute declared at it.
 fn evaluable_at(ds: &DatasetSpec, dims: &DerivedDimensions, grain: Grain, column: &str) -> bool {
     let base = dims.base_column(column);
     ds.carries(grain, base) || ds.column(base).and_then(|c| c.grain()) == Some(grain)
@@ -130,7 +101,7 @@ fn evaluable_at(ds: &DatasetSpec, dims: &DerivedDimensions, grain: Grain, column
 /// declared grain that carries every column, to be reached by a
 /// membership test; the coarsest such grain is chosen because it is the
 /// smallest table. A clause no single grain can evaluate is an error at
-/// compile time rather than a binder error inside the pool: the caller
+/// compile time rather than a binder error during execution: the caller
 /// can split it into top-level `and` terms, each of which routes alone.
 fn route(
     ds: &DatasetSpec,
@@ -197,18 +168,13 @@ fn is_membership(grain: Grain, probe: Grain) -> bool {
 
 /// `exists (…)` testing `inner` against `probe`'s rows for the same keys.
 ///
-/// `is not distinct from`, not `=`: the key columns are matching rows of
-/// the *same* entity, so a NULL here is a real value on both sides rather
-/// than a rolled-up placeholder. Plain equality would make a position with
-/// no LHU fail its own semi-join, and the row would still be present
-/// carrying a coarse measure of NULL — visibly inconsistent rather than
-/// merely absent.
+/// `is not distinct from` treats NULL keys as matching values of the same
+/// entity. Plain equality would make a position with no LHU fail its own
+/// membership test.
 ///
-/// The probe reads the same era as its caller — via `era.relation`, which
-/// applies the generation predicate to both sides itself (Phase 4a's as-of
-/// baseline fix). Reading live from inside an as-of query mixes today's
-/// data into a historical answer — and does it silently, because the
-/// numbers still look like numbers (spec §6.5).
+/// The probe uses its caller's era, including the generation predicate
+/// applied by `Era::relation`, so an as-of answer cannot probe current data
+/// from a different generation.
 fn membership(ds: &DatasetSpec, grain: Grain, probe: Grain, era: Era<'_>, inner: &str) -> String {
     let join = shared_keys(grain, probe)
         .iter()
@@ -223,12 +189,9 @@ fn membership(ds: &DatasetSpec, grain: Grain, probe: Grain, era: Era<'_>, inner:
     )
 }
 
-/// `%text%` with LIKE's own wildcards escaped, so a trader typing `50_`
-/// or `100%` searches for those characters rather than for anything.
-/// Paired with `escape '\'` in the predicate.
-///
-/// `pub(crate)` for `compile_distinct`'s document arm, which needs the same
-/// needle spelled the same way (market-data spec §4.5).
+/// `%text%` with LIKE wildcards escaped, so `50_` and `100%` search for
+/// those literal characters. Paired with `escape '\'` in the predicate.
+/// Shared by measure and document scope compilation.
 pub(crate) fn like_pattern(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('%');
@@ -242,21 +205,15 @@ pub(crate) fn like_pattern(text: &str) -> String {
     out
 }
 
-/// The values of ENUM type `enum_type` matching `pattern` (already
-/// produced by [`like_pattern`]), resolved once on `conn` at compile
-/// time (spec §3.5, the literal-list form).
+/// The values of ENUM type `enum_type` matching `pattern`, which must
+/// already be escaped by [`like_pattern`].
 ///
-/// This is a small query — a dictionary is hundreds of values, not a
-/// million rows — run synchronously on the compile connection, which is
-/// safe because `compile_scope` already runs on the service thread
-/// ahead of `submit`, not on a pool worker mid-query. Reached through
-/// [`DictionaryCache`], which resolves it (and [`existing_enum_types`])
-/// once per (type, pattern) — respectively per dataset — per statement,
-/// not once per grain: `compile_view` calls `compile_scope` once per
-/// measure grain plus once for the spine, and without the cache every
-/// one of those repeated the same catalog round-trips.
-///
-/// [`existing_enum_types`]: crate::store::ddl::existing_enum_types
+/// Queries the dictionary synchronously on the supplied compile connection.
+/// Production reads compile and execute in one worker transaction, so the
+/// matches describe the same database snapshot as the resulting query.
+/// [`DictionaryCache`] resolves matches once per (type, pattern), and type
+/// existence once per dataset, for each statement. This avoids repeating
+/// catalog queries for each measure grain and the spine.
 fn dictionary_matches(
     conn: &Connection,
     enum_type: &str,
@@ -276,30 +233,16 @@ fn dictionary_matches(
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
-/// Catalog facts the text filter needs, resolved once per statement
-/// rather than once per grain (`compile_view` calls `compile_scope`
-/// once per measure grain plus once for the spine).
+/// Catalog facts used by text filters, cached for one statement.
 ///
-/// A fresh, empty cache is exactly as correct as no cache at all — it
-/// just misses every lookup once — so [`compile_scope`] keeps working
-/// unchanged as a thin wrapper handing [`compile_scope_cached`] a
-/// throwaway `DictionaryCache::default()`.
+/// `compile_view` shares the cache across measure grains and the spine.
+/// [`compile_scope`] creates a fresh cache for each standalone call.
 ///
-/// **Never hold one across statements.** `refresh_enum` rebuilds every
-/// ENUM type on every publish, so a `DictionaryCache` parked on
-/// something longer-lived than a single compile — a `DataService`
-/// field, a pool worker, a `static` — would keep answering with
-/// whatever dictionary existed when it was first warmed. A book that
-/// arrived in the newest generation would be silently absent from a
-/// cached `matches` result, and a retired book would keep being bound
-/// as though it were still live: wrong data with no error. Construct
-/// one fresh per statement, as every call site in this crate does, and
-/// let it drop at the end of that call.
-///
-/// `pub(crate)`, not exported from `query/mod.rs`: nothing outside this
-/// crate compiles several grains of one statement, so nothing outside
-/// it needs to hold a cache across calls (`compile_scope`'s own
-/// unchanged public signature is the seam every other crate uses).
+/// Do not retain a cache across statements: publication rebuilds ENUM types,
+/// so cached type existence or matches can omit newly published values.
+/// Keep its lifetime within a single compilation and its read transaction.
+/// The cache and [`compile_scope_cached`] are crate-private; external callers
+/// use [`compile_scope`].
 #[derive(Default)]
 pub(crate) struct DictionaryCache {
     /// dataset name -> its existing ENUM type names.
@@ -364,33 +307,21 @@ impl DictionaryCache {
     }
 }
 
-/// One textual column's text-filter term and the value it binds, or `None`
-/// when the column contributes no term at all.
+/// One textual column's text-filter term and bound value.
 ///
-/// Extracted from [`compile_scope_cached`]'s text block for
-/// `compile_distinct`'s document arm (market-data spec §4.5, Part 2 Task 1):
-/// this is the grain-free half of that block, and a document dataset is one
-/// table with no grain, so every routing decision the measure path makes
-/// *around* this term is a no-op there. The choice between a dictionary `IN`
-/// and a row-scanning `ILIKE`, and the value each binds, has to be spelled
-/// once or the two paths silently drift — which for a text filter means one
-/// of them scanning rows the other reads from a dictionary, or binding the
-/// pattern where the other binds the matches.
+/// Shared by grain-aware scope compilation and document distinct queries.
+/// Categorical columns with an existing ENUM type use dictionary matches
+/// in an `IN` predicate; other columns use a row-scanning `ILIKE`.
 ///
-/// `enum_types` is the dataset's existing ENUM type names, resolved once by
-/// the caller through [`DictionaryCache::enum_types`] and passed as an owned
-/// slice: holding the cache's own borrow across a loop that also needs
-/// `&mut cache` for [`DictionaryCache::matches`] does not compile.
+/// `enum_types` contains the dataset's existing type names, resolved once
+/// through [`DictionaryCache::enum_types`]. Callers own this list separately
+/// so the cache remains mutable for dictionary matches. `pattern_text` must
+/// already be escaped by [`like_pattern`], once per filter.
 ///
-/// `pattern_text` is already `like_pattern`'d by the caller — once per
-/// filter, not once per column.
-///
-/// `None` means this column's dictionary holds no value meeting the needle,
-/// so it contributes nothing rather than an always-false subquery DuckDB
-/// would still have to plan. A caller left with no term at all must push a
-/// literal `false`: a needle nothing can match selects nothing, never
-/// everything. Both callers do; see the rule at the end of
-/// `compile_scope_cached`'s text block.
+/// `None` means the dictionary has no matching value. Omitting that column's
+/// term avoids planning an always-false subquery. If every column contributes
+/// no term, the caller must emit literal `false`: an unmatchable text filter
+/// selects no rows.
 pub(crate) fn text_column_term(
     conn: &Connection,
     ds: &DatasetSpec,
@@ -416,24 +347,14 @@ pub(crate) fn text_column_term(
     Ok(Some((test, bound)))
 }
 
-/// One dimension selection as a predicate on the column it really reads,
-/// with its values bound as a single delimiter-joined varchar and split
-/// back by `string_split` in SQL — so the statement text, and therefore
-/// the prepared plan, is the same whatever the selection's size.
+/// One dimension selection, with values bound as a delimiter-joined varchar
+/// and split by `string_split` in SQL. The statement text stays independent
+/// of selection size so prepared plans can be reused.
 ///
-/// `None` means "this selection can match nothing": a selection on a
-/// derived dimension names *derived* values while the stored column holds
-/// source ones, so it has to be translated back through the map, and a
-/// derived value the map does not produce leaves no source value at all.
-/// Binding the derived value against the source column would compile
-/// cleanly and silently match nothing, which is the worst way for this to
-/// fail (spec §6.8) — the caller turns `None` into an explicit "selects
-/// nothing" instead.
-///
-/// `pub(crate)` because `compile_distinct`'s document arm binds the very
-/// same selections without a grain to route them through (a document
-/// dataset has none, market-data spec §3.3): the derived translation and
-/// the binding form are spelled here once so the two paths cannot drift.
+/// Derived labels are translated to source values before binding against
+/// the stored column. `None` means no source value matches; callers emit an
+/// explicit false predicate. Measure and document compilation share this
+/// translation and binding logic.
 pub(crate) fn selection_clause(
     sel: &geode_core::scope::DimensionSelection,
     dims: &DerivedDimensions,
@@ -472,18 +393,12 @@ pub(crate) fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 
 /// Compile the scope for the rows of `grain`, under `era`.
 ///
-/// A thin wrapper over [`compile_scope_cached`] with a throwaway,
-/// call-local cache: every one of the twenty-odd existing callers keeps
-/// this exact signature, and a cache that lives no longer than one call
-/// is exactly as correct as no cache — it just costs one miss instead of
-/// none. A caller compiling several grains of the same statement (that
-/// is: `compile_view`, `compile_distinct`) should hold its own
-/// `DictionaryCache` across those calls instead, via
-/// `compile_scope_cached`.
+/// Creates a call-local dictionary cache. Internal callers compiling several
+/// parts of one statement share a `DictionaryCache` through
+/// `compile_scope_cached` to avoid repeated catalog queries.
 pub fn compile_scope(
-    // Used by the text filter (spec §3.5): whether a categorical column's
-    // ENUM type exists is a catalog lookup, not something the scope's own
-    // predicate can know.
+    // The text filter checks categorical ENUM existence and values in the
+    // catalog on this connection.
     conn: &Connection,
     scope: &Scope,
     ds: &DatasetSpec,
@@ -530,17 +445,10 @@ pub(crate) fn compile_scope_cached(
         return Ok(nothing());
     }
 
-    // Each clause carries its own bound values.
-    //
-    // Accumulating a flat `params` alongside the clause strings is what
-    // made this silently wrong before: params were pushed in *source*
-    // order, but the `exists(...)` wrapper holding every finer clause is
-    // emitted *last*, so a finer predicate followed by a direct one
-    // transposed their values onto each other's placeholders — a book
-    // filter and an underlying filter swapping, with no error. Keeping the
-    // values attached to the clause means the two orders cannot disagree:
-    // the params fall out of the emission order rather than being
-    // maintained in parallel with it.
+    // Each clause carries its bound values so parameter order follows SQL
+    // emission order. Direct clauses are emitted before grouped membership
+    // probes, which can differ from source order; a separately accumulated
+    // parameter list would bind values to the wrong placeholders.
     type Clause = (String, Vec<Value>);
     struct Routing {
         /// Clauses evaluated on this grain's own rows, in source order.
@@ -597,53 +505,23 @@ pub(crate) fn compile_scope_cached(
         place(&mut r, ds, dims, grain, &[sel.column.as_str()], clause)?;
     }
 
-    // 2. Text filter: OR of a literal-list `IN` over each categorical
-    // textual column's matching dictionary values, plus a plain `ILIKE`
-    // over any textual column that is not categorical (spec §3.5, the
-    // literal-list form).
+    // 2. Text filter: OR the per-column dictionary `IN` or row-scanning
+    // `ILIKE` terms. Columns absent from this grain become membership tests
+    // inside the OR, preserving the filter for coarse and fine measures.
     //
-    // Each column is routed on its own, because the OR cannot be split:
-    // a textual column this grain does not carry becomes its own
-    // membership term inside the OR, and the whole filter is one direct
-    // clause. Leaving such columns out — the earlier choice — silently
-    // applied the filter to the fine-grained measures and not to the
-    // coarse ones on the same row, and marked nothing (spec §6.3).
+    // Dictionary matches are resolved once during compilation. Empty matches
+    // omit that column's term, avoiding a subquery the database must plan.
+    // Matching values use the same single-varchar binding as selections, so
+    // statement text stays independent of match count.
     //
-    // The literal-list form replaced a subquery form
-    // (`"col" in (select v from unnest(enum_range(...)) t(v) where v
-    // ilike ? escape '\')`) that still cost DuckDB a real per-requery
-    // planning-and-probing bill even for a needle that matches nothing:
-    // an OR of several such correlated subqueries measured ~65ms on a
-    // wide demo schema at 1M rows before any row of the result was ever
-    // touched (`docs/perf.md`, "literal-list form"). Resolving each
-    // column's matches once here, on the compile connection
-    // (`compile_scope` already runs on the service thread ahead of
-    // `submit`, so this synchronous query is safe), turns that into a
-    // handful of `?`-bound values known before the statement is ever
-    // planned: a column with no matches drops its term entirely instead
-    // of compiling to an always-false subquery, and the matching values
-    // are bound the same way a dimension selection is — one
-    // delimiter-joined varchar split by `string_split` in SQL — so the
-    // statement text (and therefore the prepared plan) stays independent
-    // of match count and cacheable regardless of how many values match.
-    //
-    // If every column's dictionary drops the needle — or the dataset
-    // declares no textual columns at all — the OR would otherwise become
-    // empty and contribute no clause, silently widening the scope to
-    // "everything" instead of "nothing": rule enforced below by pushing
-    // a literal `false` clause when no term survives.
+    // If no term survives, emit literal `false`; dropping the text filter
+    // would widen an unmatchable scope to every row.
     if let Some(text) = &scope.text {
         let pattern_text = like_pattern(text);
-        // Type existence is the only gate (spec §3.5, as amended): it
-        // holds in every era, because `refresh_enum` builds the type
-        // from live *and* archive (`crate::store::ddl`), so an archived
-        // row can never hold a value the type lacks.
+        // Type existence enables the dictionary rewrite in every era:
+        // `refresh_enum` includes both live and archive values.
         //
-        // Cloned into an owned `Vec` rather than held as the cache's own
-        // borrow: `cache.matches` below also needs `&mut cache` inside
-        // this same loop, and a borrow of `enum_types` alive across every
-        // iteration would conflict with it. The list is short (a
-        // dataset's categorical textual columns), so the clone is cheap.
+        // Own the list separately because matching also needs `&mut cache`.
         let enum_types: Vec<String> = cache.enum_types(conn, &ds.name)?.to_vec();
         let mut terms: Vec<String> = Vec::new();
         let mut term_params: Vec<Value> = Vec::new();
@@ -791,7 +669,7 @@ fn derived_membership(
 /// Lower a validated expression, pushing every literal onto `params`.
 ///
 /// `dims` is threaded through so a derived dimension is resolved to its
-/// source column here too, not only in dimension selections (spec §6.8).
+/// source column here too, not only in dimension selections.
 pub(crate) fn render_expr(
     expr: &Expr,
     params: &mut Vec<Value>,
@@ -911,10 +789,9 @@ grain = "position"
         DerivedDimensions::default()
     }
 
-    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
-    /// grain. Both position (`daily_trading_pnl`) and instrument (`npv`)
-    /// measures are declared so `ds.grains()` includes both, which is
-    /// what lets `route` probe from position to instrument.
+    /// `currency` is carried by the instrument grain. Declaring position
+    /// (`daily_trading_pnl`) and instrument (`npv`) measures lets `route`
+    /// probe from position to instrument.
     fn carried_dataset() -> geode_core::schema::DatasetSpec {
         let text = r#"
 [risk.columns.book]
@@ -986,12 +863,9 @@ grain = "position"
 
     #[test]
     fn an_archive_era_relation_filters_both_sides() {
-        // Phase 4a's as-of baseline fix: the generation predicate is
-        // applied inside `relation` itself, to both the archive and live
-        // tables it reads — not by the caller afterward. Both sides are
-        // always read because publish is per grain and the resolve is a
-        // separate statement (see `Era`'s doc comment), so both must be
-        // filtered or one of them leaks an unresolved generation.
+        // `relation` applies the generation predicate to both live and archive.
+        // An as-of answer may read generations from either table, and neither
+        // side may contribute an unresolved generation.
         let era = Era {
             kind: TableKind::Archive,
             generations: Some("gen_id = 7"),
@@ -1014,14 +888,8 @@ grain = "position"
 
     #[test]
     fn a_live_era_relation_honours_a_generation_predicate() {
-        // `relation` is the sole applier of the generation predicate in
-        // every era now that every caller-side application has been
-        // deleted (Phase 4a's as-of baseline fix) — including `Live`,
-        // which no production path hands a predicate today but which
-        // must not silently drop one it is given. A `Live` arm that
-        // ignored `generations` would be a trapdoor for the next
-        // optimisation that reads only `live` when every resolved
-        // generation is current.
+        // A supplied generation predicate also filters a `Live` relation,
+        // even though the default live era has no predicate.
         let era = Era {
             kind: TableKind::Live,
             generations: Some("gen_id = 7"),
@@ -1035,9 +903,8 @@ grain = "position"
 
     #[test]
     fn a_dimension_selection_binds_one_value_and_splits_it_in_sql() {
-        // duckdb-rs cannot bind a list, and a temp table would be
-        // connection-local — compilation and execution happen on
-        // different connections (spec §6.2).
+        // A selection uses one varchar parameter because duckdb-rs cannot
+        // bind a list. Its SQL needs no connection-local auxiliary table.
         let scope = Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
@@ -1272,7 +1139,7 @@ grain = "position"
 
         // Inside one term the split is not possible, and an OR across
         // grains has no single table to evaluate on: a loud error at
-        // compile time, not a binder error in the pool.
+        // compile time, not a binder error during execution.
         let mixed = Scope {
             expression: Some(parse_expr("underlying_ref = 'SPX' or delta01 > 1").unwrap()),
             ..Scope::default()
@@ -1320,7 +1187,7 @@ grain = "position"
     #[test]
     fn a_finer_column_becomes_a_semi_join_at_a_coarser_grain() {
         // Scoping to an underlying while asking for a position measure:
-        // "positions that have SPX risk" (spec §6.3).
+        // "positions that have SPX risk".
         let scope = Scope {
             dimensions: vec![DimensionSelection {
                 column: "underlying_ref".into(),
@@ -1454,18 +1321,13 @@ grain = "position"
         );
     }
 
-    /// The Phase 4 §3.5 fixture: `book` is categorical and textual, and
-    /// `risk_instrument_live` actually carries its ENUM type — twenty
-    /// plain books, `BK000` through `BK019`, plus three whose *value*
-    /// carries a LIKE special character (`BK_01`, `BK%02`, `BK\03`). The
-    /// escape clause only matters for a needle that can meet one of
-    /// those: none of BK000..BK019 does, which is why the first version
-    /// of this fixture let a mutation dropping `escape '\'` survive —
-    /// a fixture that cannot reach the defect, the class CLAUDE.md warns
-    /// about. One instrument row each. The tempdir is deliberately
-    /// leaked (not returned) so the fixture stays a two-tuple as every
-    /// call site below expects; the file lives for the process lifetime,
-    /// which a test run can afford.
+    /// Categorical, textual `book` with an ENUM over twenty plain values
+    /// (`BK000` through `BK019`) and three containing LIKE special characters:
+    /// `BK_01`, `BK%02`, and `BK\03`. Each has one instrument row. The special
+    /// values make wildcard-escaping failures observable.
+    ///
+    /// The temporary directory is retained for the process lifetime so callers
+    /// can use the returned store without retaining a directory guard.
     fn enum_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
         let mut ds = carried_dataset();
         for c in ds.columns.iter_mut() {
@@ -1508,15 +1370,9 @@ grain = "position"
         (store, ds)
     }
 
-    /// Review round 1, Major 1: two categorical textual columns —
-    /// `book` and `counterparty` — whose dictionaries each hold exactly
-    /// one value matching the needle `"match"`, but a *different* value
-    /// each. Every other text-filter fixture in this file declares
-    /// exactly one categorical textual column, so a `DictionaryCache`
-    /// key that dropped the ENUM type and collapsed to the pattern
-    /// alone would have nothing to collide with and no test could see
-    /// it — the exact "fixture that cannot reach the defect" class
-    /// `CLAUDE.md` warns about.
+    /// Two categorical textual columns whose dictionaries match the same
+    /// needle, `"match"`, with different values: `BKMATCH` and `CPMATCH`.
+    /// This exposes cache-key collisions if the ENUM type is omitted.
     fn two_categorical_columns_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
         let mut ds = carried_dataset();
         for c in ds.columns.iter_mut() {
@@ -1551,14 +1407,8 @@ grain = "position"
         (store, ds)
     }
 
-    /// The as-of root-cause fixture (spec §3.5, as amended): `BK_OLD`
-    /// exists ONLY in the archive — `enum_fixture`'s live table never
-    /// carried it — so a dictionary built from live alone cannot hold
-    /// it. This is the exact case the era gate's original comment
-    /// worried about ("an archived row could hold a value absent from
-    /// the dictionary and the `IN` would silently drop it"); the fix is
-    /// `refresh_enum` reading live *and* archive, not leaving the
-    /// rewrite gated off.
+    /// `BK_OLD` exists only in archive. The ENUM must include archived values
+    /// so dictionary-based text filters remain valid for as-of reads.
     fn archived_only_value_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
         let (store, ds) = enum_fixture();
         let conn = store.writer();
@@ -1775,12 +1625,9 @@ grain = "position"
 
     #[test]
     fn the_rewrite_falls_back_to_the_row_scan_only_when_the_type_is_missing() {
-        // Type existence is the only gate now (root-cause fix, spec §3.5
-        // as amended) — not the era. Before the first load, or with the
-        // type explicitly dropped, neither era can name it, and both
-        // fall back; see
-        // `a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of`
-        // for the case where the type *does* exist under as-of.
+        // Without an ENUM type, categorical text filters fall back to a row
+        // scan in either era. Archived-value coverage below checks the
+        // complementary case where the type exists during an as-of read.
         let (store, ds) = enum_fixture();
         let scope = Scope {
             text: Some("bk00".into()),
@@ -1826,11 +1673,8 @@ grain = "position"
 
     #[test]
     fn a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of() {
-        // `BK_OLD` was never live — it exists only in the archive — the
-        // case the era gate's own comment worried about. Root cause
-        // fixed (spec §3.5 as amended): `refresh_enum` reads live and
-        // archive, so the type carries it, and the rewrite is no longer
-        // gated to the live era.
+        // `BK_OLD` exists only in archive. `refresh_enum` includes it so the
+        // dictionary rewrite can match it under an as-of era.
         let (store, ds) = archived_only_value_fixture();
         let scope = Scope {
             text: Some("old".into()),
@@ -1854,8 +1698,8 @@ grain = "position"
             "the archive era must take the dictionary path too: {}",
             sql.predicate
         );
-        // The read path's opinions are law: the dictionary term must
-        // select exactly what the row scan over the same relation would.
+        // The dictionary predicate must select exactly the same rows as a
+        // row scan over the same relation.
         let relation = archive.relation(&ds.name, Grain::Instrument);
         let via_dict: i64 = store
             .writer()
@@ -2005,14 +1849,9 @@ grain = "position"
 
     #[test]
     fn a_cache_keys_matches_by_type_not_pattern_alone() {
-        // Review round 1, Major 1 — the mirror of the test above: a key
-        // that collapsed to the pattern alone, dropping which column's
-        // ENUM type it names, would let `counterparty`'s lookup hit
-        // `book`'s already-cached entry for the same needle. Both
-        // columns' dictionaries contain exactly one match for "match" —
-        // `book`'s is `BKMATCH`, `counterparty`'s is `CPMATCH` — so a
-        // collision is visible as the two bound value lists becoming
-        // equal instead of staying distinct.
+        // The cache key must include the column's ENUM type as well as the
+        // pattern. Both dictionaries match "match", but the bound values
+        // must stay distinct: `BKMATCH` for book and `CPMATCH` for counterparty.
         let (store, ds) = two_categorical_columns_fixture();
         let scope = Scope {
             text: Some("match".into()),
@@ -2062,10 +1901,8 @@ grain = "position"
     proptest! {
         #[test]
         fn compile_scope_and_compile_scope_cached_agree(needle in "[a-zA-Z0-9%_\\\\]{0,6}") {
-            // The read path's opinions are law: a caller-supplied cache
-            // must be invisible to the property test's contract. Both
-            // entry points, on a fresh (cold) cache, must compile the
-            // identical statement.
+            // A caller-supplied cold cache and the public wrapper must compile
+            // identical results.
             let (store, ds) = enum_fixture();
             let scope = Scope { text: Some(needle.clone()), ..Scope::default() };
             let via_wrapper = compile_scope(
@@ -2079,16 +1916,9 @@ grain = "position"
             prop_assert_eq!(via_wrapper.params.clone(), via_cached.params.clone());
             prop_assert_eq!(via_wrapper.semantics.clone(), via_cached.semantics.clone());
 
-            // Review round 1, Major 2: the case above never exercises a
-            // *warm* cache -- both arms start cold, so it can only fail
-            // if the wrapper forwards a different argument list, not if
-            // a hit ever returned something other than what a miss
-            // would have. Compile the same statement again through the
-            // now-warm `cache` and require the identical result: this is
-            // the one place a `matches`/`enum_types` hit is actually
-            // exercised and checked against a real answer, rather than
-            // discarded (as `a_cache_resolves_each_dictionary_once_per_
-            // statement` does, asserting only on `cache.lookups`).
+            // Compile again through the warm cache and compare the complete
+            // result. Cache hits must preserve predicates, parameters, and scope
+            // semantics, not merely reduce the lookup count.
             let via_warm_cache = compile_scope_cached(
                 store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live(), &mut cache,
             ).unwrap();
