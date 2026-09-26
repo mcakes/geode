@@ -88,22 +88,25 @@ configuration guide's rule).
 
 ### 2.3 In code
 
-- `Template` stops being an enum. A package's template is a
-  `TemplateName`: an upper-case, interned name (`Rc<str>`), with
-  `CUSTOM` as a distinguished value. `RowKind::Package { template }`,
-  `Edit::Group` and the storage conversion carry it.
+- `Template` stops being an enum. It becomes a `Copy` name handle: an
+  upper-case name interned to a `&'static str` (names are few, since they
+  come from config and stored sheets, so the interner's leak is bounded).
+  `RowKind` stays `Copy`. `Template::CUSTOM` is the distinguished value,
+  and the seven built-in names are associated constants.
 - A pure `TemplateSet` (`core::template`) maps names to
   `TemplateDef { name, legs: Vec<LegSpec>, strikes, expiries }` and is
   built from the merged document. `LegSpec` keeps its fields, with
   0-based indices internally.
 - `shorthand::parse(text, &TemplateSet)` resolves a type token against
   the set, after `C` and `P`. `render_package(&TemplateDef, legs)` is
-  unchanged in logic. `Sheet::shorthand(row, &TemplateSet)` resolves the
-  package's name and falls back to legs one per line when the name is
-  unknown or the legs don't fit its current table.
-- The tile holds the current `Rc<TemplateSet>`. The factory's reload
-  path (the one that carries `pricer_views`) replaces it and rebuilds
-  every open tile's model. The app's `PricerConfigKey` gains the merged
+  unchanged in logic.
+- The `Sheet` carries an `Arc<TemplateSet>` (not persisted; the builtin
+  set by default), so `Sheet::shorthand(row)` keeps its signature. It
+  resolves the package's name and falls back to legs one per line when
+  the name is unknown or the legs don't fit its current table.
+- The factory holds the current `Arc<TemplateSet>`. Its reload path (the
+  one that carries `pricer_views`) replaces it, sets it on every open
+  tile's sheet, and rebuilds the model. The app's `PricerConfigKey` gains the merged
   `pricer_templates` value, so an unrelated config edit does not
   rebuild.
 - Column 0's tag is the package's stored name, whatever its table
