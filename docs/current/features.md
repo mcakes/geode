@@ -169,13 +169,35 @@ affect them; cursor movement does not rebuild the data model.
 Every verb has a pointer route beside its key, and both take the tile's one
 `dispatch` path. The header's `⋯` button and a right-click on a chip open an
 action menu (`.` from the keyboard) listing the openers, the cursor slot's
-verbs, the frequency steps, the two toggles with their state, and the view
-reset; a disabled row names its reason as the notice. `j`/`k` step over
-disabled rows as they do over separators and section headings (in every
-tile's action menu); only the pointer rests on a disabled row. A chip click selects
-its slot, a click on its swatch shows or hides it, and the `range · freq`
-readout opens the range popup, which also carries a frequency row whose chips
-write at once and leave the popup open. Over the chart, a wheel zooms about
+verbs, `Frequency…`, the two toggles with their state, and the view reset; a
+disabled row names its reason as the notice. `j`/`k` step over disabled rows
+as they do over separators and section headings (in every tile's action
+menu); only the pointer rests on a disabled row. A chip click selects its
+slot, and a click on its swatch shows or hides it.
+
+The header shows the range and the frequency as two triggers, `1y ▾` and
+`1d ▾` (an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`). Each
+opens its own menu under it, and stays filled while that menu is up; a second
+click closes it. `r` and the range trigger open the range menu: the seven
+presets written out with their short labels, then `Custom dates…` (`c`). `f`
+and the frequency trigger open the frequency menu: the six frequencies with
+their short labels. Both menus tick the value in force and open with the
+highlight on it (on `Custom dates…` while the range is absolute). `j`/`k`
+move, `enter` or a click applies and closes, and `escape` closes; a second `r`
+or `f` closes its own menu. A frequency the 500,000-point cap refuses over the
+current range is a disabled row carrying the cap's reason, decided when the
+menu opens; picking it leaves the reason as the notice. A preset the cap
+refuses at the current frequency is refused the same way when picked, and
+the menu stays open. `:range` and `:freq` remain the typed routes; there is
+no key that steps the frequency.
+
+`Custom dates…` opens a two-field date editor under the range trigger. It
+opens on `from`'s day segment, and a digit types into the date at once.
+`tab` switches fields, `enter` applies both dates (a backwards range or an
+unfinished segment is refused inline, and the editor stays open), and
+`escape` returns to the range menu with the highlight on `Custom dates…`. A
+second `escape` closes the menu. The editor holds the keyboard, so the tile
+reports insert mode while it is open. Over the chart, a wheel zooms about
 the pointer (the dominant axis wins, so a sideways wheel pans instead), a drag
 on a plot pans, and a drag on the band between two panes moves the split. A
 drag ends on release, on a release anywhere off the chart, or on the first
@@ -184,16 +206,6 @@ second press arms nothing, because those are the shell's tile gestures. The
 empty tile offers the add and compose verbs as buttons under its hint. A
 right press focuses a tile exactly as a left one does, so a module's context
 menu always opens in the tile whose keys it will answer to.
-
-In the range popup a preset is typed as its chip reads (`3` `m` is `3m`,
-the same spelling as `:range 3m`), until a date is edited. The digit lights
-the chips it could start and waits for `w`, `m` or `y`. A digit no preset
-starts, a unit that makes no preset, and `enter` before the unit are refused
-inline. A shifted unit counts. `backspace` or `escape` drops the pending
-digit, and every other key drops it and then acts as it would anyway. Once
-a date has been edited (a segment moved to with `left`/`right`, stepped, or
-clicked), digits belong to the date; to type a date on a fresh popup, move
-to a segment first. `escape` and `r` again return to the presets.
 
 A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an
 absolute `#rrggbb`. The first two follow the theme and get its readability

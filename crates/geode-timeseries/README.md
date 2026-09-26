@@ -11,14 +11,14 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the action menu's rows, and the absolute `#rrggbb` colour with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), and the absolute `#rrggbb` colour with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Deliveries, the fetch of waiting pairs, the query, and flip-barrier staging and promotion. |
-| `tile::popups` | Opening, keying, committing, and closing the six popups (the colour picker is gpui-component's, bridged by two subscriptions), plus the chip, swatch, and frequency-chip doors. |
+| `tile::popups` | Opening, keying, committing, and closing the six popups (the colour picker is gpui-component's, bridged by two subscriptions), plus the chip, swatch, and trigger doors. |
 | `tile::pointer` | The chart surface's wheel, drag-pan, and split-drag gestures over the chart's own hit-test. |
-| `popup` | Popup state and painting: series list, add picker, expression editor, range editor, and action menu, whose list rows share one row shell; the colour picker's state (gpui-component paints it). |
-| `header` | Prepared chips and controls, the `⋯` button, and the empty state. |
+| `popup` | Popup state and painting: series list, add picker, expression editor, custom dates editor, and the menus (one painter for the action list, the range menu and the frequency menu); the colour picker's state (gpui-component paints it). |
+| `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the `⋯` button, and the empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
 ## Commands
@@ -39,6 +39,15 @@ cargo bench -p geode-timeseries
   movement.
 - One closer owns every popup and blurs a focused editor before dropping it.
 - `:` remains local to this tile.
+- A menu's rows are built when it opens (and on a chrome rebuild while it is
+  up), never in `render`; a frequency the point cap refuses is a disabled row
+  whose reason is the model's own refusal, so a pickable row never fails.
+- The range and frequency triggers toggle in the capture phase, like the `⋯`
+  button, because an open popup's `on_mouse_down_out` would close it first;
+  they also prevent default, because a press over the focused dates editor
+  must not hand the keyboard to the shell root.
+- `escape` in the custom dates editor returns to the range menu through the
+  one closer; only the menu's own `escape` closes.
 - A pointer door dispatches the verb's own action id; it never mutates the
   model on a path its key does not take.
 - A chart press and a header control never stop propagation, so the shell's
