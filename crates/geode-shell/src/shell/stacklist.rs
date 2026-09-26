@@ -8,7 +8,7 @@ use gpui::prelude::*;
 use gpui::{App, MouseButton, Pixels, SharedString, Window, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use super::listrow::row_paint;
+use super::listrow::{paint_row, row_paint};
 use super::scale;
 use crate::fonts;
 use crate::tiling::{Rect, TileId};
@@ -94,7 +94,7 @@ pub fn render(
     for (i, row) in rows.iter().enumerate() {
         let is_highlighted = i == list.highlighted;
         let on_click = on_row_click.clone();
-        let mut el = h_flex()
+        let el = h_flex()
             .id(("stack-list-row", i))
             .w_full()
             .h(px(row_height))
@@ -107,11 +107,7 @@ pub fn render(
                 cx.stop_propagation();
                 on_click(i, window, cx);
             });
-        if is_highlighted {
-            el = el.bg(paint.active).text_color(paint.text);
-        } else {
-            el = el.hover(|s| s.bg(paint.hover));
-        }
+        let el = paint_row(el, paint, is_highlighted);
         let digit = DIGITS.get(i).copied().unwrap_or("");
         panel = panel.child(
             el.child(

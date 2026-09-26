@@ -1036,7 +1036,8 @@ fn build(
         let title_len = row.title.chars().count();
         let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
-        let mut row_el = h_flex()
+        let row_el = h_flex()
+            .id(("keybindings-row", row_ix))
             .w_full()
             .justify_between()
             .items_center()
@@ -1044,11 +1045,7 @@ fn build(
             .px_2()
             .py_1()
             .rounded(theme.radius);
-        if is_selected {
-            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row_el = row_el.hover(|s| s.bg(row_paint.hover));
-        }
+        let row_el = super::listrow::paint_row(row_el, row_paint, is_selected);
 
         let label = v_flex()
             .gap_0p5()

@@ -1590,3 +1590,88 @@ fn pending_keys_which_key_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestA
         "the palette's binding column paints `q w` as Kbd chips"
     );
 }
+
+/// A pointer moving onto a result row repaints at once. gpui notifies
+/// the rendering view on a hover transition only for an element with an
+/// id (`gpui-pre-0.3.5/src/elements/div.rs`, the `MouseMoveEvent`
+/// listener that flips `hover_state`); an id-less row's hover fill
+/// waited for some unrelated repaint, so it read as a slow hover. A real
+/// mouse move, and the notification the frame needs, counted on both
+/// views that could own the row.
+#[gpui::test]
+fn a_pointer_entering_a_result_row_repaints_at_once(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("gruvbox");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let row_bounds = cx
+        .debug_bounds("palette-row-1")
+        .expect("row 1 should have painted bounds to hover");
+    let inside = gpui::point(
+        row_bounds.origin.x + gpui::px(10.0),
+        row_bounds.origin.y + gpui::px(10.0),
+    );
+    // Row 0 (the highlighted one) is off row 1 and inside the panel, so
+    // resting there first makes the move below a hover transition on
+    // row 1 and not the window's first mouse event (which also ends the
+    // keyboard modality that suppresses hover after typing).
+    let elsewhere = cx
+        .debug_bounds("palette-row-0")
+        .expect("row 0 should have painted bounds to rest the pointer on");
+    cx.simulate_mouse_move(
+        gpui::point(
+            elsewhere.origin.x + gpui::px(10.0),
+            elsewhere.origin.y + gpui::px(10.0),
+        ),
+        None,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _subscriptions = cx.update(|_window, cx| {
+        let on_shell = notified.clone();
+        let on_root = notified.clone();
+        [
+            cx.observe(&shell, move |_, _| on_shell.set(on_shell.get() + 1)),
+            cx.observe(&root, move |_, _| on_root.set(on_root.get() + 1)),
+        ]
+    });
+
+    cx.simulate_mouse_move(inside, None, gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert!(
+        notified.get() > 0,
+        "entering a non-highlighted row must notify its view, or the hover fill waits for an unrelated repaint"
+    );
+}

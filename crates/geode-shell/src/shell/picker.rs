@@ -560,7 +560,8 @@ fn build_columns(
     for (position, (row_ix, indices)) in matches.iter().enumerate() {
         let p = &shell.pickable[*row_ix];
         let is_selected = position == picker.selected;
-        let mut row = h_flex()
+        let row = h_flex()
+            .id(("picker-column-row", *row_ix))
             .w_full()
             .justify_between()
             .items_center()
@@ -568,11 +569,7 @@ fn build_columns(
             .px_2()
             .py_1()
             .rounded(radius);
-        if is_selected {
-            row = row.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row = row.hover(|s| s.bg(row_paint.hover));
-        }
+        let row = listrow::paint_row(row, row_paint, is_selected);
         let datasets = if p.datasets.is_empty() {
             "derived".to_string()
         } else {
@@ -636,7 +633,8 @@ fn build_values(
                         let (value, n) = &values[*idx];
                         let is_ticked = ticked.contains(value);
                         let is_selected = i == selected;
-                        let mut row = h_flex()
+                        let row = h_flex()
+                            .id(("picker-value-row", *idx))
                             .w_full()
                             .justify_between()
                             .items_center()
@@ -644,11 +642,7 @@ fn build_values(
                             .px_2()
                             .py_1()
                             .rounded(radius);
-                        if is_selected {
-                            row = row.bg(row_paint.active).text_color(row_paint.text);
-                        } else {
-                            row = row.hover(|s| s.bg(row_paint.hover));
-                        }
+                        let row = listrow::paint_row(row, row_paint, is_selected);
                         let value_for_tick = value.clone();
                         let tick_entity = entity.clone();
                         let tick = if is_ticked {

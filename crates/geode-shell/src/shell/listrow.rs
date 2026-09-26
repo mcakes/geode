@@ -45,7 +45,8 @@
 //! through and commits — not menus, so they wear the list pair.
 
 use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
-use gpui::Hsla;
+use gpui::prelude::*;
+use gpui::{Div, Hsla, Stateful};
 use gpui_component::Theme;
 
 use super::colours::{over, to_hsla, to_rgb};
@@ -77,6 +78,23 @@ pub fn row_paint(theme: &Theme) -> RowPaint {
             ground,
             to_rgb(theme.foreground),
         )),
+    }
+}
+
+/// Paints a list row's state: the active fill and text when
+/// `highlighted`, else the hover fill under the pointer.
+///
+/// The row must carry an id. gpui notifies the rendering view on a hover
+/// transition only for an element with one (the `MouseMoveEvent`
+/// listener in `gpui-pre-0.3.5/src/elements/div.rs` flips `hover_state`,
+/// which only an identified element has); an id-less row still paints
+/// the fill, but only on some unrelated repaint, so the hover lags the
+/// pointer. The `Stateful` bound makes that a compile error.
+pub fn paint_row(row: Stateful<Div>, paint: RowPaint, highlighted: bool) -> Stateful<Div> {
+    if highlighted {
+        row.bg(paint.active).text_color(paint.text)
+    } else {
+        row.hover(move |s| s.bg(paint.hover))
     }
 }
 
@@ -162,6 +180,45 @@ mod tests {
         assert!(
             failing >= 10,
             "primary on selection failed on only {failing} themes — the sweep has lost its teeth"
+        );
+    }
+
+    /// Every list row paints its state through [`paint_row`], whose
+    /// `Stateful` bound is what keeps the hover prompt. A call site
+    /// writing its own `.hover(.. paint.hover)` compiles on an id-less
+    /// row and lags the pointer again, which only a source scan sees.
+    #[test]
+    fn every_row_hover_goes_through_paint_row() {
+        let sources: [(&str, &str); 8] = [
+            ("palette.rs", include_str!("../palette.rs")),
+            ("asof_view.rs", include_str!("asof_view.rs")),
+            ("dialog.rs", include_str!("dialog.rs")),
+            ("keybindings_view.rs", include_str!("keybindings_view.rs")),
+            (
+                "objectdialog/render.rs",
+                include_str!("objectdialog/render.rs"),
+            ),
+            ("picker.rs", include_str!("picker.rs")),
+            ("settings_view.rs", include_str!("settings_view.rs")),
+            ("stacklist.rs", include_str!("stacklist.rs")),
+        ];
+        let mut offenders = Vec::new();
+        let mut calls = 0;
+        for (name, text) in sources {
+            calls += text.matches("paint_row(").count();
+            for (at, _) in text.match_indices("paint.hover") {
+                let line = text[..at].lines().count();
+                offenders.push(format!("{name}:{line}"));
+            }
+        }
+        assert!(
+            calls >= 9,
+            "the scan saw only {calls} paint_row calls — a file moved?"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a list row paints its hover by hand instead of through paint_row:\n{}",
+            offenders.join("\n")
         );
     }
 

@@ -13115,6 +13115,31 @@ run_mutation "listrow: every highlight run takes the door's accent" \
   geode-shell \
   every_highlight_run_takes_the_doors_accent
 
+# The door gives a row its hover, and the row's id is what makes gpui
+# notify on the transition. Mutated so the door paints no hover, the
+# pointer entering a row asks for no frame: the real-mouse-move test
+# counts the notification the repaint needs.
+run_mutation "listrow: a hovered row asks for a repaint" \
+  crates/geode-shell/src/shell/listrow.rs \
+  '        row.hover(move |s| s.bg(paint.hover))' \
+  '        row' \
+  geode-shell \
+  a_pointer_entering_a_result_row_repaints_at_once
+
+# A call site painting its own hover compiles on an id-less row, and
+# that row's fill lags the pointer until an unrelated repaint. Only a
+# source scan sees the bypass.
+run_mutation "listrow: every row hover goes through paint_row" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        let row = super::listrow::paint_row(row, paint, position == list.ranked_highlighted());' \
+  '        let row = if position == list.ranked_highlighted() {
+            row.bg(paint.active).text_color(paint.text)
+        } else {
+            row.hover(move |s| s.bg(paint.hover))
+        };' \
+  geode-shell \
+  every_row_hover_goes_through_paint_row
+
 # ---- Clickable controls (`shell::control`, affordance follow-up) --------
 # The design guide owes every control a hover and a pressed state. The
 # door borrows gpui-component's button tokens where they are VISIBLY

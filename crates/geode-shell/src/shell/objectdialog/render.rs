@@ -2775,7 +2775,8 @@ fn build(
         // crate keeps that exact shape.
         let (name_ix, summary_ix) = split_label_indices(&m.indices, name_len);
 
-        let mut row_el = h_flex()
+        let row_el = h_flex()
+            .id(("objectdialog-row", m.row))
             .w_full()
             .justify_between()
             .items_center()
@@ -2783,11 +2784,7 @@ fn build(
             .px_2()
             .py_1()
             .rounded(theme.radius);
-        if is_selected {
-            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row_el = row_el.hover(|s| s.bg(row_paint.hover));
-        }
+        let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
         // a prefixed row paints `<prefix> · ` dimmed and the name after it, as two runs
         // of one highlighted label — the indices are split at the prefix's end so a hit
@@ -3314,7 +3311,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             // Every row carries the same 2px top border, transparent unless
             // `drag_over` recolours it — reserving the space up front means a
             // hover only repaints the color, never reflows the rows below it.
-            let mut element = h_flex()
+            let element = h_flex()
+                .id(("objectdialog-field-row", m.row))
                 .w_full()
                 .items_center()
                 .justify_between()
@@ -3324,11 +3322,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .rounded(theme.radius)
                 .border_t_2()
                 .border_color(gpui::transparent_black());
-            if is_selected {
-                element = element.bg(row_paint.active).text_color(row_paint.text);
-            } else {
-                element = element.hover(|s| s.bg(row_paint.hover));
-            }
+            let element = super::super::listrow::paint_row(element, row_paint, is_selected);
             // Set only for a list row that opens a new block — see this
             // loop's own comment on `last_item_section`.
             let mut section_header: Option<AnyElement> = None;

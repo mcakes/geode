@@ -406,15 +406,16 @@ impl PaletteState {
     }
 
     /// [`filtered`](Self::filtered) without the clones — the render's
-    /// per-frame walk: each row's item, its matched indices over
+    /// per-frame walk: each row's index into the unfiltered items (its
+    /// stable element id), the item, its matched indices over
     /// `"{title} {category}"`, and the title length the matcher scored
     /// against (the lowered title's char count), which is what
     /// [`split_label_indices`] must split at for the highlight to agree
     /// with the alignment by construction.
-    pub fn rows(&self) -> impl Iterator<Item = (&PaletteItem, &[usize], usize)> {
+    pub fn rows(&self) -> impl Iterator<Item = (usize, &PaletteItem, &[usize], usize)> {
         self.filtered
             .iter()
-            .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
+            .map(|(i, indices)| (*i, &self.items[*i], indices.as_slice(), self.title_len[*i]))
     }
 
     /// The currently selected row, if any (an empty filtered list, or a
@@ -615,9 +616,10 @@ pub fn render(
                 .child("no matches"),
         );
     } else {
-        for (i, (item, indices, title_len)) in state.rows().enumerate() {
+        for (i, (item_ix, item, indices, title_len)) in state.rows().enumerate() {
             let is_selected = i == state.selected();
-            let mut row = h_flex()
+            let row = h_flex()
+                .id(("palette-row", item_ix))
                 .w_full()
                 .justify_between()
                 .items_center()
@@ -628,11 +630,7 @@ pub fn render(
             // The list-row tokens through the one door (`shell::listrow`):
             // the highlighted row is the state, the hovered row is the
             // pointer, and they are distinct fills.
-            if is_selected {
-                row = row.bg(row_paint.active).text_color(row_paint.text);
-            } else {
-                row = row.hover(|s| s.bg(row_paint.hover));
-            }
+            let row = crate::shell::listrow::paint_row(row, row_paint, is_selected);
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
             // The shell callback selects and commits this filtered row. Clone the
@@ -1560,7 +1558,7 @@ mod tests {
         let cloned = state.filtered();
         let rows: Vec<_> = state.rows().collect();
         assert_eq!(rows.len(), cloned.len());
-        for ((item, indices), (row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
+        for ((item, indices), (_, row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
             assert_eq!(*item, *row_item);
             assert_eq!(indices, row_indices);
             assert_eq!(*title_len, item.title().chars().count());

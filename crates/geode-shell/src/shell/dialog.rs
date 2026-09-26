@@ -440,7 +440,8 @@ pub(crate) fn choice_rows(
         let text = &list.options()[ranked.row];
         let selector = format!("{prefix}-choice-{text}");
         let on_click = on_click.clone();
-        let mut row = h_flex()
+        let row = h_flex()
+            .id(("choice-row", ranked.row))
             .w_full()
             .h(scale::design(CHOICE_ROW_HEIGHT))
             // The container is a fixed-height column: without this a
@@ -461,11 +462,7 @@ pub(crate) fn choice_rows(
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 on_click(position, window, cx);
             });
-        if position == list.ranked_highlighted() {
-            row = row.bg(paint.active).text_color(paint.text);
-        } else {
-            row = row.hover(move |s| s.bg(paint.hover));
-        }
+        let row = super::listrow::paint_row(row, paint, position == list.ranked_highlighted());
         rows = rows.child(row);
     }
     rows.into_any_element()
