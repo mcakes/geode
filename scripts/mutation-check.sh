@@ -17022,16 +17022,75 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
   geode-timeseries \
   x_opens_the_expression_field_and_enter_adds_or_reports_inline
 
-# In the range popup a bare `1`..`7` is a PRESET until the trader starts
-# editing a date (§9.8, Task 10 ruling). Without the preset arm the digit
-# types itself into the day segment and the popup stays open — the
-# keyboard path to `3m` is gone.
-run_mutation "timeseries: a digit in the range popup commits a preset" \
+# In the range popup a preset is typed as its chip reads (`3` `m`) until
+# the trader starts editing a date (§9.8). Each rule of the typed label:
+# the digit waits as a prefix, the unit writes the preset, and only an
+# unedited popup reads a digit as a label.
+run_mutation "timeseries: a digit in the range popup starts a preset label" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    && Preset::digit(d).is_some() =>' \
-  '                    && false =>' \
+  '                r.prefix = Some(d);' \
+  '                r.prefix = None;' \
   geode-timeseries \
-  r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+run_mutation "timeseries: the unit completes a typed preset label" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                Some(preset) => {
+                    self.write_range(Range::Relative(preset), window, cx);' \
+  '                Some(preset) => {
+                    let _ = preset;' \
+  geode-timeseries \
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+run_mutation "timeseries: an edited range popup types digits into the date" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            && r.digit_is_preset()' \
+  '            && true' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+
+# A digit no label starts is refused, not held as a prefix nothing can
+# complete.
+run_mutation "timeseries: a digit no preset starts is refused" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if Preset::any_starts_with(d) {' \
+  '            if true {' \
+  geode-timeseries \
+  a_typed_label_refuses_what_is_no_preset
+
+# enter under a pending label would otherwise commit the two dates the
+# trader was not typing.
+run_mutation "timeseries: enter under a pending preset label is refused" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            (_, "enter") => {' \
+  '            (_, "never-enter") => {' \
+  geode-timeseries \
+  a_typed_label_refuses_what_is_no_preset
+
+# The first escape drops a pending label; only the second closes.
+run_mutation "timeseries: escape drops a pending preset label first" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            (_, "backspace" | "escape") => {' \
+  '            (_, "backspace") => {' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+
+# Only the presets a pending digit could still become are lit.
+run_mutation "timeseries: a pending label lights only its own presets" \
+  crates/geode-timeseries/src/popup.rs \
+  '        self.prefix.is_some_and(|d| preset.starts_with(d))' \
+  '        self.prefix.is_some()' \
+  geode-timeseries \
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+# A segment click is the mouse's field key and drops a pending label.
+run_mutation "timeseries: a segment click drops a pending preset label" \
+  crates/geode-timeseries/src/popup.rs \
+  '        self.edited = true;
+        self.prefix = None;' \
+  '        self.edited = true;' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
 
 # …and the other half of the same rule: only a key that MOVED something
 # counts as an edit. `right` on the last segment, or a `tab`, changes

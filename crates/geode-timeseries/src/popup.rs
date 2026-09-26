@@ -82,7 +82,7 @@ pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 /// The range popup's one hint line: the digit shortcut is otherwise
 /// invisible, and the `edited` rule behind it ("until you start editing
 /// a date") is what makes it worth naming.
-const RANGE_HINT: &str = "1–7 preset · tab switches · enter commits";
+const RANGE_HINT: &str = "type a preset (3m, 1y) · tab switches · enter commits";
 
 /// What the tile currently has open. `Series` is the series list (spec
 /// §9.5) — it holds no field, so it is NOT an insert-mode popup: the key
@@ -268,9 +268,14 @@ pub(crate) struct RangePopup {
     /// beside what caused it.
     pub error: Option<SharedString>,
     /// Whether a keystroke has reached either field since the popup
-    /// opened — what decides whether a bare `1`..`7` is a PRESET or a
-    /// digit (see [`RangePopup::digit_is_preset`]).
+    /// opened — what decides whether a bare digit starts a PRESET label
+    /// or types into the date (see [`RangePopup::digit_is_preset`]).
     pub edited: bool,
+    /// The digit of a preset label being typed (`1` of `1y`), waiting
+    /// for its unit. Only ever set on an unedited popup; the chips it
+    /// could start paint lit. `preset_key` drops it for every other
+    /// key, and a segment click (`select`) drops it too.
+    pub prefix: Option<u8>,
     /// The frequency in force, mirrored from the model at open and on
     /// every chip click so the frequency row paints the tick without
     /// reading the model in `render`.
@@ -324,6 +329,7 @@ impl RangePopup {
     ) {
         self.active = which;
         self.edited = true;
+        self.prefix = None;
         self.active_field_mut().select(segment);
         self.reprepare(which, tile_id);
     }
@@ -335,22 +341,27 @@ impl RangePopup {
         }
     }
 
-    /// Whether a bare `1`..`7` means a PRESET rather than a digit typed
-    /// into the active segment (spec §9.8).
+    /// Whether a bare digit starts a PRESET label (`3` of `3m`) rather
+    /// than typing into the active segment (spec §9.8).
     ///
     /// Two conditions, and both are load-bearing. `!typing()` is the
     /// obvious one: a second digit always belongs to the segment being
-    /// typed. `!edited` is the one the two readings of §9.8 disagree on,
-    /// and it is what makes both halves of the popup reachable — every
-    /// preset digit but `8`, `9` and `0` is also a legal first digit of
-    /// a year, so a popup that read `1` as a preset AFTER the trader had
-    /// moved onto the year segment could never be used to type `1990`.
-    /// The rule a trader learns is therefore "a digit is a preset until
-    /// you start editing a date, and the date's from then on" — and
-    /// `escape`, then `r` again, is how you get back to the presets
-    /// without the mouse.
+    /// typed. `!edited` is what makes both halves of the popup
+    /// reachable — every leading preset digit is also a legal first
+    /// digit of a year, so a popup that read `1` as a preset AFTER the
+    /// trader had moved onto the year segment could never be used to
+    /// type `1990`. The rule a trader learns is therefore "a digit is a
+    /// preset until you start editing a date, and the date's from then
+    /// on" — and `escape`, then `r` again, is how you get back to the
+    /// presets without the mouse.
     pub(crate) fn digit_is_preset(&self) -> bool {
         !self.edited && !self.active_field().typing()
+    }
+
+    /// Whether `preset`'s chip paints lit: a label is being typed and
+    /// this preset is one it could still become.
+    pub(crate) fn candidate(&self, preset: Preset) -> bool {
+        self.prefix.is_some_and(|d| preset.starts_with(d))
     }
 }
 
@@ -978,13 +989,24 @@ pub(crate) fn render_range(
         .px(scale::design(ROW_INSET))
         .gap_1()
         .items_center();
-    // One derivation for all seven: every preset chip is the same
-    // `Tone::Neutral` on the same popover ground, and `for_chip` costs a
+    // One derivation per paint, not per chip: `for_chip` costs a
     // handful of contrast checks and up to an OKLab bisection per call.
-    let chip = chip_paint(theme, Tone::Neutral);
-    let states = control::for_chip(theme, &chip, theme.popover);
+    // Every chip is filled until a label is being typed; then the
+    // presets it could still become stay filled and the rest go bare
+    // (the frequency row's pair), so `1` shows 1w, 1m and 1y.
+    let filled = chip_paint(theme, Tone::Neutral);
+    let filled_states = control::for_chip(theme, &filled, theme.popover);
+    let mut bare = chip_paint(theme, Tone::Neutral);
+    bare.fill = None;
+    bare.text = theme.muted_foreground;
+    let bare_states = control::for_chip(theme, &bare, theme.popover);
     for (i, preset) in Preset::ALL.into_iter().enumerate() {
         let word = preset.as_str();
+        let (chip, states) = if p.prefix.is_none() || p.candidate(preset) {
+            (&filled, filled_states)
+        } else {
+            (&bare, bare_states)
+        };
         presets = presets.child(
             div()
                 .id(ElementId::NamedInteger(
@@ -998,8 +1020,8 @@ pub(crate) fn render_range(
                 .text_color(chip.text)
                 .when_some(chip.fill, |d, fill| d.bg(fill))
                 .pointer_states(states)
-                // The mouse's form of the digit: commits at once, like
-                // every other preset door (§9.8).
+                // The mouse's form of the typed label: commits at once,
+                // like every other preset door (§9.8).
                 .on_mouse_down(MouseButton::Left, {
                     let tile = tile.clone();
                     move |_, window, cx| {

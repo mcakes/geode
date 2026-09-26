@@ -568,6 +568,18 @@ impl Harness {
     }
     /// The range popup's inline refusal — a backwards range, an
     /// unfinished segment or the point cap.
+    /// The range popup's chips a pending typed label still lights, in
+    /// chip order — empty when no label is pending.
+    fn range_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<&'static str> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Range(r)) => Preset::ALL
+                .into_iter()
+                .filter(|p| r.candidate(*p))
+                .map(Preset::as_str)
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
     fn range_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Range(r)) => r.error.as_ref().map(|e| e.to_string()),
@@ -1855,7 +1867,10 @@ fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(cx: &mut gpu
     // own listener: gpui dispatches against the LAST frame's focus
     // path (the picker tests' own rule).
     h.draw(&mut vcx);
+    // The label typed as the chip reads: `3` waits for its unit.
     vcx.simulate_keystrokes("3");
+    assert!(h.popup_is_range(&vcx), "a digit alone waits");
+    vcx.simulate_keystrokes("m");
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
     assert!(
@@ -1926,9 +1941,9 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
-    // `0` is no preset (`Preset::digit` has no zero), so it types —
-    // and a day of `0` waits for a second digit it never gets.
-    vcx.simulate_keystrokes("0");
+    // Off the day and back makes the popup edited, so `0` types — and
+    // a day of `0` waits for a second digit it never gets.
+    vcx.simulate_keystrokes("left right 0");
     assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
     vcx.simulate_keystrokes("enter");
     assert!(h.popup_is_range(&vcx), "refused: still open");
@@ -1951,7 +1966,7 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     );
 }
 
-/// `edited` is what turns the preset digits off, so
+/// `edited` is what turns the typed preset labels off, so
 /// only a keystroke that actually MOVED something may set it — a key
 /// that did nothing must leave the presets reachable. Two such keys,
 /// both of which used to disable them:
@@ -1973,7 +1988,7 @@ fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestApp
         (Which::From, Segment::Day),
         "`right` on the last segment moves nothing"
     );
-    vcx.simulate_keystrokes("3");
+    vcx.simulate_keystrokes("3 m");
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
 
@@ -1981,9 +1996,106 @@ fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestApp
     h.draw(&mut vcx);
     vcx.simulate_keystrokes("tab");
     assert_eq!(h.range_active_segment(&vcx).0, Which::To);
-    vcx.simulate_keystrokes("4");
+    vcx.simulate_keystrokes("6 m");
     assert!(h.popup_is_none(&vcx), "`tab` is not an edit either");
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M6));
+}
+
+/// A preset is typed as its chip reads: the digit lights the chips it
+/// could start and waits, and the unit completes the label.
+#[gpui::test]
+fn a_digit_lights_its_presets_and_the_unit_commits_the_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    assert!(
+        h.range_candidates(&vcx).is_empty(),
+        "nothing typed, nothing lit"
+    );
+    vcx.simulate_keystrokes("1");
+    assert_eq!(h.range_candidates(&vcx), vec!["1w", "1m", "1y"]);
+    assert!(h.popup_is_range(&vcx));
+    // A second digit replaces the first.
+    vcx.simulate_keystrokes("5");
+    assert_eq!(h.range_candidates(&vcx), vec!["5y"]);
+    vcx.simulate_keystrokes("1 y");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
+}
+
+/// What a typed label refuses, inline and with the popup still open:
+/// a digit no label starts, a unit that makes no label (the digit
+/// stays), and `enter` before the unit.
+#[gpui::test]
+fn a_typed_label_refuses_what_is_no_preset(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("4");
+    assert!(h.popup_is_range(&vcx));
+    assert!(h.range_candidates(&vcx).is_empty());
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(error.contains("no preset starts with 4"), "{error}");
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+
+    vcx.simulate_keystrokes("2 m");
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(
+        error.contains("no preset 2m") && error.contains("2y"),
+        "{error}"
+    );
+    assert_eq!(h.range_candidates(&vcx), vec!["2y"], "the digit stays");
+
+    vcx.simulate_keystrokes("enter");
+    assert!(
+        h.popup_is_range(&vcx),
+        "enter commits no dates under a label"
+    );
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(error.contains("finish the preset"), "{error}");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y2));
+}
+
+/// `backspace` and `escape` drop a pending label without closing (a
+/// second `escape` closes); a field key drops it and acts, and from
+/// then on digits type into the date.
+#[gpui::test]
+fn a_pending_label_is_dropped_by_backspace_escape_and_field_keys(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let before = h.model(&vcx).range().clone();
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1 backspace");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert!(h.popup_is_range(&vcx));
+    vcx.simulate_keystrokes("1 escape");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert!(h.popup_is_range(&vcx), "the first escape drops the label");
+    vcx.simulate_keystrokes("escape");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &before);
+
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1 left");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
+    vcx.simulate_keystrokes("1");
+    assert!(
+        h.range_candidates(&vcx).is_empty(),
+        "edited: a digit is the date's"
+    );
+    assert!(h.popup_is_range(&vcx));
+
+    // A click on a segment is the mouse's field key: it drops the label.
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1");
+    assert_eq!(h.range_candidates(&vcx).len(), 3, "fixture check: pending");
+    h.click(&mut vcx, &format!("ts-range-from-{TILE}-0"));
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Year));
 }
 
 /// `tab` answers a standing refusal, exactly as every other field key
@@ -1994,7 +2106,7 @@ fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
-    vcx.simulate_keystrokes("0"); // no preset; a day mid-entry
+    vcx.simulate_keystrokes("left right 0"); // edited; a day mid-entry
     vcx.simulate_keystrokes("enter");
     assert!(h.range_error(&vcx).is_some(), "fixture check: refused");
     vcx.simulate_keystrokes("tab");

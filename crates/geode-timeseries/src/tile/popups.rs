@@ -548,6 +548,7 @@ impl TimeseriesTile {
             focus,
             error: None,
             edited: false,
+            prefix: None,
             frequency: self.model.frequency(),
         }));
         self.notice = None;
@@ -561,9 +562,11 @@ impl TimeseriesTile {
     ///
     /// `geode_widgets::datefield::route` is the ONE key table this
     /// consults (CLAUDE.md), and a chord answers `None` there, so
-    /// `ctrl+k` still opens the palette over an open popup. `tab` is the
-    /// one key this popup adds: `route` has no arm for it, and with two
-    /// fields under one keyboard both directions are the same move.
+    /// `ctrl+k` still opens the palette over an open popup. `tab` is one
+    /// key this popup adds: `route` has no arm for it, and with two
+    /// fields under one keyboard both directions are the same move. The
+    /// typed preset label is the other (`preset_key`): it runs first,
+    /// so a pending label's `enter` and `escape` never reach the fields.
     ///
     /// `enter`, `escape`, `up` and `down` are ALSO bound by the
     /// fragment's `mode == insert` layer, so both doors end in the same
@@ -579,6 +582,9 @@ impl TimeseriesTile {
         }
         let modifiers = event.keystroke.modifiers;
         let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        if !chord && self.preset_key(event.keystroke.key.as_str(), modifiers.shift, window, cx) {
+            return true;
+        }
         if !chord && event.keystroke.key.as_str() == "tab" {
             if let Some(Popup::Range(r)) = &mut self.popup {
                 r.switch();
@@ -599,17 +605,89 @@ impl TimeseriesTile {
                 self.commit_range(window, cx);
             }
             FieldKey::Cancel => self.close_popup_with_window(window, cx),
-            // The digit shortcut (§9.8) — see `RangePopup::
-            // digit_is_preset` for when a digit is a preset and when it
-            // belongs to the date.
-            FieldKey::Digit(d)
-                if matches!(&self.popup, Some(Popup::Range(r)) if r.digit_is_preset())
-                    && Preset::digit(d).is_some() =>
-            {
-                let preset = Preset::digit(d).expect("just checked");
-                self.write_range(Range::Relative(preset), window, cx);
-            }
             other => self.apply_range_key(other, cx),
+        }
+        true
+    }
+
+    /// The typed preset label (§9.8): on an unedited popup a digit that
+    /// starts a label waits as `prefix`, lighting the chips it could
+    /// become, and `w`/`m`/`y` completes it — `3` `m` writes `3m`, as
+    /// the chip's click does. Answers whether the key was consumed.
+    ///
+    /// While a label is pending, `backspace` and `escape` drop it (a
+    /// second `escape` closes), and `enter` is refused rather than
+    /// committing dates the trader was not typing. A digit no label
+    /// starts is refused whole. Every other key drops the label and
+    /// goes on to the fields — see `RangePopup::digit_is_preset` for
+    /// when a digit belongs to the date instead.
+    fn preset_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(Popup::Range(r)) = &mut self.popup else {
+            return false;
+        };
+        let mut chars = key.chars();
+        let single = match (chars.next(), chars.next()) {
+            (Some(c), None) if !shift => Some(c),
+            _ => None,
+        };
+        if let Some(d) = single.and_then(|c| c.to_digit(10))
+            && r.digit_is_preset()
+        {
+            let d = d as u8;
+            if Preset::any_starts_with(d) {
+                r.prefix = Some(d);
+                r.error = None;
+            } else {
+                r.prefix = None;
+                r.error = Some(format!("no preset starts with {d} — {}", Preset::WORDS).into());
+            }
+            cx.notify();
+            return true;
+        }
+        let Some(d) = r.prefix else {
+            return false;
+        };
+        let candidates = || {
+            Preset::ALL
+                .into_iter()
+                .filter(|p| p.starts_with(d))
+                .map(Preset::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (single, key) {
+            (Some(unit @ ('w' | 'm' | 'y')), _) => match Preset::typed(d, unit) {
+                Some(preset) => {
+                    self.write_range(Range::Relative(preset), window, cx);
+                }
+                None => {
+                    r.error = Some(format!("no preset {d}{unit} — {}", candidates()).into());
+                    cx.notify();
+                }
+            },
+            (_, "backspace" | "escape") => {
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+            }
+            (_, "enter") => {
+                r.error = Some(format!("finish the preset — {}", candidates()).into());
+                cx.notify();
+            }
+            _ => {
+                // Not the label's: drop it and let the key act as it
+                // always has. A refusal about the label goes with it.
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+                return false;
+            }
         }
         true
     }
