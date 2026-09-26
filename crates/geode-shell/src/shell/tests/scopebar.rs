@@ -314,11 +314,10 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
 /// The `+` chip paints regardless of the scope's own state — adding a
 /// filter is how a scope starts — and its menu's "Dimension…" row opens
 /// the same picker `mod+p`/`frame::pick` does, with the filter field
-/// HOLDING the focus the open gave it (grouping-picker work, 2026-09-19):
-/// gpui's bubble-phase focus grab on the same mouse-down used to hand
-/// focus to the shell root a moment later, so typing after a click went
-/// nowhere. `open_shell_dialog_with_key`'s `prevent_default` is the fix,
-/// for every dialog a mouse-down opens.
+/// HOLDING the focus the open gave it, so typing after the click lands
+/// (the mouse-opened-dialog rule; the row stops its press's propagation,
+/// and `open_shell_dialog_with_key`'s `prevent_default` covers every
+/// other mouse-opened dialog).
 #[gpui::test]
 fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
