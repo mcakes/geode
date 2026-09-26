@@ -21227,7 +21227,8 @@ run_mutation "modal back: the object dialog offers Back only off Browse" \
   geode-shell the_back_button_is_absent_in_browse
 
 # One click is one whole screen: an open field is cancelled before the
-# stage is left, or its entry survives into the parent stage.
+# stage is left. Leaving Edit drops the draft and leaving Column drops the
+# entry anyway, so only the pure preparation shows the skipped cancel.
 run_mutation "modal back: a click cancels the open field before leaving" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '            draft.cancel_text_entry();
@@ -21237,7 +21238,7 @@ run_mutation "modal back: a click cancels the open field before leaving" \
   '            self.mode = DialogMode::Normal;
         }
         if self.mode == DialogMode::Filter {' \
-  geode-shell the_back_button_cancels_a_column_field_before_leaving
+  geode-shell abandon_for_back_cancels_an_open_field
 
 # A kept query is Escape's rung before the stage step; the click clears it.
 run_mutation "modal back: a click clears the kept query" \
