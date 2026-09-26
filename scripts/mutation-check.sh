@@ -20829,6 +20829,13 @@ run_mutation "blotter selection: summarize goes through top_most" \
   geode-blotter \
   a_group_with_its_child_sums_the_group_once
 
+run_mutation "blotter selection: a shift press starts a selection" \
+  crates/geode-blotter/src/tile.rs \
+  '                } => (row, col, Some(kind_for(gutter))),' \
+  '                } => (row, col, None),' \
+  geode-blotter \
+  shift_click_extends_a_block_from_the_cursor
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

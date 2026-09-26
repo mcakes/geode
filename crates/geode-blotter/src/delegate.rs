@@ -24,8 +24,8 @@ use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_fr
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
-    TextAlign, Window, div, px,
+    App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, SharedString, Stateful, TextAlign, Window, div, px,
 };
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -43,6 +43,28 @@ use std::sync::Arc;
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
+
+/// Every mouse gesture `render_td` recognises on a cell or its gutter
+/// (grid selection spec §5), carried to the tile exactly as `ChevronClicked`
+/// is — the tile's `pointer` handler is the one door both a shift+click and
+/// a drag go through to `start_selection`/`clear_selection`, so the mouse
+/// can never reach a selection state the keyboard doors forbid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPointer {
+    Press {
+        row: usize,
+        col: usize,
+        shift: bool,
+        gutter: bool,
+    },
+    Drag {
+        row: usize,
+        col: usize,
+        gutter: bool,
+    },
+}
+
+impl EventEmitter<CellPointer> for TableState<BlotterDelegate> {}
 
 /// A column's `colour` setting reduced to what a paint site needs to
 /// branch on — see `BlotterDelegate::colour_kind`.
@@ -153,6 +175,13 @@ pub struct BlotterDelegate {
     /// which is what keeps the lazy read: a blotter naming no colour
     /// never builds it at all. See [`BlotterDelegate::ensure_theme_inputs`].
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+    /// The `(row, col)` a mouse-move handler last emitted a `CellPointer`
+    /// for, so a move that stays within the same cell (gpui fires one per
+    /// pixel, not per cell) never re-emits — the tile's `pointer` handler
+    /// would otherwise re-run `start_selection`'s no-op-if-already-live
+    /// branch and move the cursor to where it already is, harmlessly but
+    /// on every frame of a held drag.
+    drag_last: Option<(usize, usize)>,
     /// The chevron's pointer states, memoised behind every colour the
     /// derivation reads (`control::ControlInputs` is that key by
     /// construction). `control_paint` costs three `Hsla -> Rgb`
@@ -216,6 +245,7 @@ impl BlotterDelegate {
             colour_cache: ColourCache::new(),
             theme_inputs: None,
             chevron: None,
+            drag_last: None,
         }
     }
 
@@ -1131,6 +1161,40 @@ impl TableDelegate for BlotterDelegate {
             // `gpui-pre-0.3.5/src/elements/div.rs`), so this costs
             // nothing on the render thread in release.
             .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
+            // Every selection gesture the mouse can make on a cell (spec
+            // §5): a press (plain, or shift-extending) and a drag while
+            // the primary button stays down. Neither stops propagation —
+            // the row's own `SelectRow`/tile-focus press must still
+            // arrive — and neither mutates the delegate beyond
+            // `drag_last`, the emitted `CellPointer` doing the rest
+            // through the tile's `pointer` handler.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    this.delegate_mut().drag_last = Some((row_ix, col_ix));
+                    cx.emit(CellPointer::Press {
+                        row: row_ix,
+                        col: col_ix,
+                        shift: e.modifiers.shift,
+                        gutter: false,
+                    });
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                if e.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+                let d = this.delegate_mut();
+                if d.drag_last == Some((row_ix, col_ix)) {
+                    return;
+                }
+                d.drag_last = Some((row_ix, col_ix));
+                cx.emit(CellPointer::Drag {
+                    row: row_ix,
+                    col: col_ix,
+                    gutter: false,
+                });
+            }))
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
             .when(in_block, |el| el.bg(theme.selection.opacity(0.35)))
             .when(is_cursor, |el| {
@@ -1187,6 +1251,41 @@ impl TableDelegate for BlotterDelegate {
                         .mr(indent)
                         .text_color(if on_cursor_row { fg } else { muted })
                         .debug_selector(|| format!("blotter-gutter-{row_ix}"))
+                        // A gutter press means "rows" the way the cell's
+                        // own press means "block" — otherwise the same
+                        // doors as the cell's. The gutter is a child of
+                        // this cell, so a press here reaches the cell's
+                        // own handler too, bubbling after this one; the
+                        // cell's repeat is harmless (Task 6 rules: a
+                        // second press only ever re-moves the cursor to
+                        // where this press already put it).
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                this.delegate_mut().drag_last = Some((row_ix, col_ix));
+                                cx.emit(CellPointer::Press {
+                                    row: row_ix,
+                                    col: col_ix,
+                                    shift: e.modifiers.shift,
+                                    gutter: true,
+                                });
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                            if e.pressed_button != Some(MouseButton::Left) {
+                                return;
+                            }
+                            let d = this.delegate_mut();
+                            if d.drag_last == Some((row_ix, col_ix)) {
+                                return;
+                            }
+                            d.drag_last = Some((row_ix, col_ix));
+                            cx.emit(CellPointer::Drag {
+                                row: row_ix,
+                                col: col_ix,
+                                gutter: true,
+                            });
+                        }))
                         .child(text),
                 );
             } else {

@@ -7,7 +7,7 @@ use crate::core::find::FindState;
 use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
-use crate::delegate::{BlotterDelegate, ChevronClicked};
+use crate::delegate::{BlotterDelegate, CellPointer, ChevronClicked};
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::grid::selection::SelectKind;
@@ -365,12 +365,17 @@ impl BlotterTile {
                 .sortable(true)
         });
         cx.subscribe(&table, |this, _, event: &TableEvent, cx| match event {
+            // Only the cursor row moves here: a live selection is the
+            // mouse doors' business (`pointer`, below) and a plain
+            // `SelectRow` — the table's own reaction to any press,
+            // selection gesture or not — must never clear one out from
+            // under a shift+click or drag that just started it.
             TableEvent::SelectRow(row) => {
-                this.table.update(cx, |t, _| {
-                    let d = t.delegate_mut();
-                    d.cursor.to_row(*row, d.shown.len());
+                this.with_delegate(cx, |d| {
+                    let len = d.shown.len();
+                    d.cursor.to_row(*row, len);
                 });
-                cx.notify();
+                this.sync_cursor(cx);
             }
             // A double-click anywhere on a row is `space` on it. The
             // table selects the row before emitting this, so the cursor
@@ -381,6 +386,10 @@ impl BlotterTile {
         .detach();
         cx.subscribe(&table, |this, _, event: &ChevronClicked, cx| {
             this.toggle_row(event.0, cx);
+        })
+        .detach();
+        cx.subscribe(&table, |this, _, event: &CellPointer, cx| {
+            this.pointer(*event, cx)
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
@@ -952,12 +961,75 @@ impl BlotterTile {
         self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
-            t.set_selected_row(row, cx);
+            // `set_selected_row` unconditionally emits `TableEvent::
+            // SelectRow`, and that event's own handler calls back into
+            // `sync_cursor` (so a mouse `SelectRow` re-resolves the
+            // selection too, Task 6) — calling it again on a row the
+            // table already has selected would re-emit and recurse
+            // forever rather than settling. The guard makes the round
+            // trip terminate after one bounce: the second `sync_cursor`
+            // finds the row unchanged and stops.
+            if t.selected_row() != Some(row) {
+                t.set_selected_row(row, cx);
+            }
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
         });
         self.take_selection_notice(cx);
         cx.notify();
+    }
+
+    /// Every mouse selection gesture (grid selection spec §5) lands here
+    /// and goes through the same `start_selection`/`clear_selection`
+    /// doors the keys use, so a shift+click or a drag can never put the
+    /// delegate in a state the keyboard vocabulary could not also reach.
+    /// A plain press clears; a shift press or a drag starts a selection
+    /// only when none is live yet (repeating either while one is live
+    /// just moves the cursor, exactly as holding `V`/`v` down and moving
+    /// does).
+    fn pointer(&mut self, event: CellPointer, cx: &mut Context<Self>) {
+        let kind_for = |gutter: bool| {
+            if gutter {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        self.with_delegate(cx, |d| {
+            let (row, col, start) = match event {
+                CellPointer::Press {
+                    row,
+                    col,
+                    shift: false,
+                    ..
+                } => {
+                    d.selection = None;
+                    (row, col, None)
+                }
+                CellPointer::Press {
+                    row,
+                    col,
+                    shift: true,
+                    gutter,
+                } => (row, col, Some(kind_for(gutter))),
+                CellPointer::Drag { row, col, gutter } => {
+                    if (row, col) == (d.cursor.row, d.cursor.col) {
+                        return;
+                    }
+                    (row, col, Some(kind_for(gutter)))
+                }
+            };
+            if let Some(kind) = start
+                && d.selection.is_none()
+            {
+                d.start_selection(kind);
+            }
+            let cols = d.plan.as_ref().map_or(0, |p| p.columns.len());
+            let len = d.shown.len();
+            d.cursor.to_row(row, len);
+            d.cursor.col = col.min(cols.saturating_sub(1));
+        });
+        self.sync_cursor(cx);
     }
 
     /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
@@ -1838,6 +1910,7 @@ mod tests {
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
     use gpui::px;
+    use gpui::{Modifiers, MouseButton};
     use std::sync::Arc;
     use std::sync::mpsc::Receiver;
     use std::time::{Duration, Instant};
@@ -2671,6 +2744,88 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(snapshot()));
         (h, cx)
+    }
+
+    /// The centre of a painted, `debug_selector`-tagged element — every
+    /// mouse-selection test's way of turning a cell's logical `(row,
+    /// col)` into the point a real press would land on. `debug_bounds`
+    /// wants a `'static str`: every call site here passes a literal, so
+    /// this takes one too rather than the brief's plain `&str`.
+    fn centre(cx: &mut gpui::VisualTestContext, sel: &'static str) -> gpui::Point<gpui::Pixels> {
+        cx.run_until_parked();
+        cx.debug_bounds(sel)
+            .unwrap_or_else(|| panic!("{sel} not painted"))
+            .center()
+    }
+
+    #[gpui::test]
+    fn shift_click_extends_a_block_from_the_cursor(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        act(&h, &mut cx, "blotter::right"); // cursor (0, 1)
+        let at = centre(&mut cx, "blotter-cell-2-2");
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows, r.cols), (SelectKind::Block, 0..3, 1..3));
+        // The keyboard keeps extending what the mouse started.
+        act(&h, &mut cx, "blotter::up");
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!(r.rows, 0..2);
+    }
+
+    #[gpui::test]
+    fn a_drag_selects_a_block_and_a_plain_click_clears_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        let from = centre(&mut cx, "blotter-cell-0-1");
+        let to = centre(&mut cx, "blotter-cell-1-2");
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.rows, r.cols), (0..2, 1..3));
+        let elsewhere = centre(&mut cx, "blotter-cell-2-1");
+        cx.simulate_mouse_down(elsewhere, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_up(elsewhere, MouseButton::Left, Modifiers::none());
+        let (sel, cursor) = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            (d.selection.is_some(), (d.cursor.row, d.cursor.col))
+        });
+        assert_eq!((sel, cursor), (false, (2, 1)));
+    }
+
+    /// A gutter press means `Rows`, not `Block` — the same distinction
+    /// `V`/`v` draw with the keyboard — reached the same way a plain
+    /// cell's does: through `on_ui_settings`'s production route
+    /// (`UiSettings`, not a direct field write), which is what actually
+    /// paints `blotter-gutter-2` for `centre` to find.
+    #[gpui::test]
+    fn a_gutter_shift_click_selects_rows(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = delivered(cx);
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let at = centre(&mut cx, "blotter-gutter-2");
+        cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::shift());
+        let r = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+            .unwrap();
+        assert_eq!((r.kind, r.rows), (SelectKind::Rows, 0..3));
     }
 
     #[gpui::test]
