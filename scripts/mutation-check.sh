@@ -16297,7 +16297,7 @@ run_mutation "pricer names: the catalog request wakes nothing" \
 
 run_mutation "pricer names: every tile asks for a catalog" \
   crates/geode-pricer/src/content.rs \
-  '        if self.catalog_watch.borrow().is_some() {
+  '        if self.catalog_watched.replace(true) {
             return;
         }' \
   '' \
@@ -17818,9 +17818,9 @@ run_mutation 'consistency: full request queue retains a view reload' \
 
 run_mutation 'consistency: terminal outcomes survive a UI burst' \
   crates/geode-app/src/events.rs \
-  '        let key = key(&event);' \
+  '        let key = key(&event, pending.local_seq);' \
   '        if pending.events.len() == 1 { return Err(Closed); }
-        let key = key(&event);' \
+        let key = key(&event, pending.local_seq);' \
   geode-app a_burst_retains_terminal_results_and_all_publication_books
 
 run_mutation 'consistency: older terminal result cannot replace newer' \
