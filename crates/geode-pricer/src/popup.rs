@@ -151,6 +151,18 @@ impl MenuItem {
     pub(crate) fn pickable(&self) -> bool {
         matches!(self, MenuItem::Action { .. } | MenuItem::View { .. })
     }
+
+    /// Where the keyboard highlight may land: a pickable row that is not
+    /// disabled.
+    fn lands(&self) -> bool {
+        matches!(
+            self,
+            MenuItem::Action {
+                enabled: Ok(()),
+                ..
+            } | MenuItem::View { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,19 +171,25 @@ pub(crate) struct Menu {
     pub highlighted: usize,
 }
 
-/// Move `delta` pickable rows from `from`, clamped at either end (never
-/// landing on a separator or section header).
+/// Move `delta` enabled rows from `from`, clamped at either end — a
+/// disabled row, a separator and a section header are all stepped over
+/// (user report 2026-09-25: `j` onto a greyed row cost an extra key). A
+/// highlight the pointer left on a disabled row steps from where it
+/// stands; with no enabled row further that way it stays put.
 pub(crate) fn step(items: &[MenuItem], from: usize, delta: isize) -> usize {
-    let pickable: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| r.pickable().then_some(i))
-        .collect();
-    let Some(last) = pickable.len().checked_sub(1) else {
-        return from;
-    };
-    let pos = pickable.iter().position(|&i| i >= from).unwrap_or(last);
-    pickable[(pos as isize + delta).clamp(0, last as isize) as usize]
+    let mut at = from;
+    for _ in 0..delta.unsigned_abs() {
+        let next = if delta > 0 {
+            (at + 1..items.len()).find(|&i| items[i].lands())
+        } else {
+            (0..at.min(items.len())).rev().find(|&i| items[i].lands())
+        };
+        match next {
+            Some(i) => at = i,
+            None => break,
+        }
+    }
+    at
 }
 
 /// `at`, or the nearest pickable row before it (after it, if none
@@ -197,9 +215,10 @@ pub(crate) struct MenuRowPaint {
 /// The market-data list's rule (`MenuItemElement`'s): the `accent` fill
 /// only on a highlighted ENABLED row. A disabled row never answers the
 /// pointer or the keyboard with a fill — the design guide's "no
-/// misleading hover/pressed response" — so the highlight still LANDS on
-/// it (`enter` there answers with the reason, which its trailing lane
-/// already shows) but it paints muted on the bare popover.
+/// misleading hover/pressed response" — so a highlight the POINTER leaves
+/// on it (`enter` there answers with the reason, which its trailing lane
+/// already shows) paints muted on the bare popover. The keyboard never
+/// lands there: [`step`] skips disabled rows.
 pub(crate) fn menu_row_paint(
     highlighted: bool,
     enabled: bool,

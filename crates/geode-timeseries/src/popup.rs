@@ -1,16 +1,21 @@
 //! The tile's one overlay (spec §9.5–§9.8): the series list
 //! ([`Popup::Series`], §9.5), the add picker ([`Popup::Picker`], §9.6),
 //! the expression field ([`Popup::Expr`], §9.7) and the range dialog
-//! ([`Popup::Range`], §9.8).
+//! ([`Popup::Range`], §9.8), the action menu ([`Popup::Menu`]) and the
+//! colour picker ([`Popup::Colour`] — gpui-component's own, which this
+//! module does not paint).
 //!
-//! **Three of the four hold the keyboard.** The picker's and the
-//! expression field's `InputState`s are tile-owned and focused, and the
+//! **Four of the six hold the keyboard.** The add picker's and the
+//! expression field's `InputState`s are tile-owned and focused, the
 //! range dialog owns a bare [`gpui::FocusHandle`] with its two date
-//! fields' keys on it; all three put the tile's key context into
-//! `insert` mode — and all three are why
+//! fields' keys on it, and the colour picker's popover and hex field
+//! sit under the component state's handle; all four put the tile's key
+//! context into `insert` mode — and all four are why
 //! `TimeseriesTile::close_popup_with_window` is the ONE closer: a
 //! focused handle dropped without a blur leaves `Window::focused`
-//! pointing at nothing for the rest of the session (CLAUDE.md).
+//! pointing at nothing for the rest of the session (CLAUDE.md). The
+//! series list and the action menu hold no field and keep the tile's
+//! own keyboard.
 //!
 //! **One popup at a time, and it is prepared, never formatted.** The
 //! list's rows are built in the tile's `rebuild_chrome` — the same door
@@ -45,6 +50,7 @@ use gpui::{
     Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Entity, FocusHandle,
     Focusable as _, Hsla, MouseButton, SharedString, Stateful, Window, anchored, deferred, div, px,
 };
+use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
@@ -95,6 +101,40 @@ pub(crate) enum Popup {
     /// The action list (mouse pass, 2026-09-24): every verb as a row,
     /// fieldless like the series list, keyed by `popup == menu`.
     Menu(MenuState),
+    /// gpui-component's colour picker, open over one slot's chip. Not
+    /// an overlay this module paints: the header draws the
+    /// `ColorPicker` element in place of the target chip's swatch, and
+    /// the component's popover owns its own surface and keys.
+    Colour(ColourPick),
+}
+
+/// The colour picker, open for slot `target` — what the header needs
+/// to draw it: the chip it stands in, the featured row
+/// ([`PickContext::featured`]'s colours, prepared once for
+/// `ColorPicker::featured_colors`) and the component state.
+pub(crate) struct ColourPick {
+    pub target: u8,
+    pub swatches: Vec<Hsla>,
+    pub picker: Entity<ColorPickerState>,
+}
+
+/// What a colour the picker commits is written against, captured at
+/// open and kept by the tile PAST the popup's close: the hex field's
+/// `enter` closes the popover (the action propagates to it) in the same
+/// keystroke whose `Change` arrives a beat later, so a context that
+/// died with the popup would drop that commit.
+///
+/// `target` is the slot NUMBER, not the cursor: the cursor may move
+/// while the picker is up (a `:` line, a chip click behind it), and a
+/// pick still lands on the slot it was opened for — a number is never
+/// reused while any slot lives. `featured` is the five palette colours
+/// then every `[colours]` name, each resolved against the theme as it
+/// stood, so an exact `Hsla` match maps a pick back to the
+/// theme-following colour it came from (`core::colour_from_pick`).
+#[derive(Clone)]
+pub(crate) struct PickContext {
+    pub target: u8,
+    pub featured: Vec<(Hsla, Colour)>,
 }
 
 /// The action menu's state: its prepared rows (`core::menu`, hints
@@ -115,7 +155,10 @@ impl Popup {
             // the keyboard — its own focus handle, with the two date
             // fields' keys on it — so it is an insert popup in every
             // sense the shell and the `popup_survives` gate care about.
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => true,
+            // The picker's popover takes the keyboard (its hex field,
+            // its swatches): typing there must never reach the tile's
+            // bare-key verbs, which is what `insert` routes away.
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => true,
         }
     }
 
@@ -134,6 +177,14 @@ impl Popup {
             // fields are pure state and the CONTAINER is what is
             // focused (the market-data date field's shape).
             Popup::Range(r) => r.focus.is_focused(window),
+            // The component's root tracks the state's handle, and its
+            // popover surface and hex field sit beneath it in the
+            // dispatch tree — so "contains", not "is".
+            Popup::Colour(c) => c
+                .picker
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx),
         }
     }
 
@@ -144,7 +195,7 @@ impl Popup {
         match self {
             Popup::Series(_) => Some("series"),
             Popup::Menu(_) => Some("menu"),
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => None,
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => None,
         }
     }
 }
@@ -1163,6 +1214,7 @@ mod tests {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         }
     }
 

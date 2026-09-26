@@ -152,33 +152,39 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
 /// `Action`, or `0` if none is (an all-disabled menu still needs a
 /// highlighted row for the border to paint on).
 pub fn first_enabled(rows: &[MenuRow]) -> usize {
-    rows.iter()
-        .position(|r| {
-            matches!(
-                r,
-                MenuRow::Action {
-                    enabled: Ok(()),
-                    ..
-                }
-            )
-        })
-        .unwrap_or(0)
+    rows.iter().position(lands).unwrap_or(0)
 }
 
-/// Move `delta` steps from `from` over `Action` rows only — a
-/// `Separator`/`Section` is never landed on — clamped at either end
-/// rather than wrapping.
+fn lands(r: &MenuRow) -> bool {
+    matches!(
+        r,
+        MenuRow::Action {
+            enabled: Ok(()),
+            ..
+        }
+    )
+}
+
+/// Move `delta` ENABLED `Action` rows from `from` — a disabled row, a
+/// `Separator` and a `Section` are all stepped over (user report
+/// 2026-09-25: `j` onto a greyed row made every pass through the list
+/// cost an extra key) — clamped at either end rather than wrapping. A
+/// highlight the pointer left on a disabled row steps from where it
+/// stands; with no enabled row further that way it stays put.
 pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
-    let actionable: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| matches!(r, MenuRow::Action { .. }).then_some(i))
-        .collect();
-    let Some(pos) = actionable.iter().position(|&i| i == from) else {
-        return from;
-    };
-    let moved = (pos as isize + delta).clamp(0, actionable.len() as isize - 1);
-    actionable[moved as usize]
+    let mut at = from;
+    for _ in 0..delta.unsigned_abs() {
+        let next = if delta > 0 {
+            (at + 1..rows.len()).find(|&i| lands(&rows[i]))
+        } else {
+            (0..at.min(rows.len())).rev().find(|&i| lands(&rows[i]))
+        };
+        match next {
+            Some(i) => at = i,
+            None => break,
+        }
+    }
+    at
 }
 
 #[cfg(test)]
@@ -346,21 +352,40 @@ mod tests {
 
     #[test]
     fn navigation_skips_separators_and_starts_on_the_first_enabled_row() {
-        let rows = rows(&inputs(DraftBadge::Clean), Clock::utc());
+        let mut i = inputs(DraftBadge::Dirty);
+        i.upload_built = true;
+        let rows = rows(&i, Clock::utc());
         assert_eq!(first_enabled(&rows), 0);
-        let last_action = rows.len() - 1;
         assert_eq!(
             step(&rows, 2, 1),
             5,
             "over the separator and the `On new document` section header"
         );
         assert_eq!(step(&rows, 5, -1), 2);
+        assert_eq!(step(&rows, 5, -2), 1, "a count steps that many rows");
         assert_eq!(
             step(&rows, 7, 1),
-            10,
-            "over the separator and the kind section header"
+            7,
+            "the kind section's rows are unbuilt: clamped on the last live row"
         );
-        assert_eq!(step(&rows, last_action, 3), last_action);
         assert_eq!(step(&rows, 0, -1), 0);
+    }
+
+    /// A disabled row is stepped over like a separator (user report
+    /// 2026-09-25): on a clean draft `Upload` and `Revert edits` are
+    /// greyed, so `j` from `Load underlying…` lands on `hold edits`.
+    #[test]
+    fn navigation_skips_disabled_rows() {
+        let rows = rows(&inputs(DraftBadge::Clean), Clock::utc());
+        assert_eq!(step(&rows, 0, 1), 5, "over Upload and Revert edits");
+        assert_eq!(step(&rows, 5, -1), 0);
+        assert_eq!(
+            step(&rows, 2, 1),
+            5,
+            "a highlight the pointer left on a greyed row steps from it"
+        );
+        assert_eq!(step(&rows, 2, -1), 0);
+        let last = rows.len() - 1;
+        assert_eq!(step(&rows, last, 1), last, "nothing live below: stays");
     }
 }

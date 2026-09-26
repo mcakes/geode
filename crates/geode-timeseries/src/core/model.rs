@@ -16,6 +16,7 @@ use geode_core::series::{
 };
 
 use super::range::Range;
+use super::rgb::Rgb8;
 
 pub const LABEL_MAX: usize = 24;
 pub const SPLIT_STEP: f32 = 0.05;
@@ -67,10 +68,14 @@ const ALL: Changed = Changed(15);
 const SETTING: Changed = Changed(1 | 4 | 8); // QUERY | CHROME | SESSION
 const LOOK: Changed = Changed(4 | 8); // CHROME | SESSION
 
+/// A slot's colour. `Palette` and `Named` follow the theme; `Custom` is
+/// absolute — painted exactly as picked, with no readability floor, so
+/// it can disappear on a theme it was not picked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Colour {
     Palette(usize),
     Named(String),
+    Custom(Rgb8),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -478,7 +483,9 @@ impl Model {
         };
         s.colour = match &s.colour {
             Colour::Palette(i) => Colour::Palette((i + 1) % Palette::LEN),
-            Colour::Named(_) => Colour::Palette(0),
+            // `c` steps the palette: off a name or an absolute colour it
+            // starts the palette over.
+            Colour::Named(_) | Colour::Custom(_) => Colour::Palette(0),
         };
         LOOK
     }
@@ -907,6 +914,13 @@ mod tests {
             m.slots()[1].colour,
             Colour::Palette(0),
             "cycling off a named colour starts the palette over"
+        );
+        m.set_colour(2, Colour::Custom(Rgb8([1, 2, 3]))).unwrap();
+        m.cycle_colour();
+        assert_eq!(
+            m.slots()[1].colour,
+            Colour::Palette(0),
+            "and so does cycling off an absolute one"
         );
         let ch = m.cycle_rule();
         assert!(ch.query(), "a rule changes the query");

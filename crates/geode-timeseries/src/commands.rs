@@ -1,7 +1,7 @@
 //! The `:` vocabulary (spec §9.9), pure. Every word is tile-local
 //! (command-line locality); completions are the bare word per position.
 
-use crate::core::Range;
+use crate::core::{Colour, Range, Rgb8};
 use geode_chart::core::layout::{SPLIT_MAX, SPLIT_MIN};
 use geode_chart::{Axis, AxisMode};
 use geode_core::series::{BucketRule, Frequency, MAX_BINS, MIN_BINS};
@@ -31,6 +31,31 @@ pub const VERBS: &[&str] = &[
     "add", "expr", "remove", "rule", "colour", "axis", "freq", "range", "pct", "density", "yaxis",
     "split", "clear",
 ];
+
+/// `:colour`'s colour word: `1`..`5` is a palette index, `#rrggbb` an
+/// absolute colour, anything else a `[colours]` name `has_name` knows.
+/// `#` is checked before the name because no `[colours]` name may start
+/// with one (`geode_core::colour::RESERVED_PREFIX`).
+pub fn colour_arg(word: &str, has_name: impl Fn(&str) -> bool) -> Result<Colour, String> {
+    let len = geode_chart::core::palette::Palette::LEN;
+    if let Ok(i) = word.parse::<usize>()
+        && (1..=len).contains(&i)
+    {
+        return Ok(Colour::Palette(i - 1));
+    }
+    if word.starts_with(geode_core::colour::RESERVED_PREFIX) {
+        return Rgb8::parse_hex(word)
+            .map(Colour::Custom)
+            .ok_or_else(|| format!("'{word}' is not a colour — #rrggbb, six hex digits"));
+    }
+    if has_name(word) {
+        Ok(Colour::Named(word.into()))
+    } else {
+        Err(format!(
+            "no colour named '{word}' — 1..{len}, a [colours] entry or #rrggbb"
+        ))
+    }
+}
 
 fn slot(word: &str, form: &str) -> Result<u8, String> {
     word.strip_prefix('s')
@@ -89,7 +114,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
             ))
         }
         "colour" => {
-            const FORM: &str = "colour s<n> <name>";
+            const FORM: &str = "colour s<n> <1..5|name|#rrggbb>";
             let [s, c] = words.as_slice() else {
                 return Err(FORM.into());
             };
@@ -275,6 +300,10 @@ mod tests {
             Command::Colour(1, "spx".into())
         );
         assert_eq!(
+            parse("colour s1 #FF8800").unwrap(),
+            Command::Colour(1, "#FF8800".into())
+        );
+        assert_eq!(
             parse("axis time").unwrap(),
             Command::AxisMode(AxisMode::Continuous)
         );
@@ -319,6 +348,35 @@ mod tests {
             };
             assert!(parse(line).is_ok(), "{line}");
         }
+    }
+
+    #[test]
+    fn a_colour_word_is_an_index_a_hex_or_a_known_name() {
+        let known = |n: &str| n == "spx";
+        assert_eq!(colour_arg("2", known), Ok(Colour::Palette(1)));
+        assert_eq!(
+            colour_arg("#FF8800", known),
+            Ok(Colour::Custom(Rgb8([0xff, 0x88, 0x00])))
+        );
+        assert_eq!(colour_arg("spx", known), Ok(Colour::Named("spx".into())));
+        for bad in ["#ff88", "#ff88001", "#gg8800", "#"] {
+            assert_eq!(
+                colour_arg(bad, known),
+                Err(format!("'{bad}' is not a colour — #rrggbb, six hex digits")),
+                "{bad}"
+            );
+        }
+        // Even a name the colours doc somehow held is never read for a
+        // `#` word.
+        assert!(colour_arg("#ff88", |_| true).is_err());
+        assert_eq!(
+            colour_arg("nope", known),
+            Err("no colour named 'nope' — 1..5, a [colours] entry or #rrggbb".into())
+        );
+        assert_eq!(
+            parse("colour s1").unwrap_err(),
+            "colour s<n> <1..5|name|#rrggbb>"
+        );
     }
 
     #[test]

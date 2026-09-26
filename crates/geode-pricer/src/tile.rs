@@ -4115,19 +4115,22 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn the_menu_opens_steps_and_picks_and_a_disabled_row_says_why(cx: &mut gpui::TestAppContext) {
+    fn the_menu_opens_steps_and_picks_and_skips_a_disabled_row(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         answer_all(&h, &mut vcx, 12.5);
         h.dispatch(&mut vcx, "menu", None);
         assert_eq!(h.mode(&mut vcx), "menu");
-        // Rows: Price all, Group, Ungroup, Undo, Redo, Delete row, then views.
-        h.dispatch(&mut vcx, "menu_down", Some(2)); // Ungroup: A is not in a package
-        h.dispatch(&mut vcx, "menu_pick", None);
-        assert_eq!(h.footer(&vcx).as_deref(), Some("not in a package"));
+        // Rows: Price all, Group, Ungroup, Undo, Redo, Delete row, then
+        // views. Ungroup (A is not in a package), Undo and Redo are
+        // greyed, so the second step lands on Delete row. (A pick on a
+        // greyed row is the pointer's:
+        // `a_pointer_over_a_disabled_menu_row_lands_without_a_fill`.)
+        h.dispatch(&mut vcx, "menu_down", Some(2));
         assert_eq!(
-            h.mode(&mut vcx),
-            "menu",
-            "a disabled row keeps the menu open"
+            h.tile
+                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+            Some(8),
+            "over the three greyed rows onto Delete row"
         );
         h.dispatch(&mut vcx, "menu_close", None);
         h.dispatch(&mut vcx, "menu", None);
@@ -4135,7 +4138,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.prices()[0].lines.len(), 4);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(7)); // the second view: barrier
+        h.dispatch(&mut vcx, "menu_down", Some(4)); // the second view: barrier
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
@@ -4151,7 +4154,10 @@ pub(crate) mod tests {
         store.set_pending(true);
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", Some(5)); // Delete row
+        // Delete row is greyed while loading, so `j` would step over it:
+        // the pointer puts the highlight there.
+        let at = centre_of(&mut vcx, "pricer-menu-row-8");
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         h.dispatch(&mut vcx, "menu_pick", None);
         assert_eq!(
             h.footer(&vcx).as_deref(),
@@ -5132,7 +5138,12 @@ pub(crate) mod tests {
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
         assert_eq!(at, Some(2), "over the separator onto Group");
-        h.dispatch(&mut vcx, "menu_down", Some(5));
+        h.dispatch(&mut vcx, "menu_down", Some(1));
+        let at = h
+            .tile
+            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+        assert_eq!(at, Some(8), "over the greyed Ungroup, Undo and Redo");
+        h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
             .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
@@ -5201,8 +5212,8 @@ pub(crate) mod tests {
     }
 
     /// A disabled row answers the pointer with no fill (the guide's "no
-    /// misleading hover response", market-data's rule): the highlight
-    /// lands on it, its paint has no fill, and a pick there still refuses
+    /// misleading hover response", market-data's rule): the pointer's
+    /// highlight lands on it (the keyboard's never does), its paint has no fill, and a pick there still refuses
     /// with the reason and keeps the menu open.
     #[gpui::test]
     fn a_pointer_over_a_disabled_menu_row_lands_without_a_fill(cx: &mut gpui::TestAppContext) {

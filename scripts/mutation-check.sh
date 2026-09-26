@@ -10853,8 +10853,8 @@ run_mutation "colours: to_table omits the hue under a token" \
 # 2c §6.1: reserved names are taken on Colours alone.
 run_mutation "objectdialog: reserved colour names are taken" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.reserved_names().contains(&name) {' \
-  '        if false && self.reserved_names().contains(&name) {' \
+  '        self.reserved_names().contains(&name)' \
+  '        false' \
   geode-shell \
   reserved_names_are_taken
 
@@ -14556,6 +14556,32 @@ run_mutation "mdauto: exactly one policy row is checked" \
   '            checked: Some(true),' \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
+
+# `j` steps over a disabled row as over a separator (user report
+# 2026-09-25); mutated, a downward step lands on greyed `Upload`.
+run_mutation "mdmenu: stepping skips disabled rows" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-marketdata \
+  navigation_skips_disabled_rows
+
+# The same mutation seen through the tile's `menu_down` route: two steps
+# from `Load underlying…` no longer reach `rebase edits`.
+run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-marketdata \
+  the_menu_ticks_the_policy_and_a_pick_sets_it
+
+# Stepping never lands on a separator or a section heading.
+run_mutation "mdmenu: stepping skips separators and sections" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).next()' \
+  geode-marketdata \
+  navigation_skips_separators_and_starts_on_the_first_enabled_row
 
 # The picker no longer refuses while the draft has edits (per-underlying
 # drafts, 2026-09-19): a switch parks the draft. Mutated back to the old
@@ -18504,9 +18530,17 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
   crates/geode-timeseries/src/core/menu.rs \
-  '        .filter_map(|(i, r)| matches!(r, MenuRow::Action { .. }).then_some(i))' \
-  '        .map(|(i, _)| i)' \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
+
+# Nor on a disabled row (user report 2026-09-25): mutated, `j` from
+# `Range…` on an empty tile lands on the greyed `Hide`.
+run_mutation "timeseries menu: stepping skips disabled rows" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-timeseries stepping_skips_disabled_rows
 
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
@@ -18688,9 +18722,17 @@ run_mutation "pricer tile: a re-checked menu clamps its highlight" \
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
   crates/geode-pricer/src/popup.rs \
-  '        .filter_map(|(i, r)| r.pickable().then_some(i))' \
-  '        .filter_map(|(i, _r)| Some(i))' \
+  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
+  '            (at + 1..items.len()).next()' \
   geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
+
+# Nor on a disabled row (user report 2026-09-25): mutated, `j` from
+# Group lands on the greyed Ungroup instead of Delete row.
+run_mutation "pricer popup: menu steps skip disabled rows" \
+  crates/geode-pricer/src/popup.rs \
+  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
+  '            (at + 1..items.len()).find(|&i| items[i].pickable())' \
+  geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # The empty table says "Loading sheet…" only while the tile is loading:
 # the delegate's mirror is the one path that flag reaches the paint.
@@ -18745,6 +18787,153 @@ run_mutation "pricer bridge: start carries the startup pricer key" \
   '        pricer_key: Some(pricer_key),' \
   '        pricer_key: None,' \
   geode-app start_builds_a_timeseries_factory_beside_the_blotters
+
+# The in-cell editor takes the cell's alignment. Mutated to the Input's
+# default left alignment, a right-aligned value jumps across the cell the
+# moment `i` opens it; every other editor test still passes.
+run_mutation "mdedit: the value editor keeps the cell's alignment" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                    .text_align(align)' \
+  '                    .text_align(TextAlign::Left)' \
+  geode-marketdata the_editor_keeps_the_value_right_aligned
+
+# ---- timeseries colour picker: absolute colours and the component bridge ----
+
+# `#rrggbb` is an absolute colour wherever a colour name is accepted, so a
+# `[colours]` name may never start with `#`.
+run_mutation "colours: a name starting with '#' is reserved" \
+  crates/geode-core/src/colour/mod.rs \
+  '                || name.starts_with(RESERVED_PREFIX)' \
+  '                || false' \
+  geode-core a_name_starting_with_a_hash_is_reserved
+
+# A featured swatch maps back to the theme-following colour it was built
+# from; mutated, every pick is absolute and stops following the theme.
+run_mutation "timeseries colour picker: a featured match keeps its palette or named colour" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        .filter(|(f, _)| within_a_step(*f, picked))' \
+  '        .filter(|_| false)' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# Anything off the featured row is absolute, not the nearest featured one.
+run_mutation "timeseries colour picker: a non-featured pick is Custom" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        None => Colour::Custom(picked),' \
+  '        None => Colour::Palette(0),' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# The component's hex field truncates: a featured colour read back one
+# step low on a channel is still that colour. Exact matching turns it
+# absolute and a shade off.
+run_mutation "timeseries colour picker: a featured match tolerates one step" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) <= 1)' \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) == 0)' \
+  geode-timeseries a_pick_one_step_off_a_featured_colour_is_that_colour
+
+# Two featured colours in reach: the nearer wins, the first on a tie.
+run_mutation "timeseries colour picker: the nearest featured colour wins" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        .min_by_key(|(f, _)| distance(*f, picked));' \
+  '        .max_by_key(|(f, _)| distance(*f, picked));' \
+  geode-timeseries the_nearest_featured_colour_wins_then_the_first
+
+# A pick of what the target already paints changes nothing: `enter` on
+# the untouched hex field must not rewrite a named colour.
+run_mutation "timeseries colour picker: a pick of the painted colour is a no-op" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
+  '        if false {' \
+  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+
+# The pick context outlives the popup: the hex field's `enter` closes the
+# popover before its commit arrives.
+run_mutation "timeseries colour picker: the pick context survives the close" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
+  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+
+# The Colours dialog refuses a `#` name up front...
+run_mutation "colours dialog: a name starting with '#' is reserved" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || false' \
+  geode-shell reserved_names_are_taken
+
+# ...and only the Colours dialog.
+run_mutation "colours dialog: the '#' reservation is the colours domain's alone" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (true && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  geode-shell reserved_names_are_taken
+
+# `#rrggbb` is exactly six digits: short, long and alpha forms are refused.
+run_mutation "timeseries colour picker: hex parse refuses the wrong length" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  '        if digits.len() < 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  geode-timeseries malformed_hex_is_refused
+
+# A session `#…` string is an absolute colour, never read as a name.
+run_mutation "timeseries colour picker: a session #rrggbb reads back as Custom" \
+  crates/geode-timeseries/src/core/session.rs \
+  '        Some(Value::String(n)) if n.starts_with(geode_core::colour::RESERVED_PREFIX) => {' \
+  '        Some(Value::String(n)) if false => {' \
+  geode-timeseries a_custom_colour_round_trips_as_hex
+
+# `:colour s1 #…` is parsed as hex before any name lookup, and a malformed
+# one names the form.
+run_mutation "timeseries colour picker: :colour reads a # word as hex" \
+  crates/geode-timeseries/src/commands.rs \
+  '    if word.starts_with(geode_core::colour::RESERVED_PREFIX) {' \
+  '    if false {' \
+  geode-timeseries a_colour_word_is_an_index_a_hex_or_a_known_name
+
+# An absolute colour paints as itself — no theme, no floor.
+run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        Colour::Custom(c) => c.to_hsla(),' \
+  '        Colour::Custom(_) => palette.colour(0),' \
+  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+
+# The Colour… row's verb opens the picker.
+run_mutation "timeseries colour picker: the menu row opens the picker" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            "pick_colour" => self.open_colour_picker(window, cx),' \
+  '            "pick_colour" => false,' \
+  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+
+# A pick lands on the slot the picker was opened for, not the cursor.
+run_mutation "timeseries colour picker: a Change applies to the target slot" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if let Ok(changed) = self.model.set_colour(pick.target, colour) {' \
+  '        if let Ok(changed) = self.model.set_colour(self.model.cursor_slot().map_or(0, |s| s.number), colour) {' \
+  geode-timeseries a_pick_lands_on_the_target_slot_even_after_the_cursor_moves
+
+# A close the component makes itself (escape, click-out, a commit) closes
+# the tile's popup and its insert mode.
+run_mutation "timeseries colour picker: the component's close closes the popup" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {' \
+  '            if false {' \
+  geode-timeseries escape_closes_the_picker_unchanged_and_gives_the_keyboard_back
+
+# The picker's popover and hex field count as the tile's own keyboard
+# holders, which is what keeps typed keys off the tile's verbs and what
+# the closer's blur is gated on.
+run_mutation "timeseries colour picker: the popover's focus is the tile's" \
+  crates/geode-timeseries/src/popup.rs \
+  '                .contains_focused(window, cx),' \
+  '                .contains_focused(window, cx) && false,' \
+  geode-timeseries a_swatch_commit_blurs_the_picker_before_dropping_it
+
+# A `:remove` of the picker's target closes it.
+run_mutation "timeseries colour picker: removing the target closes the picker" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.close_orphaned_colour_picker(window, cx);' \
+  '' \
+  geode-timeseries removing_the_target_slot_closes_the_picker
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

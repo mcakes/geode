@@ -379,6 +379,12 @@ mod tests {
                 && Domain::Colours.name_taken(&config, "none")
         );
         assert!(!Domain::Views.name_taken(&config, "sign"));
+        // `#rrggbb` is an absolute colour where a name is also read, so
+        // the colours domain refuses a `#` name up front — and only it.
+        assert!(Domain::Colours.is_reserved("#ff8800"));
+        assert!(Domain::Colours.name_taken(&config, "#ff8800"));
+        assert!(!Domain::Views.name_taken(&config, "#ff8800"));
+        assert!(!Domain::Colours.is_reserved("a#b"));
         let draft = Domain::Colours.new_draft(&config, "fresh");
         assert_eq!(
             definition_of(&draft),

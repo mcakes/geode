@@ -7234,6 +7234,16 @@ fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::
             .contains("reserved")
     );
     cx.simulate_keystrokes("escape");
+    // A `#` name is an absolute colour's spelling: refused the same way.
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("#ff8800");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("'#ff8800' is reserved")
+    );
+    cx.simulate_keystrokes("escape");
     cx.simulate_keystrokes("enter"); // delta
     cx.run_until_parked();
     assert!(cx.debug_bounds("objectdialog-swatch-header").is_some());
