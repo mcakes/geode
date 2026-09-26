@@ -523,10 +523,7 @@ impl PricerTile {
             // runs now (`save_now` itself refuses a blocked sheet).
             // A save queued and still unconfirmed is already on the
             // writer: nothing extra.
-            this.save_task = None;
-            if this.dirty || this.save_failed {
-                let _ = this.save_now();
-            }
+            this.flush_save();
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
             // A rename not yet confirmed keeps its old document.
@@ -1277,6 +1274,17 @@ impl PricerTile {
     /// `false` only when the store refused the save — the sheet is still
     /// unsaved; a blocked or empty sheet has nothing to write and answers
     /// `true`.
+    /// Save now what the idle timer would have saved, or what a failed
+    /// save left unsaved, and drop the timer. A close and the app's quit
+    /// both come here: neither may leave edits behind a timer that will
+    /// never fire.
+    pub(crate) fn flush_save(&mut self) {
+        self.save_task = None;
+        if self.dirty || self.save_failed {
+            let _ = self.save_now();
+        }
+    }
+
     pub(crate) fn save_now(&mut self) -> bool {
         if self.save_blocked {
             return true;
@@ -4969,6 +4977,38 @@ pub(crate) mod tests {
         settle(&mut vcx, SAVE_IDLE);
         assert_eq!(h.store.save_count(), base + 1, "one save for the burst");
         assert_eq!(stored(&h).qty(0), 3);
+    }
+
+    /// At quit the app flushes every tile before the data service stops:
+    /// a sheet still waiting on its idle timer, or whose last save failed,
+    /// is saved now; a clean sheet writes nothing.
+    #[gpui::test]
+    fn flush_all_saves_every_unsaved_sheet_now(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        vcx.update(|_, cx| h.factory.flush_all(cx));
+        assert_eq!(
+            h.store.save_count(),
+            base,
+            "a clean sheet has nothing to flush"
+        );
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        vcx.update(|_, cx| h.factory.flush_all(cx));
+        assert_eq!(
+            h.store.save_count(),
+            base + 1,
+            "saved without the idle wait"
+        );
+        assert_eq!(stored(&h).qty(0), 2);
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(
+            h.store.save_count(),
+            base + 1,
+            "the idle save is not repeated"
+        );
+        vcx.update(|_, cx| h.factory.save_answered("book", Err("disk full".into()), cx));
+        vcx.update(|_, cx| h.factory.flush_all(cx));
+        assert_eq!(h.store.save_count(), base + 2, "a failed save is retried");
     }
 
     #[gpui::test]

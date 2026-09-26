@@ -483,6 +483,20 @@ impl PricerFactory {
             .collect()
     }
 
+    /// Save every open tile's unsaved sheet now (`PricerTile::flush_save`).
+    /// The app calls this at quit, before it stops the data service, so the
+    /// saves are queued ahead of the shutdown, which runs queued local
+    /// writes before it stops.
+    pub fn flush_all(&self, cx: &mut App) {
+        for tile in self.live_tiles() {
+            tile.update(cx, |t, cx| {
+                t.flush_save();
+                t.rebuild_chrome();
+                cx.notify();
+            });
+        }
+    }
+
     /// A local save of `sheet` landed (`Ok`) or failed (`Err(reason)`),
     /// from the data tier's local-publish outcomes. Only a confirmed save
     /// makes the name known to the store (never `save` answering `true`: a

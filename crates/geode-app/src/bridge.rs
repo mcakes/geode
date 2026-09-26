@@ -436,6 +436,26 @@ fn pricer_sheet<'a>(dataset: &str, batch: &'a str) -> Option<&'a str> {
     (dataset == PRICER_SHEETS_DATASET).then_some(batch)
 }
 
+/// At quit: save every pricer tile's unsaved sheet, then stop the data
+/// service. The flush runs in the same hook, before the shutdown is
+/// spawned, so its publishes are admitted ahead of the service's
+/// `Shutdown` request, and the ingest runner stores queued local writes
+/// before it stops. The shutdown joins the service's threads, which may
+/// wait out an in-flight load, so it runs off the UI thread; gpui waits
+/// for it only up to its own quit timeout.
+pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
+    let handle = bridge.handle.clone();
+    let pricer = Rc::clone(&bridge.pricer);
+    cx.on_app_quit(move |cx| {
+        pricer.flush_all(cx);
+        let handle = handle.clone();
+        cx.background_executor().spawn(async move {
+            handle.shutdown();
+        })
+    })
+    .detach();
+}
+
 /// Window-local request lifecycle. The diagnostics entity owns the single
 /// pending refresh bit; only the bridge owns submissions and their replies.
 #[derive(Default)]
@@ -1992,6 +2012,69 @@ role = "key"
         let window = open_test_window(cx, services);
         cx.update(|cx| attach(&bridge, window, cx));
         (bridge, window, tiles)
+    }
+
+    /// At quit every unsaved sheet is saved before the data service stops:
+    /// a line typed a moment ago, its idle timer not yet fired, is in the
+    /// database after the app has gone. The test holds the tile past the
+    /// window's teardown, so only the quit hook can save it.
+    #[gpui::test]
+    fn quitting_saves_every_unsaved_sheet_before_the_data_service_stops(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let sources = || ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            desk: None,
+            user: None,
+        };
+        let db = dir.path().join("geode.duckdb");
+        let (bridge, window, tiles) =
+            open_app_with_a_pricer_tile(cx, sources(), db.clone(), "book");
+        cx.update(|cx| stop_at_quit(&bridge, cx));
+        {
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let tile = tiles.borrow()[0].clone();
+            wait_until(&mut vcx, "the empty sheet has loaded", |vcx| {
+                tile.read_with(vcx, |t, _| !t.is_loading())
+            });
+            type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        }
+        cx.quit();
+        // The quit hook's shutdown may still be finishing; this joins it.
+        bridge.handle.shutdown();
+        drop(tiles);
+        drop(bridge);
+
+        let config = Config::load(&sources());
+        let setup = data_setup(
+            &config,
+            db,
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = DataService::spawn(setup.config, Arc::new(move |e| tx.send(e).is_ok()));
+        assert!(handle.document(geode_core::query::DocumentParams {
+            key: QueryKey(7),
+            tag: 1,
+            submitted: std::time::Instant::now(),
+            dataset: PRICER_SHEETS_DATASET.into(),
+            document_key: vec!["book".into()],
+            as_of: AsOf::Live,
+        }));
+        let rows = loop {
+            if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                break o.snapshot.unwrap().rows();
+            }
+        };
+        assert_eq!(rows, 1, "the line typed before quit was stored");
+        handle.shutdown();
     }
 
     /// Sheets persist in DuckDB: a line typed into one tile is saved by

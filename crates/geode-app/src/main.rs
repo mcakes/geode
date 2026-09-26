@@ -303,20 +303,11 @@ fn main() {
             })
             .detach();
 
-            // The data service's shutdown joins its own thread, which may
-            // wait out an in-flight ingest or discovery scan (`DataHandle::
-            // shutdown`'s own doc comment) — so it must run off the UI
-            // thread, never as a side effect of a `DataHandle` simply
-            // dropping on `main`'s own thread at quit.
+            // Unsaved sheets are saved, then the data service stops off the
+            // UI thread (`bridge::stop_at_quit`), never as a side effect of a
+            // `DataHandle` simply dropping on `main`'s own thread at quit.
             if let Some(bridge) = &bridge {
-                let handle = bridge.handle.clone();
-                cx.on_app_quit(move |cx| {
-                    let handle = handle.clone();
-                    cx.background_executor().spawn(async move {
-                        handle.shutdown();
-                    })
-                })
-                .detach();
+                bridge::stop_at_quit(bridge, cx);
             }
 
             // The demo bus's own shutdown (Task 10): stopped before
