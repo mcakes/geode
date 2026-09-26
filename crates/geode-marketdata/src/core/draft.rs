@@ -28,12 +28,15 @@ use std::collections::{BTreeMap, HashMap};
 /// different node, paint it there, and `:upload` would send it. The
 /// generation is what tells the two apart.
 ///
-/// `generation` is `None` when the read could not name one: a draft restored
-/// from a session file (whose cell edits are unresolved and require a rebase
-/// before they can paint on any cell at all), or a historical view read,
-/// whose era pins one generation per partition. An unknown generation is not
-/// evidence of movement, so identity falls back to the source time — the
-/// behaviour before this pair existed.
+/// `generation` is `None` only where nothing named one. Two cases reach it:
+/// a session file written before `base_generation` was persisted, or without
+/// it — a restored draft otherwise carries the generation it was written
+/// with; and a historical *view* read, whose era pins one generation per
+/// partition, so no scalar names it. A document read names a generation under
+/// both live and historical as-of, which is why an open market-data draft
+/// normally has one. An unknown generation is not evidence of movement, so
+/// identity falls back to the source time — the behaviour before this pair
+/// existed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocumentBase {
     /// RFC 3339.
@@ -238,10 +241,12 @@ impl Draft {
         matches!(self.state, DraftState::Behind { .. })
     }
 
-    /// Record one edit. `base` is the source time of the generation on
-    /// screen; it is stored only while the draft is empty, because every
-    /// edit in one draft is against one generation and a later keystroke
-    /// must never quietly restamp the set.
+    /// Record one edit. `base` is the whole identity of the generation on
+    /// screen — source time *and* store generation, never the time alone,
+    /// because a corrected republish keeps the time and only the pair tells
+    /// the two apart. It is stored only while the draft is empty, because
+    /// every edit in one draft is against one generation and a later
+    /// keystroke must never quietly restamp the set.
     pub fn set(
         &mut self,
         cell: (usize, usize),
@@ -811,10 +816,13 @@ impl Draft {
         let mut table = toml::Table::new();
         if let Some(base) = &self.base {
             table.insert("base".into(), toml::Value::String(base.as_of.clone()));
-            // Only when known. A session file written before generations
-            // were carried, and a restored draft, simply have no generation
-            // — `DocumentBase::differs_from` treats that as unknown, not as
-            // "unchanged".
+            // Only when known — but write it whenever it is, because this
+            // is also the parked-draft route: an underlying switch round
+            // trips a live draft through this table in session, and dropping
+            // the generation here would silently return those edits to
+            // time-only identity. A table without the key is a session file
+            // predating it, and `DocumentBase::differs_from` treats a missing
+            // generation as unknown, not as "unchanged".
             if let Some(generation) = base.generation {
                 table.insert("base_generation".into(), toml::Value::Integer(generation));
             }
@@ -1238,9 +1246,9 @@ mod tests {
         // A different time always differs, generations or not.
         assert!(at_gen(BASE, 7).differs_from(&at_gen(NEWER, 7)));
         assert!(at(BASE).differs_from(&at(NEWER)));
-        // An unknown generation is not evidence of movement: a restored
-        // draft (whose edits are unresolved anyway) and a historical view
-        // read fall back to the source time, the behaviour before the pair.
+        // An unknown generation is not evidence of movement: a session
+        // file predating `base_generation` and a historical view read fall
+        // back to the source time, the behaviour before the pair.
         assert!(!at(BASE).differs_from(&at_gen(BASE, 9)));
         assert!(!at_gen(BASE, 9).differs_from(&at(BASE)));
     }
@@ -1759,6 +1767,72 @@ mod tests {
         };
         assert_eq!(kept, 2);
         assert!(dropped.is_empty());
+    }
+
+    /// The generation half survives the session file, and its absence stays
+    /// absent. The parked-draft route round-trips a live draft through this
+    /// table on every underlying switch, so a dropped `base_generation`
+    /// write would silently return parked edits to time-only identity and the
+    /// next same-time republish would re-point them.
+    #[test]
+    fn to_toml_and_from_toml_round_trip_the_base_generation_and_tolerate_its_absence() {
+        let mut known = Draft::default();
+        known.set((0, 1), pair("T1", "-1"), Value::F64(0.5), &at_gen(BASE, 7));
+        let table = known.to_toml();
+        assert_eq!(table.get("base").and_then(|v| v.as_str()), Some(BASE));
+        assert_eq!(
+            table.get("base_generation").and_then(|v| v.as_integer()),
+            Some(7),
+            "a known generation is written under its own key"
+        );
+        assert_eq!(
+            Draft::from_toml(&table).base.as_ref(),
+            Some(&at_gen(BASE, 7)),
+            "and comes back as the same pair, not the time alone"
+        );
+
+        // An unknown generation writes no key at all, so a reader cannot
+        // mistake a placeholder for a generation the store never named.
+        let mut unknown = Draft::default();
+        unknown.set((0, 1), pair("T1", "-1"), Value::F64(0.5), &at(BASE));
+        let bare = unknown.to_toml();
+        assert!(
+            !bare.contains_key("base_generation"),
+            "an unknown generation must not be spelled at all: {bare:?}"
+        );
+
+        // A session file predating the key: `None`, never `Some(0)` — a zero
+        // would compare unequal to every real generation and put an aligned
+        // draft Behind on its own base.
+        let mut older = toml::Table::new();
+        older.insert("base".into(), toml::Value::String(BASE.to_string()));
+        older.insert(
+            "edits".into(),
+            toml::Value::Array(vec![toml::Value::Array(vec![
+                toml::Value::String("T1".into()),
+                toml::Value::String("-1".into()),
+                toml::Value::Float(0.5),
+            ])]),
+        );
+        let restored = Draft::from_toml(&older);
+        assert_eq!(
+            restored.base,
+            Some(at(BASE)),
+            "no key restores as an unknown generation"
+        );
+        assert_eq!(
+            restored.base.as_ref().and_then(|b| b.generation),
+            None,
+            "specifically not Some(0)"
+        );
+        assert!(
+            !restored
+                .base
+                .as_ref()
+                .unwrap()
+                .differs_from(&at_gen(BASE, 9)),
+            "and an unknown generation cannot prove the document moved"
+        );
     }
 
     #[test]

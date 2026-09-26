@@ -234,7 +234,10 @@ enum Echo {
     /// base while this stands, and a redelivery of `newer` is not compared
     /// again. Keyed by the whole generation, not its source time alone, so
     /// a corrected republish cannot reuse the previous republish's
-    /// comparison. Dropped the moment the draft leaves `Sent` (`:rebase`,
+    /// comparison — exact equality rather than
+    /// [`DocumentBase::differs_from`], because re-running a comparison costs
+    /// one build while reusing a stale verdict reports an echo nothing
+    /// checked. Dropped the moment the draft leaves `Sent` (`:rebase`,
     /// `:revert`, a further edit).
     Differs {
         newer: DocumentBase,
@@ -1361,6 +1364,11 @@ impl MarketDataTile {
     /// deferred to the end of this update; the handle travels into the
     /// deferral, so it is never dropped while still focused. `y`'s own
     /// re-check in [`Self::submit_upload`] stays as the second line.
+    ///
+    /// The painted-base comparison is whole-pair equality rather than
+    /// [`DocumentBase::differs_from`]: withdrawing a question that did not
+    /// need withdrawing costs a keystroke, while leaving one armed over a
+    /// document it was never asked about sends the wrong rows.
     fn withdraw_upload_if_moved(&mut self, painted: Option<DocumentBase>, cx: &mut Context<Self>) {
         let now = self.painted_snapshot().and_then(|s| base_of(&s));
         let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
@@ -1496,6 +1504,14 @@ impl MarketDataTile {
         // Retain the outgoing snapshot only when it is the draft's actual base and the
         // new state still needs it. Restored drafts may have no delivered base; never
         // pin their newest-snapshot fallback as if it were that base.
+        //
+        // Whole-pair equality here, deliberately, not `DocumentBase::differs_from`:
+        // that method is permissive because it decides whether to DISTURB unsent
+        // work, and an unknown generation must not disturb it. This decides
+        // whether to TRUST a snapshot AS the base, where the permissive answer
+        // is the dangerous one — it would pin a snapshot whose generation the
+        // draft's base cannot vouch for, and the edits would then paint over
+        // another document's grid.
         let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
@@ -1724,6 +1740,11 @@ impl MarketDataTile {
         let Some(base) = self.painted_snapshot() else {
             return;
         };
+        // Whole-pair inequality, not `DocumentBase::differs_from`: the
+        // permissive answer would let a generation this base cannot vouch for
+        // overwrite a restored draft's stored group sizes with another
+        // document's, and rebase's same-day guard would then compare counts
+        // taken from a document the edits were never made against.
         if base_of(&base) != draft.base {
             return;
         }
