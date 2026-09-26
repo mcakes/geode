@@ -25,7 +25,8 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Distinct values | `Distinct`, with key, tag, and requested column. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
-| Local publish | Validation rejection produces diagnostics; successful storage produces `Published`. |
+| Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
+| Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
@@ -50,9 +51,12 @@ before the sentinel; if the queue refused it, disconnection ends the loop
 after dispatching those requests. Dropping the sender prevents an idle receive
 from waiting forever, but does not interrupt service open or running I/O.
 
-The service then stops its workers in dependency order. This is not a storage
-flush: the ingest writer does not drain queued jobs. Fetch calls, discovery,
-and publication can delay joining. Final-handle drop also joins on whichever
+The service then stops its workers in dependency order, the ingest writer
+last. The writer runs its queued local writes (the app's own publishes and
+forgets) in order, each answering as usual, and drops every other queued job:
+feed documents, series and files are resent by their sources after a restart.
+It is not a flush beyond that. Fetch calls, discovery, and publication can
+delay joining. Final-handle drop also joins on whichever
 thread releases it, so the app's quit hook runs explicit shutdown on the
 background executor. See [worker shutdown](data-path.md#queues-and-shutdown).
 
@@ -68,7 +72,7 @@ delivery, not applied to a window.
 |---|---|
 | Query, series, distinct, catalog, price | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
-| Local-write outcome (saved, save failed, forgotten, forget failed) | One entry per dataset/batch shared by all four; the latest replaces. The writer serializes a document's publishes and forgets, so the latest outcome describes what the store holds. Kept apart from that batch's publication entry. |
+| Local-write outcome (saved, save failed, forgotten, forget failed) | Never coalesced: each is keyed by its arrival sequence and every one is delivered, in the writer's order. A writer may be waiting on one exact outcome (a pricer load deferred behind a queued save), so a later outcome for the same document must not replace it. The count is bounded by the writes the app queued, not by a feed's rate. |
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
 | Health / poll result | Latest entry per event kind and source. |
@@ -102,10 +106,21 @@ history timestamp is event arrival time, not source freshness. Although the
 mailbox retains the book union, the bridge currently records its count;
 frame invalidation is by dataset or document batch, not individual book.
 
-Local-write outcomes are not yet routed to a tile; the bridge logs them.
-A forgotten document also requests a watched catalog refresh, because a
-forget changes the catalog without a publication. Their failures already
-reach diagnostics as error diagnostics.
+Every local-write outcome for `pricer_sheets` goes to the pricer factory,
+named by the sheet (the dataset's one-part key makes the batch the sheet
+name): `LocalPublished` and `LocalPublishFailed` to `save_answered`,
+`Forgotten` and `ForgetFailed` to `forget_answered`. The factory routes each
+to the tile that queued it. No other dataset has a local writer, so other
+datasets' outcomes are not routed. A forgotten document also requests a
+watched catalog refresh, because a forget changes the catalog without a
+publication. Failures also reach diagnostics as error diagnostics.
+
+A document's publication entry and its local-write entries are separate
+keys, and a replaced publication keeps its first position. So a `Published`
+for a sheet can be delivered after that sheet's `Forgotten`. It is harmless:
+for a local dataset a publication only notes the dataset in diagnostics (and
+re-reads a watched catalog, which reads the database as it now is), and the
+pricer reads only the local-write outcomes.
 
 Catalog refresh permits one active request and coalesces follow-up demand.
 Only the active key/tag releases that slot. Refusal or error retains demand

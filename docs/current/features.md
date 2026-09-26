@@ -346,8 +346,12 @@ tile holds:
   later save under the new name is confirmed. An empty sheet saves nothing, so
   its old document stays. From the rename until that removal is answered, the
   old name is reserved: `:e`, `:name` and `:rm` refuse it (`sheet 'x' is
-  being removed`) and `untitled-N` skips it. If a tile nevertheless holds the
-  old name when the save is confirmed (a restore), nothing is removed.
+  being removed`) and `untitled-N` skips it; a restored tile naming it opens
+  the next `untitled-N` instead (`sheet 'x' is being removed; opened
+  untitled-N`). If a tile nevertheless holds the old name when the save is
+  confirmed, nothing is removed. `:e`, `:new` or closing the tile before the
+  save under the new name is confirmed gives up the removal, so both
+  documents remain.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
   the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
@@ -357,11 +361,18 @@ tile holds:
   so in the header. The name is reserved, as for `:name`, until the removal
   is answered.
 
+A sheet name may not hold a control character: the store joins document key
+parts with `U+001F`.
+
 A save's outcome goes to the tile that queued it, not to whichever tile holds
-the name now. A tile that has moved on (`:e`, `:new`, `:name`) and hears its
-old sheet's save failed says `sheet 'x' was not saved: …; its last edits were
-not stored`. A closed tile's failed save is recorded only by the data tier's
-error diagnostic.
+the name now. A tile that has moved on (`:e`, `:new`) and hears its old
+sheet's save failed says `sheet 'x' was not saved: …; its last edits were not
+stored`; if it is waiting to load that sheet again, the text goes in the save
+slot, and a failure of the load that follows keeps it beside the
+`did not load` notice. After `:name`, a failed save of the old name is not
+reported: the edits travel under the new name, whose own save reports its
+outcome. A closed tile's failed save is recorded only by the data tier's error
+diagnostic.
 
 `:e` and `:rm` complete from the known sheet names: the diagnostics catalog's
 `pricer_sheets` documents (the factory asks for a catalog when it is created
@@ -397,6 +408,25 @@ itself because it submits no view query, so a scope change never waits on it.
 
 ### Persistence
 
+Sheets are stored in DuckDB as documents of the `pricer_sheets` dataset, one
+document per sheet, keyed by the sheet name, with a row per line (the `line`
+axis) and the sheet's view, shifts, overrides, and refresh as attributes. The
+app declares the dataset in its builtin configuration layer as `local`: only
+the app writes it, no source feeds it, and its publications do not advance the
+frame's data revision. `sheet` is not categorical, so sheet names never appear
+in the frame picker or the groupings. The declaration is frozen: its tables
+are created once and written positionally, so a changed column list would put
+values into the wrong columns of an existing database. A layer redeclaring it
+differently is ignored with an error diagnostic (see
+[configuration](configuration.md)); changing it needs a migration, which does
+not exist.
+
+Every save is a new generation. A sheet keeps its live generation and the 200
+before it; older ones are swept on the writer after a save that crosses the
+bound. Loads read the live generation (as-of browsing is not offered). A
+removal (`:rm`, or `:name` retiring the old name) deletes the document and its
+whole history.
+
 A sheet is saved as a whole document one idle second after its last change.
 Closing the tile saves any change not yet saved, whether it was still waiting
 on the idle timer, was refused by the store, or was queued and then reported
@@ -405,10 +435,15 @@ sheet name. A refused save (`the store refused it`) or a failed one (the
 writer's reason) paints a notice in the header's own save slot, separate from
 pricing notices: a refused pricing request cannot overwrite it, a later
 successful request cannot clear it, and `escape` does not clear it. Only a
-confirmed save does. Outcomes carry no link to the save that produced them and
-coalesce latest-wins, so each is read as the outcome of the latest queued
-save. The next change and the close both retry. A close with a save queued
-but unconfirmed writes nothing extra. An empty sheet publishes nothing.
+confirmed save does. Outcomes carry no link to the save that produced them;
+every one is delivered, in the writer's order, so the last to arrive is the
+latest queued save's. The next change and the close both retry. A close with
+a save queued but unconfirmed writes nothing extra: the write is already
+queued. An empty sheet publishes nothing.
+
+Quitting the app saves every unsaved sheet at once, before the data service is
+told to stop, and the writer runs the app's queued saves and removals before
+it exits.
 
 If a sheet's document fails to load (its rows do not decode, or the store
 answers with an error), the tile shows an empty fallback and the save slot
@@ -437,9 +472,20 @@ save adds a generation to that document (history is kept, nothing is lost). A
 catalog read before a removal landed can make a removed name known again, so
 its `:e` opens empty.
 
-**Known limitation:** the sheet store is in memory until the DuckDB store
-lands. A sheet survives closing and reopening its tile within one run, not a
-restart; a restored name with no document opens empty with a notice.
+**Known limitations** of storage:
+
+- Known names come from the diagnostics catalog. Until the first catalog
+  arrives, `:e` and `:rm` do not complete a sheet this session has not
+  saved, and `:rm` refuses it as unknown; `:e` still opens it by name.
+- The quit flush publishes through the bounded 64-entry request channel. With
+  a very large number of unsaved tiles at quit, some saves can be refused;
+  the app is exiting, so nothing retries them.
+- gpui waits for quit hooks only 200 ms. A save still running or queued when
+  the process exits is lost; the database stays consistent at the previous
+  generation.
+- If the data service fails to open, requests admitted before that never
+  answer (for every request kind, not only sheets): a tile shows `loading…`
+  until it switches sheet, and a sheet with a save queued stays taken.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
 underlyings; result cells are not sign-coloured; column widths are the

@@ -103,6 +103,21 @@ publication remains positional. Rebuild a demo database after changing column
 membership, roles, grains, or order. A production schema migration must be an
 explicit operation.
 
+Every build declares one dataset in its builtin layer: `pricer_sheets`, the
+line pricer's local document dataset (see [the line pricer](features.md)).
+`datasets` merges per dataset name, so a demo, desk, or user `datasets`
+document adds its datasets beside it, and a `datasets` document always
+exists. Because its tables are written positionally, the app keeps its own
+declaration: a layer that redeclares `pricer_sheets` identically is accepted
+silently, and any other redeclaration — different columns, order, or flags,
+or one invalid enough that the reader dropped it — is replaced by the builtin
+declaration at startup and on reload, with an error diagnostic naming the
+redeclaring layer and file. The Schema dialog still lists `pricer_sheets`; an
+edit saved there is such a redeclaration. Local datasets are not offered as
+the dataset choice in the Views and Sources dialogs: no view reads the app's
+own documents, and the source reader refuses a local dataset. A value that
+already names one is kept, as any current value is.
+
 ## Source configuration
 
 `sources.toml` has one top-level table per source, such as `[risk_files]`.

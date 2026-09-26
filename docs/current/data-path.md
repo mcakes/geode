@@ -73,13 +73,21 @@ growing at 256 paths per source; further unremembered paths can warn repeatedly.
 Shutdown stops producers before the ingest writer. Fetch workers drain their
 accepted requests and join. Subscription workers unsubscribe, set a stop flag,
 and join without flushing documents still held by their coalescers. Discovery
-stops polling; the ingest runner finishes its current operation and exits
-without draining queued jobs. Submission to the runner itself has no shutdown
-refusal, so producer ordering is required. Egress workers close their queue
+stops polling; the ingest runner finishes its current operation, then runs
+the queued local writes (`local`-source publishes and forgets) in queue order,
+each answering its writer as usual, and exits. Every other queued job — feed
+documents, series, files — is dropped; its source resends it after a restart.
+The local writes are the user's last edits (the pricer saves every unsaved
+sheet at quit, before the data service is told to stop), which nothing would
+resend. Submission to the runner itself has no shutdown refusal, so producer
+ordering is required. Egress workers close their queue
 first (refusing further submissions), then join; jobs already queued still
 run and answer, so shutdown can wait on a slow or stuck transport — see
 [egress and uploads](#egress-and-uploads) below. Shutdown is not a flush
-guarantee. Blocking adapter, parser, or filesystem calls can delay joins;
+guarantee: the app's quit hook runs the shutdown on the background executor,
+and gpui waits for quit hooks only up to its `SHUTDOWN_TIMEOUT` (200 ms). A
+local write still running or queued when the process exits is lost; DuckDB's
+write-ahead log keeps the database consistent, at the previous generation. Blocking adapter, parser, or filesystem calls can delay joins;
 panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
@@ -323,7 +331,9 @@ since `ForgetJob` is a public door onto the writer. An accepted forget joins
 the documents FIFO, so it runs after every publish queued before it,
 including a save of the same key. It answers `DataEvent::Forgotten`, also
 for a key that held nothing, or `DataEvent::ForgetFailed` beside an error
-diagnostic. A forget has no progress or health lane.
+diagnostic; a forget the service refused answers `ForgetFailed` too, so
+every forget a caller submitted answers exactly once. A forget has no
+progress or health lane.
 
 Series retention is separate and runs for the affected `(source, identity)`
 pair inside each append transaction. See
@@ -362,7 +372,10 @@ reports under the document key. Local document writes have no configured
 source-health lane. Instead, a local publish also answers its writer by
 dataset and document key: `DataEvent::LocalPublished` with the generation ID
 beside `Published`, or `DataEvent::LocalPublishFailed` with the reason beside
-the error diagnostic. Load entries have no eviction policy, and unresolved
+the error diagnostic. A publish the service refuses before queuing it (the
+dataset is not `local`, or not declared) answers `LocalPublishFailed` too, so
+every admitted local publish answers exactly once — the pricer counts its
+queued saves on that. Load entries have no eviction policy, and unresolved
 raw-topic failures have no fixed cap; memory can grow with distinct names.
 
 At startup, persisted unhealthy file generations seed the load lane. An

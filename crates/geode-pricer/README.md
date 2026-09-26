@@ -30,7 +30,7 @@ The tile:
 
 | Module | Holds |
 |---|---|
-| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (`pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
+| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, tree column, entry row, editor. |
@@ -47,6 +47,11 @@ cargo test -p geode-pricer
 cargo bench -p geode-pricer
 ```
 
+The `test-support` feature exposes read-only accessors a host's tests observe
+a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
+dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
+`--workspace` builds on one feature set.
+
 ## Rules this crate pins
 
 - Every edit passes through `Sheet::apply`, which returns the undo operation.
@@ -61,7 +66,9 @@ cargo bench -p geode-pricer
 - The `pricer_sheets` declaration is frozen: tables are created with
   `CREATE TABLE IF NOT EXISTS` and publishes insert positionally, so once a
   database holds the dataset its column list and order cannot change without
-  a migration (none exists). `sheet` is `categorical = false`: sheet names are
+  a migration (none exists). `geode-app` declares it in the builtin layer and
+  replaces any differing layer redeclaration with it, with an error
+  diagnostic. `sheet` is `categorical = false`: sheet names are
   not a scope dimension and an autosave must not rebuild an ENUM.
 - A document answer decodes (`rows_from_snapshot`) against the declaration's
   column list, not the answer's: a zero-row answer is no document, and a
@@ -93,9 +100,11 @@ cargo bench -p geode-pricer
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
   queued save was reported failed (`save_failed`), is saved when the tile
-  closes. An accepted save is only queued: `PricerFactory::save_answered`
-  settles it by sheet name, reading every outcome as the latest queued
-  save's (outcomes coalesce latest-wins; never count them). Only a confirmed
+  closes, and at quit (`PricerFactory::flush_all`, called by the app before
+  it stops the data service; both routes go through `flush_save`). An
+  accepted save is only queued: `PricerFactory::save_answered` settles it by
+  sheet name. The app delivers every outcome, in the writer's order, so the
+  last to arrive is the latest queued save's. Only a confirmed
   outcome reaches the store's known names (`note_saved`/`note_forgotten`,
   no-ops on `MemorySheetStore`). The save state has its own header slot,
   which pricing notices and `escape` never touch.
@@ -123,14 +132,19 @@ cargo bench -p geode-pricer
   press, blurred before it drops.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds; confirmed saves; less confirmed forgets) plus
-  `Shared::pending_saves` — names with a save queued and not yet answered.
-  `untitled-N` and `:name` treat both as taken. A load of a pending-save name
-  waits (`load_waiting`, no request) until the factory's `save_answered`
-  starts it: reads and saves are on unordered lanes. `Shared::retiring`
-  reserves a name from `:name`/`:rm` until its forget is answered, and a
-  rename's confirmed save never forgets a name a tile holds. Save outcomes
-  route to `Shared::save_origins` (the queuing tile), never by current
-  holder. The factory observes the one
+  `Shared::pending_saves` — names with a save queued and not yet answered,
+  counted per name (one per admitted save, less one per outcome; exact
+  because every admitted local publish answers once and every answer is
+  delivered). `untitled-N` and `:name` treat both as taken. A load of a
+  pending-save name waits (`load_waiting`, no request) until the name's last
+  queued save has answered: reads and saves are on unordered lanes.
+  `Shared::retiring` reserves a name from `:name`/`:rm` until its forget is
+  answered; `:e`, `:name`, `:rm` and a restore refuse it, and a rename's
+  confirmed save never forgets a name a tile holds. Save outcomes route to
+  `Shared::save_origins` (the queuing tile), never by current holder; a
+  failure of a `:name`'s old-name save is not painted (the edits travel under
+  the new name), and a failed load keeps a standing lost-edits notice beside
+  its block. The factory observes the one
   `Diagnostics` entity from its first `create`, comparing the data version,
   and asks for a catalog (with a notify) when none is held.
 - In the free underlying typeahead, `enter` takes the highlighted option only

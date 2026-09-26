@@ -104,12 +104,18 @@ often tripped:
   `forget_document` deletes a document's rows, generation summary and
   provenance in one transaction and runs only on the ingest writer, in the
   same FIFO as document publishes, so a forget queued after a save of the
-  same key deletes that save too. Refusals are error diagnostics; nothing
-  runs.
-- A local publish answers `LocalPublished`/`LocalPublishFailed` and a forget
-  answers `Forgotten`/`ForgetFailed`, addressed by dataset and document key
-  (there is no requester key), in addition to `Published` and the error
-  diagnostics every consumer already reads.
+  same key deletes that save too. A refusal is an error diagnostic plus the
+  write's failure outcome; nothing runs.
+- Every admitted local publish answers exactly once, `LocalPublished` or
+  `LocalPublishFailed`, and every forget `Forgotten` or `ForgetFailed` —
+  including one the service refuses before queuing it. They are addressed by
+  dataset and document key (there is no requester key), in addition to
+  `Published` and the error diagnostics every consumer already reads. The
+  app counts its queued saves on that.
+- Ingest shutdown runs the queued local writes (`local`-source publishes and
+  forgets) in order before the runner stops, each answering as usual, and
+  drops every other queued job. A caller that stops waiting for the join can
+  still exit with a write running.
 - Discovery compares path, size, and source time, not CSV contents. Glob and
   CSV metadata errors are currently skipped, so an empty poll does not prove
   path accessibility. Adapter queue admission likewise does not acknowledge
