@@ -777,7 +777,7 @@ fn read_instrument(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::edit::Edit;
     use crate::core::sheet::tests::{callspread, line, push, spx};
@@ -1086,7 +1086,8 @@ mod tests {
     /// `doc` in the shape a document answer arrives in —
     /// `document_columns()` order, every attribute repeated on every row
     /// — with `edit` free to drop or retype a column before it is built.
-    fn snapshot_of(
+    /// The tile's tests answer a load's `Delivery::Query` with it.
+    pub(crate) fn snapshot_of(
         doc: &DocumentRows,
         edit: impl FnOnce(&mut Vec<(ColumnMeta, TestColumn)>),
     ) -> Snapshot {

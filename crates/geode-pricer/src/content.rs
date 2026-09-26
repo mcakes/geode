@@ -240,10 +240,9 @@ impl TileContent for PricerContent {
     fn deliver(&self, delivery: Delivery, _window: &mut Window, cx: &mut App) {
         match delivery {
             Delivery::Price(outcome) => self.tile.update(cx, |t, cx| t.deliver(outcome, cx)),
-            // Part 4's store answers a sheet load here; until then this
-            // tile asks no document or view query and fetches no series,
-            // so any of these is a routing bug.
-            Delivery::Query(_) => {}
+            // A sheet load's answer; the tile drops any but its latest.
+            Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.query_answered(outcome, cx)),
+            // The tile fetches no series, so either is a routing bug.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
             // The pricer uploads no document.
             Delivery::Upload(_) => {}
@@ -335,6 +334,49 @@ impl PricerFactory {
 
     pub fn settings(&self) -> PricerSettings {
         self.shared.settings.borrow().clone()
+    }
+
+    /// The open tile holding `sheet`, if any: the open set holds each
+    /// name at most once.
+    fn holder(&self, sheet: &str, cx: &App) -> Option<Entity<PricerTile>> {
+        self.shared
+            .tiles
+            .borrow()
+            .iter()
+            .filter_map(WeakEntity::upgrade)
+            .find(|t| t.read(cx).sheet.name == sheet)
+    }
+
+    /// A local save of `sheet` landed (`Ok`) or failed (`Err(reason)`),
+    /// routed by sheet name from the data tier's local-publish outcomes.
+    /// Only a confirmed save makes the name known to the store (never
+    /// `save` answering `true`: a queued write may still fail). The tile
+    /// holding the name reads the outcome as describing its latest queued
+    /// save; an answer for a name no tile holds (a closed tile's flush)
+    /// reaches the store alone.
+    pub fn save_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
+        if answer.is_ok() {
+            self.shared.store.note_saved(sheet);
+        }
+        if let Some(tile) = self.holder(sheet, cx) {
+            tile.update(cx, |t, cx| t.save_answered(answer, cx));
+        }
+    }
+
+    /// A forget of `sheet` landed or failed. Only a confirmed forget drops
+    /// the name from the store's known names; a failure changes nothing
+    /// (the document is still there) and is logged — the data tier has
+    /// already reported it as an error diagnostic.
+    pub fn forget_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
+        let _ = cx;
+        match answer {
+            Ok(()) => self.shared.store.note_forgotten(sheet),
+            Err(reason) => tracing::warn!(
+                target: "geode::pricer",
+                sheet, reason = %reason,
+                "sheet forget failed"
+            ),
+        }
     }
 }
 

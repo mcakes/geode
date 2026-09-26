@@ -16,7 +16,7 @@ use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
-use crate::core::storage::{from_rows, to_rows};
+use crate::core::storage::{from_rows, rows_from_snapshot, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
@@ -32,7 +32,7 @@ use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
-use geode_core::query::QueryKey;
+use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
@@ -77,6 +77,15 @@ pub(crate) const REFUSED: &str =
 /// old one), so a burst saves once.
 pub(crate) const SAVE_IDLE: Duration = Duration::from_secs(1);
 pub(crate) const NOT_SAVED: &str = "sheet not saved: the store refused it; the next edit retries";
+
+/// The save slot after a queued save's outcome reported a failure.
+fn not_saved(reason: &str) -> SharedString {
+    format!("sheet not saved: {reason}; the next edit retries").into()
+}
+
+/// Why a load the store never submitted failed (`Loaded::Refused`).
+pub(crate) const LOAD_REFUSED: &str =
+    "the store refused the load: the data service is busy or gone";
 
 /// The save slot's standing notice after a failed load (see
 /// `PricerTile::save_blocked`).
@@ -227,10 +236,29 @@ pub struct PricerTile {
     /// the life of the tile. A genuinely absent document (`Missing`,
     /// `Ok(None)`) does not set this: §7.4 opens it empty under its name.
     save_blocked: bool,
-    /// A change armed a save that no accepted save has published yet.
-    /// Cleared only by an accepted save, so `on_release` flushes a refused
-    /// save as well as one still waiting on its idle timer.
+    /// A change not yet in any queued save. Cleared only when the store
+    /// accepts a save (queues it), so `on_release` flushes a refused save
+    /// as well as one still waiting on its idle timer.
     dirty: bool,
+    /// The latest queued save's outcome was a failure: the document does
+    /// not hold what this tile last queued, so the next save (a burst, or
+    /// the close) must write it again. Save outcomes carry no link to the
+    /// save that produced them and coalesce latest-wins, so each one is
+    /// read as describing the LATEST queued save — never counted: a
+    /// later `Ok` clears this, a later `Err` sets it.
+    pub(crate) save_failed: bool,
+    /// The latest save attempt was refused admission (`NOT_SAVED`): an
+    /// `Ok` arriving afterwards confirms an earlier save, not this one,
+    /// so it must not clear that notice.
+    save_refused: bool,
+    /// The latest load's tag: a `Delivery::Query` under any other is an
+    /// earlier (cancelled or superseded) load's and is dropped. Separate
+    /// from the pricing `tag`; both ride this tile's `QueryKey`, but the
+    /// query pool and the pricing worker are separate lanes.
+    load_tag: u64,
+    /// A hide cancelled by key while loading, which cancels the load too:
+    /// the next show asks again under a fresh tag.
+    load_cancelled: bool,
     /// A user error for the footer (spec §8.3); cleared by the next verb.
     pub(crate) footer: Option<SharedString>,
     /// What the footer paints: `footer`, else the cursor row's failure.
@@ -346,12 +374,10 @@ impl PricerTile {
             None => untitled(&shared),
         };
         shared.open.borrow_mut().insert(name.clone());
-        // Tag 0: this store answers Missing/Rows/Refused at once (the
-        // in-memory store) or a DuckDB load whose only outcome yet
-        // possible is the first one this tile ever asks for. The tile's
-        // own load tag lands with its load lifecycle (`:e`/`:new`) and
-        // is threaded through here once it exists.
-        let (sheet, loading) = match shared.store.load(&name, QueryKey(id.0), 0) {
+        // The tile's first load is tag 1; `start_load` bumps it for every
+        // later one, so an answer to an earlier load never installs.
+        let load_tag = 1;
+        let (sheet, loading) = match shared.store.load(&name, QueryKey(id.0), load_tag) {
             Loaded::Rows(rows) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
@@ -378,10 +404,7 @@ impl PricerTile {
             // way — a refused read must never let the empty fallback
             // stand in for, and then overwrite, the real document.
             Loaded::Refused => {
-                blocked = Some(blocked_notice(
-                    &name,
-                    "the store refused the load: the data service is busy or gone",
-                ));
+                blocked = Some(blocked_notice(&name, LOAD_REFUSED));
                 (fallback(&name, &record), false)
             }
         };
@@ -454,8 +477,10 @@ impl PricerTile {
             // Spec §7.3: the sheet is not lost until the tile is — a save
             // still waiting on its idle timer, or one the store refused,
             // runs now (`save_now` itself refuses a blocked sheet).
+            // A save queued and still unconfirmed is already on the
+            // writer: nothing extra.
             this.save_task = None;
-            if this.dirty {
+            if this.dirty || this.save_failed {
                 this.save_now();
             }
             this.data.cancel(QueryKey(this.id.0));
@@ -488,6 +513,10 @@ impl PricerTile {
             save_blocked: blocked.is_some(),
             save_notice: blocked,
             dirty: false,
+            save_failed: false,
+            save_refused: false,
+            load_tag,
+            load_cancelled: false,
             footer: None,
             footer_text: None,
             header: HeaderModel::default(),
@@ -584,9 +613,17 @@ impl PricerTile {
         }
         self.visible = visible;
         if visible {
+            if self.loading && self.load_cancelled {
+                self.start_load(cx);
+            }
             self.submit(cx);
             self.restart_timer(cx);
         } else {
+            // The cancel below reaches the query pool too, so a pending
+            // load gets no answer: the next show asks again.
+            if self.loading {
+                self.load_cancelled = true;
+            }
             self.data.cancel(QueryKey(self.id.0));
             self.in_flight.clear();
             self.refresh_task = None;
@@ -1154,6 +1191,10 @@ impl PricerTile {
     /// the save slot and stays `dirty`, so the next burst or the close
     /// retries. A sheet whose load failed publishes nothing at all: the
     /// fallback would become the document's latest generation.
+    ///
+    /// An accepted save is only QUEUED: it clears `dirty` (the close has
+    /// nothing to flush) but not the save notice, which only the outcome
+    /// (`save_answered`) settles.
     pub(crate) fn save_now(&mut self) {
         if self.save_blocked {
             return;
@@ -1163,10 +1204,37 @@ impl PricerTile {
         };
         if self.shared.store.save(&self.sheet.name, rows) {
             self.dirty = false;
-            self.save_notice = None;
+            self.save_failed = false;
+            self.save_refused = false;
         } else {
+            self.save_refused = true;
             self.save_notice = Some(NOT_SAVED.into());
         }
+    }
+
+    /// The outcome of this sheet's latest queued save (spec §7.3): `Ok`
+    /// clears a failure and its notice; `Err` paints the reason and marks
+    /// the sheet to be written again by the next burst or the close. A
+    /// sheet whose load failed queues nothing, so no outcome is its own:
+    /// its standing notice is never cleared by one.
+    pub(crate) fn save_answered(&mut self, answer: Result<(), String>, cx: &mut Context<Self>) {
+        if self.save_blocked {
+            return;
+        }
+        match answer {
+            Ok(()) => {
+                self.save_failed = false;
+                if !self.save_refused {
+                    self.save_notice = None;
+                }
+            }
+            Err(reason) => {
+                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));
+            }
+        }
+        self.rebuild_chrome();
+        cx.notify();
     }
 
     /// One `PriceParams` of every stale line, when some stale line is not
@@ -1343,8 +1411,48 @@ impl PricerTile {
         self.submit(cx);
     }
 
-    /// A `Pending` load's answer (planning decision 7): Part 4's
-    /// `Delivery::Query` arm calls this with the decoded document.
+    /// Ask the store for this tile's sheet under a fresh load tag: the
+    /// first show after a hide cancelled a pending load, and `:e`. A
+    /// standing pricing refusal streak ends here — nothing prices while
+    /// loading, so `REFUSED` would otherwise cover `loading…` with no
+    /// retry left to end it.
+    pub(crate) fn start_load(&mut self, cx: &mut Context<Self>) {
+        self.load_tag += 1;
+        self.load_cancelled = false;
+        self.loading = true;
+        self.end_refusals();
+        let key = QueryKey(self.id.0);
+        let answer = match self.shared.store.load(&self.sheet.name, key, self.load_tag) {
+            Loaded::Pending => {
+                self.notice = Some(LOADING.into());
+                self.rebuild(cx);
+                return;
+            }
+            Loaded::Rows(rows) => Ok(Some(rows)),
+            Loaded::Missing => Ok(None),
+            // Never submitted: nothing is coming, so this is the failed
+            // load, not a `loading` that never resolves.
+            Loaded::Refused => Err(LOAD_REFUSED.to_string()),
+        };
+        self.loaded(answer, cx);
+    }
+
+    /// `Delivery::Query` for this tile: only the latest load's answer,
+    /// decoded (`rows_from_snapshot`) into `loaded`. A decode failure is
+    /// a failed load (saves blocked), never a half-installed sheet.
+    pub fn query_answered(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
+        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.load_tag || !self.loading {
+            return;
+        }
+        let name = self.sheet.name.clone();
+        let answer = outcome
+            .snapshot
+            .and_then(|snapshot| rows_from_snapshot(&name, &snapshot));
+        self.loaded(answer, cx);
+    }
+
+    /// A `Pending` load's answer (planning decision 7), reached from the
+    /// `Delivery::Query` arm through `query_answered`.
     pub fn loaded(&mut self, answer: Result<Option<DocumentRows>, String>, cx: &mut Context<Self>) {
         if !self.loading {
             return;
@@ -4430,8 +4538,10 @@ pub(crate) mod tests {
         h.store.set_refusing(false);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 4 });
         settle(&mut vcx, SAVE_IDLE);
-        assert_eq!(h.save_notice(&vcx), None);
         assert_eq!(stored(&h).qty(0), 4);
+        // The notice clears when the queued save is confirmed landed.
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(h.save_notice(&vcx), None);
     }
 
     #[gpui::test]
@@ -5260,5 +5370,336 @@ pub(crate) mod tests {
         h.draw(&mut vcx);
         assert_eq!(h.footer(&vcx).as_deref(), Some("not in a package"));
         assert_eq!(h.mode(&mut vcx), "menu", "a refused pick keeps the menu");
+    }
+
+    // ---- the load and save lifecycle over the store's answers ----
+
+    /// A load answer as the data tier delivers it: `rows` in the shape a
+    /// document read returns, addressed to this tile under `tag`.
+    fn answer_load(
+        h: &Harness,
+        vcx: &mut VisualTestContext,
+        tag: u64,
+        snapshot: Result<geode_core::snapshot::Snapshot, String>,
+    ) {
+        let outcome = geode_core::query::QueryOutcome {
+            key: QueryKey(TILE),
+            tag,
+            snapshot: snapshot.map(std::sync::Arc::new),
+            submitted: std::time::Instant::now(),
+        };
+        vcx.update(|window, cx| h.content.deliver(Delivery::Query(outcome), window, cx));
+    }
+
+    fn snapshot(rows: &geode_core::document::DocumentRows) -> geode_core::snapshot::Snapshot {
+        crate::core::storage::tests::snapshot_of(rows, |_| {})
+    }
+
+    /// Ids 1 (A), 2 (the package), 3–4 (legs), 5 (B); the record holds
+    /// the cursor on B and the package open. The store answers `Pending`.
+    fn pending_book() -> (
+        MemorySheetStore,
+        toml::Table,
+        geode_core::document::DocumentRows,
+    ) {
+        let (store, mut record) = seeded(&[
+            "SPX Z26 5000 C",
+            "-5 SPX Z26 4800/5200 CS",
+            "SPX Z26 4000 P",
+        ]);
+        record.insert("cursor".into(), toml::Value::Integer(5));
+        record.insert(
+            "expanded".into(),
+            toml::Value::Array(vec![toml::Value::Integer(2)]),
+        );
+        let rows = store.get("book").unwrap();
+        store.set_pending(true);
+        (store, record, rows)
+    }
+
+    #[gpui::test]
+    fn a_query_answer_under_the_latest_load_tag_installs_the_sheet_and_an_older_one_is_ignored(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, record, rows) = pending_book();
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.store.loads(),
+            vec![("book".to_string(), QueryKey(TILE), 1)],
+            "one load, and the first show does not ask again"
+        );
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        assert!(h.prices().is_empty(), "nothing prices while loading");
+
+        // An answer under any other tag is not this load's.
+        answer_load(&h, &mut vcx, 0, Ok(snapshot(&rows)));
+        answer_load(&h, &mut vcx, 2, Ok(snapshot(&rows)));
+        assert_eq!(h.sheet_len(&vcx), 0);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+
+        answer_load(&h, &mut vcx, 1, Ok(snapshot(&rows)));
+        assert_eq!(h.sheet_len(&vcx), 5, "decoded and installed");
+        assert!(h.notice(&vcx).is_none());
+        assert_eq!(h.tree(&vcx).len(), 5, "the held expansion applied");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(4), "the held cursor");
+        assert!(!h.prices().is_empty(), "the installed sheet reprices");
+        assert_eq!(h.save_notice(&vcx), None);
+
+        // A repeat of the answered tag, even a failure, changes nothing.
+        answer_load(&h, &mut vcx, 1, Err("late".into()));
+        assert_eq!(h.save_notice(&vcx), None);
+        assert_eq!(h.sheet_len(&vcx), 5);
+    }
+
+    #[gpui::test]
+    fn a_failed_or_undecodable_load_answer_blocks_saves(cx: &mut gpui::TestAppContext) {
+        let (store, record, rows) = pending_book();
+        let (h, mut vcx) = open_full(cx, Some(record.clone()), store, PricerSettings::default());
+        answer_load(&h, &mut vcx, 1, Err("boom".into()));
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some("sheet 'book' did not load (boom); edits are not saved")
+        );
+
+        let store = MemorySheetStore::default();
+        store.set_pending(true);
+        let (h2, mut vcx2) = open_full(cx, Some(record), store, PricerSettings::default());
+        let bad = crate::core::storage::tests::snapshot_of(&rows, |cols| {
+            cols.retain(|(m, _)| m.name != "strike")
+        });
+        answer_load(&h2, &mut vcx2, 1, Ok(bad));
+        let notice = h2.save_notice(&vcx2).expect("a decode failure says so");
+        assert!(
+            notice.starts_with("sheet 'book' did not load (") && notice.contains("strike"),
+            "{notice}"
+        );
+        assert_eq!(h2.sheet_len(&vcx2), 0, "never a half-sheet");
+        assert!(h2.tile.read_with(&vcx2, |t, _| t.save_blocked));
+    }
+
+    /// A hide cancels by key, which cancels the pending load too: the
+    /// next show asks again under a fresh tag, and only that tag installs.
+    #[gpui::test]
+    fn a_load_cancelled_by_a_hide_is_resubmitted_on_show_under_a_fresh_tag(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (store, record, rows) = pending_book();
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        h.visible(&mut vcx, false);
+        assert!(
+            h.requests()
+                .iter()
+                .any(|r| matches!(r, Request::Cancel { key } if *key == QueryKey(TILE))),
+            "the hide cancelled by key"
+        );
+        assert_eq!(h.store.loads().len(), 1, "a hide asks for nothing");
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.store.loads(),
+            vec![
+                ("book".to_string(), QueryKey(TILE), 1),
+                ("book".to_string(), QueryKey(TILE), 2),
+            ]
+        );
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        answer_load(&h, &mut vcx, 1, Ok(snapshot(&rows)));
+        assert_eq!(h.sheet_len(&vcx), 0, "the cancelled load's answer is stale");
+        answer_load(&h, &mut vcx, 2, Ok(snapshot(&rows)));
+        assert_eq!(h.sheet_len(&vcx), 5);
+        assert_eq!(
+            h.tree(&vcx).len(),
+            5,
+            "the held expansion survives the resubmit"
+        );
+        // Loaded: a later hide and show asks for nothing.
+        h.visible(&mut vcx, false);
+        h.visible(&mut vcx, true);
+        assert_eq!(h.store.loads().len(), 2);
+    }
+
+    /// Decision 15: nothing prices while loading, so a standing refusal
+    /// streak would say `REFUSED` over a load with no retry to end it.
+    #[gpui::test]
+    fn a_load_starting_clears_a_refusal_streak(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 1.0);
+        h.close_channel();
+        h.dispatch(&mut vcx, "price", None);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
+        h.store.set_pending(true);
+        h.tile.update(&mut vcx, |t, cx| t.start_load(cx));
+        assert_eq!(h.notice(&vcx).as_deref(), Some(LOADING));
+        assert!(h.tile.read_with(&vcx, |t, _| t.retry_task.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_refused_load_at_restore_blocks_saves_and_names_the_refusal(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        let good = store.get("book").unwrap();
+        store.set_load_refused(true);
+        let base = store.save_count();
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.save_notice(&vcx),
+            Some(blocked_notice("book", LOAD_REFUSED).to_string())
+        );
+        assert_ne!(
+            h.notice(&vcx).as_deref(),
+            Some(LOADING),
+            "nothing is coming"
+        );
+        h.command(&mut vcx, "refresh off").unwrap();
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(
+            h.store.save_count(),
+            base,
+            "the fallback is never published"
+        );
+        assert_eq!(h.store.get("book"), Some(good));
+    }
+
+    fn save_answered(
+        h: &Harness,
+        vcx: &mut VisualTestContext,
+        sheet: &str,
+        answer: Result<(), String>,
+    ) {
+        vcx.update(|_, cx| h.factory.save_answered(sheet, answer, cx));
+    }
+
+    fn dirty(h: &Harness, vcx: &VisualTestContext) -> bool {
+        h.tile.read_with(vcx, |t, _| t.dirty || t.save_failed)
+    }
+
+    #[gpui::test]
+    fn a_save_is_settled_by_its_answer_not_by_being_queued(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        h.store.set_refusing(true);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(NOT_SAVED));
+        h.store.set_refusing(false);
+
+        // Queued: nothing to flush, but nothing confirmed either.
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 3 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base + 1);
+        assert!(!dirty(&h, &vcx), "the write is queued");
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some(NOT_SAVED),
+            "a queued save is not a landed one"
+        );
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(h.save_notice(&vcx), None);
+
+        // A failure: dirty again, the reason painted, the next burst retries.
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 4 });
+        settle(&mut vcx, SAVE_IDLE);
+        save_answered(&h, &mut vcx, "book", Err("disk full".into()));
+        assert!(dirty(&h, &vcx));
+        assert_eq!(
+            h.save_notice(&vcx).as_deref(),
+            Some("sheet not saved: disk full; the next edit retries")
+        );
+        // Another sheet's answer is not this tile's.
+        save_answered(&h, &mut vcx, "other", Ok(()));
+        assert!(dirty(&h, &vcx));
+        assert!(h.save_notice(&vcx).is_some());
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 5 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base + 3, "the next burst retried");
+        assert_eq!(stored(&h).qty(0), 5);
+
+        // Outcomes coalesce latest-wins: each describes the latest queued
+        // save, so ok → fail → ok ends clean.
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        save_answered(&h, &mut vcx, "book", Err("blip".into()));
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert!(!dirty(&h, &vcx));
+        assert_eq!(h.save_notice(&vcx), None);
+    }
+
+    #[gpui::test]
+    fn an_ok_for_an_earlier_save_keeps_a_newer_edit_dirty_and_a_failure_is_flushed_on_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 3 });
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert!(
+            dirty(&h, &vcx),
+            "the newer edit is not in the confirmed save"
+        );
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.store.save_count(), base + 2);
+        save_answered(&h, &mut vcx, "book", Err("disk full".into()));
+        let store = h.store.clone();
+        drop(h);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        drop(vcx);
+        assert_eq!(
+            store.save_count(),
+            base + 3,
+            "the failed save ran again on close"
+        );
+    }
+
+    #[gpui::test]
+    fn a_close_with_a_save_queued_writes_nothing_extra(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        let store = h.store.clone();
+        drop(h);
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        drop(vcx);
+        assert_eq!(store.save_count(), base + 1);
+    }
+
+    #[gpui::test]
+    fn a_save_answer_never_clears_a_failed_loads_block(cx: &mut gpui::TestAppContext) {
+        let (store, record, _) = pending_book();
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        answer_load(&h, &mut vcx, 1, Err("boom".into()));
+        let blocked = h.save_notice(&vcx);
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert_eq!(h.save_notice(&vcx), blocked);
+    }
+
+    /// A confirmed outcome reaches the store's known names; a submission
+    /// or a failure never does.
+    #[gpui::test]
+    fn confirmed_outcomes_update_the_stores_known_names(cx: &mut gpui::TestAppContext) {
+        let (data, _rx) = DataHandle::for_tests();
+        let store = Rc::new(crate::store::DuckSheetStore::new(data.clone()));
+        let factory = PricerFactory::new(
+            data,
+            store.clone(),
+            Views::builtin(),
+            PricerSettings::default(),
+        );
+        cx.update(|cx| {
+            factory.save_answered("a", Err("no".into()), cx);
+            factory.save_answered("b", Ok(()), cx);
+            factory.forget_answered("gone", Ok(()), cx);
+        });
+        assert!(!store.contains("a"));
+        assert!(store.contains("b"));
+        store.note_saved("gone");
+        cx.update(|cx| factory.forget_answered("gone", Err("no".into()), cx));
+        assert!(store.contains("gone"), "a failed forget leaves it known");
+        cx.update(|cx| factory.forget_answered("gone", Ok(()), cx));
+        assert!(!store.contains("gone"));
     }
 }

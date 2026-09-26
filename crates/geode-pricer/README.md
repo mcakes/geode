@@ -91,9 +91,19 @@ cargo bench -p geode-pricer
   rebuild re-checks an open menu's rows.
 - The tile arrives at flip barriers itself; it submits no view query.
 - An empty sheet is never saved. A sheet whose load failed is never saved
-  (`save_blocked`); a change not yet accepted by the store (`dirty`) is saved
-  when the tile closes. The save state has its own header slot, which pricing
-  notices and `escape` never touch.
+  (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
+  queued save was reported failed (`save_failed`), is saved when the tile
+  closes. An accepted save is only queued: `PricerFactory::save_answered`
+  settles it by sheet name, reading every outcome as the latest queued
+  save's (outcomes coalesce latest-wins; never count them). Only a confirmed
+  outcome reaches the store's known names (`note_saved`/`note_forgotten`,
+  no-ops on `MemorySheetStore`). The save state has its own header slot,
+  which pricing notices and `escape` never touch.
+- Loads carry the tile's own `load_tag` (separate from the pricing `tag`);
+  `Delivery::Query` under any other tag is dropped, and the answer is decoded
+  by `rows_from_snapshot` into `loaded`. A hide cancels a pending load, so
+  the next show resubmits it under a fresh tag. `start_load` ends a pricing
+  refusal streak.
 - `SheetStore::load` is addressed by the caller's `QueryKey`/tag so a
   DuckDB-backed answer can be routed back; a load the store never
   submitted answers `Loaded::Refused`, which the tile treats as a failed

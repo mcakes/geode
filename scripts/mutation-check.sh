@@ -16136,10 +16136,10 @@ run_mutation "pricer store: DuckSheetStore.forget names the wrong dataset" \
 
 run_mutation "pricer store: note_forgotten leaves a forgotten name known" \
   crates/geode-pricer/src/store.rs \
-  '    pub fn note_forgotten(&self, name: &str) {
+  '    fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
     }' \
-  '    pub fn note_forgotten(&self, name: &str) {
+  '    fn note_forgotten(&self, name: &str) {
         let _ = name;
     }' \
   geode-pricer names_and_contains_are_known_union_saved_minus_forgotten
@@ -16155,6 +16155,72 @@ run_mutation "pricer store: MemorySheetStore.forget keeps the sheet" \
         true
     }' \
   geode-pricer forget_removes_the_entry_and_drops_it_from_names
+
+run_mutation "pricer load: an answer under an older load tag installs" \
+  crates/geode-pricer/src/tile.rs \
+  '        if outcome.key != QueryKey(self.id.0) || outcome.tag != self.load_tag || !self.loading {' \
+  '        if outcome.key != QueryKey(self.id.0) || !self.loading {' \
+  geode-pricer a_query_answer_under_the_latest_load_tag_installs_the_sheet_and_an_older_one_is_ignored
+
+run_mutation "pricer load: a show after a hide does not resubmit a cancelled load" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.loading && self.load_cancelled {
+                self.start_load(cx);
+            }' \
+  '            let _ = self.load_cancelled;' \
+  geode-pricer a_load_cancelled_by_a_hide_is_resubmitted_on_show_under_a_fresh_tag
+
+run_mutation "pricer load: every show resubmits a pending load" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.loading && self.load_cancelled {
+                self.start_load(cx);
+            }' \
+  '            if self.loading {
+                self.start_load(cx);
+            }' \
+  geode-pricer a_query_answer_under_the_latest_load_tag_installs_the_sheet_and_an_older_one_is_ignored
+
+run_mutation "pricer save: a queued save clears the notice before its outcome" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.dirty = false;
+            self.save_failed = false;
+            self.save_refused = false;' \
+  '            self.dirty = false;
+            self.save_failed = false;
+            self.save_refused = false;
+            self.save_notice = None;' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: a failed outcome is read as a landed one" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  '                let _ = reason;
+                self.save_failed = false;' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: an Ok outcome leaves a failure standing" \
+  crates/geode-pricer/src/tile.rs \
+  '            Ok(()) => {
+                self.save_failed = false;
+                if !self.save_refused {' \
+  '            Ok(()) => {
+                if !self.save_refused {' \
+  geode-pricer a_save_is_settled_by_its_answer_not_by_being_queued
+
+run_mutation "pricer save: a failed save is not flushed on close" \
+  crates/geode-pricer/src/tile.rs \
+  '            if this.dirty || this.save_failed {' \
+  '            if this.dirty {' \
+  geode-pricer an_ok_for_an_earlier_save_keeps_a_newer_edit_dirty_and_a_failure_is_flushed_on_close
+
+run_mutation "pricer save: an unconfirmed save makes its name known" \
+  crates/geode-pricer/src/content.rs \
+  '        if answer.is_ok() {
+            self.shared.store.note_saved(sheet);' \
+  '        if true {
+            self.shared.store.note_saved(sheet);' \
+  geode-pricer confirmed_outcomes_update_the_stores_known_names
 
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
@@ -18138,10 +18204,10 @@ run_mutation "pricer tile: a refused save is silent" \
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            if this.dirty {
+  '            if this.dirty || this.save_failed {
                 this.save_now();
             }' \
-  '            let _ = this.dirty;' \
+  '            let _ = (this.dirty, this.save_failed);' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
 # A pending load (Part 4's production restore) holds the session record's
@@ -18268,7 +18334,7 @@ run_mutation "pricer tile: a failed load's fallback is saved over the document" 
 run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
   crates/geode-pricer/src/tile.rs \
   '            this.save_task = None;
-            if this.dirty {' \
+            if this.dirty || this.save_failed {' \
   '            if this.save_task.take().is_some() {' \
   geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
 

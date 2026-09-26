@@ -353,11 +353,16 @@ itself because it submits no view query, so a scope change never waits on it.
 
 A sheet is saved as a whole document one idle second after its last change.
 Closing the tile saves any change not yet saved, whether it was still waiting
-on the idle timer or was refused by the store. A refused save paints a notice
-in the header's own save slot, separate from pricing notices: a refused pricing
-request cannot overwrite it, a later successful request cannot clear it, and
-`escape` does not clear it. Only an accepted save does. The next change and
-the close both retry. An empty sheet publishes nothing.
+on the idle timer, was refused by the store, or was queued and then reported
+failed. A save the store accepts is only queued; its outcome arrives later by
+sheet name. A refused save (`the store refused it`) or a failed one (the
+writer's reason) paints a notice in the header's own save slot, separate from
+pricing notices: a refused pricing request cannot overwrite it, a later
+successful request cannot clear it, and `escape` does not clear it. Only a
+confirmed save does. Outcomes carry no link to the save that produced them and
+coalesce latest-wins, so each is read as the outcome of the latest queued
+save. The next change and the close both retry. A close with a save queued
+but unconfirmed writes nothing extra. An empty sheet publishes nothing.
 
 If a sheet's document fails to load (its rows do not decode, or the store
 answers with an error), the tile shows an empty fallback and the save slot
@@ -367,7 +372,12 @@ generation. A name with no document is not a failure: it opens empty and saves
 normally.
 
 While a load is pending the header reads `loading…`; `escape` does not clear
-it (it is the only sign the load has not answered), and the answer does.
+it (it is the only sign the load has not answered), and the answer does. Only
+the latest load's answer installs. Hiding the tile cancels a pending load with
+its pricing, so the next show asks again. A load that could not be submitted
+at all is a failed load (saves blocked), not a pending one. A load starting
+ends a standing pricing-refusal streak, so `loading…` is never covered by
+`REFUSED`.
 
 The session record keeps the sheet name, view, refresh setting, cursor line,
 and open packages (only those still on the sheet: a deleted or ungrouped

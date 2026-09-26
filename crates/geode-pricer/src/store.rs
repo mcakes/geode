@@ -55,18 +55,32 @@ pub trait SheetStore {
     fn names(&self) -> Vec<String>;
     /// Whether a document exists under `name` (the `untitled-N` rule).
     fn contains(&self, name: &str) -> bool;
+    /// A save of `name` is CONFIRMED (the data tier's local-publish
+    /// outcome, never `save` answering `true`): a store keeping a cache of
+    /// known names adds it. A store that answers `names` from its own
+    /// contents has nothing to do.
+    fn note_saved(&self, name: &str) {
+        let _ = name;
+    }
+    /// A forget of `name` is CONFIRMED: a store keeping a cache of known
+    /// names drops it.
+    fn note_forgotten(&self, name: &str) {
+        let _ = name;
+    }
 }
 
 /// The process-lifetime store. Clones share one map, so the factory and
-/// every tile it builds see the same sheets. The three knobs exist for
-/// the tile's tests (a refused save, a pending load, a save count); the
-/// app never turns them.
+/// every tile it builds see the same sheets. The knobs exist for the
+/// tile's tests (a refused save, a pending or refused load, a save count,
+/// the loads asked for); the app never turns them.
 #[derive(Clone, Default)]
 pub struct MemorySheetStore {
     sheets: Rc<RefCell<BTreeMap<String, DocumentRows>>>,
     saves: Rc<Cell<usize>>,
     refusing: Rc<Cell<bool>>,
     pending: Rc<Cell<bool>>,
+    load_refused: Rc<Cell<bool>>,
+    loads: Rc<RefCell<Vec<(String, QueryKey, u64)>>>,
 }
 
 impl MemorySheetStore {
@@ -86,10 +100,24 @@ impl MemorySheetStore {
     pub fn set_pending(&self, pending: bool) {
         self.pending.set(pending);
     }
+
+    /// Every later `load` answers `Refused` (a closed request channel).
+    pub fn set_load_refused(&self, refused: bool) {
+        self.load_refused.set(refused);
+    }
+
+    /// Every `load` asked so far, as `(name, key, tag)`.
+    pub fn loads(&self) -> Vec<(String, QueryKey, u64)> {
+        self.loads.borrow().clone()
+    }
 }
 
 impl SheetStore for MemorySheetStore {
-    fn load(&self, name: &str, _key: QueryKey, _tag: u64) -> Loaded {
+    fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded {
+        self.loads.borrow_mut().push((name.to_string(), key, tag));
+        if self.load_refused.get() {
+            return Loaded::Refused;
+        }
         if self.pending.get() {
             return Loaded::Pending;
         }
@@ -157,16 +185,6 @@ impl DuckSheetStore {
     pub fn set_known(&self, names: impl IntoIterator<Item = String>) {
         self.known.borrow_mut().extend(names);
     }
-
-    /// A confirmed save: `name` is now a known document.
-    pub fn note_saved(&self, name: &str) {
-        self.known.borrow_mut().insert(name.to_string());
-    }
-
-    /// A confirmed forget: `name` is no longer a known document.
-    pub fn note_forgotten(&self, name: &str) {
-        self.known.borrow_mut().remove(name);
-    }
 }
 
 impl SheetStore for DuckSheetStore {
@@ -209,6 +227,16 @@ impl SheetStore for DuckSheetStore {
 
     fn contains(&self, name: &str) -> bool {
         self.known.borrow().contains(name)
+    }
+
+    /// A confirmed save: `name` is now a known document.
+    fn note_saved(&self, name: &str) {
+        self.known.borrow_mut().insert(name.to_string());
+    }
+
+    /// A confirmed forget: `name` is no longer a known document.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
     }
 }
 
