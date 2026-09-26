@@ -21378,6 +21378,30 @@ run_mutation "expr suggest: derived ordering is flagged" \
   geode-core \
   check_flags_unknown_columns_and_derived_ordering
 
+# A reply from a superseded request must never fill the list.
+run_mutation "expr suggest: a stale values reply is dropped" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        if self.values.get(column) != Some(&Values::Loading { tag }) {' \
+  '        if self.values.get(column).is_none() {' \
+  geode-shell \
+  a_categorical_value_position_requests_once_and_lists_after_delivery
+
+# Quotes inside a value are doubled; a bare quote would end the string early.
+run_mutation "expr suggest: an inserted value escapes its quotes" \
+  crates/geode-shell/src/exprcomplete.rs \
+  "    format!(\"'{}'\", value.replace('\\'', \"''\"))" \
+  "    format!(\"'{}'\", value)" \
+  geode-shell \
+  a_value_with_a_quote_is_escaped_when_inserted
+
+# Operators follow the column type: a bool column offers no ordering.
+run_mutation "expr suggest: operators follow the column type" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        Some(ValueKind::Bool) => &["=", "!="],' \
+  '        Some(ValueKind::Bool) => &["=", "!=", "<"],' \
+  geode-shell \
+  operators_follow_the_column_type
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
