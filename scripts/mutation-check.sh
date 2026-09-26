@@ -21208,6 +21208,51 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
 
+# ---- Modal Back button: the pointer route for Escape's back rung
+
+# The shared title row paints the button only while the dialog reports a
+# back step; Browse, Columns, and the log-level targets have none.
+run_mutation "modal back: the button paints only while a back step exists" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                .when(show_back, |row| row.child(back_button(cx)))' \
+  '                .when(true, |row| row.child(back_button(cx)))' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# The object dialog's availability is its stage's parent, not merely an
+# open dialog.
+run_mutation "modal back: the object dialog offers Back only off Browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                .is_some_and(ObjectDialogState::has_previous_stage)' \
+  '                .is_some()' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# One click is one whole screen: an open field is cancelled before the
+# stage is left, or its entry survives into the parent stage.
+run_mutation "modal back: a click cancels the open field before leaving" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            draft.cancel_text_entry();
+            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  '            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  geode-shell the_back_button_cancels_a_column_field_before_leaving
+
+# A kept query is Escape's rung before the stage step; the click clears it.
+run_mutation "modal back: a click clears the kept query" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !self.effective_query().is_empty() {' \
+  '        if false {' \
+  geode-shell abandon_for_back_leaves_the_filter_and_clears_the_query
+
+# A pending confirmation owns input: the click must do nothing.
+run_mutation "modal back: a click is ignored while a confirm is pending" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.confirm.is_some() || !self.has_previous_stage() {' \
+  '        if !self.has_previous_stage() {' \
+  geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

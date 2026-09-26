@@ -3220,10 +3220,8 @@ impl ObjectDialogState {
         if self.mode == DialogMode::Filter {
             self.exit_filter(dialogmode::FilterExit::Revert);
         }
-        let query = self.effective_query_mut();
-        if !query.is_empty() {
-            query.clear();
-            *self.effective_selected_mut() = 0;
+        if !self.effective_query().is_empty() {
+            self.set_query(String::new());
         }
         true
     }
