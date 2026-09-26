@@ -1020,7 +1020,8 @@ mod tests {
         let mut m = Model::new();
         m.add_source("SPX.close", "demo_kdb", "series").unwrap();
         m.add_source("VIX", "demo_rest", "series").unwrap();
-        m.add_expr("s1 / s2", Expr::Ref(1)).unwrap();
+        m.add_expr("SPX.close / VIX@demo_rest", Expr::Ref(1))
+            .unwrap();
         m
     }
 
@@ -1060,7 +1061,7 @@ mod tests {
             "expr",
             "an expression has neither a source nor a rule"
         );
-        assert_eq!(p.rows[2].label.as_ref(), "s1 / s2");
+        assert_eq!(p.rows[2].label.as_ref(), "SPX.close / VIX@demo_re…");
         assert_eq!(p.rows[0].axis, "L");
         assert_eq!(p.rows[0].swatch, stub(&Color::Palette(0)));
         assert_eq!(p.rows[1].swatch, stub(&Color::Palette(1)));
@@ -1086,7 +1087,7 @@ mod tests {
         );
         let p = SeriesPopup::prepare(&m, Some(&degraded), Some("demo_kdb"), &stub);
         assert_eq!(p.rows[0].state.as_ref(), "degraded");
-        assert_eq!(p.rows[1].state.as_ref(), "fetching", "s2 is still waiting");
+        assert_eq!(p.rows[1].state.as_ref(), "fetching", "VIX is still waiting");
         // …and never over the tile's own failure.
         m.set_state(1, SlotState::Failed("no route".into()));
         let p = SeriesPopup::prepare(&m, Some(&degraded), Some("demo_kdb"), &stub);

@@ -444,7 +444,10 @@ impl TimeseriesTile {
             }
             Ok(expr) => {
                 let written = match editing {
-                    Some(number) => self.model.replace_expr(number, &text, expr),
+                    Some(number) => {
+                        self.model
+                            .replace_expr(number, &text, expr, default_source.as_deref())
+                    }
                     None => self.model.add_expr(&text, expr).map(|(_, changed)| changed),
                 };
                 self.close_popup_with_window(window, cx);

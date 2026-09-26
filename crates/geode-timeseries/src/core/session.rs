@@ -4,13 +4,17 @@
 //! `from_table` heals a hostile table rather than refusing it, like
 //! `Tree::from_parts`; every drop is a notice the tile shows once.
 //!
-//! A table without `version = 2` was saved when expression text named
-//! slots by handle (`s3`). Restoring it rewrites each handle to a name:
-//! a source slot's label, or an expression slot's own text in
-//! parentheses, recursively. A text that cannot be rewritten (a cycle,
-//! a handle to a slot the table no longer holds, a series no name can
+//! A table without `version = 2` may name slots by handle (`s3`) in
+//! expression text. Restoring it rewrites each handle to a name: a
+//! source slot's full `identity@source` (never the default-aware label,
+//! which a later default change would retarget), or an expression
+//! slot's own text in parentheses, recursively. A text with no handle
+//! is read as current text. A text that cannot be rewritten (a cycle, a
+//! handle to a slot the table no longer holds, a series no name can
 //! pick out) keeps its slot, failed with the reason, and is written
-//! back with `legacy = true` so a later restore tries again.
+//! back with `legacy = true` so a later restore tries again; numbering
+//! continues past every slot number such a text names, so none is ever
+//! reissued to a series the retry would then pick up.
 
 use geode_chart::{Axis, AxisMode};
 use geode_core::series::expr;
@@ -228,19 +232,25 @@ pub fn from_table(
                     Err(e) => notices.push(format!("{identity}@{source}: {e}")),
                 }
             }
-            Some("expr") => pending_exprs.push(PendingExpr {
-                number,
-                text: r.get("text").and_then(Value::as_str).unwrap_or(""),
-                legacy: legacy_file || r.get("legacy").and_then(Value::as_bool) == Some(true),
-                row: r,
-            }),
+            Some("expr") => {
+                let text = r.get("text").and_then(Value::as_str).unwrap_or("");
+                // Only a text that holds a handle needs rewriting; one
+                // already written in names resolves as current text does.
+                let marked = legacy_file || r.get("legacy").and_then(Value::as_bool) == Some(true);
+                pending_exprs.push(PendingExpr {
+                    number,
+                    text,
+                    legacy: marked && !handles(text).is_empty(),
+                    row: r,
+                })
+            }
             _ => notices.push("a restored series of unknown kind was dropped".into()),
         }
     }
     for p in &pending_exprs {
         let rewritten = if p.legacy {
             let mut visiting = vec![p.number];
-            rewrite_handles(p.text, &pending_exprs, &m, default_source, &mut visiting)
+            rewrite_handles(p.text, &pending_exprs, &m, &mut visiting)
                 .and_then(|text| resolve(&text, m.slots(), default_source).map(|e| (text, e)))
                 .map_err(|why| format!("could not rewrite this saved expression by name: {why}"))
         } else {
@@ -268,9 +278,19 @@ pub fn from_table(
     if let Some(n) = m.take_notice() {
         notices.push(n);
     }
+    // A failed legacy text still names its operands by number and is
+    // retried on every restore, so no number it names may be handed to a
+    // new series: numbering continues past those as well as past every
+    // saved slot. The text is saved as is, so this holds on every reload.
+    let named_by_legacy = m
+        .slots()
+        .iter()
+        .filter(|s| s.legacy)
+        .flat_map(|s| handles(s.text.as_deref().unwrap_or("")));
     m.set_next_number(
         seen.iter()
             .copied()
+            .chain(named_by_legacy)
             .max()
             .map_or(1, |n| n.saturating_add(1)),
     );
@@ -316,7 +336,15 @@ fn legacy_handle(r: &expr::RefName) -> Option<u8> {
     digits.parse().ok()
 }
 
-/// `text` with every handle written as a name: a source slot's name
+/// The slot numbers `text` names by handle; none when it does not
+/// tokenize.
+fn handles(text: &str) -> Vec<u8> {
+    expr::references(text)
+        .map(|refs| refs.iter().filter_map(|(_, r)| legacy_handle(r)).collect())
+        .unwrap_or_default()
+}
+
+/// `text` with every handle written as a name: a source slot's full pair
 /// ([`name_for`]), an expression slot's own text in parentheses (itself
 /// rewritten when it is legacy too). Other names pass through as typed.
 /// `visiting` holds the expressions being inlined, the root first, so a
@@ -325,7 +353,6 @@ fn rewrite_handles(
     text: &str,
     exprs: &[PendingExpr],
     m: &Model,
-    default_source: Option<&str>,
     visiting: &mut Vec<u8>,
 ) -> Result<String, String> {
     let refs = expr::references(text).map_err(|e| e.message)?;
@@ -341,7 +368,7 @@ fn rewrite_handles(
             m.slot_by_number(n).map(|s| &s.kind),
             Some(SlotKind::Source { .. })
         ) {
-            out.push_str(&name_for(n, m.slots(), default_source)?);
+            out.push_str(&name_for(n, m.slots())?);
         } else if let Some(inner) = exprs.iter().find(|p| p.number == n) {
             if visiting.contains(&n) {
                 return Err(if visiting.first() == Some(&n) {
@@ -352,7 +379,7 @@ fn rewrite_handles(
             }
             let inlined = if inner.legacy {
                 visiting.push(n);
-                let t = rewrite_handles(inner.text, exprs, m, default_source, visiting)?;
+                let t = rewrite_handles(inner.text, exprs, m, visiting)?;
                 visiting.pop();
                 t
             } else {
@@ -634,10 +661,10 @@ mod tests {
         let numbers: Vec<u8> = m.slots().iter().map(|s| s.number).collect();
         assert_eq!(numbers, vec![1, 2, 3, 4, 6, 7, 8, 9], "every slot is kept");
 
-        assert_eq!(slot_text(&m, 3), Some("SPX.close / VIX@demo_rest"));
+        assert_eq!(slot_text(&m, 3), Some("SPX.close@demo_kdb / VIX@demo_rest"));
         assert_eq!(
             slot_text(&m, 4),
-            Some("-(SPX.close / VIX@demo_rest)*100 - SPX.close")
+            Some("-(SPX.close@demo_kdb / VIX@demo_rest)*100 - SPX.close@demo_kdb")
         );
         for n in [3, 4] {
             let s = m.slot_by_number(n).unwrap();
@@ -744,9 +771,110 @@ mod tests {
         let s = m.slot_by_number(3).unwrap();
         assert!(s.legacy);
         assert!(
-            matches!(&s.state, SlotState::Failed(why) if why.ends_with("'VIX' is ambiguous: VIX (last) or VIX (mean)")),
+            matches!(&s.state, SlotState::Failed(why) if why.ends_with("'VIX@demo_kdb' is ambiguous: VIX@demo_kdb (last) or VIX@demo_kdb (mean)")),
             "{:?}",
             s.state
+        );
+    }
+
+    /// A failed legacy text still names its operands by slot number, so
+    /// a number it names is never handed to a new series: reissued, the
+    /// next restore would rewrite the handle to that series and plot it
+    /// under an expression the trader never wrote.
+    #[test]
+    fn a_handle_a_failed_text_names_is_never_reissued() {
+        let text = r#"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            [[slots]]
+            number = 2
+            kind = "expr"
+            text = "s1 / s3"
+            [[slots]]
+            number = 3
+            kind = "source"
+            identity = "VIX"
+            source = "gone_src"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert!(
+            m.slot_by_number(3).is_none(),
+            "the unknown source is dropped"
+        );
+        assert!(m.slot_by_number(2).unwrap().legacy);
+        let (mut m, _) = from_table(&to_table(&m), &dataset_of, Some("demo_kdb"));
+        let (n, _) = m.add_source("NKY.close", "demo_kdb", "series").unwrap();
+        assert!(n > 3, "slot 3 is still named by a saved text, got {n}");
+        let (back, notices) = from_table(&to_table(&m), &dataset_of, Some("demo_kdb"));
+        assert!(notices.is_empty(), "{notices:?}");
+        let s = back.slot_by_number(2).unwrap();
+        assert!(s.legacy, "{s:?}");
+        assert_eq!(s.text.as_deref(), Some("s1 / s3"));
+        assert!(matches!(s.state, SlotState::Failed(_)));
+    }
+
+    /// A rewritten handle names its series by the full pair, so a later
+    /// change of the default source cannot retarget it.
+    #[test]
+    fn a_rewritten_handle_survives_a_change_of_default_source() {
+        let text = r#"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "VIX"
+            source = "demo_kdb"
+            [[slots]]
+            number = 2
+            kind = "source"
+            identity = "VIX"
+            source = "demo_rest"
+            [[slots]]
+            number = 3
+            kind = "expr"
+            text = "s1 * 2"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(slot_text(&m, 3), Some("VIX@demo_kdb * 2"));
+        let (back, notices) = from_table(&to_table(&m), &dataset_of, Some("demo_rest"));
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(
+            matches!(&back.slot_by_number(3).unwrap().kind, SlotKind::Expr(e) if e.slots() == vec![1])
+        );
+    }
+
+    /// An unversioned text with no handle in it is already written in
+    /// names: it resolves as current text does, and an unresolvable one
+    /// is dropped with the resolution's own reason.
+    #[test]
+    fn a_handle_free_unversioned_text_is_read_as_current() {
+        let text = r#"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "VIX"
+            source = "demo_kdb"
+            [[slots]]
+            number = 2
+            kind = "expr"
+            text = "VIX * 2"
+            [[slots]]
+            number = 3
+            kind = "expr"
+            text = "VIX * V2X"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, notices) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(slot_text(&m, 2), Some("VIX * 2"));
+        assert!(!m.slot_by_number(2).unwrap().legacy);
+        assert!(m.slot_by_number(3).is_none());
+        assert_eq!(
+            notices,
+            vec!["expression `VIX * V2X` was dropped: 'V2X' is not loaded — `a` adds it"]
         );
     }
 

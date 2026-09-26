@@ -49,10 +49,14 @@ cargo bench -p geode-timeseries
   fits several series is refused with their labels, never resolved to the
   first. Expressions reference source series only.
 - `core::session` rewrites a pre-`version = 2` table's `sN` handles to names
-  on restore, inlining an expression operand as `(text)`. A text it cannot
-  rewrite becomes a `legacy` slot: failed, never sent (`request::params`
-  skips it), saved with `legacy = true` so the next restore retries, and
-  replaced by an edit.
+  on restore: a source as its full `identity@source` (`resolve::name_for`,
+  never the default-aware label), an expression operand as `(text)`. A text
+  with no handle is read as current. A text it cannot rewrite becomes a
+  `legacy` slot: failed, never sent (`request::params` skips it), saved with
+  `legacy = true` so the next restore retries, and replaced by an edit.
+  Numbering continues past every number a legacy text names, so the retry
+  never resolves a handle to a newer series. Completion leaves out a label
+  that names more than one series.
 - A menu's rows are built when it opens, on a chrome rebuild, and on a frame
   change while it is up, never in `render`; a frequency the point cap refuses
   is a disabled row whose reason is the model's own refusal, so a pickable row

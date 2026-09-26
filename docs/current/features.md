@@ -201,14 +201,17 @@ resolved to either. A long expression's chip label is cut to 24 characters
 ending in `…`.
 
 A tile's session table is written with `version = 2`. A table without it
-names series in expression text by slot handle (`s3`), and restore rewrites
-each handle: a source slot's handle becomes its label, and another
-expression's handle becomes that expression's text in parentheses,
-recursively. An expression that cannot be rewritten (a cycle, a handle to a
-slot the session no longer holds, or a series no name can pick out) keeps its
-slot and saved text, shows as failed with the reason, is never queried, and
-is saved back marked so a later restore tries again; editing it with `e`
-replaces it.
+may name series in expression text by slot handle (`s3`), and restore
+rewrites each handle: a source slot's handle becomes its full
+`identity@source`, never the bare identity, so a later change of the default
+source cannot retarget it; another expression's handle becomes that
+expression's text in parentheses, recursively. A text with no handle is read
+as current text. An expression that cannot be rewritten (a cycle, a handle to
+a slot the session no longer holds, or a series no name can pick out) keeps
+its slot and saved text, shows as failed with the reason, is never queried,
+and is saved back marked so a later restore tries again; editing it with `e`
+replaces it. Slot numbering continues past every number such a text names, so
+a retry can never pick up a newer series that happened to take that number.
 
 Series queries return aligned points, percentiles, bins, and coverage.
 Expression slots may narrow results to buckets shared by their operands.

@@ -1128,10 +1128,10 @@ fn a_handle_session_opens_with_names(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(cx, Some(table));
     assert_eq!(
         h.model(&vcx).slots()[2].text.as_deref(),
-        Some("SPX.close / VIX@demo_rest")
+        Some("SPX.close@demo_kdb / VIX@demo_rest")
     );
     let painted = h.painted_text(&mut vcx);
-    assert!(painted.contains("SPX.close / VIX@demo_re…"), "{painted}");
+    assert!(painted.contains("SPX.close@demo_kdb / VI…"), "{painted}");
     let saved = vcx.update(|_, cx| h.content.serialize(cx));
     assert_eq!(saved.get("version").and_then(|v| v.as_integer()), Some(2));
 }

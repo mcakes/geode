@@ -17432,6 +17432,74 @@ run_mutation "timeseries session: a legacy slot is saved unmarked" \
   geode-timeseries \
   a_handle_session_migrates_to_names
 
+# Only an unversioned (or marked) text is rewritten. Ungated, a current
+# text naming a series called `s1` is read as a handle and retargeted.
+run_mutation "timeseries session: a current table is rewritten" \
+  crates/geode-timeseries/src/core/session.rs \
+  '                    legacy: marked && !handles(text).is_empty(),' \
+  '                    legacy: !handles(text).is_empty(),' \
+  geode-timeseries \
+  a_current_table_reads_a_handle_shaped_name_as_a_name
+
+# An unversioned text with no handle is already names. Rewritten, an
+# unresolvable one is kept failed with a misleading rewrite reason
+# instead of dropped with its own.
+run_mutation "timeseries session: a handle-free text takes the rewrite path" \
+  crates/geode-timeseries/src/core/session.rs \
+  '                    legacy: marked && !handles(text).is_empty(),' \
+  '                    legacy: marked,' \
+  geode-timeseries \
+  a_handle_free_unversioned_text_is_read_as_current
+
+# The rewrite inlines expressions into expressions; `visiting` is what
+# turns a cycle in old data into a failed slot. Without it the rewrite
+# recurses until the stack overflows, which aborts the restore (the
+# test process dies, which the harness reports as caught).
+run_mutation "timeseries session: the rewrite cycle guard is off" \
+  crates/geode-timeseries/src/core/session.rs \
+  '            if visiting.contains(&n) {' \
+  '            if false {' \
+  geode-timeseries \
+  a_handle_session_migrates_to_names
+
+# A failed legacy text is retried on every restore by the numbers it
+# names. Numbering that restarts past the saved slots alone can hand
+# such a number to a new series, which the retry then silently plots.
+run_mutation "timeseries session: a legacy handle number is reissued" \
+  crates/geode-timeseries/src/core/session.rs \
+  '            .chain(named_by_legacy)' \
+  '            .chain(named_by_legacy.take(0))' \
+  geode-timeseries \
+  a_handle_a_failed_text_names_is_never_reissued
+
+# A rewritten handle is the full `identity@source`. A bare identity
+# follows the default source, so a later default change retargets it.
+run_mutation "timeseries session: a rewritten handle is a bare identity" \
+  crates/geode-timeseries/src/core/resolve.rs \
+  '        n if n == number => Ok(full),' \
+  '        n if n == number => Ok(identity.clone()),' \
+  geode-timeseries \
+  a_rewritten_handle_survives_a_change_of_default_source
+
+# Completion offers only names a command accepts. Unfiltered, the label
+# of a pair loaded twice is offered and then refused as ambiguous.
+run_mutation "timeseries: completion offers an ambiguous name" \
+  crates/geode-timeseries/src/core/model.rs \
+  '                (super::resolve::find_named(&label, &self.slots, default_source) == Ok(s.number))' \
+  '                true' \
+  geode-timeseries \
+  series_names_are_the_source_labels_that_name_one_series
+
+# A refusal names the series by the label its chip shows.
+run_mutation "timeseries: a refusal names a source by its full pair" \
+  crates/geode-timeseries/src/core/model.rs \
+  '                "{} is not an expression",
+                slot.label(default_source)' \
+  '                "{} is not an expression",
+                slot.label(None)' \
+  geode-timeseries \
+  refusals_name_a_series_by_label
+
 # The frequency menu, `:freq` and `:range` refuse in place against the same 500,000-point cap
 # the service enforces (controller decision 4), so a step that would
 # overrun it never leaves the tile. Unchecked, the tile sends a request

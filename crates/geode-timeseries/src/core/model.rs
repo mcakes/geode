@@ -273,19 +273,20 @@ impl Model {
                 .ok_or_else(|| "select a series or name one".into()),
         }
     }
-    /// Every source series' label, once each, in slot order: the names
-    /// completion offers where a `:` command takes a series.
+    /// Every source series' label that names exactly that series, in
+    /// slot order: the names completion offers where a `:` command takes
+    /// a series. A label a command would refuse as ambiguous (a pair
+    /// loaded twice) is left out rather than offered and refused.
     pub fn series_names(&self, default_source: Option<&str>) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for s in &self.slots {
-            if matches!(s.kind, SlotKind::Source { .. }) {
+        self.slots
+            .iter()
+            .filter(|s| matches!(s.kind, SlotKind::Source { .. }))
+            .filter_map(|s| {
                 let label = s.label(default_source);
-                if !out.contains(&label) {
-                    out.push(label);
-                }
-            }
-        }
-        out
+                (super::resolve::find_named(&label, &self.slots, default_source) == Ok(s.number))
+                    .then_some(label)
+            })
+            .collect()
     }
     fn gone() -> String {
         "that series is gone".into()
@@ -384,11 +385,20 @@ impl Model {
         Ok(number)
     }
 
-    pub fn replace_expr(&mut self, number: u8, text: &str, expr: Expr) -> Result<Changed, String> {
+    pub fn replace_expr(
+        &mut self,
+        number: u8,
+        text: &str,
+        expr: Expr,
+        default_source: Option<&str>,
+    ) -> Result<Changed, String> {
         let i = self.index_of(number).ok_or_else(Self::gone)?;
         let slot = &mut self.slots[i];
         if !matches!(slot.kind, SlotKind::Expr(_)) {
-            return Err(format!("{} is not an expression", slot.label(None)));
+            return Err(format!(
+                "{} is not an expression",
+                slot.label(default_source)
+            ));
         }
         slot.kind = SlotKind::Expr(expr);
         slot.text = Some(text.into());
@@ -1229,8 +1239,10 @@ mod tests {
         );
     }
 
+    /// Completion offers only names a command would accept: `VIX` here
+    /// is a pair loaded twice and always refused as ambiguous.
     #[test]
-    fn series_names_are_the_source_labels_once_each() {
+    fn series_names_are_the_source_labels_that_name_one_series() {
         let mut m = two_sources();
         m.add_source("VIX", "demo_rest", "series").unwrap();
         m.add_source("VIX", "demo_kdb", "series").unwrap();
@@ -1241,7 +1253,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             m.series_names(Some("demo_kdb")),
-            vec!["SPX.close", "VIX", "VIX@demo_rest"]
+            vec!["SPX.close", "VIX@demo_rest"]
         );
     }
 
@@ -1266,6 +1278,7 @@ mod tests {
             n,
             "SPX.close * 2",
             geode_core::series::expr::Ast::<u8>::Ref(1),
+            Some("demo_kdb"),
         )
         .unwrap();
         let s = m.slot_by_number(n).unwrap();
@@ -1287,9 +1300,15 @@ mod tests {
             "SPX.close / VIX is an expression; its rule is its operands'"
         );
         assert_eq!(
-            m.replace_expr(1, "x", geode_core::series::expr::Ast::<u8>::Num(1.0))
-                .unwrap_err(),
-            "SPX.close@demo_kdb is not an expression"
+            m.replace_expr(
+                1,
+                "x",
+                geode_core::series::expr::Ast::<u8>::Num(1.0),
+                Some("demo_kdb")
+            )
+            .unwrap_err(),
+            "SPX.close is not an expression",
+            "named by the label the chip shows"
         );
         assert_eq!(m.remove(9).unwrap_err(), "that series is gone");
     }

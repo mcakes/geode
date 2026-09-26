@@ -736,7 +736,7 @@ mod tests {
     fn cursor_is_source_names_a_source_slot_and_not_an_expression() {
         let mut m = two();
         assert_eq!(cursor_is_source(&m), Some(2));
-        m.add_expr("s1 / s2", Expr::Ref(1)).unwrap();
+        m.add_expr("SPX.close / VIX", Expr::Ref(1)).unwrap();
         assert_eq!(cursor_is_source(&m), None);
     }
 }

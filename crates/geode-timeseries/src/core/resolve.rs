@@ -104,29 +104,32 @@ pub fn find_source(
     }
 }
 
-/// The text an expression can use to name source slot `number`: its
-/// label, provided the label parses as one name that resolves back to
-/// exactly that slot. `Err` says why not: a pair loaded twice (the
-/// label is ambiguous), or an identity the grammar cannot spell.
-pub fn name_for(
-    number: u8,
-    slots: &[Slot],
-    default_source: Option<&str>,
-) -> Result<String, String> {
+/// The text a rewritten expression uses to name source slot `number`:
+/// always the full `identity@source`, never the default-aware label, so
+/// a later change of the default source cannot retarget it. It must
+/// parse as that one name and resolve back to exactly that slot; `Err`
+/// says why not (a pair loaded twice, or a name the grammar cannot
+/// spell).
+pub fn name_for(number: u8, slots: &[Slot]) -> Result<String, String> {
     let slot = slots
         .iter()
         .find(|s| s.number == number)
         .ok_or("that series is gone")?;
-    if !matches!(slot.kind, SlotKind::Source { .. }) {
+    let SlotKind::Source {
+        source, identity, ..
+    } = &slot.kind
+    else {
         return Err("an expression has no name to reference".into());
-    }
-    let label = slot.label(default_source);
-    let Ok(expr::Ast::Ref(r)) = expr::parse(&label) else {
-        return Err(format!("'{label}' cannot be written in an expression"));
     };
-    match find_source(&r.identity, r.source.as_deref(), slots, default_source)? {
-        n if n == number => Ok(label),
-        _ => Err(format!("'{label}' names another series")),
+    let full = format!("{identity}@{source}");
+    match expr::parse(&full) {
+        Ok(expr::Ast::Ref(r)) if r.identity == *identity && r.source.as_deref() == Some(source) => {
+        }
+        _ => return Err(format!("'{full}' cannot be written in an expression")),
+    }
+    match find_source(identity, Some(source), slots, None)? {
+        n if n == number => Ok(full),
+        _ => Err(format!("'{full}' names another series")),
     }
 }
 
@@ -213,7 +216,7 @@ mod tests {
         m.add_expr("SPX.close / VIX", e).unwrap();
         assert!(find_named("SPX.close / VIX", m.slots(), Some("demo_kdb")).is_err());
         assert_eq!(
-            name_for(5, m.slots(), Some("demo_kdb")).unwrap_err(),
+            name_for(5, m.slots()).unwrap_err(),
             "an expression has no name to reference"
         );
     }
@@ -234,26 +237,24 @@ mod tests {
     }
 
     #[test]
-    fn name_for_is_the_label_when_it_resolves_back() {
+    fn name_for_is_always_the_full_pair_and_resolves_back() {
         let mut m = model();
-        assert_eq!(name_for(2, m.slots(), Some("demo_kdb")).unwrap(), "VIX");
         assert_eq!(
-            name_for(3, m.slots(), Some("demo_kdb")).unwrap(),
-            "VIX@demo_rest"
+            name_for(2, m.slots()).unwrap(),
+            "VIX@demo_kdb",
+            "never the bare label, whatever the default source"
         );
-        // With no default, `VIX`'s label is already the full pair.
-        assert_eq!(name_for(2, m.slots(), None).unwrap(), "VIX@demo_kdb");
+        assert_eq!(name_for(3, m.slots()).unwrap(), "VIX@demo_rest");
         m.add_source("VIX", "demo_kdb", "series").unwrap(); // 5
-        assert!(
-            name_for(2, m.slots(), Some("demo_kdb"))
-                .unwrap_err()
-                .contains("ambiguous"),
+        assert_eq!(
+            name_for(2, m.slots()).unwrap_err(),
+            "'VIX@demo_kdb' is ambiguous: VIX@demo_kdb (last) or VIX@demo_kdb (last)",
             "a pair loaded twice has no name of its own"
         );
         m.add_source("9lives", "demo_kdb", "series").unwrap(); // 6
         assert_eq!(
-            name_for(6, m.slots(), Some("demo_kdb")).unwrap_err(),
-            "'9lives' cannot be written in an expression"
+            name_for(6, m.slots()).unwrap_err(),
+            "'9lives@demo_kdb' cannot be written in an expression"
         );
     }
 

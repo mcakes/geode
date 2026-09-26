@@ -443,10 +443,10 @@ mod tests {
     fn the_slot_section_names_the_cursor_and_reads_its_kind_and_visibility() {
         let mut m = Model::new();
         m.add_source("SPX.close", "demo_kdb", "series").unwrap();
-        m.add_expr("s1 * 2", Expr::Ref(1)).unwrap();
+        m.add_expr("SPX.close * 2", Expr::Ref(1)).unwrap();
         // The cursor is on the expression.
         let rows = rows(&MenuInputs { model: &m }, Some("demo_kdb"));
-        assert!(titles(&rows).contains(&"[s1 * 2]".to_string()));
+        assert!(titles(&rows).contains(&"[SPX.close * 2]".to_string()));
         assert_eq!(
             enabled(&rows, "timeseries::rule"),
             Err("an expression has no bucket rule".into())
