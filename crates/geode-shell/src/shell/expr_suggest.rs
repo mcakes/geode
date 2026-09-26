@@ -172,6 +172,7 @@ pub(crate) fn accept(
     // sync writes nothing.
     let text = view.dialog_input.read(cx).value().to_string();
     if let Some(state) = view.object_dialog.as_mut()
+        && super::objectdialog::expression_entry_open(state)
         && let Some(draft) = state.draft.as_mut()
     {
         draft.set_query(text);
