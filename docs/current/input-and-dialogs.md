@@ -358,7 +358,11 @@ it is a synonym for `!=`.
 A value list is offered only for a categorical text column (a dimension's
 dictionary): a distinct query returns its values with row counts, requested
 once per column per dialog opening — the cache resets each time the field
-opens, and a failed request is not retried again within that opening. The
+opens, and a failed request is not retried again within that opening. Every
+column is requested under one query-pool key, and the pool keeps only the
+newest request per key, so at most one request is outstanding: asking for a
+second column forgets a first that has not answered, and returning to it
+asks again rather than showing `loading values…` for good. The
 hint reads `loading values…` while the request is in flight and `values
 unavailable: <reason>` if it fails. A derived dimension lists its configured
 labels with no query, and a bool column lists `true`/`false`. Every other
@@ -370,7 +374,7 @@ make the typed prefix an unsound filter):
 
 | Mode | Values narrowed by |
 |---|---|
-| Whole | The frame's dimension selections and as-of. Its own expression is excluded, since the dialog replaces it. |
+| Whole | The frame's dimension selections, text filter and as-of. Its own expression is excluded, since the dialog replaces it. |
 | Add | The frame's full current scope, including its expression. |
 | Term | The frame's scope with the edited term removed. |
 
@@ -381,7 +385,9 @@ Tab inserts the highlighted row over the token under the caret and re-reads
 the new position; shift+tab moves the highlight back one row; the arrows and
 ctrl+p/ctrl+n move it by exactly one (page keys and ctrl+u/d/b/f stay the
 field's own caret keys). A row click inserts without moving focus out of the
-field. Enter never inserts a suggestion; as the mode table above says, it
+field. The click names its row by label, found in the list as it stands at
+the press, so a list rebuilt since paint never inserts a different row; the
+second press of a double-click is ignored, so it inserts once. Enter never inserts a suggestion; as the mode table above says, it
 always applies the whole draft. Every insertion is a range replace on the
 field's own text, so cmd+z undoes it like any other edit.
 

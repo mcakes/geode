@@ -2293,6 +2293,30 @@ fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppCo
         && matches!(&f.kind, FieldKind::Text(t) if t == "npv > 0"))));
 }
 
+/// `cmd-z` takes a tab insertion back in the Scopes field, and the draft's
+/// query follows the input rather than restoring the insertion on the
+/// next text sync.
+#[gpui::test]
+fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "np");
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "np");
+}
+
 /// Enter on an unknown column refuses with the notice and keeps the field open.
 #[gpui::test]
 fn the_scopes_expression_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {

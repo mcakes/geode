@@ -21429,8 +21429,8 @@ run_mutation "expr suggest: enter refuses an unknown column" \
 # A row click inserts it.
 run_mutation "expr suggest: a row click inserts" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '                    on_click(position, window, cx);' \
-  '                    let _ = (position, window, cx);' \
+  '                    on_click(&label, window, cx);' \
+  '                    let _ = (&label, window, cx);' \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
@@ -21451,6 +21451,40 @@ run_mutation "expr suggest: a Scopes expression refuses an unknown column" \
   '                        let _ = w;' \
   geode-shell \
   the_scopes_expression_field_refuses_an_unknown_column
+
+# One pool key, newest request wins: another column left Loading never
+# gets a reply, so it must be forgotten and asked again on return.
+run_mutation "expr suggest: a second column's request forgets the first" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));' \
+  '            .retain(|_, _| true);' \
+  geode-shell \
+  a_second_columns_request_forgets_the_first_so_it_is_asked_again
+
+# A double-click's second press must not accept a row of the rebuilt list.
+run_mutation "expr suggest: a double-click inserts once" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    if event.click_count > 1 {' \
+  '                    if event.click_count > 99 {' \
+  geode-shell \
+  double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# The old expression is blanked before the draft's scope is read, or an
+# unreadable one drops the selections from the values narrowing.
+run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '    blanked.source.remove("expression");' \
+  '    let _ = &mut blanked;' \
+  geode-shell \
+  expression_scope_keeps_the_selections_under_an_unreadable_expression
+
+# An accept is a range replace so it stays in the input's undo history.
+run_mutation "expr suggest: a Scopes insertion undoes" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        s.replace(write.text.clone(), window, cx);' \
+  '        s.set_value(write.text.clone(), window, cx);' \
+  geode-shell \
+  the_scopes_expression_field_undoes_an_insertion
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

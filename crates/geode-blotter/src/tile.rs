@@ -464,8 +464,8 @@ impl BlotterTile {
     /// dialog check runs only when the field is entered; a frame restored
     /// from a saved session is not re-checked here (a saved scope is
     /// checked separately, by `Scope::validate`, wherever it is loaded).
-    /// A tile's `:scope` word reached a frame-wide version of the same
-    /// check until command-line locality closed that route 2026-09-20.
+    /// A tile's `:scope` word never reaches this check: `:` lines are
+    /// tile-local, so the parser refuses it rather than change the frame.
     /// `Ok(())` when the view or its dataset isn't resolvable
     /// (nothing to validate against yet — `requery`'s own "view is not
     /// configured" error already covers that case).

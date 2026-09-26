@@ -191,8 +191,7 @@ pub(crate) fn accept_label(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(i) =
-        completion_mut(view).and_then(|c| c.rows().iter().position(|r| r.label == label))
+    let Some(i) = completion_mut(view).and_then(|c| c.rows().iter().position(|r| r.label == label))
     else {
         return;
     };
