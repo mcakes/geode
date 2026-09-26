@@ -2061,6 +2061,21 @@ fn clicking_a_candidate_inserts_it_and_typing_continues(cx: &mut gpui::TestAppCo
     vcx.simulate_input(" * 2");
     assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2");
     assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    // A press on the list's own inset, between rows, keeps the keyboard
+    // in the field too.
+    vcx.simulate_input(" / ");
+    h.draw(&mut vcx);
+    let list = vcx
+        .debug_bounds(Box::leak(format!("ts-expr-list-{TILE}").into_boxed_str()))
+        .expect("the list is painted");
+    click_at(
+        &mut vcx,
+        list.origin + gpui::point(gpui::px(1.), gpui::px(1.)),
+        1,
+    );
+    h.draw(&mut vcx);
+    vcx.simulate_input("VIX");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2 / VIX");
 }
 
 /// The palette can dispatch any action over an open field (`ctrl+k`

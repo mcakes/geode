@@ -313,6 +313,13 @@ mod tests {
         let (line, _) = c.cycle(&line, false).unwrap();
         assert_eq!(line, "SPX.close / VIX@demo_rest", "Shift+Tab steps back");
         assert_eq!(c.highlighted(), 1, "the lit row is the written one");
+        let mut three = Completion::default();
+        three.refresh("V", 1, names(&["VIX", "V2X", "VXN"]));
+        let (line, _) = three.cycle("V", true).unwrap();
+        let (line, _) = three.cycle(&line, true).unwrap();
+        assert_eq!(line, "V2X");
+        let (line, _) = three.cycle(&line, false).unwrap();
+        assert_eq!(line, "VIX", "Shift+Tab steps back one of three");
         let mut fresh = Completion::default();
         fresh.refresh("(V", 2, names(&["VIX", "V2X"]));
         assert_eq!(
