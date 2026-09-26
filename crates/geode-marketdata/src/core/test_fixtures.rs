@@ -4,7 +4,7 @@
 
 #![cfg(test)]
 
-use crate::core::draft::Draft;
+use crate::core::draft::{DocumentBase, Draft};
 use crate::core::matrix::MatrixModel;
 use crate::core::spec::{
     Columns, DIVIDEND, PanelSpec, RowAxis, RowIdentity, RowLabel, ValueColumn,
@@ -15,6 +15,16 @@ use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColu
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
 pub(crate) const BASE: &str = "2026-09-12T14:00:00Z";
+
+/// A draft base at `as_of` with no generation. Tests that only need an edit
+/// stamped against *something* use this; a test about a same-time republish
+/// names the generation itself.
+pub(crate) fn at(as_of: &str) -> DocumentBase {
+    DocumentBase {
+        as_of: as_of.to_string(),
+        generation: None,
+    }
+}
 
 pub(crate) fn date(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()

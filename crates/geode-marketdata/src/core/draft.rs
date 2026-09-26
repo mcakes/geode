@@ -4,10 +4,12 @@
 //! identify edits when another document changes those positions. Inserted
 //! rows and attributes are keyed by label or column name directly.
 //!
-//! `base` identifies the document by its per-document source time, not an
-//! immutable generation ID. A different timestamp can mean a newer or a
-//! historical document. Republishes sharing a timestamp are indistinguishable
-//! here, even if their grid positions change.
+//! `base` identifies the document by [`DocumentBase`]: its per-document
+//! source time and, when the read named one, the store generation behind it.
+//! A different timestamp can mean a newer or a historical document; an equal
+//! timestamp with a different generation is a corrected republish, which the
+//! pair tells apart so it cannot re-point grid-keyed edits. Where no single
+//! generation names the read, the timestamp alone decides.
 
 use crate::core::matrix::{MatrixModel, RowState};
 use crate::core::spec::{Columns, PanelSpec};
@@ -15,6 +17,44 @@ use geode_core::document::Value;
 use geode_core::schema::ColumnType;
 use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap};
+
+/// The document generation an open draft's edits were made against: the
+/// document's source time, and the store generation that delivered it when
+/// one was reported.
+///
+/// Source time alone is not an identity. A corrected republish keeps its
+/// source time, and `Draft::edits` is keyed by grid position — so a same-time
+/// republish that reorders or adds a node would re-point every edit onto a
+/// different node, paint it there, and `:upload` would send it. The
+/// generation is what tells the two apart.
+///
+/// `generation` is `None` when the read could not name one: a draft restored
+/// from a session file (whose cell edits are unresolved and require a rebase
+/// before they can paint on any cell at all), or a historical view read,
+/// whose era pins one generation per partition. An unknown generation is not
+/// evidence of movement, so identity falls back to the source time — the
+/// behaviour before this pair existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocumentBase {
+    /// RFC 3339.
+    pub as_of: String,
+    pub generation: Option<i64>,
+}
+
+impl DocumentBase {
+    /// Whether `delivered` is a different document generation from this one.
+    ///
+    /// Differing source times always differ. Equal times differ only when
+    /// both generations are known and disagree; see the type's own note on
+    /// why an unknown generation cannot prove movement.
+    pub fn differs_from(&self, delivered: &DocumentBase) -> bool {
+        self.as_of != delivered.as_of
+            || matches!(
+                (self.generation, delivered.generation),
+                (Some(mine), Some(theirs)) if mine != theirs
+            )
+    }
+}
 
 /// Where the draft stands against the document on screen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -29,9 +69,11 @@ pub enum DraftState {
     /// and is the same situation. When available, the panel keeps painting
     /// the base generation under the edits; `:rebase` moves them onto the
     /// delivered one and `:revert` drops them. The edits' own base
-    /// generation coming back (an as-of round trip) returns the draft to
-    /// `Editing` — see [`Draft::on_delivered`].
-    Behind { newer: String },
+    /// generation coming back (an as-of round trip, or a republish reverted
+    /// upstream) returns the draft to `Editing` — see
+    /// [`Draft::on_delivered`]. Identity is the pair, so a corrected
+    /// republish at the same source time reaches this state too.
+    Behind { newer: DocumentBase },
     /// The transport accepted the upload. Edits remain painted as sent
     /// while the tile checks subsequent deliveries for an echo; acceptance
     /// alone does not confirm upstream publication. `at` is the send time
@@ -133,9 +175,10 @@ pub enum RowDelete {
 /// Header attributes and inserted cells already carry their named identities.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
-    /// The base document's source time in RFC 3339. Edit operations set it
-    /// when the draft is empty or has no base; restoration can omit it.
-    pub base: Option<String>,
+    /// The generation the edits were made against. Edit operations set it
+    /// when the draft is empty or has no base; restoration can omit the
+    /// generation half.
+    pub base: Option<DocumentBase>,
     pub edits: BTreeMap<(usize, usize), Value>,
     /// Document-level attribute edits, keyed by column name. Part of the
     /// same draft as `edits` (one base, one state) because both are unsent
@@ -204,10 +247,10 @@ impl Draft {
         cell: (usize, usize),
         labels: (String, String),
         value: Value,
-        base: &str,
+        base: &DocumentBase,
     ) {
         if self.is_empty() || self.base.is_none() {
-            self.base = Some(base.to_string());
+            self.base = Some(base.clone());
         }
         self.edits.insert(cell, value);
         self.labels.insert(cell, labels);
@@ -232,9 +275,9 @@ impl Draft {
     }
 
     /// Record one attribute edit — the same base rule as `set`.
-    pub fn set_attr(&mut self, column: &str, value: Value, base: &str) {
+    pub fn set_attr(&mut self, column: &str, value: Value, base: &DocumentBase) {
         if self.is_empty() || self.base.is_none() {
-            self.base = Some(base.to_string());
+            self.base = Some(base.clone());
         }
         self.attrs.insert(column.to_string(), value);
         if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
@@ -245,9 +288,9 @@ impl Draft {
     /// Insert an empty row under `after` (`None` means the top), using the
     /// same base rule as [`Self::set`]. The caller supplies the identity,
     /// minting a temporary label or committing a typed row label.
-    pub fn insert_row(&mut self, label: String, after: Option<String>, base: &str) {
+    pub fn insert_row(&mut self, label: String, after: Option<String>, base: &DocumentBase) {
         if self.is_empty() || self.base.is_none() {
-            self.base = Some(base.to_string());
+            self.base = Some(base.clone());
         }
         self.rows.insert(
             label,
@@ -265,9 +308,9 @@ impl Draft {
     /// row is removed; a document row is marked `Deleted`; an existing deletion
     /// returns `Already`. Removing an inserted row reanchors its followers to
     /// its own anchor, preserving the chain's position.
-    pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
+    pub fn delete_row(&mut self, label: &str, base: &DocumentBase) -> RowDelete {
         if self.is_empty() || self.base.is_none() {
-            self.base = Some(base.to_string());
+            self.base = Some(base.clone());
         }
         if matches!(self.state, DraftState::Clean | DraftState::Sent { .. }) {
             self.state = DraftState::Editing;
@@ -449,7 +492,7 @@ impl Draft {
         &mut self,
         cells: impl Iterator<Item = ((usize, usize), (String, String), f64, ColumnType)>,
         delta: f64,
-        base: &str,
+        base: &DocumentBase,
     ) -> Result<usize, String> {
         // Compute every result before writing any edit: a typing refusal
         // partway through must leave the whole draft unchanged.
@@ -465,34 +508,46 @@ impl Draft {
         Ok(n)
     }
 
-    /// Process a delivered source time and report whether state changed.
-    /// An editing draft becomes `Behind` when the timestamp differs; a behind
-    /// draft returns to `Editing` when its base timestamp is delivered again.
-    /// Clean and sent drafts are unchanged; the tile checks sent echoes.
+    /// Process a delivered generation and report whether state changed.
+    /// An editing draft becomes `Behind` when the delivered generation differs
+    /// from the base; a behind draft returns to `Editing` when its own base is
+    /// delivered again. Clean and sent drafts are unchanged; the tile checks
+    /// sent echoes.
     ///
-    /// Identity is source time alone. A corrected republish with the same time
-    /// is treated as the same document and can replace the grid under indexed
-    /// edits. If row or column positions change, those edits can target the
-    /// wrong cells; this method cannot detect that collision.
-    pub fn on_delivered(&mut self, as_of: &str) -> bool {
+    /// Identity is [`DocumentBase`]: source time *and*, when both are known,
+    /// generation. A corrected republish at the same source time therefore
+    /// reaches `Behind`, where before it was invisible and could re-point
+    /// position-keyed edits onto other nodes. When either generation is
+    /// unknown the comparison falls back to source time alone.
+    pub fn on_delivered(&mut self, delivered: &DocumentBase) -> bool {
         match &self.state {
-            DraftState::Editing if self.base.as_deref() != Some(as_of) => {
+            DraftState::Editing
+                if self
+                    .base
+                    .as_ref()
+                    .is_none_or(|base| base.differs_from(delivered)) =>
+            {
                 self.state = DraftState::Behind {
-                    newer: as_of.to_string(),
+                    newer: delivered.clone(),
                 };
                 true
             }
-            // Returning to the base timestamp restores editing without moving
-            // edits. Check this before updating the pending delivery timestamp.
-            DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
+            // Returning to the base generation restores editing without moving
+            // edits. Check this before updating the pending delivery.
+            DraftState::Behind { .. }
+                if self
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| !base.differs_from(delivered)) =>
+            {
                 self.state = DraftState::Editing;
                 true
             }
-            // Keep the badge on the latest delivered timestamp, which may be
+            // Keep the badge on the latest delivered generation, which may be
             // historical when the user changes as-of.
-            DraftState::Behind { newer } if newer != as_of => {
+            DraftState::Behind { newer } if newer != delivered => {
                 self.state = DraftState::Behind {
-                    newer: as_of.to_string(),
+                    newer: delivered.clone(),
                 };
                 true
             }
@@ -701,7 +756,7 @@ impl Draft {
         // with, which describe a document no longer on screen.
         self.capture_groups(model_of_newer);
 
-        self.base = model_of_newer.source_time.clone();
+        self.base = model_of_newer.base.clone();
         self.state = if self.is_empty() {
             DraftState::Clean
         } else {
@@ -717,7 +772,7 @@ impl Draft {
             DraftState::Clean => DraftBadge::Clean,
             DraftState::Editing => DraftBadge::Dirty,
             DraftState::Behind { newer } => DraftBadge::Behind {
-                newer: newer.clone(),
+                newer: newer.as_of.clone(),
             },
             DraftState::Sent { at } => DraftBadge::Sent { at: at.clone() },
         }
@@ -755,7 +810,14 @@ impl Draft {
     pub fn to_toml(&self) -> toml::Table {
         let mut table = toml::Table::new();
         if let Some(base) = &self.base {
-            table.insert("base".into(), toml::Value::String(base.clone()));
+            table.insert("base".into(), toml::Value::String(base.as_of.clone()));
+            // Only when known. A session file written before generations
+            // were carried, and a restored draft, simply have no generation
+            // — `DocumentBase::differs_from` treats that as unknown, not as
+            // "unchanged".
+            if let Some(generation) = base.generation {
+                table.insert("base_generation".into(), toml::Value::Integer(generation));
+            }
         }
         let edits = self
             .edits
@@ -828,7 +890,13 @@ impl Draft {
     /// ambiguous for a text attribute containing a date-shaped string: it
     /// restores as [`Value::Date`], regardless of its original type.
     pub fn from_toml(t: &toml::Table) -> Draft {
-        let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);
+        let base = t
+            .get("base")
+            .and_then(|v| v.as_str())
+            .map(|as_of| DocumentBase {
+                as_of: as_of.to_string(),
+                generation: t.get("base_generation").and_then(|v| v.as_integer()),
+            });
         let mut edits = BTreeMap::new();
         let mut labels = BTreeMap::new();
         let rows = t.get("edits").and_then(|v| v.as_array());
@@ -1147,12 +1215,67 @@ mod tests {
         (row.to_string(), col.to_string())
     }
 
+    fn at(as_of: &str) -> DocumentBase {
+        DocumentBase {
+            as_of: as_of.to_string(),
+            generation: None,
+        }
+    }
+
+    fn at_gen(as_of: &str, generation: i64) -> DocumentBase {
+        DocumentBase {
+            as_of: as_of.to_string(),
+            generation: Some(generation),
+        }
+    }
+
+    #[test]
+    fn a_same_time_republish_is_a_different_generation_when_both_ids_are_known() {
+        // The defect this branch closes: identical source times, different
+        // generations. Position-keyed edits must not be re-pointed silently.
+        assert!(at_gen(BASE, 7).differs_from(&at_gen(BASE, 8)));
+        assert!(!at_gen(BASE, 7).differs_from(&at_gen(BASE, 7)));
+        // A different time always differs, generations or not.
+        assert!(at_gen(BASE, 7).differs_from(&at_gen(NEWER, 7)));
+        assert!(at(BASE).differs_from(&at(NEWER)));
+        // An unknown generation is not evidence of movement: a restored
+        // draft (whose edits are unresolved anyway) and a historical view
+        // read fall back to the source time, the behaviour before the pair.
+        assert!(!at(BASE).differs_from(&at_gen(BASE, 9)));
+        assert!(!at_gen(BASE, 9).differs_from(&at(BASE)));
+    }
+
+    #[test]
+    fn on_delivered_goes_behind_on_a_same_time_republish() {
+        let mut draft = Draft::default();
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at_gen(BASE, 7));
+        assert!(
+            !draft.on_delivered(&at_gen(BASE, 7)),
+            "the same generation redelivered changes nothing"
+        );
+        assert!(
+            draft.on_delivered(&at_gen(BASE, 8)),
+            "a republish at the same source time moved the document"
+        );
+        assert_eq!(
+            draft.state,
+            DraftState::Behind {
+                newer: at_gen(BASE, 8)
+            }
+        );
+        assert!(
+            draft.on_delivered(&at_gen(BASE, 7)),
+            "the edits' own generation coming back restores Editing"
+        );
+        assert_eq!(draft.state, DraftState::Editing);
+    }
+
     /// A model with the given row and column labels and no values — the
-    /// draft only ever reads a model's labels and its source time.
-    fn model(rows: &[&str], cols: &[&str], source_time: &str) -> MatrixModel {
+    /// draft only ever reads a model's labels and its base.
+    fn model(rows: &[&str], cols: &[&str], base: &DocumentBase) -> MatrixModel {
         MatrixModel {
             key: vec!["SPX.Z".to_string()],
-            source_time: Some(source_time.to_string()),
+            base: Some(base.clone()),
             header: Vec::new(),
             slice_columns: 0,
             column_values: Vec::new(),
@@ -1188,15 +1311,15 @@ mod tests {
     fn the_first_edit_records_the_base_and_a_second_edit_on_one_cell_keeps_the_latest() {
         let mut draft = Draft::default();
         assert_eq!(draft.state, DraftState::Clean);
-        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), &at(BASE));
         assert_eq!(draft.state, DraftState::Editing);
-        assert_eq!(draft.base.as_deref(), Some(BASE));
-        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.7), BASE);
+        assert_eq!(draft.base.as_ref(), Some(&at(BASE)));
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.7), &at(BASE));
         assert_eq!(draft.edits.len(), 1);
         assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(0.7)));
         assert_eq!(
-            draft.base.as_deref(),
-            Some(BASE),
+            draft.base.as_ref(),
+            Some(&at(BASE)),
             "every edit in one draft is against one generation"
         );
     }
@@ -1204,30 +1327,25 @@ mod tests {
     #[test]
     fn on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
 
         assert!(
-            !draft.on_delivered(BASE),
+            !draft.on_delivered(&at(BASE)),
             "the same document redelivered changes nothing"
         );
         assert_eq!(draft.state, DraftState::Editing);
 
-        assert!(draft.on_delivered(NEWER));
-        assert_eq!(
-            draft.state,
-            DraftState::Behind {
-                newer: NEWER.to_string()
-            }
-        );
+        assert!(draft.on_delivered(&at(NEWER)));
+        assert_eq!(draft.state, DraftState::Behind { newer: at(NEWER) });
         assert_eq!(draft.edits.len(), 1, "a newer document never clobbers work");
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
         assert_eq!(
-            draft.base.as_deref(),
-            Some(BASE),
+            draft.base.as_ref(),
+            Some(&at(BASE)),
             "the base still names what is painted"
         );
         assert!(
-            !draft.on_delivered(NEWER),
+            !draft.on_delivered(&at(NEWER)),
             "the same newer document again is not a fresh transition"
         );
     }
@@ -1237,27 +1355,25 @@ mod tests {
     #[test]
     fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
         let older = "2026-09-12T09:00:00Z";
 
-        assert!(draft.on_delivered(older), "an as-of step back is Behind");
-        assert_eq!(
-            draft.state,
-            DraftState::Behind {
-                newer: older.to_string()
-            }
+        assert!(
+            draft.on_delivered(&at(older)),
+            "an as-of step back is Behind"
         );
+        assert_eq!(draft.state, DraftState::Behind { newer: at(older) });
 
         assert!(
-            draft.on_delivered(BASE),
+            draft.on_delivered(&at(BASE)),
             "the base coming back is a real transition"
         );
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.edits.len(), 1, "the edits are untouched");
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.0)));
-        assert_eq!(draft.base.as_deref(), Some(BASE));
+        assert_eq!(draft.base.as_ref(), Some(&at(BASE)));
         assert!(
-            !draft.on_delivered(BASE),
+            !draft.on_delivered(&at(BASE)),
             "and the base again is no transition at all"
         );
     }
@@ -1268,22 +1384,22 @@ mod tests {
     #[test]
     fn a_sent_draft_stays_sent_on_delivery_and_rebases_to_editing() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
         draft.state = DraftState::Sent {
             at: "2026-09-24T09:00:00Z".into(),
         };
-        assert!(!draft.on_delivered(NEWER));
+        assert!(!draft.on_delivered(&at(NEWER)));
         assert!(draft.is_sent());
-        let (kept, dropped) = draft.rebase(&model(&["T1"], &["-20"], NEWER));
+        let (kept, dropped) = draft.rebase(&model(&["T1"], &["-20"], &at(NEWER)));
         assert_eq!((kept, dropped.len()), (1, 0));
         assert_eq!(draft.state, DraftState::Editing);
-        assert_eq!(draft.base.as_deref(), Some(NEWER));
+        assert_eq!(draft.base.as_ref(), Some(&at(NEWER)));
     }
 
     #[test]
     fn on_delivered_does_nothing_to_a_clean_draft() {
         let mut draft = Draft::default();
-        assert!(!draft.on_delivered(NEWER));
+        assert!(!draft.on_delivered(&at(NEWER)));
         assert_eq!(draft.state, DraftState::Clean);
     }
 
@@ -1291,13 +1407,13 @@ mod tests {
     fn rebase_moves_an_edit_to_its_new_index_by_label_and_reports_a_dropped_one() {
         let mut draft = Draft::default();
         // Two edits on a document whose rows were [T_b, T_a].
-        draft.set((1, 1), pair("T_a", "-1"), Value::F64(0.5), BASE);
-        draft.set((0, 0), pair("T_b", "-20"), Value::F64(0.25), BASE);
-        draft.on_delivered(NEWER);
+        draft.set((1, 1), pair("T_a", "-1"), Value::F64(0.5), &at(BASE));
+        draft.set((0, 0), pair("T_b", "-20"), Value::F64(0.25), &at(BASE));
+        draft.on_delivered(&at(NEWER));
 
         // The new document dropped T_b and so lists T_a first: the kept
         // edit's *index* moves even though its labels did not.
-        let newer = model(&["T_a"], &["-20", "-1"], NEWER);
+        let newer = model(&["T_a"], &["-20", "-1"], &at(NEWER));
         let (kept, dropped) = draft.rebase(&newer);
 
         assert_eq!(kept, 1);
@@ -1310,8 +1426,8 @@ mod tests {
         );
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(
-            draft.base.as_deref(),
-            Some(NEWER),
+            draft.base.as_ref(),
+            Some(&at(NEWER)),
             "a rebased draft is against the document it was rebased onto"
         );
     }
@@ -1319,9 +1435,9 @@ mod tests {
     #[test]
     fn rebase_onto_a_document_that_lost_every_label_is_clean_again() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T_a", "-20"), Value::F64(1.0), BASE);
-        draft.on_delivered(NEWER);
-        let (kept, dropped) = draft.rebase(&model(&["T_z"], &["-20"], NEWER));
+        draft.set((0, 0), pair("T_a", "-20"), Value::F64(1.0), &at(BASE));
+        draft.on_delivered(&at(NEWER));
+        let (kept, dropped) = draft.rebase(&model(&["T_z"], &["-20"], &at(NEWER)));
         assert_eq!(kept, 0);
         assert_eq!(dropped, vec![pair("T_a", "-20")]);
         assert_eq!(draft.state, DraftState::Clean);
@@ -1343,13 +1459,13 @@ mod tests {
             (1, 3),
             ("2026-09-18#2".into(), "amount".into()),
             Value::F64(1.0),
-            "t0",
+            &at("t0"),
         );
         draft.set(
             (2, 3),
             ("2026-12-18".into(), "amount".into()),
             Value::F64(2.0),
-            "t0",
+            &at("t0"),
         );
         draft.capture_groups(&base);
         let (_, dropped) = draft.rebase(&newer);
@@ -1375,7 +1491,7 @@ mod tests {
             "2026-12-18",
         ]);
         let mut draft = Draft::default();
-        draft.delete_row("2026-09-18#2", "t0");
+        draft.delete_row("2026-09-18#2", &at("t0"));
         draft.capture_groups(&base);
         let (_, dropped) = draft.rebase(&newer);
         assert!(
@@ -1400,7 +1516,7 @@ mod tests {
             (1, 3),
             ("2026-09-18#2".into(), "amount".into()),
             Value::F64(1.0),
-            "t0",
+            &at("t0"),
         );
         let (_, dropped) = draft.rebase(&newer);
         assert!(dropped.is_empty(), "{dropped:?}");
@@ -1414,7 +1530,7 @@ mod tests {
             (1, 3),
             ("2026-09-18#2".into(), "amount".into()),
             Value::F64(1.0),
-            "t0",
+            &at("t0"),
         );
         draft.capture_groups(&base);
         let back = Draft::from_toml(&draft.to_toml());
@@ -1424,8 +1540,8 @@ mod tests {
     #[test]
     fn revert_clears_the_edits_and_counts_them() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
-        draft.set((0, 1), pair("T1", "-1"), Value::F64(2.0), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(2.0), &at(BASE));
         assert_eq!(draft.revert(), 2);
         assert_eq!(draft.state, DraftState::Clean);
         assert!(draft.edits.is_empty());
@@ -1436,8 +1552,8 @@ mod tests {
     #[test]
     fn revert_clears_everything_including_the_behind_state() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
-        draft.on_delivered(NEWER);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
+        draft.on_delivered(&at(NEWER));
         draft.revert();
         assert!(draft.edits.is_empty());
         assert_eq!(draft.state, DraftState::Clean);
@@ -1452,14 +1568,14 @@ mod tests {
             ((0, 0), pair("T1", "-20"), 1.0, ColumnType::F64),
             ((0, 1), pair("T1", "-1"), 2.5, ColumnType::F64),
         ];
-        assert_eq!(draft.bump(cells.into_iter(), 0.5, BASE), Ok(2));
+        assert_eq!(draft.bump(cells.into_iter(), 0.5, &at(BASE)), Ok(2));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(1.5)));
         assert_eq!(draft.edits.get(&(0, 1)), Some(&Value::F64(3.0)));
         assert_eq!(draft.state, DraftState::Editing);
         // Bumping again reads the caller's *current* value, which is the
         // draft's own by then — the tile passes what the model paints.
         let again = vec![((0, 0), pair("T1", "-20"), 1.5, ColumnType::F64)];
-        assert_eq!(draft.bump(again.into_iter(), 0.5, BASE), Ok(1));
+        assert_eq!(draft.bump(again.into_iter(), 0.5, &at(BASE)), Ok(1));
         assert_eq!(draft.edits.get(&(0, 0)), Some(&Value::F64(2.0)));
     }
 
@@ -1474,7 +1590,7 @@ mod tests {
                 ]
                 .into_iter(),
                 2.0,
-                "t0",
+                &at("t0"),
             )
             .unwrap();
         assert_eq!(n, 2);
@@ -1493,7 +1609,7 @@ mod tests {
                 ]
                 .into_iter(),
                 0.5,
-                "t0",
+                &at("t0"),
             )
             .unwrap_err();
         assert!(err.contains("whole numbers") && err.contains("y"), "{err}");
@@ -1503,7 +1619,7 @@ mod tests {
     #[test]
     fn set_row_cell_moves_a_sent_draft_back_to_editing() {
         let mut draft = Draft::default();
-        draft.insert_row("new-1".into(), None, "t0");
+        draft.insert_row("new-1".into(), None, &at("t0"));
         draft.state = DraftState::Sent {
             at: "2026-09-24T09:00:00Z".into(),
         };
@@ -1520,9 +1636,9 @@ mod tests {
     #[test]
     fn numeric_edit_reads_f64_and_i64_and_ignores_other_kinds() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.5), BASE);
-        draft.set((0, 1), pair("T1", "-1"), Value::I64(7), BASE);
-        draft.set((0, 2), pair("T1", "0"), Value::Utf8("x".into()), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.5), &at(BASE));
+        draft.set((0, 1), pair("T1", "-1"), Value::I64(7), &at(BASE));
+        draft.set((0, 2), pair("T1", "0"), Value::Utf8("x".into()), &at(BASE));
         assert_eq!(draft.numeric_edit((0, 0)), Some(1.5));
         assert_eq!(draft.numeric_edit((0, 1)), Some(7.0));
         assert_eq!(
@@ -1539,12 +1655,12 @@ mod tests {
         assert_eq!(draft.badge(), DraftBadge::Clean);
         assert_eq!(draft.count_phrase(), "");
 
-        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), BASE);
+        draft.set((0, 0), pair("T1", "-20"), Value::F64(1.0), &at(BASE));
         assert_eq!(draft.badge(), DraftBadge::Dirty);
         assert_eq!(draft.count_phrase(), "1 cell");
 
-        draft.set((0, 1), pair("T1", "-1"), Value::F64(1.0), BASE);
-        draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(1.0), &at(BASE));
+        draft.set((1, 1), pair("T2", "-1"), Value::F64(1.0), &at(BASE));
         assert_eq!(draft.count_phrase(), "3 cells");
 
         draft.state = DraftState::Sent {
@@ -1557,9 +1673,7 @@ mod tests {
             }
         );
 
-        draft.state = DraftState::Behind {
-            newer: NEWER.to_string(),
-        };
+        draft.state = DraftState::Behind { newer: at(NEWER) };
         assert_eq!(
             draft.badge(),
             DraftBadge::Behind {
@@ -1597,8 +1711,8 @@ mod tests {
     #[test]
     fn to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base() {
         let mut draft = Draft::default();
-        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), BASE);
-        draft.set((1, 0), pair("T2", "-20"), Value::F64(0.25), BASE);
+        draft.set((0, 1), pair("T1", "-1"), Value::F64(0.5), &at(BASE));
+        draft.set((1, 0), pair("T2", "-20"), Value::F64(0.25), &at(BASE));
 
         let table = draft.to_toml();
         assert_eq!(table.get("base").and_then(|v| v.as_str()), Some(BASE));
@@ -1614,8 +1728,8 @@ mod tests {
 
         let restored = Draft::from_toml(&table);
         assert_eq!(
-            restored.base.as_deref(),
-            Some(BASE),
+            restored.base.as_ref(),
+            Some(&at(BASE)),
             "the base is what makes the first delivery Behind rather than aligned"
         );
         assert_eq!(restored.state, DraftState::Editing);
@@ -1630,7 +1744,7 @@ mod tests {
         // `rebase` against the first model resolves them.
         let (kept, dropped) = {
             let mut restored = restored;
-            let resolved = restored.rebase(&model(&["T2", "T1"], &["-20", "-1"], BASE));
+            let resolved = restored.rebase(&model(&["T2", "T1"], &["-20", "-1"], &at(BASE)));
             assert_eq!(
                 restored.edits.get(&(1, 1)),
                 Some(&Value::F64(0.5)),
@@ -1676,13 +1790,18 @@ mod tests {
     #[test]
     fn typed_edits_round_trip_through_toml_with_a_type_tag() {
         let mut draft = Draft::default();
-        draft.set((0, 0), pair("D1", "ex"), Value::Date(d(2026, 12, 20)), BASE);
-        draft.set((0, 1), pair("D1", "amount"), Value::F64(1.5), BASE);
+        draft.set(
+            (0, 0),
+            pair("D1", "ex"),
+            Value::Date(d(2026, 12, 20)),
+            &at(BASE),
+        );
+        draft.set((0, 1), pair("D1", "amount"), Value::F64(1.5), &at(BASE));
         draft.set(
             (0, 2),
             pair("D1", "status"),
             Value::Utf8("paid".into()),
-            BASE,
+            &at(BASE),
         );
 
         let table = draft.to_toml();
@@ -1740,10 +1859,10 @@ mod tests {
     fn an_attribute_edit_is_part_of_the_same_draft() {
         let mut draft = Draft::default();
         assert_eq!(draft.badge(), DraftBadge::Clean);
-        draft.set_attr("spot_ref", Value::F64(4520.0), "2026-09-14T14:00:00Z");
+        draft.set_attr("spot_ref", Value::F64(4520.0), &at("2026-09-14T14:00:00Z"));
         assert_eq!(draft.len(), 1);
         assert_eq!(draft.attr_count(), 1);
-        assert_eq!(draft.base.as_deref(), Some("2026-09-14T14:00:00Z"));
+        assert_eq!(draft.base.as_ref(), Some(&at("2026-09-14T14:00:00Z")));
         assert_eq!(draft.state, DraftState::Editing);
         assert_eq!(draft.badge(), DraftBadge::Dirty);
         // No cell touched at all — an `is_empty` keyed on `edits` alone
@@ -1757,8 +1876,8 @@ mod tests {
     #[test]
     fn an_attribute_edit_survives_rebase_when_the_newer_document_declares_it() {
         let mut draft = Draft::default();
-        draft.set_attr("spot_ref", Value::F64(1.0), "t0");
-        draft.set_attr("gone", Value::I64(2), "t0");
+        draft.set_attr("spot_ref", Value::F64(1.0), &at("t0"));
+        draft.set_attr("gone", Value::I64(2), &at("t0"));
         let newer = model_with_header(&[("spot_ref", "spot")]);
         let (kept, dropped) = draft.rebase(&newer);
         assert_eq!(kept, 1);
@@ -1816,8 +1935,8 @@ mod tests {
     #[test]
     fn toml_round_trips_attribute_edits() {
         let mut draft = Draft::default();
-        draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), "t0");
-        draft.set_attr("spot_ref", Value::F64(4520.0), "t0");
+        draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), &at("t0"));
+        draft.set_attr("spot_ref", Value::F64(4520.0), &at("t0"));
         let back = Draft::from_toml(&draft.to_toml());
         assert_eq!(back.attrs, draft.attrs);
         assert_eq!(back.base, draft.base);
@@ -1866,12 +1985,27 @@ mod tests {
     #[test]
     fn count_phrase_names_cells_and_attributes() {
         let mut draft = Draft::default();
-        draft.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
-        draft.set((0, 1), ("1M".into(), "-10".into()), Value::F64(0.1), "t0");
-        draft.set_attr("spot_ref", Value::F64(1.0), "t0");
+        draft.set(
+            (0, 0),
+            ("1M".into(), "-20".into()),
+            Value::F64(0.1),
+            &at("t0"),
+        );
+        draft.set(
+            (0, 1),
+            ("1M".into(), "-10".into()),
+            Value::F64(0.1),
+            &at("t0"),
+        );
+        draft.set_attr("spot_ref", Value::F64(1.0), &at("t0"));
         assert_eq!(draft.count_phrase(), "2 cells, spot_ref");
         let mut one = Draft::default();
-        one.set((0, 0), ("1M".into(), "-20".into()), Value::F64(0.1), "t0");
+        one.set(
+            (0, 0),
+            ("1M".into(), "-20".into()),
+            Value::F64(0.1),
+            &at("t0"),
+        );
         assert_eq!(one.count_phrase(), "1 cell");
     }
 
@@ -1892,10 +2026,10 @@ mod tests {
         ) {
             let mut draft = Draft::default();
             for (column, value) in &floats {
-                draft.set_attr(column, value.clone(), "t0");
+                draft.set_attr(column, value.clone(), &at("t0"));
             }
-            draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), "t0");
-            draft.set_attr("free_text", Value::Utf8("a note".into()), "t0");
+            draft.set_attr("anchor_date", Value::Date(d(2026, 9, 14)), &at("t0"));
+            draft.set_attr("free_text", Value::Utf8("a note".into()), &at("t0"));
 
             let back = Draft::from_toml(&draft.to_toml());
             prop_assert_eq!(back.attrs, draft.attrs);
@@ -1905,18 +2039,18 @@ mod tests {
     #[test]
     fn inserting_and_deleting_rows_is_counted_and_phrased() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
         assert!(d.set_row_cell("new-1", "amount", Value::F64(1.0)));
         assert!(
             !d.set_row_cell("D1", "amount", Value::F64(1.0)),
             "not an inserted row"
         );
-        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Marked);
-        assert_eq!(d.delete_row("D2", "t0"), RowDelete::Already);
+        assert_eq!(d.delete_row("D2", &at("t0")), RowDelete::Marked);
+        assert_eq!(d.delete_row("D2", &at("t0")), RowDelete::Already);
         assert_eq!(d.rows_added(), 1);
         assert_eq!(d.rows_removed(), 1);
         assert_eq!(d.count_phrase(), "1 row added, 1 row removed");
-        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        assert_eq!(d.delete_row("new-1", &at("t0")), RowDelete::Dropped);
         assert_eq!(d.rows_added(), 0);
         assert_eq!(d.revert(), 1);
         assert!(d.rows.is_empty());
@@ -1927,13 +2061,13 @@ mod tests {
     #[test]
     fn dropping_the_only_inserted_row_leaves_a_clean_draft() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), None, "t0");
-        assert_eq!(d.delete_row("new-1", "t0"), RowDelete::Dropped);
+        d.insert_row("new-1".into(), None, &at("t0"));
+        assert_eq!(d.delete_row("new-1", &at("t0")), RowDelete::Dropped);
         assert!(d.is_empty());
         assert!(d.base.is_none());
         assert_eq!(d.badge(), DraftBadge::Clean);
         assert!(
-            !d.on_delivered("t9"),
+            !d.on_delivered(&at("t9")),
             "a clean draft with nothing pending never goes Behind"
         );
     }
@@ -1942,7 +2076,7 @@ mod tests {
     fn mint_label_takes_the_smallest_unused_number() {
         let mut d = Draft::default();
         assert_eq!(d.mint_label(|_| false), "new-1");
-        d.insert_row("new-1".into(), None, "t0");
+        d.insert_row("new-1".into(), None, &at("t0"));
         assert_eq!(d.mint_label(|_| false), "new-2");
         assert_eq!(
             d.mint_label(|l| l == "new-2"),
@@ -1954,8 +2088,8 @@ mod tests {
     #[test]
     fn rename_row_moves_an_inserted_row_and_refuses_a_collision() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), None, "t0");
-        d.insert_row("new-2".into(), None, "t0");
+        d.insert_row("new-1".into(), None, &at("t0"));
+        d.insert_row("new-2".into(), None, &at("t0"));
         assert!(d.rename_row("new-1", "2027-01-15"));
         assert!(d.row_state("2027-01-15").is_some());
         assert!(!d.rename_row("new-2", "2027-01-15"));
@@ -1967,9 +2101,9 @@ mod tests {
     #[test]
     fn rename_row_rehangs_its_followers() {
         let mut d = Draft::default();
-        d.insert_row("2027-01-15".into(), Some("new-2".into()), "t0");
-        d.insert_row("new-2".into(), Some("D1".into()), "t0");
-        d.insert_row("new-3".into(), Some("D2".into()), "t0");
+        d.insert_row("2027-01-15".into(), Some("new-2".into()), &at("t0"));
+        d.insert_row("new-2".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-3".into(), Some("D2".into()), &at("t0"));
         assert!(d.rename_row("new-2", "2027-02-15"));
         assert!(
             matches!(
@@ -1993,10 +2127,10 @@ mod tests {
     #[test]
     fn dropping_an_inserted_row_hands_its_followers_to_its_anchor() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
-        d.insert_row("new-2".into(), Some("D1".into()), "t0");
-        d.insert_row("new-3".into(), Some("D2".into()), "t0");
-        assert_eq!(d.delete_row("new-2", "t0"), RowDelete::Dropped);
+        d.insert_row("new-1".into(), Some("new-2".into()), &at("t0"));
+        d.insert_row("new-2".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-3".into(), Some("D2".into()), &at("t0"));
+        assert_eq!(d.delete_row("new-2", &at("t0")), RowDelete::Dropped);
         assert!(matches!(
             d.row_state("new-1"),
             Some(RowEdit::Inserted { after: Some(a), .. }) if a == "D1"
@@ -2016,11 +2150,11 @@ mod tests {
     #[test]
     fn rehang_followers_moves_every_row_anchored_on_from() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
-        d.insert_row("new-2".into(), Some("D1".into()), "t0");
-        d.insert_row("new-3".into(), None, "t0");
-        d.insert_row("new-4".into(), Some("D2".into()), "t0");
-        d.delete_row("D1", "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-2".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-3".into(), None, &at("t0"));
+        d.insert_row("new-4".into(), Some("D2".into()), &at("t0"));
+        d.delete_row("D1", &at("t0"));
         d.rehang_followers(Some("D1"), Some("new-9".into()));
         fn after(d: &Draft, l: &str) -> Option<String> {
             match d.row_state(l) {
@@ -2050,8 +2184,8 @@ mod tests {
     #[test]
     fn reanchor_row_moves_an_inserted_row_under_a_new_anchor() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
-        d.insert_row("new-2".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-2".into(), Some("D1".into()), &at("t0"));
         assert!(d.reanchor_row("new-1", Some("new-2".into())));
         assert!(matches!(
             d.row_state("new-1"),
@@ -2061,7 +2195,7 @@ mod tests {
             !d.reanchor_row("D1", None),
             "only an inserted row re-anchors"
         );
-        d.delete_row("D3", "t0");
+        d.delete_row("D3", &at("t0"));
         assert!(!d.reanchor_row("D3", None), "a deleted row has no anchor");
     }
 
@@ -2071,10 +2205,10 @@ mod tests {
     #[test]
     fn rebase_carries_rows_by_label() {
         let mut d = Draft::default();
-        d.delete_row("GONE", "t0");
-        d.delete_row("D1", "t0");
-        d.insert_row("D9".into(), Some("D1".into()), "t0"); // upstream will carry D9
-        d.insert_row("new-1".into(), Some("GONE".into()), "t0"); // anchor vanishes
+        d.delete_row("GONE", &at("t0"));
+        d.delete_row("D1", &at("t0"));
+        d.insert_row("D9".into(), Some("D1".into()), &at("t0")); // upstream will carry D9
+        d.insert_row("new-1".into(), Some("GONE".into()), &at("t0")); // anchor vanishes
         let newer = flat_model_with_rows(&["D1", "D2", "D9"]);
         let (_, dropped) = d.rebase(&newer);
         assert!(matches!(d.row_state("D1"), Some(RowEdit::Deleted)));
@@ -2102,8 +2236,8 @@ mod tests {
     #[test]
     fn rebase_keeps_a_chain_anchored_on_a_surviving_inserted_row() {
         let mut d = Draft::default();
-        d.insert_row("new-2".into(), Some("D1".into()), "t0");
-        d.insert_row("new-1".into(), Some("new-2".into()), "t0");
+        d.insert_row("new-2".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-1".into(), Some("new-2".into()), &at("t0"));
         let (kept, dropped) = d.rebase(&flat_model_with_rows(&["D1"]));
         assert_eq!(kept, 2);
         assert!(dropped.is_empty(), "{dropped:?}");
@@ -2120,8 +2254,8 @@ mod tests {
         // carries `D7`, so the chained row hangs off the real one and
         // only the conflict is named.
         let mut d = Draft::default();
-        d.insert_row("D7".into(), Some("D1".into()), "t0");
-        d.insert_row("new-1".into(), Some("D7".into()), "t0");
+        d.insert_row("D7".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-1".into(), Some("D7".into()), &at("t0"));
         let (_, dropped) = d.rebase(&flat_model_with_rows(&["D1", "D7"]));
         assert!(d.row_state("D7").is_none());
         assert!(matches!(
@@ -2140,10 +2274,10 @@ mod tests {
     #[test]
     fn rows_round_trip_through_toml() {
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
         d.set_row_cell("new-1", "ex", Value::Date(date(2027, 1, 15)));
         d.set_row_cell("new-1", "status", Value::Utf8("estimated".into()));
-        d.delete_row("D2", "t0");
+        d.delete_row("D2", &at("t0"));
         let back = Draft::from_toml(&d.to_toml());
         assert_eq!(back.rows, d.rows);
         assert_eq!(back.base, d.base);

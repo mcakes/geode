@@ -22,13 +22,13 @@
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
 use crate::core::draft::{RowDelete, RowEdit, bumped, local_hhmm};
-use crate::core::matrix::RowState;
+use crate::core::matrix::{RowState, base_of};
 use crate::core::menu::{self, MenuInputs, MenuRow};
 use crate::core::spec::RowIdentity;
 use crate::core::{
-    Cell, CellKind, Columns, DateTimeField, Draft, DraftBadge, DraftState, FieldKey, MatrixModel,
-    PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr, parse_cell,
-    route,
+    Cell, CellKind, Columns, DateTimeField, DocumentBase, Draft, DraftBadge, DraftState, FieldKey,
+    MatrixModel, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
+    parse_cell, route,
 };
 use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
 use crate::header::{self, HeaderInputs, HeaderModel, Tone};
@@ -229,12 +229,17 @@ enum Echo {
     /// `sent HH:MM, confirmed HH:MM` — the draft has cleared; dropped by
     /// [`MarketDataTile::rebuild_chrome`] at the next edit.
     Confirmed(SharedString),
-    /// The generation that was compared and found different (`newer`, its
-    /// source time) and the line naming how many rows differ. The panel
-    /// keeps painting the base while this stands, and a redelivery of
-    /// `newer` is not compared again. Dropped the moment the draft leaves
-    /// `Sent` (`:rebase`, `:revert`, a further edit).
-    Differs { newer: String, text: SharedString },
+    /// The generation that was compared and found different (`newer`) and
+    /// the line naming how many rows differ. The panel keeps painting the
+    /// base while this stands, and a redelivery of `newer` is not compared
+    /// again. Keyed by the whole generation, not its source time alone, so
+    /// a corrected republish cannot reuse the previous republish's
+    /// comparison. Dropped the moment the draft leaves `Sent` (`:rebase`,
+    /// `:revert`, a further edit).
+    Differs {
+        newer: DocumentBase,
+        text: SharedString,
+    },
 }
 
 /// What [`MarketDataTile::echo_of`] decided about one delivery.
@@ -1343,7 +1348,7 @@ impl MarketDataTile {
     /// `deliver` for an un-barriered outcome and by [`Self::promote`] for
     /// a staged one, so the two paths cannot drift.
     fn apply(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
-        let painted = self.painted_snapshot().and_then(|s| source_time_of(&s));
+        let painted = self.painted_snapshot().and_then(|s| base_of(&s));
         self.apply_snapshot(snapshot, cx);
         self.withdraw_upload_if_moved(painted, cx);
     }
@@ -1356,8 +1361,8 @@ impl MarketDataTile {
     /// deferred to the end of this update; the handle travels into the
     /// deferral, so it is never dropped while still focused. `y`'s own
     /// re-check in [`Self::submit_upload`] stays as the second line.
-    fn withdraw_upload_if_moved(&mut self, painted: Option<String>, cx: &mut Context<Self>) {
-        let now = self.painted_snapshot().and_then(|s| source_time_of(&s));
+    fn withdraw_upload_if_moved(&mut self, painted: Option<DocumentBase>, cx: &mut Context<Self>) {
+        let now = self.painted_snapshot().and_then(|s| base_of(&s));
         let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;
         if !self.pending_upload.as_ref().is_some_and(moved) {
             return;
@@ -1393,14 +1398,14 @@ impl MarketDataTile {
     /// [`Self::apply`]'s body: everything a delivered snapshot does to the
     /// panel, before the armed confirm is checked against it.
     fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
-        let as_of = source_time_of(&snapshot);
+        let base = base_of(&snapshot);
         // Evaluate delivery on a draft copy and build the resulting model before
         // committing either. An unbuildable generation changes only the notice, keeping
         // the last usable snapshot, draft state, and model together.
         let mut draft = self.draft.clone();
-        let mut moved = as_of.as_ref().is_some_and(|t| draft.on_delivered(t));
+        let mut moved = base.as_ref().is_some_and(|b| draft.on_delivered(b));
         // Evaluate the upload echo on the same draft copy before committing state.
-        let echo = match self.echo_of(&snapshot, as_of.as_deref(), &mut draft) {
+        let echo = match self.echo_of(&snapshot, base.as_ref(), &mut draft) {
             Ok(echo) => echo,
             Err(unbuildable) => {
                 self.notice = Some(unbuildable.into());
@@ -1459,9 +1464,9 @@ impl MarketDataTile {
                     let phrase = draft.count_phrase();
                     draft.revert();
                     // `Behind` implies `on_delivered` ran with `Some`.
-                    let when = as_of
-                        .as_deref()
-                        .map(|t| local_hhmm(t, self.clock))
+                    let when = base
+                        .as_ref()
+                        .map(|b| local_hhmm(&b.as_of, self.clock))
                         .unwrap_or_default();
                     notice = Some(format!("update {when} replaced {phrase}").into());
                 }
@@ -1476,7 +1481,7 @@ impl MarketDataTile {
                 None => self
                     .snapshot
                     .clone()
-                    .filter(|s| draft.base.is_some() && source_time_of(s) == draft.base),
+                    .filter(|s| draft.base.is_some() && base_of(s) == draft.base),
             }
         } else {
             None
@@ -1568,7 +1573,7 @@ impl MarketDataTile {
 
     /// Compare a Sent draft's saved upload rows with a different delivered generation.
     /// Matching content clears the draft and follows the delivery; a difference keeps
-    /// Sent over its base. Reuse a difference result for the same source time.
+    /// Sent over its base. Reuse a difference result for the same generation.
     ///
     /// Assemble incoming content from a clean document model. Empty or invalid upload
     /// content cannot confirm the send and produces a differing-echo notice. A
@@ -1577,30 +1582,34 @@ impl MarketDataTile {
     fn echo_of(
         &self,
         snapshot: &Snapshot,
-        as_of: Option<&str>,
+        delivered: Option<&DocumentBase>,
         draft: &mut Draft,
     ) -> Result<EchoStep, String> {
-        let (DraftState::Sent { at }, Some(t)) = (&draft.state, as_of) else {
+        let (DraftState::Sent { at }, Some(delivered)) = (&draft.state, delivered) else {
             return Ok(EchoStep::None);
         };
-        if draft.base.as_deref() == Some(t) {
+        if draft
+            .base
+            .as_ref()
+            .is_some_and(|b| !b.differs_from(delivered))
+        {
             return Ok(EchoStep::None);
         }
         let Some(sent) = self.sent.as_ref() else {
             draft.state = DraftState::Behind {
-                newer: t.to_string(),
+                newer: delivered.clone(),
             };
             return Ok(EchoStep::Unchecked);
         };
         if let Some(held @ Echo::Differs { newer, .. }) = &self.echo
-            && newer == t
+            && newer == delivered
         {
             return Ok(EchoStep::Held(held.clone()));
         }
         let clean = MatrixModel::build(snapshot, self.spec, &Draft::default())?;
         let held = |text: String| {
             EchoStep::Held(Echo::Differs {
-                newer: t.to_string(),
+                newer: delivered.clone(),
                 text: text.into(),
             })
         };
@@ -1686,15 +1695,15 @@ impl MarketDataTile {
         self.base_snapshot.clone().or_else(|| self.snapshot.clone())
     }
 
-    /// Capture same-day group sizes only if the painted snapshot's source time equals
-    /// the draft base. A restored or parked draft may paint a newer fallback because
+    /// Capture same-day group sizes only if the painted snapshot is the draft's own
+    /// base generation. A restored or parked draft may paint a newer fallback because
     /// its real base was never delivered here; keep its stored base-group sizes in that
     /// case. All capture sites share this guard before calling Draft::capture_groups.
     fn capture_groups_if_base(&self, draft: &mut Draft) {
         let Some(base) = self.painted_snapshot() else {
             return;
         };
-        if source_time_of(&base) != draft.base {
+        if base_of(&base) != draft.base {
             return;
         }
         if let Ok(base_model) = MatrixModel::build(&base, self.spec, &Draft::default()) {
@@ -1949,8 +1958,9 @@ impl MarketDataTile {
         }
         self.source_at = self
             .model
-            .source_time
-            .as_deref()
+            .base
+            .as_ref()
+            .map(|b| b.as_of.as_str())
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&chrono::Utc));
         self.header = HeaderModel::prepare(HeaderInputs {
@@ -2266,26 +2276,27 @@ impl MarketDataTile {
         }
     }
 
-    /// Return the edit's base source time, or a refusal when no usable document exists.
-    /// If provenance lacks source_time, use an empty base. Production document queries
-    /// supply it; an empty base will differ from a later dated delivery, making the
+    /// Return the edit's base generation, or a refusal when no usable document
+    /// exists. A model with no provenance yields the default base — an empty
+    /// source time and an unknown generation. Production document queries supply
+    /// one; an empty base will differ from a later dated delivery, making the
     /// provenance gap visible through Behind state.
-    fn edit_base(&self) -> Result<String, String> {
+    fn edit_base(&self) -> Result<DocumentBase, String> {
         if self.model.rows.is_empty() || self.model.columns.is_empty() {
             return Err(NO_DOCUMENT.to_string());
         }
-        Ok(self.model.source_time.clone().unwrap_or_default())
+        Ok(self.model.base.clone().unwrap_or_default())
     }
 
     /// The attribute strip's own [`Self::edit_base`]: an attribute needs
     /// no row or column, only a header to belong to, which the model
     /// carries exactly when it carries any rows at all (see
     /// `MatrixModel::build`'s early return for an empty document).
-    fn attr_edit_base(&self) -> Result<String, String> {
+    fn attr_edit_base(&self) -> Result<DocumentBase, String> {
         if self.model.header.is_empty() {
             return Err(NO_DOCUMENT.to_string());
         }
-        Ok(self.model.source_time.clone().unwrap_or_default())
+        Ok(self.model.base.clone().unwrap_or_default())
     }
 
     /// Open the cursor's cell or attribute editor seeded from its painted draft value.
@@ -2900,7 +2911,7 @@ impl MarketDataTile {
             Some(RowEdit::Inserted { cells, .. }) if cells.is_empty()
         );
         if provisional {
-            let base = self.model.source_time.clone().unwrap_or_default();
+            let base = self.model.base.clone().unwrap_or_default();
             self.draft.delete_row(label.as_ref(), &base);
             self.rebuild_model(cx);
         }
@@ -2918,7 +2929,7 @@ impl MarketDataTile {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(usize, String), String> {
+    ) -> Result<(usize, DocumentBase), String> {
         if self.editor.is_some() {
             self.close_editor(window, cx);
         }
@@ -4386,16 +4397,6 @@ fn as_of_text(
     }
 }
 
-/// Delivered document source time used as draft generation identity. Dataset-wide
-/// gen_id is not an individual document's base.
-fn source_time_of(snapshot: &Snapshot) -> Option<String> {
-    snapshot
-        .provenance()
-        .datasets
-        .first()
-        .and_then(|f| f.as_of.clone())
-}
-
 /// `:rebase`'s notice about the edits it could not carry over — a row or
 /// column label the newer document no longer has. Each pair is spelled
 /// `row/col` (the same display separator a document key uses), since a
@@ -4528,6 +4529,7 @@ mod tests {
     use crate::core::draft::RowEdit;
     use crate::core::spec::{RowAxis, RowIdentity, RowLabel, ValueColumn};
     use crate::core::test_fixtures;
+    use crate::core::test_fixtures::at;
     use crate::core::{CVI, DIVIDEND, DraftState};
     use crate::delegate::LABEL_COL;
     use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -5825,7 +5827,10 @@ mod tests {
             )),
         );
         let (rows, source) = h.tile.read_with(&vcx, |t, _| {
-            (t.model().rows.len(), t.model().source_time.clone())
+            (
+                t.model().rows.len(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
+            )
         });
         assert_eq!(rows, 2, "the stale outcome must not land");
         assert_eq!(source.as_deref(), Some(BASE));
@@ -6245,7 +6250,7 @@ mod tests {
             .tile
             .read_with(&vcx, |t, _| (t.draft().state.clone(), t.draft().len()));
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "held, not replaced, on the first delivery after a restore — got {state:?}"
         );
         assert_eq!(len, 1, "the edit survives, parked at its label");
@@ -6920,9 +6925,12 @@ edits = [["2026-11-20", "-1", 9.5]]
             "normal",
             "and the keyboard is the panel's again"
         );
-        let (len, base) = h
-            .tile
-            .read_with(&vcx, |t, _| (t.draft().len(), t.draft().base.clone()));
+        let (len, base) = h.tile.read_with(&vcx, |t, _| {
+            (
+                t.draft().len(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
+            )
+        });
         assert_eq!(len, 1);
         assert_eq!(
             base.as_deref(),
@@ -8688,7 +8696,7 @@ deleted = true
             )
         });
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "got {state:?}"
         );
         assert_eq!(rows, 2, "still the base generation's two terms");
@@ -8742,7 +8750,7 @@ deleted = true
             )
         });
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWEST),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWEST),
             "moves to the LATEST as_of, got {state:?}"
         );
         assert_eq!(rows, 2, "still the ORIGINAL base generation's two terms");
@@ -10961,8 +10969,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (state, base, source, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().state.clone(),
-                t.draft().base.clone(),
-                t.model().source_time.clone(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows.len(),
                 t.model().rows[0].cells[0].clone(),
                 t.notice().map(str::to_string),
@@ -11073,7 +11081,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (draft, source, rows, cell, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().clone(),
-                t.model().source_time.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows.len(),
                 t.model().rows[0].cells[0].clone(),
                 t.notice().map(str::to_string),
@@ -11122,12 +11130,12 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (state, source, rows) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().state.clone(),
-                t.model().source_time.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows.len(),
             )
         });
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "still Behind after the switch, got {state:?}"
         );
         assert_eq!(source.as_deref(), Some(BASE), "still painting the base");
@@ -11141,12 +11149,12 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (state, source, len) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().state.clone(),
-                t.model().source_time.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.draft().len(),
             )
         });
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "a redelivery never acts, got {state:?}"
         );
         assert_eq!(source.as_deref(), Some(BASE));
@@ -11157,8 +11165,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (state, base, source, cell) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().state.clone(),
-                t.draft().base.clone(),
-                t.model().source_time.clone(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows[0].cells[0].clone(),
             )
         });
@@ -11331,7 +11339,7 @@ auto = "discard"
         let (len, base, cells, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().len(),
-                t.draft().base.clone(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows[0].cells[..2].to_vec(),
                 t.notice().map(str::to_string),
             )
@@ -11396,7 +11404,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "the policy itself is restored"
         );
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "Behind, as hold would leave it — got {state:?}"
         );
         assert_eq!(len, 1, "the restored edit survives");
@@ -11412,7 +11420,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             .tile
             .read_with(&vcx, |t, _| (t.draft().state.clone(), t.draft().len()));
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "a redelivery never acts, got {state:?}"
         );
         assert_eq!(len, 1);
@@ -11423,7 +11431,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let (draft, source, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().clone(),
-                t.model().source_time.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.notice().map(str::to_string),
             )
         });
@@ -11452,13 +11460,13 @@ edits = [["2026-11-20", "-1", 9.5]]
             (
                 t.policy(),
                 t.draft().state.clone(),
-                t.draft().base.clone(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
                 t.draft().len(),
             )
         });
         assert_eq!(policy, UpdatePolicy::Rebase);
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "Behind, not rebased — got {state:?}"
         );
         assert_eq!(base.as_deref(), Some(BASE), "the base is the restored one");
@@ -11482,13 +11490,13 @@ edits = [["2026-11-20", "-1", 9.5]]
             (
                 t.draft().state.clone(),
                 t.draft().len(),
-                t.model().source_time.clone(),
+                t.model().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows.len(),
                 t.notice().map(str::to_string),
             )
         });
         assert!(
-            matches!(state, DraftState::Behind { ref newer } if newer == NEWER),
+            matches!(state, DraftState::Behind { ref newer } if newer.as_of == NEWER),
             "hold's path, got {state:?}"
         );
         assert_eq!(len, 1, "the edit is intact");
@@ -11538,7 +11546,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let (len, base, cells, notice) = h.tile.read_with(&vcx, |t, _| {
             (
                 t.draft().len(),
-                t.draft().base.clone(),
+                t.draft().base.as_ref().map(|b| b.as_of.clone()),
                 t.model().rows[0].cells[..2].to_vec(),
                 t.notice().map(str::to_string),
             )
@@ -12935,7 +12943,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let tag = h.tile.read_with(&vcx, |t, _| t.tag);
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         let after = h.tile.read_with(&vcx, |t, _| t.draft().clone());
-        assert_eq!(after.base.as_deref(), Some(NEWER), "rebased, not Behind");
+        assert_eq!(
+            after.base.as_ref().map(|b| b.as_of.as_str()),
+            Some(NEWER),
+            "rebased, not Behind"
+        );
         assert!(!after.is_behind());
         assert!(
             same_edits(&before, &after) && before.state == after.state,
@@ -12972,7 +12984,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.command(&mut vcx, "upload").unwrap();
         draw(&mut vcx);
         h.tile.update(&mut vcx, |t, _| {
-            t.draft.base = Some(NEWER.to_string());
+            t.draft.base = Some(at(NEWER));
         });
         type_keys(&mut vcx, "y");
         assert!(h.upload_request().is_none(), "a moved base sends nothing");
@@ -12997,7 +13009,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         h.deliver(&mut vcx, tag, Arc::new(cvi(NEWER)));
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.draft().base.clone())
+                .read_with(&vcx, |t, _| t
+                    .draft()
+                    .base
+                    .as_ref()
+                    .map(|b| b.as_of.clone()))
                 .as_deref(),
             Some(NEWER),
             "rebased while in flight"
@@ -13055,7 +13071,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         }
         fn painted_as_of(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
             self.tile
-                .read_with(vcx, |t, _| t.model().source_time.clone())
+                .read_with(vcx, |t, _| t.model().base.as_ref().map(|b| b.as_of.clone()))
         }
         fn sent_rows(&self, vcx: &gpui::VisualTestContext) -> Option<DocumentRows> {
             self.tile.read_with(vcx, |t, _| t.sent.clone())
@@ -13245,7 +13261,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
             assert!(draft.is_sent(), "{policy}: {:?}", draft.state);
             assert_eq!(draft.len(), 1, "{policy}: the edit is kept");
-            assert_eq!(draft.base.as_deref(), Some(BASE), "{policy}: not moved");
+            assert_eq!(
+                draft.base.as_ref().map(|b| b.as_of.as_str()),
+                Some(BASE),
+                "{policy}: not moved"
+            );
             assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(BASE), "{policy}");
         }
     }
@@ -13268,7 +13288,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(h.command(&mut vcx, "rebase"), Ok(()));
         let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
         assert_eq!(draft.state, DraftState::Editing);
-        assert_eq!(draft.base.as_deref(), Some(NEWER));
+        assert_eq!(draft.base.as_ref().map(|b| b.as_of.as_str()), Some(NEWER));
         assert_eq!(draft.len(), 1, "the edit moved onto the echo");
         assert_eq!(h.painted_as_of(&vcx).as_deref(), Some(NEWER));
         assert!(h.cell(&vcx, 0, 0).1, "painted as an edit again");
@@ -13312,7 +13332,11 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
         let draft = h.tile.read_with(&vcx, |t, _| t.draft().clone());
         assert!(draft.is_sent(), "{:?}", draft.state);
-        assert_eq!(draft.base.as_deref(), Some(BASE), "unchanged");
+        assert_eq!(
+            draft.base.as_ref().map(|b| b.as_of.as_str()),
+            Some(BASE),
+            "unchanged"
+        );
         assert_eq!(draft.len(), 1, "the edit is unchanged");
     }
 

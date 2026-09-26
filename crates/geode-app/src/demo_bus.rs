@@ -701,7 +701,10 @@ mod tests {
         let first_label = clean.rows[0].label.to_string();
         let mut draft = Draft::default();
         let label = draft.mint_label(|l| clean.rows.iter().any(|r| r.label.as_ref() == l));
-        draft.insert_row(label.clone(), Some(first_label), "base");
+        // Stamp the insert against the delivered generation the clean model
+        // was built from, exactly as the panel does.
+        let stamp = clean.base.clone().unwrap_or_default();
+        draft.insert_row(label.clone(), Some(first_label), &stamp);
         let late = NaiveDate::from_ymd_opt(2027, 3, 19).unwrap();
         for (column, value) in [
             ("ex", Value::Date(late)),

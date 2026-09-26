@@ -452,7 +452,7 @@ mod tests {
     use super::*;
     use crate::core::spec::{CVI, DIVIDEND};
     use crate::core::test_fixtures::{
-        BASE, CVI_NODES, CVI_TERMS, date, fixture_cvi_rows, fixture_dividend_rows, snapshot_of,
+        BASE, CVI_NODES, CVI_TERMS, at, date, fixture_cvi_rows, fixture_dividend_rows, snapshot_of,
     };
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{Column, Value};
@@ -569,9 +569,14 @@ role = "attribute"
     fn a_dividend_draft_assembles_edits_deletes_and_inserts_in_painted_order() {
         let base = fixture_dividend_rows();
         let mut draft = Draft::default();
-        draft.set((1, 3), ("B".into(), "amount".into()), Value::F64(1.5), BASE);
-        draft.delete_row("C", BASE);
-        draft.insert_row("new-1".into(), Some("A".into()), BASE);
+        draft.set(
+            (1, 3),
+            ("B".into(), "amount".into()),
+            Value::F64(1.5),
+            &at(BASE),
+        );
+        draft.delete_row("C", &at(BASE));
+        draft.insert_row("new-1".into(), Some("A".into()), &at(BASE));
         for (column, value) in [
             ("ex", Value::Date(date(2026, 11, 20))),
             ("announced", Value::Date(date(2026, 10, 15))),
@@ -622,7 +627,7 @@ role = "attribute"
     fn an_attribute_edit_replaces_the_snapshots_value() {
         let base = fixture_dividend_rows();
         let mut draft = Draft::default();
-        draft.set_attr("currency", Value::Utf8("EUR".into()), BASE);
+        draft.set_attr("currency", Value::Utf8("EUR".into()), &at(BASE));
         let (snapshot, model) = built(&DIVIDEND, &base, &draft);
         let sent = assemble(&snapshot, &DIVIDEND, &model, &draft).unwrap();
         assert_eq!(
@@ -647,9 +652,9 @@ role = "attribute"
             (0, 4),
             ("2026-10-16".into(), "-1".into()),
             Value::F64(0.25),
-            BASE,
+            &at(BASE),
         );
-        draft.insert_row("2026-12-18".into(), Some("2026-11-20".into()), BASE);
+        draft.insert_row("2026-12-18".into(), Some("2026-11-20".into()), &at(BASE));
         for (column, value) in [
             ("fwd", 4600.0),
             ("atm", 0.2),
@@ -709,7 +714,7 @@ role = "attribute"
         // An inserted row with only its amount filled: the first empty
         // column in the dataset's order is named.
         let mut draft = Draft::default();
-        draft.insert_row("new-1".into(), Some("A".into()), BASE);
+        draft.insert_row("new-1".into(), Some("A".into()), &at(BASE));
         assert!(draft.set_row_cell("new-1", "amount", Value::F64(0.5)));
         let (snapshot, model) = built(&DIVIDEND, &base, &draft);
         assert_eq!(
@@ -723,7 +728,7 @@ role = "attribute"
             (1, 3),
             ("B".into(), "amount".into()),
             Value::Utf8("lots".into()),
-            BASE,
+            &at(BASE),
         );
         let (snapshot, model) = built(&DIVIDEND, &base, &draft);
         assert_eq!(
@@ -735,7 +740,7 @@ role = "attribute"
         // empty document.
         let mut draft = Draft::default();
         for label in ["A", "B", "C"] {
-            draft.delete_row(label, BASE);
+            draft.delete_row(label, &at(BASE));
         }
         let (snapshot, model) = built(&DIVIDEND, &base, &draft);
         assert_eq!(
@@ -745,7 +750,7 @@ role = "attribute"
 
         // A wrong-typed attribute edit likewise.
         let mut draft = Draft::default();
-        draft.set_attr("schedule_date", Value::Utf8("soon".into()), BASE);
+        draft.set_attr("schedule_date", Value::Utf8("soon".into()), &at(BASE));
         let (snapshot, model) = built(&DIVIDEND, &base, &draft);
         assert_eq!(
             assemble(&snapshot, &DIVIDEND, &model, &draft),
@@ -759,7 +764,7 @@ role = "attribute"
     fn assembly_refuses_a_typed_row_label_that_is_not_a_date() {
         let base = fixture_cvi_rows();
         let mut draft = Draft::default();
-        draft.insert_row("soon".into(), Some("2026-11-20".into()), BASE);
+        draft.insert_row("soon".into(), Some("2026-11-20".into()), &at(BASE));
         for column in ["fwd", "atm", "skew", "-20", "-1", "3.5"] {
             assert!(draft.set_row_cell("soon", column, Value::F64(1.0)));
         }
