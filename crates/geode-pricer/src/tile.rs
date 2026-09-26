@@ -6600,7 +6600,16 @@ pub(crate) mod tests {
             let cursor = h.cursor(&vcx);
             h.command(&mut vcx, "rm old").unwrap();
             h.draw(&mut vcx);
+            // Held here so a handle dropped still focused stays visible.
+            let focus = h.tile.read_with(&vcx, |t, _| {
+                t.confirm.as_ref().expect("armed").focus.clone()
+            });
+            assert!(vcx.update(|window, _| focus.is_focused(window)));
             vcx.simulate_keystrokes(key);
+            assert!(
+                !vcx.update(|window, _| focus.is_focused(window)),
+                "{key}: blurred before it dropped"
+            );
             assert_eq!(prompt(&h, &vcx), None, "{key}");
             assert_eq!(h.footer(&vcx).as_deref(), Some(NOT_REMOVED), "{key}");
             assert_eq!(h.mode(&mut vcx), "normal", "{key}");
