@@ -183,10 +183,17 @@ pub fn data_setup(
 /// or user layer redeclaring it with other columns, or the same columns in
 /// another order, would put sheet values into the wrong columns of an
 /// existing database while reads by name decode a plausible wrong sheet.
-/// A redeclaration that differs is replaced by the builtin one and
-/// reported as an error naming the layer and file; an identical one is
-/// accepted silently.
+/// A redeclaration that differs (or is invalid, and so dropped from the
+/// schema) is replaced by the builtin one and reported as an error naming
+/// the layer and file; an identical one is accepted silently. A config with
+/// no `pricer_sheets` at all (no builtin layer) is left alone.
 fn pin_pricer_sheets(schema: &mut SchemaSpec, config: &Config) -> Option<Diagnostic> {
+    if !config
+        .doc("datasets")
+        .is_some_and(|d| d.value.contains_key(PRICER_SHEETS_DATASET))
+    {
+        return None;
+    }
     let builtin = LayerDoc::builtin("datasets", PRICER_SHEETS_DECLARATION)
         .expect("PRICER_SHEETS_DECLARATION is well-formed TOML");
     let (alone, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[builtin]));
