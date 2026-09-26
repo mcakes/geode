@@ -6116,12 +6116,21 @@ pub(crate) mod tests {
         assert_eq!(store.save_count(), base + 1);
     }
 
+    /// The tile that queued `book`'s save leaves it and comes back; the
+    /// load behind that save fails. A later outcome of the same save (two
+    /// coalesced answers) reaches the tile as the sheet's own, and must
+    /// not clear the failed load's block.
     #[gpui::test]
     fn a_save_answer_never_clears_a_failed_loads_block(cx: &mut gpui::TestAppContext) {
-        let (store, record, _) = pending_book();
-        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
-        answer_load(&h, &mut vcx, 1, Err("boom".into()));
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        h.store.set_load_refused(true);
+        save_answered(&h, &mut vcx, "book", Ok(()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.save_blocked), "the premise");
         let blocked = h.save_notice(&vcx);
+        assert!(blocked.is_some());
         save_answered(&h, &mut vcx, "book", Ok(()));
         assert_eq!(h.save_notice(&vcx), blocked);
     }
