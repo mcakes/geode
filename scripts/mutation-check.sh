@@ -3097,12 +3097,34 @@ run_mutation "delegate: a plan rebuild re-resolves a sort's column, not just its
   geode-blotter \
   hiding_the_sorted_column_drops_the_sort_and_says_which
 
+# The notice is the whole remedy a trader gets when a sort is dropped;
+# losing the column's name here leaves the harness silent about it.
+run_mutation "delegate: a dropped sort keeps the column's name for the tile to report" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    None => self.dropped_sort = Some(s.column),' \
+  '                    None => self.dropped_sort = None,' \
+  geode-blotter \
+  hiding_the_sorted_column_drops_the_sort_and_says_which
+
 # The cursor is a screen position, so a reorder leaves it on a different
-# column and the next sort cycles something else.
+# column and the next sort cycles something else. Anchored past the
+# `if let` itself and through the `move_column`-only trailing comment: a
+# plan rebuild re-resolves the cursor the same way, so the bare `if let`
+# line alone now matches twice in this file.
 run_mutation "delegate: the cursor is re-derived by column name across a move" \
   crates/geode-blotter/src/delegate.rs \
-  '        if let Some(name) = under_cursor' \
-  '        if let Some(name) = None::<String>' \
+  '        if let Some(name) = under_cursor
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
+  '        if let Some(name) = None::<String>
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 

@@ -357,7 +357,9 @@ mod tests {
     }
 
     /// Like `visible`, but against a caller-supplied plan: needed for a
-    /// plan mutated between two flattens, such as a column move.
+    /// plan mutated between two flattens, such as a column move. Always
+    /// flattens with the default (root-only) expansion; unlike `visible`,
+    /// there is no expansion parameter to vary.
     fn visible_with(snap: &Snapshot, plan: &ColumnPlan, sort: Option<&SortSpec>) -> Vec<u32> {
         let mut out = Vec::new();
         flatten(snap, plan, &Expansion::default(), sort, &mut out);
@@ -425,6 +427,12 @@ mod tests {
             order: SortOrder::Desc,
         };
         let before = visible_with(&snap, &plan, Some(&spec));
+        let unsorted = visible_with(&snap, &plan, None);
+        assert_ne!(
+            before, unsorted,
+            "the fixture must actually reorder rows under this sort, or a lookup that always \
+             misses and falls back to default order would pass this test too"
+        );
 
         // Moving a column must not change which column the sort names.
         plan.move_column(delta, delta + 1);

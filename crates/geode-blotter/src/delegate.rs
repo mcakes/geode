@@ -393,6 +393,19 @@ impl BlotterDelegate {
         grouping: &[String],
     ) -> bool {
         let keep = self.cursor_path();
+        // Captured before the reorder for the same reason `move_column`
+        // captures it: the cursor is a screen position into
+        // `plan.columns`, not a name, and a rebuild that hides a column
+        // shifts every later index down. A bare `clamp` afterwards only
+        // catches an index that runs off the end — one that stays in
+        // range but now names a different column slides the cursor onto
+        // it silently, and the next sort orders by whatever the cursor
+        // lands on, not what the trader was looking at.
+        let under_cursor = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(self.cursor.col))
+            .map(|c| c.name.clone());
         let fresh = ColumnPlan::build(view, grouping, &snapshot);
         let rebuild = self.plan.as_ref() != Some(&fresh);
         self.dropped_sort = None;
@@ -409,6 +422,18 @@ impl BlotterDelegate {
                     Some(_) => self.sort = Some(s),
                     None => self.dropped_sort = Some(s.column),
                 }
+            }
+            // Same re-resolution as the sort above, and for the same
+            // reason: a column hidden to the left of the cursor shifts
+            // every later index down, so the old index now names a
+            // different column even though it is still in range. A
+            // cursor whose own column was the one hidden finds no match
+            // here and falls through to the ordinary clamp below, same
+            // as `move_column` does.
+            if let Some(name) = under_cursor
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
             }
         }
         self.expansion.prune_to(grouping.len());

@@ -2945,6 +2945,95 @@ mod tests {
         );
     }
 
+    /// A view edit is not the only reorder path a rebuild takes: it also
+    /// shortens `ColumnPlan::columns` when a column is hidden, and a
+    /// cursor sitting past the hidden column's old slot then keeps an
+    /// in-range index that now names a different column — the same
+    /// failure `move_column`'s own fix prevents for a column drag. Hiding
+    /// a column to the RIGHT of the cursor never moves its index, so only
+    /// a column hidden to its LEFT can tell a real fix from a clamp that
+    /// merely keeps the index in bounds.
+    #[gpui::test]
+    fn hiding_a_column_left_of_the_cursor_carries_it_by_name(cx: &mut gpui::TestAppContext) {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                     [[tree.columns]]\nname = \"model_code\"\nkind = \"dimension\"\n\
+                     [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n\
+                     [[tree.columns]]\nname = \"daily_trading_pnl\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let views = ViewSpec::from_doc(&doc).0;
+        let (h, mut cx) = open_with_views(cx, None, views);
+
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("model_code"),
+                    TestColumn::Dict(vec![None, Some("A".into()), Some("B".into())]),
+                ),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+                (
+                    meta("daily_trading_pnl"),
+                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0)]),
+                ),
+            ],
+            1,
+        ));
+
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snap.clone()));
+
+        // The plan is [tree, model_code, delta01, daily_trading_pnl];
+        // rest the cursor on delta01, in the middle.
+        let delta_ix = h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.plan.as_ref().unwrap().position_of("delta01").unwrap()
+            })
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| d.cursor.col = delta_ix);
+        });
+
+        // Hides model_code, to the LEFT of the cursor: delta01 and
+        // daily_trading_pnl both shift down one slot.
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "model_code");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snap));
+
+        let name = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone()
+        });
+        assert_eq!(
+            name, "delta01",
+            "the cursor stays on the column it was on, not the position it held"
+        );
+    }
+
     /// A header click reaches every order a measure can show, desc first
     /// (user ruling 2026-09-12), whatever three-state value gpui-component
     /// proposes; the header label follows; the tree column paints no sort
