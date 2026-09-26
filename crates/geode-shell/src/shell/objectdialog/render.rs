@@ -3463,10 +3463,31 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     let grip_and_tick = if draft.text_entry.is_some() {
                         None
                     } else {
-                        let grip = if own && draggable {
+                        // A member row's grip is its drag handle. The row body opens
+                        // a Views column's stage on mouse-down, which would leave the
+                        // list before a drag could start, so the gesture starts here
+                        // and the grip's press stops before the row's own handler.
+                        // gpui bubbles an element's drag arming before its
+                        // `on_mouse_down`, so stopping propagation there still arms
+                        // the drag.
+                        let payload = draggable.then(|| draft.row_drag(edit_row)).flatten();
+                        let grip = if own && let Some(payload) = payload {
+                            let grip_id = format!("objectdialog-grip-{}", entry.name);
                             div()
+                                .id(gpui::SharedString::from(format!(
+                                    "objectdialog-grip-{}-{}",
+                                    payload.field, payload.name
+                                )))
                                 .text_color(theme.muted_foreground)
                                 .w(scale::design(11.))
+                                .cursor_grab()
+                                .debug_selector(move || grip_id)
+                                .on_drag(payload, |drag: &RowDrag, _offset, _window, cx| {
+                                    DragGhost::build(drag, cx)
+                                })
+                                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                                    cx.stop_propagation();
+                                })
                                 .child("⋮")
                                 .into_any_element()
                         } else {
@@ -3625,28 +3646,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     // payload that arrives at `on_drop` is the dragged row's
                     // own, built by whichever row started the gesture.
                     let target = payload.clone();
+                    // The id carries everything that identifies the row,
+                    // because gpui keys per-element state (the pending
+                    // mouse-down a drag starts from) on it: the field, so
+                    // two lists in one draft cannot collide; `own`, so a
+                    // name cannot collide with itself across the two
+                    // blocks (a demoted column keeps its name); and the
+                    // name, which is unique within a block.
+                    let row_el = row_el.id(gpui::SharedString::from(format!(
+                        "objectdialog-drag-{}-{}-{}",
+                        payload.field, payload.own, payload.name
+                    )));
+                    // A member row drags from its grip (above); an Available
+                    // row has no grip and opens nothing on a press, so its
+                    // whole body stays the handle.
+                    let row_el = if payload.own {
+                        row_el
+                    } else {
+                        row_el
+                            .cursor_grab()
+                            .on_drag(payload, |drag: &RowDrag, _offset, _window, cx| {
+                                DragGhost::build(drag, cx)
+                            })
+                    };
                     row_el
-                        // The id carries everything that identifies the row,
-                        // because gpui keys per-element state (the pending
-                        // mouse-down a drag starts from) on it: the field, so
-                        // two lists in one draft cannot collide; `own`, so a
-                        // name cannot collide with itself across the two
-                        // blocks (a demoted column keeps its name); and the
-                        // name, which is unique within a block.
-                        .id(gpui::SharedString::from(format!(
-                            "objectdialog-drag-{}-{}-{}",
-                            payload.field, payload.own, payload.name
-                        )))
-                        .cursor_grab()
-                        // The ghost's name comes off the dragged value the
-                        // constructor is handed, not a captured copy: a
-                        // capture would clone a `String` per list row per
-                        // frame for a ghost that exists only once a gesture
-                        // actually starts.
-                        .on_drag(payload, move |drag: &RowDrag, _offset, _window, cx| {
-                            let name = gpui::SharedString::from(drag.name.clone());
-                            cx.new(|_| DragGhost { name })
-                        })
                         // Only this dialog's own payload: a tile drag or any
                         // other dragged value passing over the modal must not
                         // land on a column list.
@@ -4591,6 +4614,17 @@ fn on_choice_row_clicked(
 /// underneath a ghost that is already painted.
 struct DragGhost {
     name: gpui::SharedString,
+}
+
+impl DragGhost {
+    /// The ghost's name comes off the dragged value the constructor is
+    /// handed, not a captured copy: a capture would clone a `String` per
+    /// list row per frame for a ghost that exists only once a gesture
+    /// actually starts.
+    fn build(drag: &RowDrag, cx: &mut App) -> Entity<Self> {
+        let name = gpui::SharedString::from(drag.name.clone());
+        cx.new(|_| DragGhost { name })
+    }
 }
 
 impl gpui::Render for DragGhost {

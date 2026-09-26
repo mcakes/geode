@@ -4557,6 +4557,32 @@ fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The grip is the member row's drag handle: a press on it arms the drag
+/// and nothing else, so a column can be reordered by the mouse without
+/// the press opening that column's stage the way a press on the row's
+/// body does.
+#[gpui::test]
+fn pressing_a_member_rows_grip_does_not_open_its_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let grip = cx
+        .debug_bounds("objectdialog-grip-npv")
+        .expect("npv is one of tree's own columns and paints a grip");
+    cx.simulate_mouse_down(
+        gpui::point(grip.origin.x + gpui::px(3.0), grip.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "a press on the grip leaves the dialog on the view's edit stage"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Task 8: the object dialog to the mock — crumb, badges, grip and tick,
 // section headers (§18.1).
