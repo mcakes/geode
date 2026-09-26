@@ -1857,7 +1857,6 @@ well inside the 8 ms budget. At 100,000 points or more it is over budget for a
 live drag. This is a colour-only change invalidating cached geometry. It is
 not a cost of the picker itself.
 
-
 ### Scope expression suggestions: ranking 20,000 values (2026-09-26)
 
 Every keystroke in an open scope expression field re-lexes the field's text,
