@@ -145,6 +145,11 @@ impl Definition {
 /// A column's `colour` key already spells these two.
 pub const RESERVED_NAMES: [&str; 2] = ["none", "sign"];
 
+/// A name starting with this is reserved too: `#rrggbb` is an absolute
+/// colour wherever a colour name is also accepted (a timeseries slot's
+/// `:colour` and its session entry), so such a name would be ambiguous.
+pub const RESERVED_PREFIX: char = '#';
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NamedColours {
     by_name: BTreeMap<String, Definition>,
@@ -186,7 +191,10 @@ impl NamedColours {
                     format!("colours.{name}.{suffix}")
                 }
             };
-            if RESERVED_NAMES.contains(&name.as_str()) || check_object_name(name).is_err() {
+            if RESERVED_NAMES.contains(&name.as_str())
+                || name.starts_with(RESERVED_PREFIX)
+                || check_object_name(name).is_err()
+            {
                 diags.push(diag(
                     Severity::Error,
                     at(""),
@@ -632,6 +640,19 @@ mod tests {
                 && paths.contains(&"colours.tone.tone"),
             "{paths:?}"
         );
+    }
+
+    /// A `#` name is refused: `#rrggbb` is how a series' absolute colour
+    /// is spelled wherever a colour name is also accepted, so a name
+    /// starting with one could never be told from it.
+    #[test]
+    fn a_name_starting_with_a_hash_is_reserved() {
+        let (colours, diags) =
+            NamedColours::from_doc(&doc("[\"#ff8800\"]\nhue = 30\n[ok]\nhue = 30\n"));
+        assert!(colours.get("#ff8800").is_none());
+        assert!(colours.get("ok").is_some());
+        let paths: Vec<&str> = diags.iter().filter_map(|d| d.path.as_deref()).collect();
+        assert_eq!(paths, vec!["colours.#ff8800"]);
     }
 
     #[test]
