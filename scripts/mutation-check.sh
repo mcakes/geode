@@ -21359,6 +21359,16 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
 
+# ---- Scope expression suggestions: the caret reader.
+# After an operator the caret wants a value; reading it as a finished term
+# would offer and/or where values belong.
+run_mutation "expr suggest: after an operator comes a value" \
+  crates/geode-core/src/scope/complete.rs \
+  '            (St::Op(_), _, Some(_)) => St::Term,' \
+  '            (St::Op(_), _, Some(_)) => St::Operand,' \
+  geode-core \
+  context_agrees_with_the_parser_on_every_prefix
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

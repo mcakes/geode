@@ -6,6 +6,7 @@
 //! Shell state and data compilation use these types without depending on
 //! each other.
 
+pub mod complete;
 pub mod expr;
 
 pub use expr::{CompareOp, Expr, Literal, ParseError, parse_expr};
