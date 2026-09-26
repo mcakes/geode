@@ -234,10 +234,13 @@ Ordinary refusal paths and completed transport calls each emit one
 `DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
 the target, including unknown targets, unsupported documents, missing writers,
 write errors, unavailable workers, queue refusal, and transport errors.
-This is not an unconditional completion guarantee: service startup can fail
-after channel admission, a transport can block indefinitely, and writer or
-transport panics are not contained by the egress path. Event-sink refusal has
-no retry. Uploads have no timeout, automatic retry, or keyed cancellation.
+A transport panic becomes `egress '<target>': transport panicked: …`; the
+worker then continues with the next queued job using the same transport handle.
+
+Completion still has limits: service startup can fail after channel admission,
+serialization has no panic boundary, and serializer or transport calls can
+block indefinitely. Event-sink refusal has no retry. Uploads have no timeout,
+automatic retry, or keyed cancellation.
 
 A successful outcome means the adapter's `upload` call returned successfully;
 the adapter defines what that acknowledges. It does not establish that a

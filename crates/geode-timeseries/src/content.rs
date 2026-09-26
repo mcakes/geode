@@ -36,6 +36,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::split_shrink", "Shrink the upper pane"),
     ("timeseries::split_grow", "Grow the upper pane"),
     ("timeseries::colour", "Cycle series colour"),
+    // Registered without a default binding. The menu and palette open the
+    // picker; :colour supplies the direct keyboard route to the same colour model.
+    ("timeseries::pick_colour", "Pick series colour…"),
     ("timeseries::rule", "Cycle bucket rule"),
     ("timeseries::remove", "Remove series"),
     ("timeseries::edit", "Edit expression…"),

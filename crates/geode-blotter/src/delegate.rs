@@ -16,7 +16,7 @@ use geode_core::colour::{Anchors, NamedColours, Tokens};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
-use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
+use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
@@ -52,12 +52,6 @@ enum ColourKind {
 
 const INDENT: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
-/// One digit cell of the line-number gutter, in px: the mono face's
-/// advance at the default UI size, rounded up so a gutter never wraps.
-/// Same absolute-px school as `INDENT` above.
-const GUTTER_DIGIT_PX: f32 = 8.0;
-/// The gap between the gutter's last digit and the tree indent.
-const GUTTER_GAP_PX: f32 = 6.0;
 
 pub struct BlotterDelegate {
     pub snapshot: Option<Arc<Snapshot>>,
@@ -318,10 +312,7 @@ impl BlotterDelegate {
     /// a table growing past a power of ten widens on its next
     /// `TableState::refresh`, which every reflatten already triggers.
     pub fn gutter_px(&self) -> f32 {
-        match self.line_numbers {
-            LineNumbers::Off => 0.0,
-            _ => gutter_digits(self.shown.len()) as f32 * GUTTER_DIGIT_PX + GUTTER_GAP_PX,
-        }
+        geode_shell::linenumbers::gutter_px(self.line_numbers, self.shown.len())
     }
 
     /// Rebuild `numbers` for the cache's current window if anything it
@@ -1114,6 +1105,7 @@ mod tests {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_core::view::{Colour, ViewPresentationSpec, ViewSpec};
+    use geode_shell::linenumbers::GUTTER_DIGIT_PX;
 
     fn dim(name: &str) -> ColumnMeta {
         ColumnMeta {

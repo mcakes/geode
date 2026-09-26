@@ -11,6 +11,7 @@ use toml::{Table, Value};
 use super::model::{Colour, Model, SlotState};
 use super::range::Range;
 use super::resolve::resolve;
+use super::rgb::Rgb8;
 
 pub fn to_table(model: &Model) -> Table {
     let mut t = Table::new();
@@ -47,6 +48,12 @@ pub fn to_table(model: &Model) -> Table {
                 }
                 Colour::Named(n) => {
                     r.insert("colour".into(), Value::String(n.clone()));
+                }
+                // `#rrggbb`: a `[colours]` name can never start with `#`
+                // (`geode_core::colour::RESERVED_PREFIX`), so the string
+                // form stays unambiguous.
+                Colour::Custom(c) => {
+                    r.insert("colour".into(), Value::String(c.hex()));
                 }
             }
             if s.axis != Axis::Left {
@@ -235,6 +242,13 @@ fn apply_look(m: &mut Model, number: u8, r: &Table) {
         {
             let _ = m.set_colour(number, Colour::Palette(*i as usize));
         }
+        // A malformed `#…` keeps the slot's default colour, as an
+        // out-of-range palette index does.
+        Some(Value::String(n)) if n.starts_with(geode_core::colour::RESERVED_PREFIX) => {
+            if let Some(c) = Rgb8::parse_hex(n) {
+                let _ = m.set_colour(number, Colour::Custom(c));
+            }
+        }
         Some(Value::String(n)) => {
             let _ = m.set_colour(number, Colour::Named(n.clone()));
         }
@@ -311,6 +325,44 @@ mod tests {
             back.add_source("X", "demo_kdb", "series").unwrap().0,
             4,
             "numbering continues past the restored max"
+        );
+    }
+
+    /// An absolute colour is written as lowercase `#rrggbb` and read
+    /// back as `Custom`, never as a name; a malformed one keeps the
+    /// slot's default colour.
+    #[test]
+    fn a_custom_colour_round_trips_as_hex() {
+        let mut m = Model::new();
+        m.add_source("SPX.close", "demo_kdb", "series").unwrap();
+        m.add_source("VIX", "demo_kdb", "series").unwrap();
+        m.set_colour(1, Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00])))
+            .unwrap();
+        let t = to_table(&m);
+        let slots = t["slots"].as_array().unwrap();
+        assert_eq!(
+            slots[0].as_table().unwrap()["colour"].as_str(),
+            Some("#ff8800")
+        );
+        let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(
+            back.slots()[0].colour,
+            Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
+        );
+        let text = r##"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            colour = "#ff88"
+        "##;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert_eq!(
+            back.slots()[0].colour,
+            Colour::Palette(0),
+            "malformed hex is neither a colour nor a name"
         );
     }
 

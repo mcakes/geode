@@ -111,10 +111,10 @@ migrated when a schema document changes.
 
 Expected failures become data: diagnostics, health, refused submissions, or
 per-request errors. Read and pricing workers contain panics in their request
-paths; egress transport calls have no equivalent catch boundary. Failure and
-shutdown behavior therefore depend on the worker rather than on a universal
-background-task guarantee. Panics also reach the application panic hook and
-crash report.
+paths. Egress workers contain transport panics and continue serving their
+queues, but service-thread document serialization has no such boundary.
+Containment does not interrupt blocked calls. The application panic hook logs
+contained panics; uncontained panics also produce a crash report.
 
 Health and freshness describe what the system knows rather than concealing
 degradation. A source can remain queryable while degraded; the UI must retain

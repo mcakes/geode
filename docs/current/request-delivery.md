@@ -47,13 +47,16 @@ runs transport calls serially; serialization can still delay other service
 requests.
 
 Validation, serialization, and target-queue failures emit an error with the
-original tile key and tag. A transport result uses the same outcome path.
-This produces one outcome on normal completion, not a durable delivery
-receipt: startup failure, a blocked or panicking serializer/transport, or a
-closed event sink can prevent delivery. Egress has no automatic retry or
-panic containment. An `Ok` acknowledges transport success, not a new local
-generation; subscription ingestion and the panel's echo check are separate.
-See [document egress](data-path.md) for configuration and worker details.
+original tile key and tag. Transport results and contained transport panics
+use the same outcome path; a panic produces a target-named error and leaves the
+worker available for subsequent jobs.
+
+This is not a durable delivery receipt: startup failure, a blocked serializer
+or transport, an uncontained serialization panic, or event-sink refusal can
+prevent delivery. Egress has no automatic retry. An `Ok` acknowledges transport
+success, not a new local generation; subscription ingestion and the panel's
+echo check are separate. See [document egress](data-path.md#egress-and-uploads)
+for configuration and worker details.
 
 ## View replacement and shutdown
 

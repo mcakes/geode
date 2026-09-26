@@ -1,18 +1,18 @@
-//! State and painting for the tile's series list, add picker, expression
-//! field, range editor, and action menu. At most one is open at a time.
+//! State and painting for six mutually exclusive transient surfaces: series
+//! list, add picker, expression field, range editor, action menu, and colour picker.
 //!
-//! Picker and expression inputs, and the range container's focus handle, use
-//! insert-mode routing. The series list and action menu retain normal mode with
-//! popup-specific context. Closing blurs only a popup that still owns focus.
+//! Add/expression inputs, the range container, and the component colour picker
+//! use insert-mode routing. Series and action lists retain normal mode with
+//! popup-specific context. The shared closer blurs only a popup that owns focus.
+//! Colour-picker ownership includes focused descendants such as its hex field.
 //!
-//! Series labels, state text, and swatches are prepared in `rebuild_chrome`
-//! alongside header chips. Picker labels, menu rows, and date segments are also
-//! prepared outside render; painting reuses retained strings and segment arrays.
+//! Series labels, state text, and swatches are prepared alongside header chips.
+//! Picker labels, menu rows, and date segments are also prepared outside render.
+//! Series/picker rows share row_shell; menu rows add disabled reasons and toggles.
 //!
-//! Fieldless lists, the picker, and the range editor use deferred anchored
-//! popovers that occlude the chart and close on an outside press. The expression
-//! field is inline below the header. Series and picker rows share `row_shell`;
-//! menu rows add disabled reasons, toggle state, and hover-driven selection.
+//! The lists, add picker, and range editor use deferred anchored popovers above
+//! the chart. Expressions paint inline below the header. The component colour
+//! picker replaces its target chip's swatch and owns its own popup surface.
 
 use std::rc::Rc;
 
@@ -30,6 +30,7 @@ use gpui::{
     Anchor, AnchoredPositionMode, App, Deferred, Div, ElementId, Entity, FocusHandle,
     Focusable as _, Hsla, MouseButton, SharedString, Stateful, Window, anchored, deferred, div, px,
 };
+use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
@@ -56,9 +57,9 @@ pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 /// Range keyboard hint; numeric presets are available until date editing starts.
 const RANGE_HINT: &str = "1–7 preset · tab switches · enter commits";
 
-/// The tile's mutually exclusive transient surfaces. Series and Menu add
-/// `popup == series` or `popup == menu` to normal-mode context. Picker, Expr, and
-/// Range use insert bindings; Range also routes keys on its focused container.
+/// Mutually exclusive transient state. Series and Menu add their popup pair
+/// to normal-mode context. Picker, Expr, Range, and Colour use insert routing;
+/// Range and the component colour picker also own their focused key handlers.
 pub(crate) enum Popup {
     Series(SeriesPopup),
     Picker(PickerState),
@@ -66,6 +67,31 @@ pub(crate) enum Popup {
     Range(RangePopup),
     /// Fieldless action menu, routed through `popup == menu`.
     Menu(MenuState),
+    /// Component colour picker anchored at one slot's chip. The header renders
+    /// its trigger in place of that chip's swatch; the component owns the popover.
+    Colour(ColourPick),
+}
+
+/// Header paint state for a colour picker: target slot number, featured swatches
+/// resolved at open, and the reusable component state.
+pub(crate) struct ColourPick {
+    pub target: u8,
+    pub swatches: Vec<Hsla>,
+    pub picker: Entity<ColorPickerState>,
+}
+
+/// Commit context captured at open and retained after popup closure. Hex Enter
+/// can close before its Change event arrives; dropping this context on close
+/// would lose that commit.
+///
+/// Target is a slot number, independent of cursor movement. Featured entries are
+/// the palette followed by configured names, resolved with the opening theme.
+/// Their snapshot maps near-equal picked RGB bytes back to theme-following choices;
+/// the current painted target color is checked separately for no-op commits.
+#[derive(Clone)]
+pub(crate) struct PickContext {
+    pub target: u8,
+    pub featured: Vec<(Hsla, Colour)>,
 }
 
 /// Prepared action rows and the highlighted index shared by keyboard and pointer.
@@ -81,8 +107,9 @@ impl Popup {
     pub(crate) fn is_insert(&self) -> bool {
         match self {
             Popup::Series(_) | Popup::Menu(_) => false,
-            // Range owns a focus handle rather than an InputState.
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => true,
+            // Range owns a focus handle and Colour owns a component focus subtree;
+            // both require insert routing just as focused text inputs do.
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => true,
         }
     }
 
@@ -96,6 +123,12 @@ impl Popup {
             Popup::Expr(f) => f.input.read(cx).focus_handle(cx).is_focused(window),
             // The container owns focus; date fields are pure state.
             Popup::Range(r) => r.focus.is_focused(window),
+            // Include descendants: the popover and hex input focus beneath the state handle.
+            Popup::Colour(c) => c
+                .picker
+                .read(cx)
+                .focus_handle(cx)
+                .contains_focused(window, cx),
         }
     }
 
@@ -106,7 +139,7 @@ impl Popup {
         match self {
             Popup::Series(_) => Some("series"),
             Popup::Menu(_) => Some("menu"),
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) => None,
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => None,
         }
     }
 }
@@ -691,6 +724,7 @@ fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
         separator: muted,
         suffix: muted,
         radius: theme.radius_tokens().sm,
+        flush: false,
     }
 }
 
@@ -1016,6 +1050,7 @@ mod tests {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         }
     }
 

@@ -1,6 +1,6 @@
-//! Lifecycle and input routing for the series list, add picker, expression
-//! field, range editor, and action menu. `crate::popup` owns state and popup
-//! painting; the expression field is rendered inline by `crate::header`.
+//! Lifecycle and routing for the series list, add picker, expression field,
+//! range editor, action menu, and component colour picker. Popup state and custom
+//! painting live in crate::popup; the header hosts expressions and the colour trigger.
 
 use super::*;
 
@@ -22,9 +22,9 @@ impl TimeseriesTile {
                 self.toggle_menu(window, cx);
                 true
             }
-            // Menu navigation clamps over action rows, including disabled rows, and
-            // skips headings/separators. Enter picks; Escape closes. Series navigation
-            // uses these action names in its own mutually exclusive context.
+            // Menu navigation clamps over enabled action rows, skipping disabled rows
+            // and headings/separators. Pointer hover may still select a disabled row.
+            // Enter picks; Escape closes. Series uses separate context for these actions.
             "list_down" | "list_up" if menu_open => {
                 let delta = if verb == "list_down" {
                     n as isize
@@ -109,6 +109,10 @@ impl TimeseriesTile {
                 self.open_expr(Some(seed), window, cx);
                 true
             }
+            "pick_colour" => self.open_colour_picker(window, cx),
+            // The colour picker commits through its own keys (a hex
+            // field's `enter`, a swatch) inside the component; an
+            // `enter` that reaches the tile is inert.
             "commit" => match &self.popup {
                 Some(Popup::Picker(_)) => self.commit_picker(window, cx),
                 Some(Popup::Expr(_)) => self.commit_expr(window, cx),
@@ -809,6 +813,125 @@ impl TimeseriesTile {
         }
     }
 
+    // ---- the colour picker -------------------------------------------
+
+    /// Open the component picker for the cursor's slot, or report an empty tile.
+    /// Seed without emitting Change. Capture palette and named featured choices
+    /// using the same theme resolver as the chip; later cursor moves do not retarget it.
+    pub(super) fn open_colour_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(slot) = self.model.cursor_slot() else {
+            self.notice = Some("add a series first".into());
+            cx.notify();
+            return false;
+        };
+        let target = slot.number;
+        let current = slot.colour.clone();
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        let colours = Arc::clone(&self.colours.borrow());
+        let (featured, seed) = {
+            let colour_of = colour_fn(Arc::clone(&colours), cx.theme());
+            let featured: Vec<(Hsla, Colour)> = (0..Palette::LEN)
+                .map(Colour::Palette)
+                .chain(colours.names().map(|n| Colour::Named(n.to_string())))
+                .map(|c| (colour_of(&c), c))
+                .collect();
+            (featured, colour_of(&current))
+        };
+        let swatches = featured.iter().map(|(h, _)| *h).collect();
+        let picker = self.colour_picker_state(window, cx);
+        picker.update(cx, |state, cx| {
+            state.set_value(seed, window, cx);
+            state.set_open(true, cx);
+        });
+        self.popup = Some(Popup::Colour(ColourPick {
+            target,
+            swatches,
+            picker,
+        }));
+        self.pick_context = Some(PickContext { target, featured });
+        self.notice = None;
+        cx.notify();
+        true
+    }
+
+    /// Create and subscribe once, then reuse the component state. A nonempty
+    /// Change commits to the captured target. Observing component closure runs the
+    /// shared closer when this tile still has a colour popup.
+    fn colour_picker_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ColorPickerState> {
+        if let Some(picker) = &self.colour_picker {
+            return picker.clone();
+        }
+        let picker = cx.new(|cx| ColorPickerState::new(window, cx));
+        cx.subscribe_in(&picker, window, |this, _picker, event, _window, cx| {
+            // `None` is a cleared value, which this picker never offers.
+            if let ColorPickerEvent::Change(Some(h)) = event {
+                this.colour_picked(*h, cx);
+            }
+        })
+        .detach();
+        cx.observe_in(&picker, window, |this, picker, window, cx| {
+            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {
+                this.close_popup_with_window(window, cx);
+            }
+        })
+        .detach();
+        self.colour_picker = Some(picker.clone());
+        picker
+    }
+
+    /// Apply component commits through set_colour and apply_changed. Sliders
+    /// commit as they move; closing does not revert those changes. Keep using the
+    /// captured context after close so a delayed hex Change can still land.
+    ///
+    /// Ignore a missing target or a value within one RGB byte step of what it paints
+    /// now. Otherwise map against the opening featured snapshot, preserving a palette
+    /// or named identity when close enough and storing opaque Custom RGB otherwise.
+    pub(super) fn colour_picked(&mut self, h: Hsla, cx: &mut Context<Self>) {
+        let Some(pick) = &self.pick_context else {
+            return;
+        };
+        let Some(current) = self
+            .model
+            .slots()
+            .iter()
+            .find(|s| s.number == pick.target)
+            .map(|s| s.colour.clone())
+        else {
+            return;
+        };
+        let painted = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme())(&current);
+        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {
+            return;
+        }
+        let colour = colour_from_pick(h, &pick.featured);
+        if let Ok(changed) = self.model.set_colour(pick.target, colour) {
+            self.apply_changed(changed, cx);
+        }
+    }
+
+    /// Close the picker when the slot it was opened for is gone.
+    pub(super) fn close_orphaned_colour_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Popup::Colour(c)) = &self.popup
+            && self.model.slots().iter().all(|s| s.number != c.target)
+        {
+            self.close_popup_with_window(window, cx);
+        }
+    }
+
     // ---- shared by every popup ---------------------------------------
 
     /// Add a source pair from the picker or `:add`, sharing source/dataset
@@ -847,6 +970,11 @@ impl TimeseriesTile {
             .is_some_and(|p| p.holds_focus(window, cx));
         if own_field_focused {
             window.blur(cx);
+        }
+        // Close reusable component state too. Its observer then sees no colour
+        // popup, while captured commit context remains available for delayed Change.
+        if let Some(Popup::Colour(c)) = &self.popup {
+            c.picker.update(cx, |state, cx| state.set_open(false, cx));
         }
         self.popup = None;
         cx.notify();

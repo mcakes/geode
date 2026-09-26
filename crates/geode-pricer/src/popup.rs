@@ -145,6 +145,18 @@ impl MenuItem {
     pub(crate) fn pickable(&self) -> bool {
         matches!(self, MenuItem::Action { .. } | MenuItem::View { .. })
     }
+
+    /// Whether keyboard stepping may select this row: enabled actions and view choices
+    /// qualify.
+    fn lands(&self) -> bool {
+        matches!(
+            self,
+            MenuItem::Action {
+                enabled: Ok(()),
+                ..
+            } | MenuItem::View { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -153,23 +165,28 @@ pub(crate) struct Menu {
     pub highlighted: usize,
 }
 
-/// Move `delta` pickable rows from `from`, clamped at either end (never
-/// landing on a separator or section header).
+/// Starting at `from`, move `delta` enabled rows, skipping disabled actions, separators,
+/// and section headers. Clamp at either end. If the current highlight is disabled, search
+/// from that position; with no enabled row in the requested direction, retain it.
 pub(crate) fn step(items: &[MenuItem], from: usize, delta: isize) -> usize {
-    let pickable: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| r.pickable().then_some(i))
-        .collect();
-    let Some(last) = pickable.len().checked_sub(1) else {
-        return from;
-    };
-    let pos = pickable.iter().position(|&i| i >= from).unwrap_or(last);
-    pickable[(pos as isize + delta).clamp(0, last as isize) as usize]
+    let mut at = from;
+    for _ in 0..delta.unsigned_abs() {
+        let next = if delta > 0 {
+            (at + 1..items.len()).find(|&i| items[i].lands())
+        } else {
+            (0..at.min(items.len())).rev().find(|&i| items[i].lands())
+        };
+        match next {
+            Some(i) => at = i,
+            None => break,
+        }
+    }
+    at
 }
 
-/// `at`, or the nearest pickable row before it (after it, if none
-/// precedes it) — where a highlight lands when the list changes under it.
+/// Keep at or find the nearest pickable row before it, then after it, when rebuilding
+/// the list. Disabled actions remain pickable here; keyboard stepping separately
+/// requires enabled rows.
 pub(crate) fn snap(items: &[MenuItem], at: usize) -> usize {
     let at = at.min(items.len().saturating_sub(1));
     (0..=at)
@@ -190,7 +207,7 @@ pub(crate) struct MenuRowPaint {
 
 /// Only highlighted, enabled rows receive accent fill. Disabled actions can hold the
 /// logical highlight and report their reason when picked, but remain muted on the
-/// popover background.
+/// popover background. Keyboard stepping skips disabled rows.
 pub(crate) fn menu_row_paint(
     highlighted: bool,
     enabled: bool,

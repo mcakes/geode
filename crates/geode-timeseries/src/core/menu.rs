@@ -57,9 +57,9 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
 }
 
 /// Build openers, cursor-slot operations, frequency steps, display toggles,
-/// and view reset in fixed order. Empty tiles keep the slot section but disable
-/// its actions. Bucket-rule changes require a source; expression editing requires
-/// an expression. These reasons explain why a row cannot currently act.
+/// and view reset in fixed order. Empty tiles keep their slot section disabled.
+/// Bucket rules require a source and expression editing requires an expression;
+/// Colour opens a picker while Cycle colour advances through the palette.
 pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     let m = i.model;
     let mut out = vec![
@@ -89,6 +89,7 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     ));
     out.push(action("timeseries::axis_next", "Cycle axis", none));
     out.push(action("timeseries::colour", "Cycle colour", none));
+    out.push(action("timeseries::pick_colour", "Colour…", none));
     out.push(action(
         "timeseries::rule",
         "Cycle bucket rule",
@@ -132,34 +133,40 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
 /// The first row worth landing the highlight on — the first enabled
 /// `Action`, or `0` if none is.
 pub fn first_enabled(rows: &[MenuRow]) -> usize {
-    rows.iter()
-        .position(|r| {
-            matches!(
-                r,
-                MenuRow::Action {
-                    enabled: Ok(()),
-                    ..
-                }
-            )
-        })
-        .unwrap_or(0)
+    rows.iter().position(lands).unwrap_or(0)
 }
 
-/// Move over Action rows, including disabled actions, clamping at the ends.
-/// Skip separators/headings. If `from` is not an action, return the first enabled
-/// row (or zero when none is enabled).
+fn lands(r: &MenuRow) -> bool {
+    matches!(
+        r,
+        MenuRow::Action {
+            enabled: Ok(()),
+            ..
+        }
+    )
+}
+
+/// Move delta enabled actions, skipping disabled rows, headings, and separators.
+/// Clamp at either end. Zero retains any Action row, including a disabled row
+/// selected by the pointer. From a non-action, return first_enabled. From a
+/// disabled action with no enabled row in the requested direction, stay put.
 pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
-    let actionable: Vec<usize> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| matches!(r, MenuRow::Action { .. }).then_some(i))
-        .collect();
-    let Some(pos) = actionable.iter().position(|&i| i == from) else {
+    if !matches!(rows.get(from), Some(MenuRow::Action { .. })) {
         return first_enabled(rows);
-    };
-    let last = actionable.len().saturating_sub(1) as isize;
-    let next = (pos as isize + delta).clamp(0, last);
-    actionable[next as usize]
+    }
+    let mut at = from;
+    for _ in 0..delta.unsigned_abs() {
+        let next = if delta > 0 {
+            (at + 1..rows.len()).find(|&i| lands(&rows[i]))
+        } else {
+            (0..at).rev().find(|&i| lands(&rows[i]))
+        };
+        match next {
+            Some(i) => at = i,
+            None => break,
+        }
+    }
+    at
 }
 
 #[cfg(test)]
@@ -206,6 +213,7 @@ mod tests {
                 "Hide",
                 "Cycle axis",
                 "Cycle colour",
+                "Colour…",
                 "Cycle bucket rule",
                 "Edit expression…",
                 "Remove",
@@ -221,6 +229,7 @@ mod tests {
             "timeseries::toggle_visible",
             "timeseries::axis_next",
             "timeseries::colour",
+            "timeseries::pick_colour",
             "timeseries::rule",
             "timeseries::edit",
             "timeseries::remove",
@@ -285,15 +294,35 @@ mod tests {
 
     #[test]
     fn stepping_skips_separators_and_sections_and_clamps() {
-        let m = Model::new();
+        let mut m = Model::new();
+        m.add_source("SPX.close", "demo_kdb", "series").unwrap();
         let rows = rows(&MenuInputs { model: &m }, None);
         // Row 4 is the separator, 5 the section: from `Range…` (3) one
         // step down lands on `Hide` (6).
         assert_eq!(step(&rows, 3, 1), 6);
         assert_eq!(step(&rows, 6, -1), 3);
+        // On a source `Edit expression…` (11) is greyed: stepped over.
+        assert_eq!(step(&rows, 10, 1), 12);
+        assert_eq!(step(&rows, 12, -1), 10);
         assert_eq!(step(&rows, 0, -1), 0, "clamped at the top");
         let last = rows.len() - 1;
         assert_eq!(step(&rows, last, 1), last, "clamped at the bottom");
         assert_eq!(step(&rows, 4, 1), 0, "from a non-row: the first enabled");
+    }
+
+    /// Disabled slot actions are skipped, so an empty tile moves directly from
+    /// Range to Finer frequency.
+    #[test]
+    fn stepping_skips_disabled_rows() {
+        let m = Model::new();
+        let rows = rows(&MenuInputs { model: &m }, None);
+        assert_eq!(step(&rows, 3, 1), 14, "over the greyed slot section");
+        assert_eq!(step(&rows, 14, -1), 3);
+        assert_eq!(
+            step(&rows, 8, 1),
+            14,
+            "a highlight the pointer left on a greyed row steps from it"
+        );
+        assert_eq!(step(&rows, 8, 0), 8, "a refresh keeps it there");
     }
 }

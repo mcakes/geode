@@ -160,6 +160,13 @@ Source and dataset edits require restart to rebuild runtime workers. See
 and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
 for runtime readiness, delivery, and failure behavior.
 
+### Credentials
+
+Shipped adapters require no credentials. Adapters that need them must read
+secrets from the environment. Layered configuration may name the environment
+variable, but must not contain the secret: these files are shared, diffable,
+and writable by the application.
+
 ## Egress configuration
 
 `egress.toml` has one top-level table per upload target, such as

@@ -230,6 +230,7 @@ pub fn segment_paint(theme: &Theme) -> SegmentPaint {
         separator: theme.muted_foreground,
         suffix: theme.muted_foreground,
         radius: theme.radius_tokens().sm,
+        flush: false,
     }
 }
 

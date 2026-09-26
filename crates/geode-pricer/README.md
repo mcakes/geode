@@ -103,7 +103,9 @@ cargo bench -p geode-pricer
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
 - A menu command's title is its palette title (`content::action_title`); the
-  menu's highlight never rests on a separator or section header.
+  menu's keyboard navigation skips separators, section headers, and disabled
+  rows. Disabled actions can still hold the highlight after a pointer move,
+  opening the menu, or rebuilding its rows.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value

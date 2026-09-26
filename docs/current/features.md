@@ -58,8 +58,8 @@ editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
 Edits live in a `Draft` over a base identified by the document's source time.
 The default Hold policy retains the base snapshot when available after a
-document with a different source time arrives. `:auto` selects how later deliveries resolve
-such a transition:
+document with a different source time arrives. `:auto` selects how later
+deliveries resolve such a transition:
 
 | Policy | Effect on unsent edits |
 |---|---|
@@ -83,6 +83,14 @@ restores Editing. The module supports numeric, date, text, and closed-choice
 cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
+
+`[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
+label when shown, otherwise the first value column. The column widens for the
+gutter while cursor borders, draft fills, and deletion marks stay on the data
+cell. Numbering includes inserted and deleted rows in painted order. Relative
+mode uses absolute numbers while the cursor is in the header attribute strip.
+Numeric and date editors retain the displayed value's alignment and text origin
+inside the cell.
 
 Dividend row labels use the ex date and a same-date ordinal (`<date>#n`).
 Rebase drops cell edits and deletions in a same-date group whose row count
@@ -180,9 +188,9 @@ frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
 show older data.
 
-The series list, add picker, expression editor, range editor, and action menu
-share one `Popup` owner. The list has no text field; insert popups own their input and
-key routing. Closing uses one cleanup path and blurs a focused input before
+The series list, add picker, expression editor, range editor, action menu, and
+colour picker share one `Popup` owner. The list has no text field; input popups
+own their fields and key routing. Closing uses one cleanup path and blurs a focused input before
 releasing it. Series and add-picker rows share geometry, theme treatment,
 identity, and pointer handling, while supplying their own labels, controls,
 and activation behavior. The range editor uses separate date-field rows;
@@ -196,7 +204,8 @@ affect them; cursor movement does not rebuild the data model.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, frequency steps,
-toggles, and view reset. A disabled row can be selected but has no highlight
+toggles, and view reset. Keyboard stepping skips disabled rows, separators, and
+headings. Pointer selection can rest on a disabled row, which has no highlight
 fill; choosing it shows its reason and leaves the menu open. Enabled actions
 close the menu before dispatch. Key hints refresh when the menu opens or its
 chrome rebuilds, so an open menu can retain old hints after a keymap reload.
@@ -208,7 +217,7 @@ change processing:
 |---|---|
 | Click a series chip / its swatch | Select the slot / toggle its visibility |
 | Right-click a series chip | Select the slot and open the action menu |
-| Click the range and frequency readout | Toggle the range editor |
+| Click the range and frequency readout | Toggle the range editor and keep keyboard focus in its input |
 | Click a frequency chip in the range editor | Apply immediately, leaving draft dates unchanged; cancelling the editor does not undo frequency |
 | Wheel over a plot | Dominant vertical motion zooms about the pointer; dominant horizontal motion pans; ties zoom |
 | Drag a plot / the band between panes | Pan / adjust the split |
@@ -219,6 +228,35 @@ move with no button held. Movement outside the chart surface is not tracked.
 Modified presses and subsequent presses in a multi-click do not start chart
 drags, leaving those gestures available to the shell. Right presses focus the
 tile before its context menu handles keys.
+
+A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolute
+`#rrggbb`. Palette and named colours follow the theme. Absolute colours receive
+no theme or contrast adjustment. Sessions store them as lowercase six-digit
+hex; malformed hex restores the slot's default colour. Colour names beginning
+with `#` are reserved. `c` cycles the palette, starting at colour 1 from a named
+or absolute colour. `:colour s<n> <1..5|name|#rrggbb>` sets the colour directly;
+an explicit hex remains absolute even if it matches a palette colour.
+
+The action menu's `Colour…` row opens a picker at the selected slot's chip.
+Its featured swatches capture the five palette colours and all named colours
+as resolved when the picker opens. Picks are quantized to opaque 8-bit RGB:
+
+- A pick within one step per channel of the slot's currently painted colour
+  leaves its colour setting unchanged.
+- Otherwise, a pick within that tolerance of a featured swatch retains its
+  palette or name identity. The nearest swatch wins, with the first on a tie.
+- Other picks become absolute colours, with alpha discarded.
+
+The tolerance preserves palette and named choices through the component's hex
+field conversion. Swatches and entered hex commit and close; sliders apply
+live and stay open. Escape or an outside click closes without undoing slider
+changes. Picks target the slot that opened the picker even if the cursor moves;
+removing that slot closes it. Picker focus puts the tile in insert mode so hex
+input does not invoke single-key tile commands.
+
+Each slider change rebuilds the chart model and clears its path cache. Measured
+daily and hourly fixtures fit the frame budget; the 500,000-point fixture does
+not. See the [measurement log](../perf.md) for conditions and timings.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
@@ -330,9 +368,10 @@ Normal-mode keys:
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
 and view selection. Key hints show default bindings and do not reflect
-rebindings. Pointer and keyboard selection skip separators and headings.
-Disabled rows can be selected but have no highlight fill; choosing one shows
-its reason and leaves the menu open.
+rebindings. Keyboard stepping skips disabled rows, separators, and headings.
+Pointer selection, the initial highlight, or a rebuilt menu can still leave a
+disabled row selected. It has no highlight fill; choosing it shows its reason
+and leaves the menu open.
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for

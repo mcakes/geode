@@ -93,10 +93,14 @@ pub(crate) fn date_segment_paint(
 }
 
 /// Shared segmented-date painter for header attributes and grid cells.
+/// `framed` adds padding and a rounded border for a header attribute; grid
+/// editors omit that frame and segment padding because the cursor border
+/// already surrounds the cell.
+///
 /// The container tracks the editor's focus handle and routes handled keys before
-/// the shell listener. Segment clicks are consumed by the shared painter to avoid
-/// the parent cell/attribute click closing the editor; padding and separators
-/// still allow parent click handling.
+/// the shell listener. Segment clicks are consumed to avoid the parent cell or
+/// attribute click closing the editor; padding and separators still allow parent
+/// click handling.
 pub(crate) fn render_date_field(
     paint: &DateFieldPaint,
     focus: &FocusHandle,
@@ -104,15 +108,18 @@ pub(crate) fn render_date_field(
     tones: &FlooredTones,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
+    framed: bool,
 ) -> impl IntoElement {
     let separator: Hsla = theme.muted_foreground;
     let field = h_flex()
         .track_focus(focus)
         .items_center()
-        .px_1()
-        .rounded(theme.radius_tokens().sm)
-        .border_1()
-        .border_color(theme.table_active_border)
+        .when(framed, |el| {
+            el.px_1()
+                .rounded(theme.radius_tokens().sm)
+                .border_1()
+                .border_color(theme.table_active_border)
+        })
         .font_family(fonts::MONO)
         .debug_selector(move || format!("marketdata-date-{tile_id}"))
         .on_key_down({
@@ -142,6 +149,7 @@ pub(crate) fn render_date_field(
         separator,
         suffix: separator,
         radius: theme.radius_tokens().sm,
+        flush: !framed,
     };
     let tile = tile.clone();
     field.child(geode_widgets::datefield::paint(
@@ -423,9 +431,9 @@ pub(crate) fn render(
             Some((e, EditorPaint::Text(state))) if *e == i => {
                 value.child(div().min_w(scale::design(80.)).child(Input::new(state)))
             }
-            Some((e, EditorPaint::Date { paint, focus })) if *e == i => {
-                value.child(render_date_field(paint, focus, theme, tones, tile, tile_id))
-            }
+            Some((e, EditorPaint::Date { paint, focus })) if *e == i => value.child(
+                render_date_field(paint, focus, theme, tones, tile, tile_id, true),
+            ),
             _ => value.child(attr.text.clone()),
         };
         row = row.child(

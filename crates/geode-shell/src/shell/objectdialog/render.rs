@@ -443,7 +443,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if domain.name_taken(&shell.services.config, &name) {
         // Reserved names, existing browse objects, and orphaned presentations need
         // different remedies. Only an existing object can be opened from this list.
-        let notice = if domain.reserved_names().contains(&name.as_str()) {
+        let notice = if domain.is_reserved(&name) {
             format!("'{name}' is reserved")
         } else if derive_rows(shell).iter().any(|row| row.name == name) {
             format!("'{name}' already exists — open it instead")

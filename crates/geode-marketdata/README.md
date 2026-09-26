@@ -70,6 +70,16 @@ cargo bench -p geode-marketdata    # matrix model and draft
   bundled-theme contrast tests.
 - `cvi_reanchor` and `cvi_recalc_forward` remain unimplemented and refuse.
   Ordinary document upload uses the adapter path without local recalculation.
+- The line-number gutter (`[ui] line_numbers`) sits beside the pinned cell,
+  outside its cursor border, state fill, and deletion strike. Changing the
+  setting refreshes the table's cached column widths.
+  Numbers count painted rows, including inserts and marked deletions. Relative
+  mode shows distance from the cursor, with an absolute number on its own row;
+  while the cursor is in the attribute strip, all numbers are absolute.
+- Cell editors share the text's alignment: row labels left, values right.
+  Text inputs omit their own frame and horizontal padding. Grid date fields
+  use flush segments inside the cursor border; header date fields retain
+  their separate padded frame. Fixed column widths can still constrain dates.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.
 
@@ -79,6 +89,10 @@ The panel reports `normal`, `menu`, or `insert` in the shared `marketdata`
 context. Editors, underlying and choice inputs, and upload confirmation use
 insert mode. Insert bindings leave shell chords available; confirmation consumes
 every key, including chords, while armed.
+
+Action-menu keyboard motion counts enabled actions and skips disabled rows,
+headings, and separators without wrapping. Pointer hover can highlight a
+refused action so its reason remains accessible.
 
 Underlying and choice lists retain every ranked match but paint a moving window
 of at most twelve rows. Hover changes selection, and clicks commit. Underlying

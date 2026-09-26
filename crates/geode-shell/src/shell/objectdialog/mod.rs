@@ -287,12 +287,21 @@ impl Domain {
         }
     }
 
+    /// Whether `name` is reserved in this domain: one of [`Self::reserved_names`],
+    /// or — for colours only — any name starting with `#`, which spells an
+    /// absolute `#rrggbb` colour wherever a colour name is also read
+    /// (`geode_core::colour::RESERVED_PREFIX`; the reader drops such a name too).
+    pub fn is_reserved(self, name: &str) -> bool {
+        self.reserved_names().contains(&name)
+            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))
+    }
+
     /// Whether a name is already present in a definition, fixed roster, or user
     /// presentation overlay. Include orphaned overlays so a new object cannot silently
     /// inherit their old personalisation. `config_version` is rejected separately by
     /// `check_object_name`.
     pub fn name_taken(self, config: &Config, name: &str) -> bool {
-        if self.reserved_names().contains(&name) {
+        if self.is_reserved(name) {
             return true;
         }
         if self.roster().is_some_and(|roster| roster.contains(&name)) {

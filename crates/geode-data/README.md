@@ -29,9 +29,10 @@ pressure. Shutdown and final-handle drop join workers and must run off the UI
 thread. Admission, cancellation, and completion have distinct guarantees; see
 [requests and UI delivery](../../docs/current/request-delivery.md).
 
-Background operations contain panics and report failures without stopping
-unrelated work; an ingest load panic reports that operation as `Failed`.
-Containment does not interrupt blocked adapter or filesystem calls.
+Read, pricing, ingest, and egress transport paths contain panics at their
+operation boundaries; an ingest load panic reports that operation as `Failed`.
+Service-thread upload serialization has no equivalent boundary. Containment
+does not interrupt blocked adapter or filesystem calls.
 
 The bounded request and adapter channels do not bound the ingest queues.
 Documents precede series, which precede files, with no preemption of running
@@ -101,8 +102,9 @@ often tripped:
   storage publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
 - Upload channel admission, transport success, and a stored echo are separate
   events. Service-thread validation/serialization precedes each target's bounded
-  FIFO worker queue. Normal refusal and transport-return paths emit one outcome;
-  startup failure, blocking or panicking implementations, and sink refusal can
+  FIFO worker queue. Refusals, transport returns, and contained transport panics
+  emit outcomes; a transport panic leaves the worker available for later jobs.
+  Startup failure, blocked calls, serialization panics, and sink refusal can
   prevent delivery. Uploads have no keyed cancellation or automatic retry.
 - Adapter resolution and worker creation request separate egress handles.
   Shutdown closes worker queues and joins after queued jobs run; a stuck

@@ -36,3 +36,6 @@ jobs:
         run: cargo bench --workspace --no-run
       - name: geode-shell test-support feature builds
         run: cargo check -p geode-shell --features test-support --all-targets
+      - name: Mutation anchors
+        if: runner.os != 'Windows'
+        run: zsh scripts/mutation-check.sh --anchors-only

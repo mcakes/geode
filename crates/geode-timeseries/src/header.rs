@@ -25,7 +25,9 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
-use gpui::{App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div};
+use gpui::{
+    AnyElement, App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
@@ -193,6 +195,9 @@ pub(crate) fn render_header(
     tile_id: u64,
     stack: Option<&StackHandle>,
     menu_open: bool,
+    // The open colour picker: the slot number it targets and the
+    // component element, which takes that chip's swatch position.
+    mut colour_picker: Option<(u8, AnyElement)>,
 ) -> impl IntoElement {
     let mut row = h_flex()
         .w_full()
@@ -247,11 +252,9 @@ pub(crate) fn render_header(
                 Some("timeseries::range"),
                 None,
             ))
-            // Capture phase, the `⋯` button's reason (below): an open
-            // range popup's own `on_mouse_down_out` is a capture
-            // listener that would close it before a bubble handler
-            // here could see it open, and the click meant to close
-            // would reopen on a fresh seed instead.
+            // Run before the popup's outside-press close so a second press toggles shut.
+            // Prevent default ancestor focus from overriding the range handle focused by
+            // this press. Propagation still lets the shell focus the tile.
             .capture_any_mouse_down({
                 let tile = tile.clone();
                 move |event: &MouseDownEvent, window, cx| {
@@ -259,6 +262,7 @@ pub(crate) fn render_header(
                         return;
                     }
                     tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                    window.prevent_default();
                 }
             }),
     );
@@ -281,6 +285,46 @@ pub(crate) fn render_header(
         }
         let states = control::for_chip(theme, &paint, theme.background);
         let number = chip.number;
+        // Replace only the target slot's swatch with an equally sized component
+        // trigger. It consumes its press so visibility and chip selection do not also run.
+        let picker = colour_picker
+            .take_if(|(target, _)| *target == number)
+            .map(|(_, el)| el);
+        let swatch = match picker {
+            Some(picker) => picker,
+            None => div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("ts-swatch"),
+                    number as u64,
+                ))
+                .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
+                .size(scale::design(SWATCH_TARGET))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius_tokens().sm)
+                .pointer_states(bare_states)
+                .tooltip(tips::tip_with(
+                    chip.swatch_tip_selector.clone(),
+                    SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
+                    Some("timeseries::toggle_visible"),
+                    None,
+                ))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_: &MouseDownEvent, _window, cx| {
+                        tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
+                    }
+                })
+                .child(
+                    div()
+                        .size(scale::design(SWATCH))
+                        .rounded_full()
+                        .bg(chip.swatch),
+                )
+                .into_any_element(),
+        };
         let mut el = div()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("ts-chip"),
@@ -299,41 +343,9 @@ pub(crate) fn render_header(
             // A hidden series stays in the strip — `v` is a toggle, and a
             // chip that vanished would leave nothing to press again.
             .when(chip.hidden, |d| d.opacity(0.5).line_through())
-            // The surrounding target toggles visibility after selecting this slot.
-            // Let the event continue through the chip and shell to retain tile focus.
-            .child(
-                div()
-                    .id(ElementId::NamedInteger(
-                        SharedString::new_static("ts-swatch"),
-                        number as u64,
-                    ))
-                    .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
-                    .size(scale::design(SWATCH_TARGET))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(theme.radius_tokens().sm)
-                    .pointer_states(bare_states)
-                    .tooltip(tips::tip_with(
-                        chip.swatch_tip_selector.clone(),
-                        SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
-                        Some("timeseries::toggle_visible"),
-                        None,
-                    ))
-                    .on_mouse_down(MouseButton::Left, {
-                        let tile = tile.clone();
-                        move |_: &MouseDownEvent, _window, cx| {
-                            tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
-                        }
-                    })
-                    .child(
-                        div()
-                            .size(scale::design(SWATCH))
-                            .rounded_full()
-                            .bg(chip.swatch),
-                    ),
-            )
+            // Use the visibility target normally, or the component's trigger while a
+            // colour picker is open for this slot. The component owns its trigger press.
+            .child(swatch)
             .child(chip.label.clone())
             .child(
                 div()
@@ -514,6 +526,7 @@ mod tests {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         }
     }
 

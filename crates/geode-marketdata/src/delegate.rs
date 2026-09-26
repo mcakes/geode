@@ -14,9 +14,11 @@ use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_shell::fonts;
+use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div, px,
+    App, Context, Div, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div,
+    px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -33,6 +35,11 @@ const CELL_WIDTH: f32 = 84.0;
 /// Index of the fixed row-label column when labels are shown. Hidden-label
 /// panels instead pin their first value column; offset() owns that distinction.
 pub(crate) const LABEL_COL: usize = 0;
+
+/// Pinned table column: the row label when shown, otherwise the first value.
+/// The line-number gutter widens this column so it stays visible during
+/// horizontal scrolling without reducing the data cell's width.
+const PINNED_COL: usize = 0;
 
 /// Paint-time editor mirror. Row and optional column use model coordinates;
 /// None identifies a typed row-label editor. Text inputs retain their entity,
@@ -115,6 +122,16 @@ pub struct MatrixDelegate {
     /// top of `render`: a compare per painted editor, a derivation only
     /// when the theme moved.
     pub(crate) tones: FlooredTones,
+    /// `[ui] line_numbers`, mirrored from the `UiSettings` global by the
+    /// tile (`MarketDataTile::on_ui_settings`), which refreshes the table
+    /// on a change: the pinned column's width includes the gutter.
+    pub(crate) line_numbers: LineNumbers,
+    /// Cached gutter text per painted row. `ensure_numbers` refreshes it during
+    /// rendering when the stamp changes; subsequent cells clone the prepared text.
+    numbers: Vec<SharedString>,
+    /// Cache key: row count, mode, and cursor row for relative numbering.
+    /// Absolute numbering ignores cursor movement.
+    numbers_stamp: Option<(usize, usize, LineNumbers)>,
 }
 
 impl MatrixDelegate {
@@ -134,7 +151,56 @@ impl MatrixDelegate {
             tile,
             tile_id,
             tones,
+            line_numbers: LineNumbers::Off,
+            numbers: Vec::new(),
+            numbers_stamp: None,
         }
+    }
+
+    /// The gutter's width in px — `0` when off. Read by `column` (the
+    /// pinned column widens by it, so its own text keeps its room) and by
+    /// `render_td` (the gutter's own width).
+    pub(crate) fn gutter_px(&self) -> f32 {
+        gutter_px(self.line_numbers, self.model.rows.len())
+    }
+
+    /// Rebuild numbers when the mode, row count, or relative cursor changes.
+    /// Count all painted rows, including inserts and marked deletions. Relative
+    /// mode shows distances except on the cursor row, which shows its absolute
+    /// number. With the cursor in the attribute strip, use absolute numbers.
+    fn ensure_numbers(&mut self) {
+        let mode = self.line_numbers;
+        let len = self.model.rows.len();
+        let cursor = match (mode, self.cursor) {
+            (LineNumbers::Relative, Some((row, _))) => row,
+            _ => usize::MAX,
+        };
+        let stamp = (len, cursor, mode);
+        if self.numbers_stamp == Some(stamp) {
+            return;
+        }
+        let mode = match (mode, self.cursor) {
+            (LineNumbers::Relative, None) => LineNumbers::On,
+            _ => mode,
+        };
+        self.numbers.clear();
+        self.numbers.extend((0..len).map(|row| {
+            gutter_number(mode, row, cursor)
+                .map(|n| SharedString::from(n.to_string()))
+                .unwrap_or_default()
+        }));
+        self.numbers_stamp = Some(stamp);
+    }
+
+    /// The gutter text for `row` — `None` when the gutter is off.
+    /// Test-only: production code goes through `render_td`.
+    #[cfg(test)]
+    pub(crate) fn gutter_text(&mut self, row: usize) -> Option<SharedString> {
+        if self.line_numbers == LineNumbers::Off {
+            return None;
+        }
+        self.ensure_numbers();
+        self.numbers.get(row).cloned()
     }
 
     /// The editor to paint in table cell (`row_ix`, `col_ix`), if the
@@ -146,29 +212,42 @@ impl MatrixDelegate {
             .filter(|e| e.row == row_ix && e.col == self.model_col(col_ix))
     }
 
-    /// Render a text input or the shared date-field painter in the target cell.
-    /// A date field needs a live tile for event routing; if that weak handle cannot
-    /// be upgraded, the caller falls back to the cell's prepared text.
+    /// Render a text input or shared date field aligned with its cell's text.
+    /// Both omit their own frame so the cell's cursor border and draft fill stay
+    /// visible. Text inputs remove horizontal padding; grid date fields use flush
+    /// segments. A date field needs a live tile for event routing; otherwise the
+    /// caller falls back to the cell's prepared text.
     fn render_editor(
         &mut self,
         editor: &DelegateEditor,
+        align: TextAlign,
         theme: &Theme,
     ) -> Option<gpui::AnyElement> {
         match &editor.paint {
-            DelegateEditorPaint::Text(state) => Some(Input::new(state).into_any_element()),
+            DelegateEditorPaint::Text(state) => Some(
+                Input::new(state)
+                    .appearance(false)
+                    .px_0()
+                    .text_align(align)
+                    .into_any_element(),
+            ),
             DelegateEditorPaint::Date { paint, focus } => {
                 let tile = self.tile.upgrade()?;
                 self.tones.refresh(theme);
                 Some(
-                    header::render_date_field(
-                        paint,
-                        focus,
-                        theme,
-                        &self.tones,
-                        &tile,
-                        self.tile_id,
-                    )
-                    .into_any_element(),
+                    div()
+                        .flex()
+                        .when(matches!(align, TextAlign::Right), |el| el.justify_end())
+                        .child(header::render_date_field(
+                            paint,
+                            focus,
+                            theme,
+                            &self.tones,
+                            &tile,
+                            self.tile_id,
+                            false,
+                        ))
+                        .into_any_element(),
                 )
             }
         }
@@ -222,7 +301,7 @@ impl TableDelegate for MatrixDelegate {
                 align: TextAlign::Left,
                 // Preserve document row order and column identity: no sorting or movement.
                 sort: None,
-                width: px(LABEL_WIDTH),
+                width: px(LABEL_WIDTH + self.gutter_px()),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
                 // See `LABEL_WIDTH`'s own note: a dragged width has
@@ -244,7 +323,12 @@ impl TableDelegate for MatrixDelegate {
             // including typed text/date/choice columns in flat panels.
             align: TextAlign::Right,
             sort: None,
-            width: px(CELL_WIDTH),
+            width: px(CELL_WIDTH
+                + if col_ix == PINNED_COL {
+                    self.gutter_px()
+                } else {
+                    0.0
+                }),
             // Under a hidden label the FIRST value column is what keeps
             // a row identifiable under horizontal scroll, so it takes
             // the pin the label column would have had.
@@ -282,9 +366,9 @@ impl TableDelegate for MatrixDelegate {
             .child(column.name)
     }
 
-    /// Paint a prepared cell or its active editor. Normal cell text is cloned
-    /// from SharedString; date and choice editors share prepared paint. Debug selectors
-    /// identify coordinates without formatting cell values during rendering.
+    /// Paint a data cell with an optional gutter beside the pinned column.
+    /// The gutter is outside the cell element so cursor borders, draft fills,
+    /// and deletion strikes apply only to data.
     fn render_td(
         &mut self,
         row_ix: usize,
@@ -292,6 +376,48 @@ impl TableDelegate for MatrixDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let cell = self.render_cell(row_ix, col_ix, cx);
+        if col_ix != PINNED_COL || self.line_numbers == LineNumbers::Off {
+            return cell;
+        }
+        self.ensure_numbers();
+        let text = self.numbers.get(row_ix).cloned().unwrap_or_default();
+        let theme = cx.theme();
+        let on_cursor_row = self.cursor.is_some_and(|(row, _)| row == row_ix);
+        div()
+            .size_full()
+            .flex()
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_end()
+                    .w(px(self.gutter_px()))
+                    .pr(px(GUTTER_GAP_PX))
+                    .font_family(fonts::MONO)
+                    .text_color(if on_cursor_row {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .debug_selector(|| format!("marketdata-gutter-{row_ix}"))
+                    .child(text),
+            )
+            .child(cell.flex_1().min_w_0())
+    }
+}
+
+impl MatrixDelegate {
+    /// Paint a prepared cell or its active editor. Normal cell text is cloned
+    /// from SharedString; date and choice editors share prepared paint. Debug
+    /// selectors identify coordinates without formatting cell values.
+    fn render_cell(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        cx: &mut Context<TableState<Self>>,
+    ) -> Div {
         let theme = cx.theme();
         let Some(model_col) = self.model_col(col_ix) else {
             // Paint the row label in its row state, including insertion tint and
@@ -315,7 +441,7 @@ impl TableDelegate for MatrixDelegate {
             let editor = self
                 .editor_at(row_ix, col_ix)
                 .cloned()
-                .and_then(|e| self.render_editor(&e, theme));
+                .and_then(|e| self.render_editor(&e, TextAlign::Left, theme));
             let CellPaint { fill, text, strike } = cell_paint(theme, sent, false, state);
             let el = div()
                 .size_full()
@@ -383,7 +509,7 @@ impl TableDelegate for MatrixDelegate {
         let editor = self
             .editor_at(row_ix, col_ix)
             .cloned()
-            .and_then(|e| self.render_editor(&e, theme));
+            .and_then(|e| self.render_editor(&e, TextAlign::Right, theme));
         // Anchor the choice popup at its target cell's bottom-left. Deferred
         // painting escapes the table clip; a dropped tile cannot receive popup events.
         let choice = self

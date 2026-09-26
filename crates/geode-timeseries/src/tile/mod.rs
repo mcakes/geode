@@ -42,16 +42,19 @@ use gpui::{
     App, Context, ElementId, Entity, Focusable as _, Hsla, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
 };
+use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Theme, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{Preset, Range, chart, menu, request, resolve, session};
+use crate::core::{
+    Preset, Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+};
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    DateFieldPaint, ExprField, MenuState, PickerStage, PickerState, Popup, RangePopup, SeriesPopup,
-    Which, render_menu, render_picker, render_range, render_series_popup,
+    ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
+    RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
 
@@ -155,6 +158,12 @@ pub struct TimeseriesTile {
     chart_bounds: ChartBounds,
     /// The pointer gesture in progress, if any (`tile::pointer`).
     drag: Option<Drag>,
+    /// Lazily created reusable component state with one set of subscriptions.
+    /// The header renders its trigger while Popup::Colour is active.
+    colour_picker: Option<Entity<ColorPickerState>>,
+    /// What the picker's commits are written against; outlives the
+    /// popup on purpose (see [`PickContext`]), replaced at each open.
+    pick_context: Option<PickContext>,
 }
 
 impl TimeseriesTile {
@@ -326,15 +335,16 @@ impl TimeseriesTile {
             footer: header::footer_text(cx),
             chart_bounds: ChartBounds::default(),
             drag: None,
+            colour_picker: None,
+            pick_context: None,
         }
     }
 
     // ---- what the shell reads ----------------------------------------
 
-    /// Picker, expression, and range editors report insert mode while open.
-    /// The fieldless series list stays in normal mode with `popup == series`,
-    /// allowing its keymap fragment to own navigation. Actual focus ownership
-    /// is checked separately by `holds_focus`.
+    /// Add, expression, range, and colour editors use insert routing. Fieldless
+    /// series/menu lists keep normal mode with their popup pair. Actual focus
+    /// ownership is checked separately, including colour-picker descendants.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
             "insert"
@@ -511,7 +521,8 @@ impl TimeseriesTile {
             "jump_end" => self.model.jump_end(),
             // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
-            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick" => {
+            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick"
+            | "pick_colour" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -535,16 +546,14 @@ impl TimeseriesTile {
 
     // ---- the `:` line ------------------------------------------------
 
-    /// `window` is unused: no `:` verb this tile has touches a popup or
-    /// a field. It stays in the signature because
-    /// [`TileContent::command`] is spelled that way for every module.
+    /// Commands may remove the colour picker's target. Forward the window so
+    /// that orphaned popup can close through the focus-aware closer.
     pub fn command(
         &mut self,
         line: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let _ = window;
         self.notice = None;
         let cmd = commands::parse(line)?;
         let (now, as_of) = self.now_and_as_of(cx);
@@ -611,6 +620,9 @@ impl TimeseriesTile {
             }
         };
         self.apply_changed(changed, cx);
+        // `:remove` and `:clear` can take the slot an open picker was
+        // opened for; a pick would then have nowhere to land.
+        self.close_orphaned_colour_picker(window, cx);
         Ok(())
     }
 
@@ -624,21 +636,11 @@ impl TimeseriesTile {
         commands::completions(line, cursor, &slots, &sources, &colours)
     }
 
-    /// `1`..`5` is a palette index; anything else is a `[colours]` name.
+    /// `1`..`5` is a palette index, `#rrggbb` an absolute colour,
+    /// anything else a `[colours]` name (`commands::colour_arg`).
     fn colour_named(&self, name: &str) -> Result<Colour, String> {
-        if let Ok(i) = name.parse::<usize>()
-            && (1..=Palette::LEN).contains(&i)
-        {
-            return Ok(Colour::Palette(i - 1));
-        }
-        if self.colours.borrow().get(name).is_some() {
-            Ok(Colour::Named(name.into()))
-        } else {
-            Err(format!(
-                "no colour named '{name}' — 1..{} or a [colours] entry",
-                Palette::LEN
-            ))
-        }
+        let colours = self.colours.borrow();
+        commands::colour_arg(name, |n| colours.get(n).is_some())
     }
 
     // ---- the tails ---------------------------------------------------
@@ -804,6 +806,11 @@ impl TimeseriesTile {
     }
 
     #[cfg(test)]
+    pub(crate) fn pick_context(&self) -> Option<&PickContext> {
+        self.pick_context.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&SharedString> {
         self.notice.as_ref()
     }
@@ -962,8 +969,31 @@ impl Render for TimeseriesTile {
             Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx)),
             Some(Popup::Menu(m)) => Some(render_menu(m, &tile, tile_id, cx)),
             // The expression field is not an overlay: it is a strip in
-            // the body, below.
-            Some(Popup::Expr(_)) | None => None,
+            // the body, below; the colour picker is drawn in its target
+            // chip, by the header.
+            Some(Popup::Expr(_)) | Some(Popup::Colour(_)) | None => None,
+        };
+        // Render the component trigger in its target chip only while open. State
+        // and subscriptions persist on the tile; the popover element state is transient.
+        let colour_picker = match self.popup.as_ref() {
+            Some(Popup::Colour(c)) => {
+                let target = c.target;
+                Some((
+                    target,
+                    div()
+                        .debug_selector(move || {
+                            format!("timeseries-colour-picker-{tile_id}-{target}")
+                        })
+                        .child(
+                            ColorPicker::new(&c.picker)
+                                .featured_colors(c.swatches.clone())
+                                .accessibility_label(SharedString::new_static("Series colour"))
+                                .xsmall(),
+                        )
+                        .into_any_element(),
+                ))
+            }
+            _ => None,
         };
         let expr_field = match self.popup.as_ref() {
             Some(Popup::Expr(f)) => Some(header::render_expr_field(f, theme)),
@@ -979,6 +1009,7 @@ impl Render for TimeseriesTile {
                 tile_id,
                 self.stack.as_ref(),
                 menu_open,
+                colour_picker,
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(
@@ -1070,9 +1101,10 @@ fn chart_key(
 }
 
 /// A slot's colour on this theme: a palette index through the floored
-/// five chart colours, a `[colours]` name through the shared wheel, and
-/// a name the trader has since deleted back to the first palette colour
-/// rather than an error — a stale name costs a colour, never a tile.
+/// five chart colours, a `[colours]` name through the shared wheel, an
+/// absolute colour as itself, and a name the trader has since deleted
+/// back to the first palette colour rather than an error — a stale name
+/// costs a colour, never a tile.
 ///
 /// Takes the definitions by `Arc` and the theme's derived pair by value
 /// so the returned closure borrows NOTHING: `rebuild_chrome` holds
@@ -1097,6 +1129,8 @@ fn colour_fn(colours: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Colour) -> H
             Some(def) => to_hsla(geode_core::colour::resolve(def, &anchors, &tokens)),
             None => palette.colour(0),
         },
+        // Absolute: no theme, no readability floor — what was picked.
+        Colour::Custom(c) => c.to_hsla(),
     }
 }
 
