@@ -389,9 +389,15 @@ impl BlotterDelegate {
         let rebuild = self.plan.as_ref() != Some(&fresh);
         if rebuild {
             self.plan = Some(fresh);
-            self.sort = self
-                .sort
-                .filter(|s| s.column < self.plan.as_ref().unwrap().columns.len());
+            // Re-resolved, not bounds-checked: a rebuild that hides a column
+            // or folds a dimension into the tree shortens the list, and an
+            // in-range index then names a different column than the trader
+            // sorted by.
+            self.sort = self.sort.take().filter(|s| {
+                self.plan
+                    .as_ref()
+                    .is_some_and(|p| p.position_of(&s.column).is_some())
+            });
         }
         self.expansion.prune_to(grouping.len());
         self.unplaced = snapshot.tree().unplaced();
@@ -742,7 +748,7 @@ impl TableDelegate for BlotterDelegate {
         let Some(c) = self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) else {
             return Column::default();
         };
-        let own_sort = self.sort.filter(|s| s.column == col_ix);
+        let own_sort = self.sort.as_ref().filter(|s| s.column == c.name);
         let sort = match own_sort {
             Some(s) if s.order.descending() => Some(ColumnSort::Descending),
             Some(_) => Some(ColumnSort::Ascending),
@@ -830,10 +836,18 @@ impl TableDelegate for BlotterDelegate {
         // repaint; it does not notify itself. The row highlight follows
         // the cursor the way `sync_cursor` does after a keyboard sort:
         // `reflatten` keeps the cursor by path, so its row index moves.
-        let current = self.sort.filter(|s| s.column == col_ix).map(|s| s.order);
+        let name = match self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) {
+            Some(c) => c.name.clone(),
+            None => return,
+        };
+        let current = self
+            .sort
+            .as_ref()
+            .filter(|s| s.column == name)
+            .map(|s| s.order);
         let next = SortOrder::click_cycle(current, self.is_measure(col_ix));
         self.sort = next.map(|order| SortSpec {
-            column: col_ix,
+            column: name,
             order,
         });
         self.reflatten();
@@ -855,6 +869,8 @@ impl TableDelegate for BlotterDelegate {
         if let Some(p) = self.plan.as_mut() {
             p.move_column(col_ix, to_ix);
         }
+        // No sort remap here: the sort names its column, not a position,
+        // so reordering the plan cannot re-point it.
         // `TableState::move_column` (gpui-component) calls this directly
         // and never fires `visible_rows_changed`, so this needs its own
         // immediate refill rather than waiting for the next scroll —

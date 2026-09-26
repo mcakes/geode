@@ -91,10 +91,13 @@ impl SortOrder {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SortSpec {
-    /// Index into `ColumnPlan::columns`.
-    pub column: usize,
+    /// The snapshot column name, as `PlannedColumn::name` spells it. A name
+    /// rather than a position because the plan reorders under a column drag
+    /// and shortens when a column is hidden or folded into the tree, and an
+    /// index that survives either change names a different column.
+    pub column: String,
     pub order: SortOrder,
 }
 
@@ -186,7 +189,10 @@ fn visit_child(
 }
 
 fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: &mut [u32]) {
-    let Some(column) = plan.columns.get(spec.column) else {
+    let Some(column) = plan
+        .position_of(&spec.column)
+        .and_then(|i| plan.columns.get(i))
+    else {
         return;
     };
     let idx = column.index;
@@ -350,6 +356,14 @@ mod tests {
         out
     }
 
+    /// Like `visible`, but against a caller-supplied plan: needed for a
+    /// plan mutated between two flattens, such as a column move.
+    fn visible_with(snap: &Snapshot, plan: &ColumnPlan, sort: Option<&SortSpec>) -> Vec<u32> {
+        let mut out = Vec::new();
+        flatten(snap, plan, &Expansion::default(), sort, &mut out);
+        out
+    }
+
     #[test]
     fn collapsed_shows_the_root_and_its_children_only_when_the_root_is_open() {
         // The grand total is always open: a blotter that shows one row is
@@ -375,7 +389,7 @@ mod tests {
         let mut e = Expansion::default();
         e.open_all();
         let delta = SortSpec {
-            column: 1,
+            column: "delta01".to_string(),
             order: SortOrder::Desc,
         };
         assert_eq!(
@@ -384,13 +398,41 @@ mod tests {
             "L1 (60) before L2 (40); NDX 50 before SPX 10; P2 4 before P1 NULL"
         );
         let asc = SortSpec {
-            column: 1,
+            column: "delta01".to_string(),
             order: SortOrder::Asc,
         };
         assert_eq!(
             visible(&e, Some(&asc)),
             vec![0, 2, 6, 4, 1, 3, 8, 7, 5],
             "ascending, NULL still last"
+        );
+    }
+
+    #[test]
+    fn a_sort_survives_a_column_move_because_it_names_the_column() {
+        let snap = signed_snapshot();
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"desk\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let mut plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let delta = plan
+            .columns
+            .iter()
+            .position(|c| c.name == "delta01")
+            .expect("the fixture has delta01");
+        let spec = SortSpec {
+            column: "delta01".to_string(),
+            order: SortOrder::Desc,
+        };
+        let before = visible_with(&snap, &plan, Some(&spec));
+
+        // Moving a column must not change which column the sort names.
+        plan.move_column(delta, delta + 1);
+        let after = visible_with(&snap, &plan, Some(&spec));
+
+        assert_eq!(
+            before, after,
+            "the sort follows delta01, not the position it used to hold"
         );
     }
 
@@ -420,14 +462,17 @@ mod tests {
         )
     }
 
-    fn signed_visible(column: usize, order: SortOrder) -> Vec<u32> {
+    fn signed_visible(column: &str, order: SortOrder) -> Vec<u32> {
         let snap = signed_snapshot();
         let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"desk\"\nkind = \"dimension\"\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let view = ViewSpec::from_doc(&doc).0.remove(0);
         let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
         assert_eq!(plan.columns[2].kind, ColumnKind::Dimension, "sanity");
-        let spec = SortSpec { column, order };
+        let spec = SortSpec {
+            column: column.to_string(),
+            order,
+        };
         let mut out = Vec::new();
         flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
         out
@@ -435,7 +480,7 @@ mod tests {
 
     #[test]
     fn absolute_orders_compare_magnitudes_and_keep_null_last() {
-        let by = |order| signed_visible(1, order);
+        let by = |order| signed_visible("delta01", order);
         assert_eq!(
             by(SortOrder::Desc),
             vec![0, 2, 3, 1, 4],
@@ -492,7 +537,10 @@ mod tests {
             SortOrder::AbsDesc,
             SortOrder::AbsAsc,
         ] {
-            let spec = SortSpec { column: 1, order };
+            let spec = SortSpec {
+                column: "delta01".to_string(),
+                order,
+            };
             let mut out = Vec::new();
             flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
             let nan_count = (0..n).filter(|i| i % 4 == 3).count();
@@ -588,7 +636,7 @@ mod tests {
     fn an_absolute_order_on_a_text_column_is_its_signed_direction() {
         // Text has no magnitude; `abs` on it means the plain direction
         // rather than an odd or refused sort.
-        let by = |order| signed_visible(2, order);
+        let by = |order| signed_visible("desk", order);
         assert_eq!(by(SortOrder::Asc), vec![0, 2, 3, 1, 4], "A, B, C, NULL");
         assert_eq!(by(SortOrder::Desc), vec![0, 1, 3, 2, 4], "C, B, A, NULL");
         assert_eq!(by(SortOrder::AbsAsc), by(SortOrder::Asc));

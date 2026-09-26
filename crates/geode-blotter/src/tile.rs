@@ -1084,13 +1084,28 @@ impl BlotterTile {
                     if col == 0 {
                         return;
                     }
+                    let Some(name) = d
+                        .plan
+                        .as_ref()
+                        .and_then(|p| p.columns.get(col))
+                        .map(|c| c.name.clone())
+                    else {
+                        return;
+                    };
                     let measure = d.is_measure(col);
-                    let current = d.sort.filter(|s| s.column == col).map(|s| s.order);
+                    let current = d
+                        .sort
+                        .as_ref()
+                        .filter(|s| s.column == name)
+                        .map(|s| s.order);
                     let next = SortOrder::cycle(current, absolute, measure);
                     if next == current {
                         return;
                     }
-                    d.sort = next.map(|order| SortSpec { column: col, order });
+                    d.sort = next.map(|order| SortSpec {
+                        column: name,
+                        order,
+                    });
                     d.reflatten();
                 });
                 self.table.update(cx, |t, cx| {
@@ -1184,7 +1199,10 @@ impl BlotterTile {
                     // A text column has no magnitude: `abs` on it is its
                     // signed direction, in the state as on the screen.
                     let order = order.on_column(d.is_measure(col));
-                    d.sort = Some(SortSpec { column: col, order });
+                    d.sort = Some(SortSpec {
+                        column: column.clone(),
+                        order,
+                    });
                     d.reflatten();
                     Some(())
                 });
@@ -2791,7 +2809,7 @@ mod tests {
         let sort = |cx: &mut gpui::VisualTestContext| {
             h.tile.read_with(cx, |t, cx| {
                 let d = t.table().read(cx).delegate();
-                d.sort.map(|s| (s.column, s.order))
+                d.sort.as_ref().map(|s| (s.column.clone(), s.order))
             })
         };
         let header = |cx: &mut gpui::VisualTestContext| {
@@ -2810,18 +2828,27 @@ mod tests {
 
         act(&mut cx, "blotter::right");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Desc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::Desc))
+        );
         act(&mut cx, "blotter::sort_cycle");
         assert_eq!(sort(&mut cx), None);
 
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         assert_eq!(header(&mut cx), "delta01 |x|");
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsAsc))
+        );
         act(&mut cx, "blotter::sort_cycle_abs");
         assert_eq!(sort(&mut cx), None);
         assert_eq!(header(&mut cx), "delta01");
@@ -2830,15 +2857,21 @@ mod tests {
         // from a signed order restarts at abs desc.
         act(&mut cx, "blotter::sort_cycle_abs");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         act(&mut cx, "blotter::sort_cycle");
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
 
         h.tile.update(&mut cx, |t, cx| {
             t.command("sort daily_trading_pnl abs asc", cx).unwrap()
         });
-        assert_eq!(sort(&mut cx), Some((2, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("daily_trading_pnl".to_string(), SortOrder::AbsAsc))
+        );
         assert_eq!(
             header(&mut cx),
             "delta01",
@@ -2846,7 +2879,10 @@ mod tests {
         );
         h.tile
             .update(&mut cx, |t, cx| t.command("sort delta01 abs", cx).unwrap());
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         h.tile
             .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
         assert_eq!(sort(&mut cx), None);
@@ -2884,7 +2920,8 @@ mod tests {
                     .read(cx)
                     .delegate()
                     .sort
-                    .map(|s| (s.column, s.order))
+                    .as_ref()
+                    .map(|s| (s.column.clone(), s.order))
             })
         };
         let header = |cx: &mut gpui::VisualTestContext| {
@@ -2926,12 +2963,12 @@ mod tests {
         click(&mut cx, 1);
         assert_eq!(
             sort(&mut cx),
-            Some((1, SortOrder::Desc)),
+            Some(("delta01".to_string(), SortOrder::Desc)),
             "first click: desc"
         );
         assert_eq!(row_of(&mut cx), (3, 2), "desc keeps L1 (5) above L2 (4)");
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
         // Asc puts L2 (4) above L1 (5) and its open child: the cursor
         // follows L2 to row 1 by path, and so does the component's
@@ -2944,17 +2981,26 @@ mod tests {
             "the component's highlight followed the cursor"
         );
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         assert_eq!(header(&mut cx), "delta01 |x|");
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsAsc))
+        );
         click(&mut cx, 1);
         assert_eq!(sort(&mut cx), None);
         assert_eq!(header(&mut cx), "delta01");
         // Another column's click starts its own cycle at desc.
         click(&mut cx, 1);
         click(&mut cx, 2);
-        assert_eq!(sort(&mut cx), Some((2, SortOrder::Desc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("daily_trading_pnl".to_string(), SortOrder::Desc))
+        );
     }
 
     /// `:filter` narrows through `tile_scope`, composed into the query's
