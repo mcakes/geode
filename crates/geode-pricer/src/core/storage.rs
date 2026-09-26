@@ -1111,6 +1111,8 @@ mod tests {
         Snapshot::for_tests(columns, 0)
     }
 
+    type Columns = Vec<(ColumnMeta, TestColumn)>;
+
     fn replace(columns: &mut [(ColumnMeta, TestColumn)], name: &str, col: TestColumn) {
         let slot = columns
             .iter_mut()
@@ -1167,7 +1169,7 @@ mod tests {
     fn a_missing_or_wrong_typed_column_is_refused_by_name() {
         let rows = to_rows(&full_sheet()).unwrap();
         let n = rows.rows();
-        let refused = |edit: &dyn Fn(&mut Vec<(ColumnMeta, TestColumn)>)| {
+        let refused = |edit: &dyn Fn(&mut Columns)| {
             rows_from_snapshot("book-1", &snapshot_of(&rows, |c| edit(c)))
                 .expect_err("refused, never a half-sheet")
         };
