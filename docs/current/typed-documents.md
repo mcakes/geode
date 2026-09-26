@@ -106,7 +106,8 @@ View definitions nest numeric format keys under `format`; presentation
 column tables put them beside `label` and `width`. The color key is `color`.
 The old spelling `colour` is still read when `color` is absent, with a warning
 at the old key; beside `color` it is ignored with a warning. The dialogs write
-`color`. Dataset presentation
+`color`, and saving a view through the Views dialog rewrites an old `colour`
+key in its column formats the same way the reader resolves it. Dataset presentation
 applies only to selected columns owned by that dataset. Ownership searches
 the primary dataset first, then joins in declaration order. Unknown datasets
 or columns warn and are skipped.

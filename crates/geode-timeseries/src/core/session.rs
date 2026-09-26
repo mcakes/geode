@@ -1,4 +1,4 @@
-//! `TileState` in `session.toml` (spec §9.11): slots (kind, colour, axis,
+//! `TileState` in `session.toml` (spec §9.11): slots (kind, color, axis,
 //! visible, rule; an expression by its TEXT), range, frequency, axis
 //! mode, split, density, percentiles. Not the view, not slot state.
 //! `from_table` heals a hostile table rather than refusing it, like
@@ -49,7 +49,7 @@ pub fn to_table(model: &Model) -> Table {
                 Colour::Named(n) => {
                     r.insert("color".into(), Value::String(n.clone()));
                 }
-                // `#rrggbb`: a `[colours]` name can never start with `#`
+                // `#rrggbb`: a `[colors]` name can never start with `#`
                 // (`geode_core::colour::RESERVED_PREFIX`), so the string
                 // form stays unambiguous.
                 Colour::Custom(c) => {

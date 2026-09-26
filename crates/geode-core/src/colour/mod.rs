@@ -142,12 +142,12 @@ impl Definition {
     }
 }
 
-/// A column's `colour` key already spells these two.
+/// A column's `color` key already spells these two.
 pub const RESERVED_NAMES: [&str; 2] = ["none", "sign"];
 
 /// A name starting with this is reserved too: `#rrggbb` is an absolute
 /// color wherever a color name is also accepted (a timeseries slot's
-/// `:colour` and its session entry), so such a name would be ambiguous.
+/// `:color` and its session entry), so such a name would be ambiguous.
 pub const RESERVED_PREFIX: char = '#';
 
 #[derive(Debug, Clone, Default, PartialEq)]

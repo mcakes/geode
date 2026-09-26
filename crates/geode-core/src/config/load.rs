@@ -19,6 +19,13 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
         .filter(|p| p.extension().is_some_and(|x| x == "toml"))
         .collect();
     paths.sort();
+    // Every stem on disk, loaded or not: a current file that fails to read or
+    // parse still shadows its old-named copy (`adopt_renamed_docs`).
+    let stems: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
     for path in paths {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -66,19 +73,27 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
             table,
         });
     }
-    adopt_renamed_docs(layer, &mut docs, &mut diags);
+    adopt_renamed_docs(layer, &stems, &mut docs, &mut diags);
     (docs, diags)
 }
 
 /// Load an old-named file (`colours.toml`) under its current doc name, or drop
 /// it when the same layer also holds the current file. Either way a warning
 /// names both files, so a stale copy is never merged or ignored in silence.
-fn adopt_renamed_docs(layer: Layer, docs: &mut Vec<LayerDoc>, diags: &mut Vec<Diagnostic>) {
+/// "Holds" means exists on disk (`stems`): a current file that failed to load
+/// keeps its own error and still shadows the old one, whose content would
+/// otherwise stand in for it.
+fn adopt_renamed_docs(
+    layer: Layer,
+    stems: &[String],
+    docs: &mut Vec<LayerDoc>,
+    diags: &mut Vec<Diagnostic>,
+) {
     for (old, new) in super::RENAMED_DOCS {
         let Some(i) = docs.iter().position(|d| d.name == *old) else {
             continue;
         };
-        if docs.iter().any(|d| d.name == *new) {
+        if stems.iter().any(|s| s == new) {
             let legacy = docs.remove(i);
             diags.push(Diagnostic::warning(
                 layer,
@@ -373,6 +388,50 @@ mod tests {
         assert_eq!(d.severity, Severity::Warning);
         assert!(d.file.as_ref().is_some_and(|f| f.ends_with("colours.toml")));
         assert!(d.message.starts_with("ignored"), "{d}");
+    }
+
+    /// A broken `colors.toml` is still the current file: its own error stands,
+    /// and the stale `colours.toml` beside it is ignored rather than loaded
+    /// as `colors` (whose advice would be to overwrite the current file).
+    #[test]
+    fn a_broken_colors_file_still_shadows_the_old_colours_file() {
+        let user = tempfile::tempdir().unwrap();
+        write(user.path(), "colors.toml", "config_version = 1\n[delta\n");
+        write(
+            user.path(),
+            "colours.toml",
+            "config_version = 1\n[stale]\nhue = 90\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: Vec::new(),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        assert!(config.get("colors", "stale").is_none(), "{config:?}");
+        assert!(config.layered_docs("colors").is_empty());
+        let errors: Vec<&Diagnostic> = config
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{:?}", config.diagnostics);
+        assert!(
+            errors[0]
+                .file
+                .as_ref()
+                .is_some_and(|f| f.ends_with("colors.toml"))
+        );
+        let ignored: Vec<&Diagnostic> = config
+            .diagnostics
+            .iter()
+            .filter(|d| d.file.as_ref().is_some_and(|f| f.ends_with("colours.toml")))
+            .collect();
+        assert_eq!(ignored.len(), 1, "{:?}", config.diagnostics);
+        assert!(
+            ignored[0].message.starts_with("ignored"),
+            "{}",
+            ignored[0].message
+        );
     }
 
     /// A user view replaces the desk definition as a whole; presentation then

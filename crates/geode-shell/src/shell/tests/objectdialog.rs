@@ -7762,7 +7762,7 @@ fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
     // Onto `npv`'s column stage: label(0), width(1), scale(2),
-    // precision(3), thousands(4), negative(5), colour(6).
+    // precision(3), thousands(4), negative(5), color(6).
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(matches!(

@@ -46,6 +46,12 @@ impl ActionRegistry {
         if self.actions.contains_key(&def.id) {
             return Err(format!("action '{}' registered twice", def.id));
         }
+        if let Some(new) = self.renames.get(&def.id) {
+            return Err(format!(
+                "action '{}' is retired (renamed to '{new}'); register a new id",
+                def.id
+            ));
+        }
         self.hashes
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -153,6 +159,21 @@ mod tests {
         );
         assert!(reg.register_rename("a::colour", "a::other").is_err());
         assert!(reg.register_rename("a::color", "a::x").is_err());
+        assert!(!reg.contains(&ActionId("a::colour".into())));
+    }
+
+    /// A retired id cannot be registered again: a later registration would
+    /// otherwise be silently redirected by the keymap's rename lookup.
+    #[test]
+    fn a_retired_id_cannot_be_registered() {
+        let mut reg = ActionRegistry::default();
+        reg.register(def("a::color", "Color")).unwrap();
+        reg.register_rename("a::colour", "a::color").unwrap();
+        let err = reg.register(def("a::colour", "Colour")).unwrap_err();
+        assert!(
+            err.contains("a::colour") && err.contains("retired"),
+            "{err}"
+        );
         assert!(!reg.contains(&ActionId("a::colour".into())));
     }
 

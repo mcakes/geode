@@ -20421,6 +20421,35 @@ run_mutation "color rename: a duplicate old override key is stale" \
   '            if false {' \
   geode-shell an_override_recorded_under_the_old_colours_key_still_counts
 
+# A colors.toml that exists but fails to load still shadows colours.toml.
+# Mutated to ask which docs LOADED, the stale file stands in for it.
+run_mutation "color rename: a broken colors.toml still shadows colours.toml" \
+  crates/geode-core/src/config/load.rs \
+  '        if stems.iter().any(|s| s == new) {' \
+  '        if docs.iter().any(|d| d.name == *new) {' \
+  geode-core a_broken_colors_file_still_shadows_the_old_colours_file
+
+# A Views dialog save writes a format's old colour key as color.
+run_mutation "color rename: a saved view rewrites the old colour key" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            out.push(super::toml_table_to_edit(&with_current_color_key(column)));' \
+  '            out.push(super::toml_table_to_edit(column));' \
+  geode-shell a_saved_view_rewrites_the_old_colour_key_as_color
+
+# Beside color, the old key is dropped rather than kept or promoted.
+run_mutation "color rename: a saved view drops colour beside color" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        && !format.contains_key("color")' \
+  '        && true' \
+  geode-shell a_saved_view_rewrites_the_old_colour_key_as_color
+
+# A retired action id cannot be registered again.
+run_mutation "action rename: register refuses a retired id" \
+  crates/geode-shell/src/actions.rs \
+  '        if let Some(new) = self.renames.get(&def.id) {' \
+  '        if let Some(new) = None::<&ActionId> {' \
+  geode-shell a_retired_id_cannot_be_registered
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

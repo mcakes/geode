@@ -37,7 +37,9 @@ Renamed documents keep loading under their old file name. A layer directory
 holding only `colours.toml` loads it as the `colors` document with a warning
 asking for the rename. When one directory holds both `colors.toml` and
 `colours.toml`, the old file is ignored with a warning naming it; the current
-file is never merged with the stale copy. `config::RENAMED_DOCS` lists these
+file is never merged with the stale copy. "Holds" means the file exists: a
+`colors.toml` that fails to read or parse keeps its own error and still
+shadows the old file, which never stands in for it. `config::RENAMED_DOCS` lists these
 pairs. Runtime writes always target the current name: the first
 `config_write` edit of `colors` in a user directory holding only
 `colours.toml` starts from the old file's content, writes `colors.toml`, and

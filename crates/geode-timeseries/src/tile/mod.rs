@@ -1185,7 +1185,7 @@ fn chart_key(
 }
 
 /// A slot's colour on this theme: a palette index through the floored
-/// five chart colours, a `[colours]` name through the shared wheel, an
+/// five chart colours, a `[colors]` name through the shared wheel, an
 /// absolute colour as itself, and a name the trader has since deleted
 /// back to the first palette colour rather than an error — a stale name
 /// costs a colour, never a tile.

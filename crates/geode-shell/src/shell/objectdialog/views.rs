@@ -385,7 +385,7 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
         };
         if names.contains(&name) {
             seen.push(name);
-            out.push(super::toml_table_to_edit(column));
+            out.push(super::toml_table_to_edit(&with_current_color_key(column)));
         }
     }
     // A name the source never had is a column the object gained, which is
@@ -406,6 +406,21 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
         out.push(column);
     }
     out
+}
+
+/// `column` with its format's old `colour` key written as `color`, the way
+/// the reader resolves them: moved when `color` is absent, dropped beside
+/// it. Without this a saved view would carry the old key, and its warning,
+/// forever.
+fn with_current_color_key(column: &toml::Table) -> toml::Table {
+    let mut column = column.clone();
+    if let Some(toml::Value::Table(format)) = column.get_mut("format")
+        && let Some(old) = format.remove(geode_core::view::LEGACY_COLOR_KEY)
+        && !format.contains_key("color")
+    {
+        format.insert("color".into(), old);
+    }
+    column
 }
 
 /// Render the entire user view-presentation object from the draft's members. Write
@@ -1464,6 +1479,32 @@ role = "value"
             "an available column reached the doc table it has no business \
              being in:\n{text}"
         );
+    }
+
+    /// A view written before the rename says `format = { colour = … }`: a
+    /// dialog save writes it as `color` (dropping the old key beside a
+    /// `color`, as the reader does), so the warning does not outlive the save.
+    #[test]
+    fn a_saved_view_rewrites_the_old_colour_key_as_color() {
+        let config = config_with_view(
+            "[tree]\ndataset = \"risk\"\n\
+             [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\nformat = { precision = 0, colour = \"sign\" }\n\
+             [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\nformat = { color = \"none\", colour = \"sign\" }\n",
+        );
+        let draft = Domain::Views.draft(&config, "tree");
+        let text =
+            super::super::object_text("tree", Domain::Views.to_table(&draft, Destination::Doc));
+        assert!(!text.contains("colour"), "{text}");
+        assert!(text.contains("color = \"sign\""), "{text}");
+        assert!(text.contains("color = \"none\""), "{text}");
+        assert!(text.contains("precision = 0"), "{text}");
+        let (views, diags) = ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", &text).unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::Sign));
+        assert_eq!(views[0].presentation_of("book").colour, Some(Colour::None));
     }
 
     /// The row promoted above (`book`) is the catalogue's FIRST, so

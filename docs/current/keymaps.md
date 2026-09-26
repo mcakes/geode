@@ -50,7 +50,8 @@ register a retired ID with `ActionRegistry::register_rename` (`config::colours`
 `timeseries::pick_colour` → `timeseries::pick_color`). A binding naming a
 retired ID binds the current action and warns with both IDs, so an existing
 user keymap keeps working until the file is edited; the dialogs write only the
-current ID. Startup can use the remaining
+current ID. `register` refuses a retired ID, so a later registration
+cannot be silently redirected. Startup can use the remaining
 compiled bindings. On reload, compilation errors participate in the shell's
 last-good acceptance gate; see [reload](configuration.md#hot-reload).
 

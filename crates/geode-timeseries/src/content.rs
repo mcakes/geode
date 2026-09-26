@@ -143,7 +143,7 @@ context = "timeseries && mode == normal && popup == menu"
 "." = "timeseries::list_close"
 
 # The range menu's `Custom dates…` row. Bindings resolve last-wins, so
-# this layer sits after the normal one, whose `c` cycles a colour.
+# this layer sits after the normal one, whose `c` cycles a color.
 [[bindings]]
 context = "timeseries && mode == normal && popup == menu && menu == range"
 [bindings.keys]

@@ -366,7 +366,7 @@ mod tests {
                 "{bad}"
             );
         }
-        // Even a name the colours doc somehow held is never read for a
+        // Even a name the colors doc somehow held is never read for a
         // `#` word.
         assert!(colour_arg("#ff88", |_| true).is_err());
         assert_eq!(
