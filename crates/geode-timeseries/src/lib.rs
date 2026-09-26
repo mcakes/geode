@@ -10,27 +10,34 @@ pub mod header;
 pub mod popup;
 pub mod tile;
 
-/// Reclaim `tab`/`shift+tab` inside the custom dates editor, the
-/// same door and the same mechanism as `geode_blotter::init` and
-/// `geode_marketdata::init`: gpui-component's `Root` binds both keys
-/// window-wide to its own focus cycling (`root::Tab`), and gpui
-/// dispatches a matched ACTION before any `on_key_down` listener — so
-/// without this the editor's own listener never sees the keystroke that
-/// moves between its two date fields.
+/// Reclaim `tab`/`shift+tab` inside the custom dates editor and the
+/// expression field, the same mechanism as `geode_blotter::init` and
+/// `geode_marketdata::init`. gpui-component's `Root` binds both keys
+/// window-wide to its own focus cycling (`root::Tab`), and gpui dispatches
+/// a matched ACTION before any `on_key_down` listener, so an unreclaimed
+/// `tab` never reaches the editor's field switch or the expression field's
+/// completion.
+///
+/// Inside the running app the shell root already reclaims both keys:
+/// `geode_shell::shell::dialog::init_reclaimed_keybindings` binds them to
+/// `NoAction` in `GeodeShell`, which every tile sits under. These
+/// narrower bindings are defence in depth for a host without that root,
+/// such as the tile tests' stand-in shell, which carries no `GeodeShell`
+/// context and so would otherwise lose `tab` to `Root`.
 ///
 /// `NoAction` is gpui's own mechanism for exactly this: the deepest
 /// matching context wins, and a `NoAction` there suppresses every
-/// out-ranked binding, leaving the keystroke to the key listeners
-/// (`geode_shell::shell::dialog::init_reclaimed_keybindings` has the
-/// long form of the argument). It is scoped to the popup's own context,
-/// so `tab` keeps cycling focus everywhere else — the shell's own
-/// scoping rule for this key.
+/// out-ranked binding, leaving the keystroke to the key listeners. The
+/// focused `Input`'s own `tab` binding (indent) sits deeper still but has
+/// no handler on a single-line input, so the key falls through to the
+/// field's listener. Each binding is scoped to its popup's own context.
 ///
 /// Must be called once at startup, beside the other modules' inits.
 pub fn init(cx: &mut gpui::App) {
-    let context = Some(popup::RANGE_CONTEXT);
-    cx.bind_keys([
-        gpui::KeyBinding::new("tab", gpui::NoAction, context),
-        gpui::KeyBinding::new("shift-tab", gpui::NoAction, context),
-    ]);
+    for context in [popup::RANGE_CONTEXT, popup::EXPR_CONTEXT] {
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", gpui::NoAction, Some(context)),
+            gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some(context)),
+        ]);
+    }
 }

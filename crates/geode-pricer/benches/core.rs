@@ -169,7 +169,7 @@ fn bench(c: &mut Criterion) {
     let views = Views::builtin();
     let plan = ColumnPlan::build(views.get("vanilla").expect("bundled"));
     g.bench_function("grid_build_1000", |b| {
-        b.iter(|| black_box(GridModel::build(&s, &expansion, &plan, None, Clock::utc())))
+        b.iter(|| black_box(GridModel::build(&s, &expansion, &plan, Clock::utc())))
     });
 
     g.finish();

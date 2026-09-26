@@ -200,6 +200,27 @@ series, including a pair loaded twice under two rules, is refused rather than
 resolved to either. A long expression's chip label is cut to 24 characters
 ending in `…`.
 
+The expression field (`x`, or `e` on an expression) completes loaded series
+names, the only names an expression may reference. The name at the caret is
+the run the expression tokenizer reads as one reference (an identity with an
+optional `@source`), so `SPX.close/VI` completes `VI`; a caret just before a
+name's first character is in that name, and a caret in a number offers
+nothing. Loaded names that name exactly one series are ranked against
+it with the `:` line's matcher; an empty name (an empty field, or after an
+operator, a parenthesis or a space) offers every one. The list hangs under the
+field over the chart, showing at most eight rows that scroll with the lit row;
+with nothing loaded it says so and names `a`. Tab writes the lit name over the
+name at the caret and repeated Tab cycles the same list; Shift+Tab cycles
+back, and a first Shift+Tab writes the last. The lit row is the name last
+written. A row click writes that name the same way and leaves the keyboard in
+the field. Enter first writes in a typed name that is not exact but matches
+exactly one loaded name, then commits; with several matches it commits the
+text as typed and the resolver names the unknown reference, and the list is
+re-ranked against the expanded text. Each completion is one edit in the
+field's undo history. A caret moved without typing, including after a Tab,
+re-ranks on the next Tab, not before; the list itself shows the ranking from
+the last edit. A change of the desk's default source relabels an open list.
+
 A tile's session table is written with `version = 2`. A table without it
 may name series in expression text by slot handle (`s3`), and restore
 rewrites each handle: a source slot's handle becomes its full
@@ -405,16 +426,24 @@ largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by color alone. The tree column reserves a fixed chevron slot on every
-row, so roots share one leading edge and legs sit one step in; the entry row
-opens at the depth it will land at. A long tree label or text cell ends in
-`…`; a number never truncates. Cell text is floored to the readable ratio on
-the row's own ground and on the table's hover and selected-row grounds.
+row, so roots share one leading edge and legs sit one step in. Column 0
+carries structure only: the depth indent, the chevron slot and a package's
+template token (`CS`, `CUSTOM`); a line or leg has no tag. Find (`/`, `n`,
+`N`) still matches each row's full shorthand, which no column paints. A long
+text cell ends in `…`; a number never truncates. Cell text is
+floored to the readable ratio on the row's own ground and on the table's
+hover and selected-row grounds.
+
+The entry bar sits between the header and the column headers. A muted label
+names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
+parse error or a refused insert keeps the text and shows the reason under
+the field in danger text; any edit clears it. "Add lines…" from the palette
+while the bar is open keeps its text and place and focuses its field again.
 
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
 Lines, packages, and an open package's legs are numbered in painted order —
-the index `NG` jumps to. The entry placeholder is blank and does not shift the
-numbers below it, since no motion lands on it. Relative mode shows distance
+the index `NG` jumps to. Relative mode shows distance
 from the cursor row, with its absolute number on that row, and numbers
 absolutely when there is no cursor row.
 
@@ -428,7 +457,7 @@ Normal-mode keys:
 
 | Keys | Effect |
 |---|---|
-| `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
+| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `escape` closes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -451,8 +480,9 @@ the same reason.
 
 The underlying, type, and barrier-type cells edit through a typeahead. The
 underlying list offers the sheet's own underlyings and also takes free text.
-Ranking is a case-insensitive subsequence match, so the top-ranked option is
-only a guess: `enter` commits the highlighted underlying only when the query
+Ranking is the shared fuzzy match (see
+[input and dialogs](input-and-dialogs.md#filtering-choice-and-movement)), so
+the top-ranked option is only a guess: `enter` commits the highlighted underlying only when the query
 equals it (in any case) or the highlight was moved with `up`/`down` or a row
 click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
@@ -481,14 +511,17 @@ edit, and an empty shift on an inherited shift stays inherited. An explicit
 shift is a change from inherited to own even when it equals the inherited
 value.
 
-Open editors and the entry field paint no field chrome: no background, border,
+Open editors paint no field chrome: no background, border,
 radius, or horizontal padding. Their text sits where the cell's text sat
 (numbers right-aligned, text left) at the row's height, and the cell's cursor
 border is the only frame. The date field's segments are flush.
 
-A grid click cancels an editor or entry field before acting on the painted
-row's identity. Removing an entry placeholder therefore cannot redirect the
-click to a neighboring row. Clicking the placeholder itself only closes it.
+A grid click closes an open editor or the entry bar, then acts on the row it
+hit. Closing the bar moves the table up on screen, so a double-click whose
+first press closed it edits the line that press hit, not the row that slid
+under the pointer; the hand-off lasts for the next press only. A chevron
+press that closes the bar hands off the same way, so the cursor stays on the
+package it toggled.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 

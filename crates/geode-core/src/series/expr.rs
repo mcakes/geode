@@ -84,15 +84,20 @@ enum Token {
     RParen,
 }
 
-fn is_ident_start(c: char) -> bool {
+/// A character that can open a reference's identity. Public so a name
+/// completer draws the same word boundaries the tokenizer does.
+pub fn is_ident_start(c: char) -> bool {
     c.is_ascii_alphabetic() || c == '_'
 }
 
-fn is_ident_char(c: char) -> bool {
+/// A character that can continue a reference's identity (`SPX.close`).
+pub fn is_ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '.'
 }
 
-fn is_source_char(c: char) -> bool {
+/// A character of the `@source` part after an identity. `-` is one only
+/// there; before the `@` it is subtraction.
+pub fn is_source_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 

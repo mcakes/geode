@@ -1,15 +1,14 @@
 //! The table's prepared rows (line-pricer spec §8.2): every visible row's
 //! cells as `SharedString`s with the core's `CellState`, built on every
-//! edit, delivery, expansion, view, clock and entry change — never per
+//! edit, delivery, expansion, view and clock change — never per
 //! frame (`cell_text` allocates a `String` per cell). The paint is NOT
 //! here: `Paints` resolves a state to a colour at render from a per-theme
 //! memo (planning decision 14), so a theme switch rebuilds nothing.
-//!
-//! The entry placeholder (planning decision 11) is a row of this model
-//! and never of the sheet.
+//! Column 0 carries structure only: the row's tag; the shorthand is kept
+//! as a search key.
 
 use crate::core::columns::{CellState, ColumnKind, cell_text};
-use crate::core::sheet::{LineId, Place, RowKind, Sheet};
+use crate::core::sheet::{LineId, RowKind, Sheet};
 use crate::core::shorthand::render_expiry;
 use crate::core::tree::{Expansion, visible_rows};
 use crate::core::views::ColumnPlan;
@@ -34,11 +33,7 @@ pub struct GridColumn {
 pub enum GridRowKind {
     Line,
     Leg,
-    Package {
-        open: bool,
-    },
-    /// The entry field's placeholder.
-    Entry,
+    Package { open: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -50,12 +45,16 @@ pub struct GridCell {
 #[derive(Debug, Clone)]
 pub struct GridRow {
     pub kind: GridRowKind,
-    /// The sheet's flat row; `None` on the placeholder.
+    /// The sheet's flat row.
     pub row: Option<usize>,
     pub id: Option<LineId>,
     pub depth: usize,
-    /// Column 0's label: the row's shorthand (spec §8.2).
-    pub tree: SharedString,
+    /// Column 0's painted tag: a package's template token (`CS`,
+    /// `CUSTOM`), empty on a line or leg (entry-bar spec §2).
+    pub tag: SharedString,
+    /// What find matches: the row's shorthand, never painted, so `/`
+    /// finds a row by text no visible column shows (entry-bar spec §3).
+    pub search: SharedString,
     pub cells: Vec<GridCell>,
 }
 
@@ -77,10 +76,10 @@ fn right_aligned(kind: ColumnKind) -> bool {
     )
 }
 
-/// A package's column-0 label: its template form while the legs still
-/// match the table (the grammar round-trips it), else its template token
-/// with its legs' distinct underlyings and expiries (spec §8.2).
-fn package_label(sheet: &Sheet, row: usize) -> String {
+/// A package's search key: its template form while the legs still match
+/// the table (the grammar round-trips it), else its template token with
+/// its legs' distinct underlyings and expiries.
+fn package_search(sheet: &Sheet, row: usize) -> String {
     let text = sheet.shorthand(row);
     if !text.is_empty() && !text.contains('\n') {
         return text;
@@ -112,26 +111,11 @@ fn package_label(sheet: &Sheet, row: usize) -> String {
     parts.join(" ")
 }
 
-/// The flat index a `Place` inserts at.
-fn flat(place: Place) -> (usize, usize) {
-    match place {
-        Place::Root { at } => (at, 0),
-        Place::Leg { package, leg } => (package + 1 + leg, 1),
-    }
-}
-
 impl GridModel {
-    /// The tile opens the target package before it arms a `Place::Leg`
-    /// entry (the tile's entry task does so), so a `Leg` place whose
-    /// package `expansion` still has closed is a fallback this model
-    /// never itself refuses: the placeholder lands directly after the
-    /// closed package row, at depth 1, rather than among legs the caller
-    /// hid (review fix, 2026-09-24).
     pub fn build(
         sheet: &Sheet,
         expansion: &Expansion,
         plan: &ColumnPlan,
-        entry: Option<Place>,
         clock: Clock,
     ) -> GridModel {
         let columns: Vec<GridColumn> = plan
@@ -147,30 +131,8 @@ impl GridModel {
             })
             .collect();
         let visible = visible_rows(sheet, expansion);
-        let mut rows = Vec::with_capacity(visible.len() + usize::from(entry.is_some()));
-        let placeholder = |depth: usize| GridRow {
-            kind: GridRowKind::Entry,
-            row: None,
-            id: None,
-            depth,
-            tree: SharedString::default(),
-            cells: plan
-                .columns
-                .iter()
-                .map(|_| GridCell {
-                    text: SharedString::default(),
-                    state: CellState::Blank,
-                })
-                .collect(),
-        };
-        let mut pending = entry.map(flat);
+        let mut rows = Vec::with_capacity(visible.len());
         for r in visible {
-            if let Some((at, depth)) = pending
-                && r >= at
-            {
-                rows.push(placeholder(depth));
-                pending = None;
-            }
             let kind = match sheet.kind(r) {
                 RowKind::Package { .. } => GridRowKind::Package {
                     open: expansion.is_open(sheet.id(r)),
@@ -180,17 +142,20 @@ impl GridModel {
                 }
                 RowKind::Line | RowKind::Underlying => GridRowKind::Line,
             };
-            let tree = if sheet.is_package(r) {
-                package_label(sheet, r)
-            } else {
-                sheet.shorthand(r)
+            let (tag, search) = match sheet.kind(r) {
+                RowKind::Package { template } => (
+                    SharedString::new_static(template.token()),
+                    package_search(sheet, r),
+                ),
+                _ => (SharedString::default(), sheet.shorthand(r)),
             };
             rows.push(GridRow {
                 kind,
                 row: Some(r),
                 id: Some(sheet.id(r)),
                 depth: sheet.depth(r),
-                tree: tree.into(),
+                tag,
+                search: search.into(),
                 cells: plan
                     .columns
                     .iter()
@@ -204,18 +169,11 @@ impl GridModel {
                     .collect(),
             });
         }
-        if let Some((_, depth)) = pending {
-            rows.push(placeholder(depth));
-        }
         GridModel { columns, rows }
     }
 
     pub fn grid_row_of(&self, id: LineId) -> Option<usize> {
         self.rows.iter().position(|r| r.id == Some(id))
-    }
-
-    pub fn entry_row(&self) -> Option<usize> {
-        self.rows.iter().position(|r| r.kind == GridRowKind::Entry)
     }
 }
 
@@ -240,25 +198,32 @@ mod tests {
         ColumnPlan::build(Views::builtin().get("vanilla").unwrap())
     }
 
-    fn build(s: &Sheet, e: &Expansion, entry: Option<Place>) -> GridModel {
-        GridModel::build(s, e, &plan(), entry, Clock::utc())
+    fn build(s: &Sheet, e: &Expansion) -> GridModel {
+        GridModel::build(s, e, &plan(), Clock::utc())
     }
 
     #[test]
-    fn rows_follow_the_expansion_and_carry_depth_ids_and_the_tree_label() {
+    fn rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys() {
         let s = sheet();
-        let closed = build(&s, &Expansion::default(), None);
+        let closed = build(&s, &Expansion::default());
         assert_eq!(closed.rows.len(), 3);
         assert_eq!(closed.rows[1].kind, GridRowKind::Package { open: false });
-        assert_eq!(closed.rows[1].tree.as_ref(), "SPX Z26 4800/5200 CS");
+        assert_eq!(closed.rows[1].search.as_ref(), "SPX Z26 4800/5200 CS");
+        assert_eq!(
+            closed.rows[1].tag.as_ref(),
+            "CS",
+            "a package: its template token"
+        );
+        assert_eq!(closed.rows[0].tag.as_ref(), "", "a line: no tag");
         let mut e = Expansion::default();
         e.set(s.id(1), true);
-        let open = build(&s, &e, None);
+        let open = build(&s, &e);
         assert_eq!(open.rows.len(), 5);
         assert_eq!(open.rows[1].kind, GridRowKind::Package { open: true });
         assert_eq!(open.rows[2].kind, GridRowKind::Leg);
         assert_eq!(open.rows[2].depth, 1);
-        assert_eq!(open.rows[4].tree.as_ref(), "SPX Z26 4000 P");
+        assert_eq!(open.rows[2].tag.as_ref(), "", "a leg: no tag");
+        assert_eq!(open.rows[4].search.as_ref(), "SPX Z26 4000 P");
         assert_eq!(open.grid_row_of(s.id(4)), Some(4));
         assert_eq!(
             open.columns.len(),
@@ -275,7 +240,7 @@ mod tests {
             .map(|r| (s.id(r), s.revision(r), Ok(result(12.5))))
             .collect();
         s.deliver_all(answers, at(0));
-        let m = build(&s, &Expansion::default(), None);
+        let m = build(&s, &Expansion::default());
         let price = plan()
             .columns
             .iter()
@@ -300,50 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn the_entry_placeholder_paints_where_its_place_lands_and_is_no_sheet_row() {
-        let s = sheet();
-        let mut e = Expansion::default();
-        e.set(s.id(1), true);
-        let m = build(&s, &e, Some(Place::Root { at: 1 }));
-        assert_eq!(m.rows.len(), 6);
-        assert_eq!(m.entry_row(), Some(1));
-        assert_eq!(m.rows[1].kind, GridRowKind::Entry);
-        assert_eq!(m.rows[1].id, None);
-        let m = build(&s, &e, Some(Place::Leg { package: 1, leg: 2 }));
-        assert_eq!(m.entry_row(), Some(4), "after the last leg");
-        assert_eq!(m.rows[4].depth, 1);
-        let m = build(&s, &e, Some(Place::Root { at: 5 }));
-        assert_eq!(m.entry_row(), Some(5), "at the end");
-        assert_eq!(s.len(), 5, "the sheet never holds the placeholder");
-    }
-
-    /// Review fix (2026-09-24): the tile always opens a package before it
-    /// arms a `Leg` entry into it, so this is a fallback path, not the
-    /// intended display — but `GridModel::build` must still answer
-    /// something sane if it is ever reached with the package still
-    /// closed. Pinned behaviour: the legs stay hidden (the caller's
-    /// `Expansion` is not consulted or overridden) and the placeholder
-    /// lands right after the closed package row, at depth 1 — the same
-    /// depth a leg would carry, not the package's own depth 0.
-    #[test]
-    fn a_leg_entry_into_a_closed_package_lands_after_it_as_a_fallback() {
-        let s = sheet();
-        let m = build(
-            &s,
-            &Expansion::default(),
-            Some(Place::Leg { package: 1, leg: 2 }),
-        );
-        assert_eq!(m.rows.len(), 4, "A, closed P, the placeholder, B — no legs");
-        assert_eq!(m.rows[1].kind, GridRowKind::Package { open: false });
-        assert_eq!(m.entry_row(), Some(2));
-        assert_eq!(m.rows[2].kind, GridRowKind::Entry);
-        assert_eq!(m.rows[2].id, None);
-        assert_eq!(m.rows[2].depth, 1);
-        assert_eq!(m.rows[3].row, Some(4), "B follows, unaffected");
-    }
-
-    #[test]
-    fn a_custom_package_labels_by_template_underlyings_and_expiries() {
+    fn a_custom_package_is_tagged_by_its_token_and_searched_by_its_legs() {
         let mut s = Sheet::new("t");
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
         push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
@@ -354,7 +276,8 @@ mod tests {
             id: None,
         })
         .unwrap();
-        let m = build(&s, &Expansion::default(), None);
-        assert_eq!(m.rows[0].tree.as_ref(), "CUSTOM SPX Z26");
+        let m = build(&s, &Expansion::default());
+        assert_eq!(m.rows[0].tag.as_ref(), "CUSTOM");
+        assert_eq!(m.rows[0].search.as_ref(), "CUSTOM SPX Z26");
     }
 }

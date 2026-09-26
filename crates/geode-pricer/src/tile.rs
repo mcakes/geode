@@ -11,7 +11,7 @@ use crate::core::clip::{put_place, spec_of};
 use crate::core::columns::ColumnKind;
 use crate::core::commands::{self, Command, ShiftField};
 use crate::core::edit::{Edit, EditError, Undo};
-use crate::core::entry::{history, next_place, place_for};
+use crate::core::entry::{history, next_place, place_for, target_label};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
 use crate::core::shorthand::render_expiry;
@@ -22,7 +22,7 @@ use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
 use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
-use crate::grid::{GridModel, GridRowKind};
+use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
 use crate::session::Record;
@@ -136,11 +136,18 @@ pub(crate) struct Cursor {
     pub last_row: usize,
 }
 
-/// The entry field (spec §8.4): where its rows will land, the field, and
-/// the sheet's own lines to walk with `up`/`down`.
+/// The entry bar (entry-bar spec §4): where its rows will land, the
+/// field, and the sheet's own lines to walk with `up`/`down`.
 pub(crate) struct Entry {
     pub place: Place,
     pub input: Entity<InputState>,
+    /// Where `enter` lands, as the bar's muted label: `target_label` of
+    /// `place`, rebuilt whenever `place` changes, never in render.
+    pub label: SharedString,
+    /// A refused `enter`'s reason, under the field. Any typed edit clears
+    /// it (it describes text that is no longer there), as does a history
+    /// step.
+    pub error: Option<SharedString>,
     history: Vec<String>,
     /// `None`: the trader's own text; `Some(i)`: showing `history[i]`.
     history_ix: Option<usize>,
@@ -354,9 +361,9 @@ pub struct PricerTile {
     /// The write-behind idle timer (spec §7.3): armed by every change,
     /// re-armed by the next one, flushed by `on_release`.
     save_task: Option<Task<()>>,
-    /// The open entry field (spec §8.4): `o`/`shift+o` open it, `enter`
-    /// parses and inserts through `apply_edit`, `escape` or a click drops
-    /// it. `None` in normal mode.
+    /// The entry bar (entry-bar spec §4): `o` opens it, `enter` parses and
+    /// inserts through `apply_edit`, `escape`, a click or another verb
+    /// drops it. `None` in normal mode.
     pub(crate) entry: Option<Entry>,
     /// The open cell editor (spec §8.4): `i`/`enter`/double-click open it,
     /// `enter` commits one `Edit` through `apply_edit`, `escape` or a click
@@ -367,14 +374,16 @@ pub struct PricerTile {
     editor_window: Option<AnyWindowHandle>,
     /// The `.` action menu: `None` outside menu mode.
     pub(crate) menu: Option<Menu>,
-    /// What a cell press that closed the entry field resolved — its line,
-    /// `None` on the placeholder — with the grid row it was painted at
-    /// (see `on_table_event`).
-    click_anchor: Option<(usize, Option<LineId>)>,
-    /// `click_anchor`, taken by the next press when it hit the same row:
-    /// read only by that press's own `DoubleClickedCell` (every press
-    /// emits `SelectCell` first, which overwrites it).
-    pressed: Option<(usize, Option<LineId>)>,
+    /// The line a press that closed the entry bar resolved. Closing the
+    /// bar moves the table up on screen, so the second press of the same
+    /// double-click lands on a different painted row; this carries the
+    /// first press's line to it. Every press takes it (see `pressed`), so
+    /// it lives for exactly one following press.
+    click_anchor: Option<Option<LineId>>,
+    /// `click_anchor`, taken by the latest press: read only by that
+    /// press's own `DoubleClickedCell` (every press emits `SelectCell`
+    /// first, which overwrites it).
+    pressed: Option<Option<LineId>>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -716,6 +725,14 @@ impl PricerTile {
         self.loading
     }
 
+    /// The entry bar's text; `None` with the bar closed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn entry_text(&self, cx: &App) -> Option<String> {
+        self.entry
+            .as_ref()
+            .map(|e| e.input.read(cx).value().to_string())
+    }
+
     pub fn serialize(&self) -> toml::Table {
         Record {
             sheet: Some(self.sheet.name.clone()),
@@ -876,35 +893,52 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `o` / `shift+o`: a placeholder after (before) the cursor row, the
-    /// field focused (spec §8.4). A leg place opens its package so the
-    /// placeholder shows where it lands.
-    fn open_entry(&mut self, below: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// `o`: the entry bar under the header, the field focused (entry-bar
+    /// spec §4.1). Lines land below the cursor row; a leg place opens
+    /// its package so what lands is visible. With the bar already open
+    /// (a palette dispatch) the typed text and place stay and the field
+    /// takes focus back.
+    fn open_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(entry) = &self.entry {
+            // The palette's commit focuses the shell root before it
+            // dispatches: without this the bar reads `insert` while
+            // holding no focus, and shifted letters reach shell bindings.
+            entry.input.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
-        self.close_entry(window, cx);
-        let place = place_for(&self.sheet, self.cursor_sheet_row(), below);
+        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(ENTRY_HINT));
+        cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
+            if let InputEvent::Change = event
+                && let Some(entry) = this.entry.as_mut()
+                && entry.error.take().is_some()
+            {
+                cx.notify();
+            }
+        })
+        .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
         self.entry = Some(Entry {
             place,
-            input: input.clone(),
+            input,
+            label: target_label(&self.sheet, place).into(),
+            error: None,
             history: history(&self.sheet),
             history_ix: None,
         });
-        self.table
-            .update(cx, |t, _| t.delegate_mut().entry = Some(input));
         self.rebuild(cx);
     }
 
-    /// `enter`: parse, insert, reprice, and open the next placeholder
-    /// below what landed; a parse error or a refusal keeps the text and
-    /// says why in the footer.
+    /// `enter`: parse, insert, reprice, and advance the place past what
+    /// landed; a parse error or a refusal keeps the text and says why
+    /// under the field.
     fn commit_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.entry.as_mut() else {
             return;
@@ -913,15 +947,14 @@ impl PricerTile {
         let spec = match parse(&text) {
             Ok(spec) => spec,
             Err(e) => {
-                self.footer = Some(format!("{} (column {})", e.message, e.offset + 1).into());
-                self.rebuild_chrome();
+                entry.error = Some(format!("{} (column {})", e.message, e.offset + 1).into());
                 cx.notify();
                 return;
             }
         };
         let at = entry.place;
-        // Move the placeholder first so the edit's own rebuild paints it
-        // below what landed; put it back on a refusal.
+        // Advance the place first so the edit's own rebuild labels what
+        // comes next; put it back on a refusal.
         entry.place = next_place(at, &spec);
         match self.apply_edit(
             Edit::Insert {
@@ -939,6 +972,8 @@ impl PricerTile {
                 if let Some(entry) = self.entry.as_mut() {
                     entry.history = history(&self.sheet);
                     entry.history_ix = None;
+                    entry.label = target_label(&self.sheet, entry.place).into();
+                    entry.error = None;
                     entry.input.update(cx, |s, cx| s.set_value("", window, cx));
                 }
                 self.rebuild(cx);
@@ -946,8 +981,8 @@ impl PricerTile {
             Err(e) => {
                 if let Some(entry) = self.entry.as_mut() {
                     entry.place = at;
+                    entry.error = Some(e.to_string().into());
                 }
-                self.footer = Some(e.to_string().into());
                 self.rebuild(cx);
             }
         }
@@ -963,7 +998,6 @@ impl PricerTile {
         if entry.input.read(cx).focus_handle(cx).is_focused(window) {
             window.blur(cx);
         }
-        self.table.update(cx, |t, _| t.delegate_mut().entry = None);
         self.rebuild(cx);
     }
 
@@ -990,6 +1024,7 @@ impl PricerTile {
             }
         };
         entry.history_ix = next;
+        entry.error = None;
         let text = next.map(|i| entry.history[i].clone()).unwrap_or_default();
         entry
             .input
@@ -1969,13 +2004,16 @@ impl PricerTile {
             self.cancel_remove(window, cx);
         }
         // Any verb but the fields' own closes an open field first (a
-        // palette dispatch can arrive while one is open).
+        // palette dispatch can arrive while one is open). `add_below`
+        // keeps an open bar: it is the bar's own opener (spec §4.1).
         let field_verb = matches!(
             verb,
             "commit" | "cancel" | "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big"
         );
         if !field_verb {
-            self.close_entry(window, cx);
+            if verb != "add_below" {
+                self.close_entry(window, cx);
+            }
             self.close_editor(window, cx);
         }
         // Any verb but the menu's own closes an open menu (a palette
@@ -2031,7 +2069,6 @@ impl PricerTile {
                     .model
                     .rows
                     .iter()
-                    .filter(|r| r.kind != GridRowKind::Entry)
                     .map(|r| {
                         r.cells
                             .get(col)
@@ -2056,8 +2093,8 @@ impl PricerTile {
                 self.reprice_all(cx);
                 return true;
             }
-            "add_below" | "add_above" => {
-                self.open_entry(verb == "add_below", window, cx);
+            "add_below" => {
+                self.open_entry(window, cx);
                 return true;
             }
             "edit" => {
@@ -2516,7 +2553,11 @@ impl PricerTile {
     }
 
     fn row_labels(&self) -> Vec<String> {
-        self.model.rows.iter().map(|r| r.tree.to_string()).collect()
+        self.model
+            .rows
+            .iter()
+            .map(|r| r.search.to_string())
+            .collect()
     }
 
     fn repeat_find(&mut self, dir: FindDirection, count: usize) {
@@ -2955,17 +2996,11 @@ impl PricerTile {
             &self.sheet,
             &self.expansion,
             &self.plan,
-            self.entry_place(),
             self.clock,
         ));
         self.install_model(cx);
         self.rebuild_chrome();
         cx.notify();
-    }
-
-    /// The open entry field's place, if any (spec §8.4).
-    pub(crate) fn entry_place(&self) -> Option<Place> {
-        self.entry.as_ref().map(|e| e.place)
     }
 
     /// The only way a model reaches the table (spec §8.2).
@@ -3062,14 +3097,9 @@ impl PricerTile {
 
     // ---- the cursor -------------------------------------------------------
 
-    /// Grid rows a cursor may sit on (never the entry placeholder).
+    /// Grid rows a cursor may sit on.
     pub(crate) fn cursor_rows(&self) -> impl Iterator<Item = usize> + '_ {
-        self.model
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.kind != GridRowKind::Entry)
-            .map(|(i, _)| i)
+        0..self.model.rows.len()
     }
 
     pub(crate) fn cursor_row(&self) -> Option<usize> {
@@ -3139,16 +3169,20 @@ impl PricerTile {
         });
     }
 
-    /// Resolve a painted grid row to its LineId before closing fields. The entry
-    /// placeholder resolves to None; removing it shifts every following grid index.
+    /// Resolve a painted grid row to its LineId before closing fields.
     fn line_at(&self, row: usize) -> Option<LineId> {
         self.model.rows.get(row).and_then(|r| r.id)
     }
 
     /// Chevron activation cancels open fields, then toggles the package resolved before
-    /// the close. A click on the entry placeholder only closes that field.
+    /// the close.
     fn chevron_clicked(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let line = self.line_at(row);
+        // The chevron stops propagation, so no `SelectCell` hands off for
+        // it: closing the bar moves the table up, and the double-click's
+        // second press must still resolve the package, not the row that
+        // slid up. A press takes any older anchor, as `SelectCell` does.
+        self.click_anchor = self.entry.is_some().then_some(line);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         if let Some(id) = line {
@@ -3167,13 +3201,12 @@ impl PricerTile {
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
                 // so only a real cell click — `SelectCell` — closes a field.
                 let line = self.line_at(*row);
-                // Entry closure shifts grid indices between the two presses of a
-                // double-click. Carry the first press's resolved target to the next
-                // press at that index for DoubleClickedCell only. A single click still
-                // selects the currently painted row.
-                self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);
+                // Closing the bar moves the table up on screen between the
+                // two presses of one double-click: hand this press's line
+                // to the next press only, whatever row that one lands on.
+                self.pressed = self.click_anchor.take();
                 if self.entry.is_some() {
-                    self.click_anchor = Some((*row, line));
+                    self.click_anchor = Some(line);
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
@@ -3188,20 +3221,19 @@ impl PricerTile {
                 cx.notify();
             }
             // Double-click uses the same edit route as i. SelectCell has already
-            // cancelled the previous field; the tree column and entry placeholder open
-            // no editor.
+            // cancelled the previous field; the tree column opens no editor.
             TableEvent::DoubleClickedCell(row, col) => {
-                // A handed-on line wins, placeholder (`None`) included:
-                // the row now painted under the pointer slid up there.
+                // A line handed on by a first press that closed the bar
+                // wins: the row now under the pointer slid up there.
                 let line = match self.pressed.take() {
-                    Some((_, line)) => line,
+                    Some(line) => line,
                     None => self.line_at(*row),
                 };
                 self.close_entry(window, cx);
                 let Some(id) = line else {
                     return;
                 };
-                // Before the tree-column check: this press's `SelectCell`
+                // Before the tree-column return: this press's `SelectCell`
                 // moved the cursor to the row that slid up.
                 self.cursor.line = Some(id);
                 self.sync_cursor(cx);
@@ -3275,6 +3307,10 @@ impl gpui::Render for PricerTile {
                 .bordered(false)
                 .stripe(false),
         );
+        let bar = self
+            .entry
+            .as_ref()
+            .map(|e| header::render_entry_bar(&e.input, &e.label, e.error.as_ref(), theme));
         let footer = header::render_footer(self.footer_text.as_ref(), theme);
         // A pointer press anywhere on the tile cancels an armed `:rm`
         // confirm — capture phase, so it runs before the press reaches
@@ -3289,6 +3325,7 @@ impl gpui::Render for PricerTile {
                 })
             })
             .child(header)
+            .children(bar)
             .child(body)
             .child(footer)
     }
@@ -3519,10 +3556,16 @@ pub(crate) mod tests {
         pub fn serialize(&self, vcx: &mut VisualTestContext) -> toml::Table {
             vcx.update(|_, cx| self.content.serialize(cx))
         }
-        /// Column 0's text per grid row — the tree the table paints.
+        /// Every painted row's search key (its shorthand).
         pub fn tree(&self, vcx: &VisualTestContext) -> Vec<String> {
             self.tile.read_with(vcx, |t, _| {
-                t.model.rows.iter().map(|r| r.tree.to_string()).collect()
+                t.model.rows.iter().map(|r| r.search.to_string()).collect()
+            })
+        }
+        /// Every painted row's column-0 tag.
+        pub fn tags(&self, vcx: &VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.model.rows.iter().map(|r| r.tag.to_string()).collect()
             })
         }
         /// The planned columns' vocabulary names, in order.
@@ -3564,6 +3607,24 @@ pub(crate) mod tests {
         pub fn save_notice(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile
                 .read_with(vcx, |t, _| t.header.save.as_ref().map(|n| n.to_string()))
+        }
+        pub fn entry_text(&self, vcx: &VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, cx| {
+                t.entry
+                    .as_ref()
+                    .map(|e| e.input.read(cx).value().to_string())
+            })
+        }
+        pub fn entry_label(&self, vcx: &VisualTestContext) -> Option<String> {
+            self.tile
+                .read_with(vcx, |t, _| t.entry.as_ref().map(|e| e.label.to_string()))
+        }
+        pub fn entry_error(&self, vcx: &VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.entry
+                    .as_ref()
+                    .and_then(|e| e.error.as_ref().map(|s| s.to_string()))
+            })
         }
         pub fn footer(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile
@@ -3924,9 +3985,8 @@ pub(crate) mod tests {
     /// painted row (an expanded package's legs included) beside the tree
     /// cell, widening the pinned tree column by exactly the gutter, in one
     /// lane whatever the row's depth. `rel` re-numbers on a cursor move,
-    /// and the cursor row's own number is the one `NG` jumps to. The
-    /// entry placeholder is blank and shifts no number. Off gives the
-    /// width back.
+    /// and the cursor row's own number is the one `NG` jumps to. Off
+    /// gives the width back.
     #[gpui::test]
     fn the_line_numbers_global_paints_a_gutter_beside_the_tree_column(
         cx: &mut gpui::TestAppContext,
@@ -4010,18 +4070,6 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "bottom", Some(2));
         assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
         assert_eq!(texts(&mut vcx)[1], "2", "`2G` lands on the row numbered 2");
-
-        h.dispatch(&mut vcx, "add_above", None);
-        h.draw(&mut vcx);
-        let entry = h.tile.read_with(&vcx, |t, _| t.model.entry_row());
-        assert_eq!(entry, Some(1), "the placeholder opens above the package");
-        let t = texts(&mut vcx);
-        assert_eq!(t[1], "", "the placeholder is blank");
-        assert_eq!(t.len(), 6);
-        assert_eq!(
-            t[2], "2",
-            "the package keeps its number with the placeholder above it"
-        );
 
         set(&mut vcx, LineNumbers::Off);
         assert!(
@@ -4157,6 +4205,19 @@ pub(crate) mod tests {
             Some(0),
             "escape returns to where `/` opened"
         );
+    }
+
+    /// Find matches the shorthand even though column 0 no longer paints
+    /// it: a package's strikes show in no package-row cell.
+    #[gpui::test]
+    fn find_matches_shorthand_that_no_column_shows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.tags(&vcx), ["", "CS", ""]);
+        vcx.update(|window, cx| {
+            h.content
+                .find(FindEvent::Changed("4800/5200".into()), window, cx)
+        });
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
     }
 
     // ---- repricing ----
@@ -4484,9 +4545,10 @@ pub(crate) mod tests {
         vcx.update(|window, cx| window.focused(cx).is_some())
     }
 
-    /// Spec §12: `o`, a line, `enter` adds a row and submits one request.
+    /// Entry-bar spec §4: `o`, a line, `enter` adds a row below the
+    /// cursor and keeps the bar open; the next `enter` lands below that.
     #[gpui::test]
-    fn o_then_a_line_then_enter_adds_a_row_submits_it_and_opens_the_next_placeholder(
+    fn o_then_lines_then_enter_adds_each_below_the_last_and_keeps_the_bar_open(
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open(cx);
@@ -4494,51 +4556,82 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "add_below", None);
         assert_eq!(h.mode(&mut vcx), "insert");
         assert!(focused(&mut vcx), "the field owns focus");
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("at end"));
         typed(&h, &mut vcx, "-5 SPX Z26 5000 C");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.sheet_len(&vcx), 1);
         let batches = h.prices();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].lines.len(), 1);
-        assert_eq!(
-            h.mode(&mut vcx),
-            "insert",
-            "a fresh placeholder opens below"
-        );
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), Some(1));
+        assert_eq!(h.mode(&mut vcx), "insert", "the bar stays open");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some(""));
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("at end"));
         typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.sheet_len(&vcx), 4, "a package with its two legs");
         assert_eq!(
             h.tree(&vcx).len(),
-            5,
-            "the typed package opens so its legs show, plus the placeholder"
+            4,
+            "the typed package opens; no placeholder row"
+        );
+        assert_eq!(
+            h.cursor(&vcx).map(|c| c.0),
+            Some(1),
+            "the cursor is on what landed"
         );
     }
 
     #[gpui::test]
-    fn a_parse_error_keeps_the_text_and_names_the_column(cx: &mut gpui::TestAppContext) {
+    fn o_lands_below_the_cursor_row_and_the_label_says_so(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("after SPX Z26 5000 C"));
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        let second = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(1));
+        assert_eq!(second, "SPX Z26 3000 P", "below row 0, above the package");
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("after SPX Z26 3000 P"));
+    }
+
+    #[gpui::test]
+    fn a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (h, mut vcx) = open(cx);
         h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "SPX Z26 5000 CX");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(h.sheet_len(&vcx), 0);
         assert_eq!(h.mode(&mut vcx), "insert");
-        let footer = h.footer(&vcx).unwrap();
-        assert!(footer.ends_with("(column 14)"), "{footer}");
-        let text = h.tile.read_with(&vcx, |t, cx| {
-            t.entry.as_ref().unwrap().input.read(cx).value().to_string()
-        });
-        assert_eq!(text, "SPX Z26 5000 CX", "the text is kept for fixing");
+        let error = h.entry_error(&vcx).expect("the reason is under the field");
+        assert!(error.ends_with("(column 14)"), "{error}");
+        assert_eq!(h.footer(&vcx), None, "not in the footer");
+        assert!(vcx.debug_bounds("pricer-entry-error").is_some());
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX Z26 5000 CX"));
+        vcx.simulate_keystrokes("backspace");
+        h.draw(&mut vcx);
+        assert_eq!(h.entry_error(&vcx), None, "an edit answers the error");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX Z26 5000 C"));
     }
 
     #[gpui::test]
-    fn shift_o_on_a_leg_inserts_a_leg_before_it(cx: &mut gpui::TestAppContext) {
+    fn a_history_step_clears_the_error(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "nonsense");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.entry_error(&vcx).is_some());
+        h.dispatch(&mut vcx, "insert_up", None);
+        assert_eq!(h.entry_error(&vcx), None);
+    }
+
+    #[gpui::test]
+    fn o_on_a_leg_inserts_the_next_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "expand", None);
-        h.dispatch(&mut vcx, "down", Some(2)); // the second leg
-        h.dispatch(&mut vcx, "add_above", None);
+        h.dispatch(&mut vcx, "down", None); // the first leg
+        h.dispatch(&mut vcx, "add_below", None);
         typed(&h, &mut vcx, "SPX Z26 5000 C");
         h.dispatch(&mut vcx, "commit", None);
         let legs = h.tile.read_with(&vcx, |t, _| t.sheet.children(1).len());
@@ -4547,29 +4640,81 @@ pub(crate) mod tests {
         assert_eq!(middle, "SPX Z26 5000 C", "between the two legs");
     }
 
+    /// `o` on a closed package opens it: the line lands as its first leg,
+    /// visible, and the cursor names a row the model paints.
     #[gpui::test]
-    fn a_package_typed_at_a_leg_place_is_refused_in_the_footer(cx: &mut gpui::TestAppContext) {
+    fn o_on_a_closed_package_opens_it_and_lands_on_its_first_leg(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None); // P, closed
+        assert_eq!(h.tree(&vcx).len(), 3, "fixture: P is closed");
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tree(&vcx).len(), 6, "P is open: its three legs show");
+        let first = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(2));
+        assert_eq!(first, "SPX Z26 5000 C", "P's first leg");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the new leg");
+    }
+
+    #[gpui::test]
+    fn a_package_typed_at_a_leg_place_is_refused_under_the_field(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "down", None);
         h.dispatch(&mut vcx, "add_below", None); // a package row: its first leg
+        assert_eq!(h.entry_label(&vcx).as_deref(), Some("into CS"));
         typed(&h, &mut vcx, "SPX Z26 4800/5200 CS");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.footer(&vcx).as_deref(),
+            h.entry_error(&vcx).as_deref(),
             Some("a package cannot hold a package")
         );
+        assert_eq!(
+            h.entry_label(&vcx).as_deref(),
+            Some("into CS"),
+            "the place is restored"
+        );
         assert_eq!(h.mode(&mut vcx), "insert");
+    }
+
+    /// Spec §4.1: `o` (here a palette dispatch) while the bar is open
+    /// keeps its text and place, and its field keeps focus.
+    #[gpui::test]
+    fn a_palette_add_while_the_bar_is_open_keeps_it_and_its_text(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "half typed");
+        h.dispatch(&mut vcx, "add_below", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(focused(&mut vcx));
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("half typed"));
+    }
+
+    /// A refused insert puts the place back even when the refused spec
+    /// would have advanced it. `place_for` answers no such place today
+    /// (its one reachable refusal, a package at a leg place, never
+    /// advances), so the place is planted: a root boundary inside a
+    /// package's leg run, which `apply` refuses.
+    #[gpui::test]
+    fn a_refused_line_puts_the_place_back(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        h.tile.update(&mut vcx, |t, _| {
+            t.entry.as_mut().unwrap().place = Place::Root { at: 2 };
+        });
+        typed(&h, &mut vcx, "SPX Z26 3000 P");
+        h.dispatch(&mut vcx, "commit", None);
+        assert!(h.entry_error(&vcx).is_some(), "refused");
+        let place = h
+            .tile
+            .read_with(&vcx, |t, _| t.entry.as_ref().unwrap().place);
+        assert_eq!(place, Place::Root { at: 2 });
     }
 
     #[gpui::test]
     fn up_and_down_walk_the_sheets_own_lines_newest_first(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "add_below", None);
-        let text = |vcx: &VisualTestContext| {
-            h.tile.read_with(vcx, |t, cx| {
-                t.entry.as_ref().unwrap().input.read(cx).value().to_string()
-            })
-        };
+        let text = |vcx: &VisualTestContext| h.entry_text(vcx).unwrap();
         h.dispatch(&mut vcx, "insert_up", None);
         assert_eq!(text(&vcx), "SPX Z26 4000 P");
         h.dispatch(&mut vcx, "insert_up", None);
@@ -4581,17 +4726,15 @@ pub(crate) mod tests {
     }
 
     #[gpui::test]
-    fn escape_removes_the_placeholder_and_the_field_blurs_before_it_drops(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn escape_closes_the_bar_and_the_field_blurs_before_it_drops(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "add_below", None);
         assert!(focused(&mut vcx));
         h.dispatch(&mut vcx, "cancel", None);
         assert!(!focused(&mut vcx), "blurred, then dropped (CLAUDE.md)");
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), None);
-        assert_eq!(h.sheet_len(&vcx), 5, "the sheet never held the placeholder");
+        assert!(!painted(&mut vcx, "pricer-entry"), "the bar is gone");
+        assert_eq!(h.sheet_len(&vcx), 5, "the bar never held a row");
     }
 
     #[gpui::test]
@@ -4966,29 +5109,22 @@ pub(crate) mod tests {
         );
     }
 
-    /// The `o` entry line is an in-grid field too: no chrome, its text
-    /// flush with where the row's shorthand will paint.
+    /// The bar paints between the header and the column headers.
     #[gpui::test]
-    fn the_entry_field_paints_no_chrome(cx: &mut gpui::TestAppContext) {
+    fn the_entry_bar_paints_between_the_header_and_the_table(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "add_below", None);
         h.draw(&mut vcx);
-        let slot = vcx
-            .debug_bounds("pricer-entry-field")
-            .expect("the entry field's slot is painted");
-        let text = h.tile.read_with(&vcx, |t, cx| {
-            t.entry
-                .as_ref()
-                .unwrap()
-                .input
-                .read(cx)
-                .text_bounds()
-                .expect("painted")
-        });
-        assert!(
-            (text.left() - slot.left()).abs() < gpui::px(0.5),
-            "{text:?} in {slot:?}"
-        );
+        let bar = vcx
+            .debug_bounds("pricer-entry")
+            .expect("the bar is painted");
+        let th = vcx
+            .debug_bounds("pricer-th-1")
+            .expect("the headers are painted");
+        assert!(bar.bottom() <= th.top(), "{bar:?} above {th:?}");
+        let field = vcx.debug_bounds("pricer-entry-field").expect("the field");
+        let label = vcx.debug_bounds("pricer-entry-label").expect("the label");
+        assert!(label.right() <= field.left(), "the label leads the field");
     }
 
     // ---- the expiry date field ----
@@ -6273,132 +6409,113 @@ pub(crate) mod tests {
         assert_eq!(h.cell(&vcx, 0, "price"), "12.50");
     }
 
-    // ---- clicks while the entry field is open ----
-
-    /// [A, P, Q], both packages closed: grid rows A=0, P=1, Q=2.
-    const TWO_PACKAGES: [&str; 3] = [
-        "SPX Z26 5000 C",
-        "-5 SPX Z26 4800/5200 CS",
-        "SPX Z26 4000/4400 CS",
-    ];
-
     /// Three roots A, B, C: strikes 5000, 4000, 3000.
     const THREE_LINES: [&str; 3] = ["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"];
 
-    /// The placeholder is a grid row: a click painted below it names the
-    /// row one index lower once the entry closes. The chevron's row must
-    /// be read before the close, or P's chevron toggles Q.
-    #[gpui::test]
-    fn a_chevron_click_below_an_open_entry_toggles_that_package(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_seeded(cx, &TWO_PACKAGES);
-        h.dispatch(&mut vcx, "down", None); // P
-        h.dispatch(&mut vcx, "add_above", None);
-        assert_eq!(h.tile.read_with(&vcx, |t, _| t.model.entry_row()), Some(1));
-        let at = centre_of(&mut vcx, "pricer-chevron-2"); // P, under the placeholder
-        click_at(&mut vcx, at, 1);
-        h.draw(&mut vcx);
-        assert_eq!(h.mode(&mut vcx), "normal", "the click closed the entry");
-        assert_eq!(
-            h.tree(&vcx),
-            vec![
-                "SPX Z26 5000 C".to_string(),
-                "-5 SPX Z26 4800/5200 CS".to_string(),
-                "-5 SPX Z26 4800 C".to_string(),
-                "5 SPX Z26 5200 C".to_string(),
-                "SPX Z26 4000/4400 CS".to_string(),
-            ],
-            "P opened, not Q"
-        );
-        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on P");
-    }
+    // ---- clicks while the bar is open ----
 
     #[gpui::test]
-    fn a_cell_click_below_an_open_entry_lands_on_that_row(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
-        click_at(&mut vcx, at, 1);
-        h.draw(&mut vcx);
-        assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cursor(&vcx), Some((1, 3)), "B's strike, not C's");
-    }
-
-    /// A click on the placeholder itself only closes the entry.
-    #[gpui::test]
-    fn a_click_on_the_placeholder_only_closes_the_entry(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-1-4"); // the placeholder
-        click_at(&mut vcx, at, 1);
-        h.draw(&mut vcx);
-        assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cursor(&vcx), Some((1, 0)), "the cursor stays on B");
-    }
-
-    #[gpui::test]
-    fn a_double_click_below_an_open_entry_edits_that_row(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
-        click_at(&mut vcx, at, 1);
-        click_at(&mut vcx, at, 2);
-        h.draw(&mut vcx);
-        assert_eq!(h.mode(&mut vcx), "insert");
-        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"), "B's strike");
-    }
-
-    /// A double-click on the placeholder only closes the entry: the row
-    /// that slides up under its second press opens nothing.
-    #[gpui::test]
-    fn a_double_click_on_the_placeholder_opens_nothing(cx: &mut gpui::TestAppContext) {
-        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-1-4"); // the placeholder
-        click_at(&mut vcx, at, 1);
-        click_at(&mut vcx, at, 2);
-        h.draw(&mut vcx);
-        assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(editor_text(&h, &vcx), None, "no editor on B");
-    }
-
-    /// A double-click on the tree column opens nothing, but the cursor
-    /// stays on the row it was aimed at, not the one that slid up.
-    #[gpui::test]
-    fn a_tree_column_double_click_below_an_open_entry_keeps_that_row(
+    fn a_click_on_a_row_while_the_bar_is_open_closes_it_and_lands_there(
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-2-0"); // B's shorthand
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-2-2");
         click_at(&mut vcx, at, 1);
-        click_at(&mut vcx, at, 2);
         h.draw(&mut vcx);
         assert_eq!(h.mode(&mut vcx), "normal");
-        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on B, not C");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2));
     }
 
-    /// The closing press's line is handed to the next press only: a
-    /// later double-click at the same spot edits what is painted there.
+    /// A real double-click is two presses at one screen point. The first
+    /// closes the bar and the table moves up under the pointer, so the
+    /// second lands on a lower row; the editor still opens on the row the
+    /// first press hit.
+    #[gpui::test]
+    fn a_double_click_on_a_row_while_the_bar_is_open_edits_that_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-cell-0-4")
+                .is_some_and(|b| !b.contains(&at)),
+            "the table moved up under the pointer"
+        );
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.cursor(&vcx), Some((0, 3)), "on A's strike");
+        assert_eq!(h.mode(&mut vcx), "insert", "the cell editor opened");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"), "A's strike");
+        assert!(h.tile.read_with(&vcx, |t, _| t.entry.is_none()));
+    }
+
+    /// The closing press's line is handed to the next press only: a later
+    /// double-click at the same spot edits the row painted there now.
     #[gpui::test]
     fn a_later_double_click_at_the_same_spot_edits_the_row_painted_there(
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
-        h.dispatch(&mut vcx, "down", None); // B
-        h.dispatch(&mut vcx, "add_above", None);
-        let at = centre_of(&mut vcx, "pricer-cell-2-4"); // B's strike
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
-        assert_eq!(h.cursor(&vcx), Some((1, 3)), "on B");
-        click_at(&mut vcx, at, 1);
         click_at(&mut vcx, at, 2);
         h.draw(&mut vcx);
-        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3000"), "C's strike");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        let (row, _) = h.cursor(&vcx).expect("a cursor row");
+        assert_ne!(row, 0, "the row painted there now, not A");
+        assert_eq!(h.mode(&mut vcx), "insert");
+        let expected = ["5000", "4000", "3000"][row];
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some(expected));
+    }
+
+    /// A chevron double-click hands off like a cell's: the first press
+    /// closes the bar and toggles the package, the table moves up under
+    /// the pointer, and the second press keeps the cursor on the package,
+    /// not on the row that slid up.
+    #[gpui::test]
+    fn a_chevron_double_click_while_the_bar_is_open_keeps_the_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-chevron-1"); // P
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-chevron-1")
+                .is_some_and(|b| !b.contains(&at)),
+            "the table moved up under the pointer"
+        );
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 5, "P toggled open, once");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on P");
+        assert!(h.tile.read_with(&vcx, |t, _| t.entry.is_none()));
+    }
+
+    /// A tree-column double-click opens nothing, but the cursor stays on
+    /// the row the first press hit, not the one that slid up.
+    #[gpui::test]
+    fn a_tree_column_double_click_while_the_bar_is_open_keeps_that_row(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-cell-0-0"); // A's shorthand
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(0), "on A");
     }
 
     // Empty state, labels, action menu, and pointer trigger.
@@ -6416,8 +6533,7 @@ pub(crate) mod tests {
     }
 
     /// Empty-table text distinguishes a pending load from a sheet ready for entry.
-    /// Installing a model mirrors loading state; an entry placeholder replaces the
-    /// empty state because it occupies a table row.
+    /// Installing a model mirrors loading state.
     #[gpui::test]
     fn an_empty_table_names_the_next_action_or_that_it_is_loading(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6425,8 +6541,8 @@ pub(crate) mod tests {
         assert!(painted(&mut vcx, "pricer-empty"));
         h.dispatch(&mut vcx, "add_below", None);
         assert!(
-            !painted(&mut vcx, "pricer-empty"),
-            "the placeholder is a row"
+            painted(&mut vcx, "pricer-empty"),
+            "the bar is not a row; the empty text stays"
         );
 
         let (store, record) = seeded(&["SPX Z26 5000 C"]);

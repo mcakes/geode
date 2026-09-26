@@ -43,9 +43,12 @@ const TILE: u64 = 7;
 /// this module's fragment spliced in) under the tile's LIVE key context,
 /// and dispatched through the tile's own door. So `simulate_keystrokes`
 /// drives a menu the way a trader's keys do, and a key that reaches no
-/// binding (a removed one, say) reaches nothing. Only while the tile is
-/// in `normal` mode: in `insert` the shell resolves a bare key against
-/// the insert layer alone, and those four keys are the fields' own.
+/// binding (a removed one, say) reaches nothing. In `insert` mode it
+/// follows the shell's insert branch for bare keys: they resolve against
+/// the tile context alone (the one carrying `mode == insert`), so a
+/// field's `enter` and `escape` reach its verbs and typing stays text.
+/// Chords in insert mode, and the shell's root `tab` reclaim
+/// (`GeodeShell`), are not modelled; `crate::init`'s own reclaim stands in.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<TimeseriesTile>,
@@ -61,18 +64,23 @@ impl gpui::Render for ShellStandIn {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let context = this.tile.read(cx).key_context();
-                if context.get("mode") != Some("normal") {
-                    return;
-                }
                 let Some(keystroke) = geode_shell::shell::keys::convert_keystroke(&event.keystroke)
                 else {
                     return;
                 };
-                let stack = [
-                    KeyContext::new("workspace"),
-                    KeyContext::new("tile"),
-                    context,
-                ];
+                let stack = match context.get("mode") {
+                    Some("normal") => vec![
+                        KeyContext::new("workspace"),
+                        KeyContext::new("tile"),
+                        context,
+                    ],
+                    // The shell's insert branch: a bare key resolves only
+                    // against the context carrying `mode == insert`, so
+                    // typing stays text and `enter`/`escape` reach the
+                    // field's verbs. Chords are not modelled here.
+                    Some("insert") if !keystroke.mods.is_chord() => vec![context],
+                    _ => return,
+                };
                 if let MatchResult::Matched { action, count } =
                     this.matcher.press(&this.keymap, keystroke, &stack)
                 {
@@ -168,7 +176,7 @@ impl ModuleFactory for Handle {
     }
 }
 
-/// A `colours.toml` holding one name, `spx`, at `degrees` on the
+/// A `colors.toml` holding one name, `spx`, at `degrees` on the
 /// wheel — what `:color SPX.close spx` resolves against, and what a
 /// reload redefines.
 /// `n` HOURLY buckets ending an hour before the current hour, one
@@ -251,7 +259,7 @@ fn seed_catalog(h: &Harness, vcx: &mut gpui::VisualTestContext, sources: &[(&str
     });
 }
 
-fn named_colours(degrees: f32) -> NamedColours {
+fn named_colors(degrees: f32) -> NamedColours {
     let mut c = NamedColours::default();
     c.insert(
         "spx".to_string(),
@@ -316,7 +324,7 @@ fn open_full(
         })
     });
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(TimeseriesFactory::new(data, named_colours(0.0)));
+    let factory = Rc::new(TimeseriesFactory::new(data, named_colors(0.0)));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
@@ -535,7 +543,7 @@ impl Harness {
     fn factory_handle(&self) -> Box<dyn ModuleFactory> {
         Box::new(Handle(self.factory.clone()))
     }
-    /// The first chip's resolved swatch — what a colour reload has
+    /// The first chip's resolved swatch — what a color reload has
     /// to move.
     fn swatch(&self, vcx: &gpui::VisualTestContext) -> gpui::Hsla {
         self.tile.read_with(vcx, |t, _| t.header().chips[0].swatch)
@@ -608,6 +616,29 @@ impl Harness {
             Some(Popup::Expr(f)) => f.error.as_ref().map(|e| e.to_string()),
             _ => None,
         })
+    }
+    /// The expression field's ranked completions, in list order.
+    fn expr_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Expr(f)) => f.completion.candidates().map(str::to_string).collect(),
+            _ => Vec::new(),
+        })
+    }
+    /// The completion list's lit row.
+    fn expr_lit(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Expr(f)) => f
+                .completion
+                .candidates()
+                .nth(f.completion.highlighted())
+                .map(str::to_string),
+            _ => None,
+        })
+    }
+    fn is_painted(&self, vcx: &mut gpui::VisualTestContext, selector: &str) -> bool {
+        self.draw(vcx);
+        let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
+        vcx.debug_bounds(selector).is_some()
     }
     fn popup_is_range(&self, vcx: &gpui::VisualTestContext) -> bool {
         self.tile
@@ -990,11 +1021,11 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
     let after_axis = h.chart(&vcx).version;
     assert!(after_axis > v, "an axis change");
     h.dispatch(&mut vcx, "color", None);
-    assert!(h.chart(&vcx).version > after_axis, "a colour change");
+    assert!(h.chart(&vcx).version > after_axis, "a color change");
 }
 
 #[gpui::test]
-fn a_reloaded_colours_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
+fn a_reloaded_colors_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "color SPX.close spx").unwrap();
@@ -1004,12 +1035,12 @@ fn a_reloaded_colours_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
     // The factory's own door, as the app's bridge calls it on a
     // `ConfigReloaded`: it swaps a fresh `Arc` into the cell every
     // open tile shares, and the next frame is what notices.
-    h.factory.set_colours(named_colours(180.0));
+    h.factory.set_colours(named_colors(180.0));
     h.draw(&mut vcx);
     assert_ne!(h.swatch(&vcx), before, "the chip's swatch follows");
     assert!(
         h.chart(&vcx).version > version,
-        "and so does the line's colour, which lives in the chart model"
+        "and so does the line's color, which lives in the chart model"
     );
     // The frame after that changes nothing.
     let settled = h.chart(&vcx).version;
@@ -1136,7 +1167,7 @@ fn a_handle_session_opens_with_names(cx: &mut gpui::TestAppContext) {
     assert_eq!(saved.get("version").and_then(|v| v.as_integer()), Some(2));
 }
 
-/// `:rule`, `:colour`, `:yaxis` and `:remove` act on the selected series
+/// `:rule`, `:color`, `:yaxis` and `:remove` act on the selected series
 /// with no name, or on the series named first; an expression is reached
 /// only by selection, and a name that fits two series is refused.
 #[gpui::test]
@@ -1911,6 +1942,280 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
     assert_eq!(h.notice(&vcx).as_deref(), Some("VIX is not an expression"));
 }
 
+/// The expression field lists the loaded names, re-ranked against the
+/// name at the caret as the text changes, and paints them under the
+/// field with the first lit. An empty field offers every name.
+#[gpui::test]
+fn the_expression_field_lists_loaded_names_ranked_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.expr_candidates(&vcx),
+        vec!["SPX.close", "VIX", "VIX@demo_rest"],
+        "an empty field offers every loaded name"
+    );
+    vcx.simulate_input("SPX.close / V");
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX", "VIX@demo_rest"]);
+    assert_eq!(h.expr_lit(&vcx).as_deref(), Some("VIX"));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-VIX@demo_rest")));
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close")));
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    vcx.simulate_input(" * 2");
+    assert!(h.expr_candidates(&vcx).is_empty(), "a number takes no name");
+    // `e` seeds the field and ranks at once, against the name the
+    // caret sits after.
+    h.set_input_text(&mut vcx, "SPX.close / VIX");
+    h.dispatch(&mut vcx, "commit", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.expr_candidates(&vcx)[0], "VIX", "ranked on open");
+}
+
+/// With nothing loaded there is nothing an expression may reference:
+/// the list says so and names the key that loads one.
+#[gpui::test]
+fn the_expression_field_says_when_no_series_is_loaded(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "expr", None);
+    assert!(h.popup_is_expr(&vcx));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    h.dispatch(&mut vcx, "cancel", None);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-empty-{TILE}")));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-VIX")));
+}
+
+/// Real `tab` keys reach the field (not `Root`'s focus cycling): the
+/// first writes the lit name over the typed one, the next cycles the
+/// same list, `shift-tab` steps back, and typing carries on after the
+/// written name.
+#[gpui::test]
+fn tab_completes_the_name_at_the_caret_and_cycles(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest");
+    assert_eq!(h.expr_lit(&vcx).as_deref(), Some("VIX@demo_rest"));
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX", "wraps");
+    h.keys(&mut vcx, "shift-tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest");
+    assert!(h.popup_is_expr(&vcx));
+    assert!(
+        vcx.update(|w, cx| h.content.holds_focus(w, cx)),
+        "the field keeps the keyboard"
+    );
+    vcx.simulate_input(" * 2");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX@demo_rest * 2");
+}
+
+/// A caret moved without typing emits no Change; the first `tab` after
+/// it completes the name at the LIVE caret, not the one last typed.
+#[gpui::test]
+fn tab_after_a_caret_move_completes_the_name_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("V / SPX.close");
+    h.keys(&mut vcx, "home right tab");
+    assert_eq!(h.input_text(&vcx), "VIX / SPX.close");
+}
+
+/// `enter` on a name that is not exact but matches exactly one loaded
+/// name writes that name in, then commits — the `:` line's rule.
+#[gpui::test]
+fn enter_expands_a_unique_name_then_commits(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / VI");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX")
+    );
+}
+
+/// A candidate click writes it at the caret like `tab`, and the field
+/// keeps the keyboard: the test TYPES after the click, since a press the
+/// stand-in shell root took would leave the text unchanged.
+#[gpui::test]
+fn clicking_a_candidate_inserts_it_and_typing_continues(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / ");
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-VIX"));
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    assert!(h.popup_is_expr(&vcx));
+    vcx.simulate_input(" * 2");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2");
+    assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    // A press on the list's own inset, between rows, keeps the keyboard
+    // in the field too.
+    vcx.simulate_input(" / ");
+    h.draw(&mut vcx);
+    let list = vcx
+        .debug_bounds(Box::leak(format!("ts-expr-list-{TILE}").into_boxed_str()))
+        .expect("the list is painted");
+    click_at(
+        &mut vcx,
+        list.origin + gpui::point(gpui::px(1.), gpui::px(1.)),
+        1,
+    );
+    h.draw(&mut vcx);
+    vcx.simulate_input("VIX");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2 / VIX");
+}
+
+/// An `enter` whose expansion is refused keeps the field open with the
+/// expanded text; the list is re-ranked against THAT text, so a click
+/// writes over the expanded name rather than the range typed before it,
+/// and the refusal stays on screen.
+#[gpui::test]
+fn a_refused_enter_expansion_re_ranks_before_the_next_click(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("QQQ / SPX.cl");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.input_text(&vcx), "QQQ / SPX.close");
+    h.draw(&mut vcx);
+    assert!(h.expr_error(&vcx).is_some(), "the refusal stays up");
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close"));
+    assert_eq!(h.input_text(&vcx), "QQQ / SPX.close");
+}
+
+/// The same after an expansion ahead of a multi-byte character: a stale
+/// range would end inside it, and the click must neither panic nor write
+/// anywhere but the name at the caret.
+#[gpui::test]
+fn a_click_after_an_expansion_before_multibyte_text_does_not_panic(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add ABC").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.cl éAB");
+    h.keys(&mut vcx, "home right right right right right right");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.input_text(&vcx), "SPX.close éAB");
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close"));
+    assert_eq!(h.input_text(&vcx), "SPX.close éAB");
+}
+
+/// A caret moved after a Tab, then another Tab, completes the name at the
+/// live caret rather than rewriting the name the first Tab wrote.
+#[gpui::test]
+fn tab_after_a_completion_and_a_caret_move_completes_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("S / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "S / VIX");
+    h.keys(&mut vcx, "home right tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+}
+
+/// A caret at a name's START is in that name: Tab completes it rather
+/// than gluing a second name in front of it.
+#[gpui::test]
+fn tab_at_the_start_of_a_name_completes_that_name(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close/VI");
+    h.keys(&mut vcx, "left left tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close/VIX");
+}
+
+/// A completion is one edit in the field's own history: undo takes it
+/// back to what was typed.
+#[gpui::test]
+fn undo_takes_back_a_completion(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    h.keys(
+        &mut vcx,
+        if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        },
+    );
+    assert_eq!(h.input_text(&vcx), "SPX.close / V");
+}
+
+/// A real `enter` reaches the commit through the insert layer, the way
+/// the shell routes a bare key while a field holds the keyboard, and
+/// expands a unique name on the way.
+#[gpui::test]
+fn a_real_enter_commits_through_the_insert_layer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / VI");
+    h.keys(&mut vcx, "enter");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX")
+    );
+}
+
+/// A default-source change while the field is open relabels the loaded
+/// names, so the list cannot offer a label that no longer resolves.
+#[gpui::test]
+fn a_default_source_change_relabels_the_open_list(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX"]);
+    vcx.update(|_, cx| {
+        cx.set_global(SeriesSettings {
+            default_source: Some("demo_rest".into()),
+            sources: demo_sources(),
+        })
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX@demo_kdb"]);
+}
+
 /// The palette can dispatch any action over an open field (`ctrl+k`
 /// is a chord, so it opens with the picker up, and `commit_selected`
 /// closes the palette and dispatches). A verb that ran with the
@@ -1934,7 +2239,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
         before,
         "and the verb itself ran"
     );
-    // The fieldless list remains open while changing slot colours.
+    // The fieldless list remains open while changing slot colors.
     h.dispatch(&mut vcx, "list", None);
     h.dispatch(&mut vcx, "color", None);
     assert!(h.popup_is_series(&vcx));
@@ -2965,18 +3270,18 @@ fn the_empty_state_buttons_open_the_picker_and_the_expression_field(cx: &mut gpu
     assert!(vcx.debug_bounds(selector).is_none());
 }
 
-// ---- the colour picker -------------------------------------------
+// ---- the color picker -------------------------------------------
 
 impl Harness {
-    /// The slot the open colour picker targets, if the picker is up.
-    fn colour_target(&self, vcx: &gpui::VisualTestContext) -> Option<u8> {
+    /// The slot the open color picker targets, if the picker is up.
+    fn color_target(&self, vcx: &gpui::VisualTestContext) -> Option<u8> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Color(c)) => Some(c.target),
             _ => None,
         })
     }
     /// The open picker's component state and its captured featured row.
-    fn colour_pick(
+    fn color_pick(
         &self,
         vcx: &gpui::VisualTestContext,
     ) -> (Entity<ColorPickerState>, Vec<(gpui::Hsla, Color)>) {
@@ -2986,15 +3291,15 @@ impl Harness {
                     assert_eq!(c.target, p.target);
                     (c.picker.clone(), p.featured.clone())
                 }
-                _ => panic!("the colour picker is open"),
+                _ => panic!("the color picker is open"),
             })
     }
-    /// Commit `colour` through the component's own commit — the method
+    /// Commit `color` through the component's own commit — the method
     /// a swatch click and the hex field's `enter` both run.
-    fn select_colour(&self, vcx: &mut gpui::VisualTestContext, colour: gpui::Hsla) {
-        let (picker, _) = self.colour_pick(vcx);
+    fn select_color(&self, vcx: &mut gpui::VisualTestContext, color: gpui::Hsla) {
+        let (picker, _) = self.color_pick(vcx);
         vcx.update(|window, cx| {
-            picker.update(cx, |s, cx| s.select_color(colour, window, cx));
+            picker.update(cx, |s, cx| s.select_color(color, window, cx));
         });
         self.draw(vcx);
     }
@@ -3003,7 +3308,7 @@ impl Harness {
     }
     /// Open the menu and pick `Color…` with the menu's own verbs (`j`
     /// until it is lit, then `enter`).
-    fn pick_colour_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
+    fn pick_color_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
         self.dispatch(vcx, "menu", None);
         let row = self.menu_row_index(vcx, "Color…");
         while !self.menu_rows(vcx)[row].1 {
@@ -3028,20 +3333,20 @@ fn focus_stand_in(vcx: &mut gpui::VisualTestContext) -> gpui::FocusHandle {
 }
 
 #[gpui::test]
-fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
+fn the_color_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
-    h.pick_colour_row_by_keys(&mut vcx);
-    assert_eq!(h.colour_target(&vcx), Some(2), "the cursor's slot");
-    let (picker, featured) = h.colour_pick(&vcx);
+    h.pick_color_row_by_keys(&mut vcx);
+    assert_eq!(h.color_target(&vcx), Some(2), "the cursor's slot");
+    let (picker, featured) = h.color_pick(&vcx);
     assert!(picker.read_with(&vcx, |s, _| s.is_open()));
     assert_eq!(
         picker.read_with(&vcx, |s, _| s.value()),
         Some(h.tile.read_with(&vcx, |t, _| t.header().chips[1].swatch)),
-        "seeded with the slot's colour as painted"
+        "seeded with the slot's color as painted"
     );
     assert_eq!(
         featured.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
@@ -3057,7 +3362,7 @@ fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
     // The component stands in the target chip, in place of its swatch.
     let picker_sel: &'static str =
-        Box::leak(format!("timeseries-colour-picker-{TILE}-2").into_boxed_str());
+        Box::leak(format!("timeseries-color-picker-{TILE}-2").into_boxed_str());
     let swatch_sel: &'static str =
         Box::leak(format!("timeseries-swatch-{TILE}-2").into_boxed_str());
     assert!(vcx.debug_bounds(picker_sel).is_some());
@@ -3071,33 +3376,33 @@ fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
     let row = h.menu_row_index(&vcx, "Color…");
     h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
     h.draw(&mut vcx);
-    assert_eq!(h.colour_target(&vcx), Some(1));
+    assert_eq!(h.color_target(&vcx), Some(1));
     // The same picker entity is reused, not rebuilt.
-    assert_eq!(h.colour_pick(&vcx).0, picker);
+    assert_eq!(h.color_pick(&vcx).0, picker);
     assert!(picker.read_with(&vcx, |s, _| s.is_open()));
 }
 
 #[gpui::test]
-fn a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute(
+fn a_featured_pick_keeps_the_theme_following_color_and_anything_else_is_absolute(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (picker, featured) = h.colour_pick(&vcx);
-    h.select_colour(&mut vcx, featured[5].0);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (picker, featured) = h.color_pick(&vcx);
+    h.select_color(&mut vcx, featured[5].0);
     assert_eq!(h.model(&vcx).slots()[0].color, Color::Named("spx".into()));
     assert!(h.popup_is_none(&vcx), "a swatch commit closes the picker");
     assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (_, featured) = h.colour_pick(&vcx);
-    h.select_colour(&mut vcx, featured[3].0);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (_, featured) = h.color_pick(&vcx);
+    h.select_color(&mut vcx, featured[3].0);
     assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(3));
     // Off the featured row: absolute, and the chart paints exactly it.
-    h.pick_colour_row_by_keys(&mut vcx);
+    h.pick_color_row_by_keys(&mut vcx);
     let before = h.chart(&vcx).slots[0].colour;
     let green = crate::core::Rgb8([0x00, 0xcc, 0x44]);
-    h.select_colour(&mut vcx, green.to_hsla());
+    h.select_color(&mut vcx, green.to_hsla());
     assert_eq!(h.model(&vcx).slots()[0].color, Color::Custom(green));
     let after = h.chart(&vcx).slots[0].colour;
     assert_ne!(before, after);
@@ -3116,16 +3421,16 @@ fn a_pick_lands_on_the_target_slot_even_after_the_cursor_moves(cx: &mut gpui::Te
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
-    h.pick_colour_row_by_keys(&mut vcx);
-    assert_eq!(h.colour_target(&vcx), Some(2));
+    h.pick_color_row_by_keys(&mut vcx);
+    assert_eq!(h.color_target(&vcx), Some(2));
     // The cursor moves under the open picker (the chip door), and a
     // delivery rebuilds the chrome: neither retargets it.
     vcx.update(|_, cx| h.tile.update(cx, |t, cx| t.chip_clicked(0, cx)));
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     assert_eq!(h.model(&vcx).cursor(), Some(0));
-    assert_eq!(h.colour_target(&vcx), Some(2));
+    assert_eq!(h.color_target(&vcx), Some(2));
     let blue = crate::core::Rgb8([0x11, 0x22, 0xee]);
-    h.select_colour(&mut vcx, blue.to_hsla());
+    h.select_color(&mut vcx, blue.to_hsla());
     let m = h.model(&vcx);
     assert_eq!(m.slots()[1].color, Color::Custom(blue), "the target");
     assert_eq!(m.slots()[0].color, Color::Palette(0), "not the cursor");
@@ -3136,17 +3441,17 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let root = focus_stand_in(&mut vcx);
-    h.pick_colour_row_by_keys(&mut vcx);
+    h.pick_color_row_by_keys(&mut vcx);
     // The popover holds the keyboard, and the tile says so: the shell's
     // insert branch then keeps bare keys (typing in the hex field) away
     // from the tile's verbs.
     assert!(h.holds_focus(&mut vcx), "the picker holds the keyboard");
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
-    let colour = h.model(&vcx).slots()[0].color.clone();
+    let color = h.model(&vcx).slots()[0].color.clone();
     vcx.simulate_keystrokes("escape");
     h.draw(&mut vcx);
     assert!(h.popup_is_none(&vcx), "escape closes");
-    assert_eq!(h.model(&vcx).slots()[0].color, colour, "unchanged");
+    assert_eq!(h.model(&vcx).slots()[0].color, color, "unchanged");
     assert!(
         vcx.update(|window, _| root.is_focused(window)),
         "focus is back where it was"
@@ -3159,16 +3464,16 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
 }
 
 /// The component writes its hex field by TRUNCATING each channel, so
-/// the seeded text can sit one step below the colour the slot paints.
+/// the seeded text can sit one step below the color the slot paints.
 /// `enter` on that untouched text must not turn a theme-following
-/// colour into an absolute one a shade off.
+/// color into an absolute one a shade off.
 #[gpui::test]
-fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAppContext) {
+fn enter_on_the_untouched_hex_field_keeps_the_slots_color(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let _root = focus_stand_in(&mut vcx);
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (picker, _) = h.colour_pick(&vcx);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (picker, _) = h.color_pick(&vcx);
     vcx.update(|window, cx| {
         let input = picker.read(cx).hex_input().clone();
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -3180,21 +3485,21 @@ fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAp
     assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(0));
 }
 
-/// A pick that is (to a step) the colour the slot already paints
+/// A pick that is (to a step) the color the slot already paints
 /// changes nothing — even where a featured entry also matches it. Here
 /// the slot names a color since deleted from `[colors]`, so it paints
-/// palette colour 1; `enter` on the untouched field keeps the name
+/// palette color 1; `enter` on the untouched field keeps the name
 /// rather than rewriting it as `Palette(0)`.
 #[gpui::test]
-fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
+fn a_pick_of_the_color_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "color SPX.close spx").unwrap();
     h.factory.set_colours(NamedColours::default());
     h.draw(&mut vcx);
     let _root = focus_stand_in(&mut vcx);
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (picker, _) = h.colour_pick(&vcx);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (picker, _) = h.color_pick(&vcx);
     vcx.update(|window, cx| {
         let input = picker.read(cx).hex_input().clone();
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -3207,12 +3512,12 @@ fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext
 }
 
 #[gpui::test]
-fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
+fn a_typed_hex_commits_an_absolute_color_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let root = focus_stand_in(&mut vcx);
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (picker, _) = h.colour_pick(&vcx);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (picker, _) = h.color_pick(&vcx);
     // The hex field, as a click on it would leave it: focused, emptied.
     vcx.update(|window, cx| {
         let input = picker.read(cx).hex_input().clone();
@@ -3222,7 +3527,7 @@ fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::Te
     h.draw(&mut vcx);
     assert!(h.holds_focus(&mut vcx), "the hex field is the picker's");
     // Typing edits the field and commits nothing until `enter`. (That a
-    // typed `c` is not the tile's `Cycle colour` is the shell's insert
+    // typed `c` is not the tile's `Cycle color` is the shell's insert
     // branch's doing, which routes on `holds_focus` + `insert`, both
     // asserted above; this harness has no shell matcher.)
     vcx.simulate_input("#ffcc00");
@@ -3251,9 +3556,9 @@ fn a_swatch_commit_blurs_the_picker_before_dropping_it(cx: &mut gpui::TestAppCon
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let _root = focus_stand_in(&mut vcx);
-    h.pick_colour_row_by_keys(&mut vcx);
+    h.pick_color_row_by_keys(&mut vcx);
     assert!(h.holds_focus(&mut vcx));
-    let (picker, featured) = h.colour_pick(&vcx);
+    let (picker, featured) = h.color_pick(&vcx);
     vcx.update(|window, cx| {
         picker.update(cx, |s, cx| s.select_color(featured[1].0, window, cx));
     });
@@ -3271,18 +3576,18 @@ fn removing_the_target_slot_closes_the_picker(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
-    h.pick_colour_row_by_keys(&mut vcx);
-    let (picker, _) = h.colour_pick(&vcx);
+    h.pick_color_row_by_keys(&mut vcx);
+    let (picker, _) = h.color_pick(&vcx);
     // Another slot going leaves it up.
     h.command(&mut vcx, "remove SPX.close").unwrap();
-    assert_eq!(h.colour_target(&vcx), Some(2));
+    assert_eq!(h.color_target(&vcx), Some(2));
     h.command(&mut vcx, "remove VIX").unwrap();
     assert!(h.popup_is_none(&vcx), "its target is gone");
     assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
 }
 
 #[gpui::test]
-fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
+fn the_color_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     assert!(!h.dispatch_handled(&mut vcx, "pick_color", None));
     assert!(h.popup_is_none(&vcx));

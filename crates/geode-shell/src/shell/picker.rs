@@ -310,6 +310,9 @@ fn commit_column(
             column: column.clone(),
         };
         p.selected = 0;
+        // `set_value` below emits no change event, so the mirror is reset
+        // here; the column filter would otherwise hide every value.
+        p.query.clear();
     }
     sync_picker_scroll(shell);
     shell.dialog_input.update(cx, |input, cx| {

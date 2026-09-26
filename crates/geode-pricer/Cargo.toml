@@ -9,8 +9,8 @@ bench = false
 
 [features]
 # Read-only accessors a host's tests observe a tile through
-# (`PricerTile::sheet`, `is_loading`); geode-app's dev-dependencies turn
-# it on.
+# (`PricerTile::sheet`, `is_loading`, `entry_text`); geode-app's
+# dev-dependencies turn it on.
 test-support = []
 
 # The pure core (`core`) needs `geode-core` and `chrono` alone. The tile

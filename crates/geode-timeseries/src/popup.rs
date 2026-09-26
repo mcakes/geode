@@ -1,20 +1,22 @@
 //! State and painting for six mutually exclusive transient surfaces: series
 //! list, add picker, expression field, custom dates editor, the menus (action
-//! list, range menu and frequency menu, one painter), and colour picker.
+//! list, range menu and frequency menu, one painter), and color picker.
 //!
 //! Add/expression inputs, the dates editor's container, and the component
-//! colour picker use insert-mode routing. Series and the menus retain normal
+//! color picker use insert-mode routing. Series and the menus retain normal
 //! mode with popup-specific context. The shared closer blurs only a popup that
 //! owns focus. Color-picker ownership includes focused descendants such as its
 //! hex field.
 //!
 //! Series labels, state text, and swatches are prepared alongside header chips.
-//! Picker labels, menu rows, and date segments are also prepared outside render.
-//! Series/picker rows share row_shell; menu rows add disabled reasons and toggles.
+//! Picker labels, completion labels, menu rows, and date segments are also
+//! prepared outside render. Series, picker and completion rows share
+//! row_shell; menu rows add disabled reasons and toggles.
 //!
-//! The lists, add picker, and range editor use deferred anchored popovers above
-//! the chart. Expressions paint inline below the header. The component colour
-//! picker replaces its target chip's swatch and owns its own popup surface.
+//! The lists, add picker, range editor, and expression completion list use
+//! deferred anchored popovers above the chart. The expression field itself
+//! paints inline below the header. The component color picker replaces its
+//! target chip's swatch and owns its own popup surface.
 
 use std::rc::Rc;
 
@@ -35,6 +37,7 @@ use gpui_component::color_picker::ColorPickerState;
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
+use crate::core::complete::Completion;
 use crate::core::menu::{MenuKind, MenuRow, Trailing};
 use crate::core::model::{Color, Model, SlotState};
 use crate::tile::TimeseriesTile;
@@ -54,6 +57,15 @@ const LABEL_WIDTH: f32 = 32.0;
 /// Tab actions here so the container can switch its two date fields.
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 
+/// Expression-field key context. `crate::init` unbinds GPUI's
+/// focus-cycling Tab actions here so the field's listener completes a
+/// series name.
+pub const EXPR_CONTEXT: &str = "GeodeTimeseriesExpr";
+
+/// The completion list's line when no series is loaded: an expression
+/// may reference only a loaded one. Backtick-quoted runs are keys.
+const EXPR_NOTHING_LOADED: &str = "no series loaded — `a` adds one";
+
 /// The dates editor's hint: `tab` and `escape` do things a trader cannot see
 /// from the two fields alone. Backtick-quoted runs are keys, painted as chips
 /// by `kbd::marked`.
@@ -62,7 +74,7 @@ const RANGE_HINT: &str = "`tab` switches · `enter` applies · `escape` goes bac
 /// Mutually exclusive transient state. Series and Menu add their popup pair
 /// to normal-mode context (a menu also its `menu` kind pair). Picker, Expr,
 /// Range (the custom dates editor), and Color use insert routing; Range and
-/// the component colour picker also own their focused key handlers.
+/// the component color picker also own their focused key handlers.
 pub(crate) enum Popup {
     Series(SeriesPopup),
     Picker(PickerState),
@@ -71,9 +83,9 @@ pub(crate) enum Popup {
     /// Fieldless menu — the action list, the range menu or the frequency menu
     /// ([`MenuKind`]) — routed through `popup == menu` and a `menu` kind pair.
     Menu(MenuState),
-    /// Component colour picker anchored at one slot's chip. The header renders
+    /// Component color picker anchored at one slot's chip. The header renders
     /// its trigger in place of that chip's swatch; the component owns the popover.
-    Color(ColourPick),
+    Color(ColorPick),
 }
 
 /// Which popup is up, without its state: what a painted popup's outside-press
@@ -89,9 +101,9 @@ pub(crate) enum PopupKind {
     Color,
 }
 
-/// Header paint state for a colour picker: target slot number, featured swatches
+/// Header paint state for a color picker: target slot number, featured swatches
 /// resolved at open, and the reusable component state.
-pub(crate) struct ColourPick {
+pub(crate) struct ColorPick {
     pub target: u8,
     pub swatches: Vec<Hsla>,
     pub picker: Entity<ColorPickerState>,
@@ -399,6 +411,14 @@ pub(crate) struct ExprField {
     /// name and checks for a cycle through.
     pub editing: Option<u8>,
     pub error: Option<SharedString>,
+    /// The loaded-name list under the field, rebuilt on the input's
+    /// Change event and on open, never in render.
+    pub completion: Completion,
+    /// The text the tile's own last completion write left in the field.
+    /// That write's Change event carries it and is skipped: the write has
+    /// already placed the list, and a refusal shown after an Enter
+    /// expansion must survive its echo.
+    pub echo: Option<String>,
 }
 
 /// Split each option into the two columns a picker row paints. The
@@ -449,7 +469,7 @@ impl SeriesPopup {
         model: &Model,
         result: Option<&SeriesResult>,
         default_source: Option<&str>,
-        colour_of: &dyn Fn(&Color) -> Hsla,
+        color_of: &dyn Fn(&Color) -> Hsla,
     ) -> SeriesPopup {
         let rows = model
             .slots()
@@ -467,7 +487,7 @@ impl SeriesPopup {
                     source_rule: source_rule.into(),
                     axis: s.axis.letter(),
                     state: state_text(s.number, &s.state, result),
-                    swatch: colour_of(&s.color),
+                    swatch: color_of(&s.color),
                     hidden: !s.visible,
                 }
             })
@@ -732,6 +752,61 @@ pub(crate) fn render_picker(
         list = list.child(empty_row(theme, "no identities known"));
     }
     anchor_popup(list, Anchor::TopRight)
+}
+
+/// Paint the expression field's completion list under the field: the
+/// painted window of ranked loaded names with the lit row, or the one
+/// muted line when nothing is loaded. `None` when there is nothing to
+/// offer at the caret (a number, or no name matches).
+///
+/// A row press writes that name at the caret through `expr_pick`, the
+/// same write `tab` makes. The press never leaves the popup: rows stop
+/// propagation, and the surface occludes, so no hitbox below it — the
+/// shell root's `track_focus` among them, which focuses only a hovered
+/// hitbox — is hovered, and nothing takes the keyboard from the field.
+pub(crate) fn render_expr_list(
+    f: &ExprField,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+    cx: &App,
+) -> Option<Deferred> {
+    let c = &f.completion;
+    if !c.nothing_loaded() && c.candidate_count() == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let hover = row_paint(theme).hover;
+    let mut list = popover_surface(cx)
+        .debug_selector(move || format!("ts-expr-list-{tile_id}"))
+        // Keep the chart below from receiving pointer hits through the
+        // popup, and the shell root from taking focus on a press here.
+        .occlude();
+    if c.nothing_loaded() {
+        list = list.child(
+            empty_row(theme, EXPR_NOTHING_LOADED)
+                .debug_selector(move || format!("ts-expr-empty-{tile_id}")),
+        );
+        return Some(anchor_popup(list, Anchor::TopLeft));
+    }
+    for (i, label) in c.painted() {
+        let highlighted = i == c.highlighted();
+        let selector_label = label.clone();
+        list = list.child(
+            row_shell(
+                theme,
+                hover,
+                ElementId::Name(label.clone()),
+                highlighted,
+                move || format!("ts-expr-row-{tile_id}-{selector_label}"),
+                {
+                    let tile = tile.clone();
+                    move |window, cx| tile.update(cx, |t, cx| t.expr_pick(i, window, cx))
+                },
+            )
+            .child(label.clone()),
+        );
+    }
+    Some(anchor_popup(list, Anchor::TopLeft))
 }
 
 /// Read date-field colors from the current theme; segment strings are already
@@ -1008,8 +1083,8 @@ mod tests {
     use geode_core::series::{BucketRule, SlotProvenance, SlotResult};
 
     /// Map palette indices to distinct hues for window-free swatch assertions.
-    fn stub(colour: &Color) -> Hsla {
-        match colour {
+    fn stub(color: &Color) -> Hsla {
+        match color {
             Color::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Color::Named(_) => gpui::black(),
             Color::Custom(c) => c.to_hsla(),

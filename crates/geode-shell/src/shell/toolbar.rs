@@ -11,6 +11,12 @@
 //! Scope chips show dimensions, top-level expression terms, and any
 //! contradiction. The add action opens [`super::addfilter`]. The text input
 //! shows the frame's text and supplies its own clear glyph.
+//!
+//! Pressable controls and the scope input wrapper use `occlude()` so their
+//! hitboxes block the title bar's window-drag handling, including the Windows
+//! caption hit test. Text selection and other control gestures stay local;
+//! dragging bare title-bar space moves the window. Event propagation alone
+//! does not block the platform caption hit test.
 
 use std::rc::Rc;
 
@@ -57,6 +63,9 @@ fn chip(
 ) -> Stateful<Div> {
     h_flex()
         .id(id)
+        // A title-bar control: `occlude()` keeps a press here from
+        // reaching `TitleBar`'s drag surface (module doc: title-bar controls).
+        .occlude()
         .items_center()
         .gap_1()
         .px_2()
@@ -86,6 +95,8 @@ fn verb(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
         .flex()
         .items_center()
         .justify_center()
@@ -407,6 +418,8 @@ pub fn toolbar(
     // control pointer colors used by the toolbar actions.
     let grouping = h_flex()
         .id("scope-grouping")
+        // A title-bar control (module doc: title-bar controls).
+        .occlude()
         .items_center()
         .gap_1()
         .pl_1p5()
@@ -514,12 +527,17 @@ pub fn toolbar(
             // never the cleared text). The wrapper carries the selector a
             // window test measures the field by — `Input` has none.
             .child(
-                div().debug_selector(|| "scope-field".to_string()).child(
-                    Input::new(filter_input)
-                        .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
-                        .cleanable(true)
-                        .w(scale::design(FILTER_WIDTH)),
-                ),
+                // A title-bar control (module doc: title-bar controls): a drag
+                // in the field selects text.
+                div()
+                    .occlude()
+                    .debug_selector(|| "scope-field".to_string())
+                    .child(
+                        Input::new(filter_input)
+                            .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                            .cleanable(true)
+                            .w(scale::design(FILTER_WIDTH)),
+                    ),
             ),
     )
 }
