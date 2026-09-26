@@ -20600,11 +20600,16 @@ run_mutation "pricer grid: a package's tag is its search text" \
   '                    package_search(sheet, r).into(),' \
   geode-pricer rows_follow_the_expansion_and_carry_depth_ids_tags_and_search_keys
 
-# Find reads the unpainted search key, not the painted tag.
+# Find reads the unpainted search key, not the painted tag. Anchored on
+# `row_labels`'s wrapped chain (rustfmt splits it past chain_width); the
+# harness's own `tree()` helper keeps the equivalent call on one line, so
+# the two never collide.
 run_mutation "pricer tile: find reads the painted tag" \
   crates/geode-pricer/src/tile.rs \
-  '        self.model.rows.iter().map(|r| r.search.to_string()).collect()' \
-  '        self.model.rows.iter().map(|r| r.tag.to_string()).collect()' \
+  '            .map(|r| r.search.to_string())
+            .collect()' \
+  '            .map(|r| r.tag.to_string())
+            .collect()' \
   geode-pricer find_matches_shorthand_that_no_column_shows
 
 # The pricer's gutter follows `[ui] line_numbers` through the observed
