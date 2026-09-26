@@ -515,8 +515,16 @@ pub fn draft_scope(draft: &Draft, config: &Config, minus: &str) -> Scope {
 /// The scope a new `expression` for this draft is ANDed with: its own
 /// selections and text filter, with no expression, since that is being
 /// replaced. Narrows the expression field's value suggestions.
+///
+/// The old expression is blanked before the scope is read, not after: the
+/// reader drops a whole scope whose expression it cannot read (one naming
+/// a removed column), which would widen the request to the whole dataset
+/// exactly when the field is opened to repair it. `to_table` renders from
+/// `source` alone, so that is the only place it is blanked.
 pub fn expression_scope(draft: &Draft, config: &Config) -> Scope {
-    let mut scope = draft_scope(draft, config, "");
+    let mut blanked = draft.clone();
+    blanked.source.remove("expression");
+    let mut scope = draft_scope(&blanked, config, "");
     scope.expression = None;
     scope
 }
@@ -1045,5 +1053,24 @@ mod tests {
         assert_eq!(scope.text.as_deref(), Some("spx"));
         assert_eq!(scope.dimensions.len(), 1);
         assert_eq!(scope.dimensions[0].column, "lhu");
+    }
+
+    /// The saved expression is the one being replaced, so an unreadable one
+    /// (a removed column) must not drop the draft's selections from the
+    /// values request's narrowing — that is when the field is opened to
+    /// repair it.
+    #[test]
+    fn expression_scope_keeps_the_selections_under_an_unreadable_expression() {
+        let config = config_with_scope(
+            "[mine]\ntext = \"spx\"\nexpression = \"gone = 'x'\"\n\
+             [mine.dimensions]\nbook = [\"BK001\"]\n",
+        );
+        let draft = Domain::Scopes.draft(&config, "mine");
+        let scope = expression_scope(&draft, &config);
+        assert_eq!(scope.dimensions.len(), 1);
+        assert_eq!(scope.dimensions[0].column, "book");
+        assert_eq!(scope.dimensions[0].values, ["BK001"]);
+        assert_eq!(scope.text.as_deref(), Some("spx"));
+        assert!(scope.expression.is_none());
     }
 }
