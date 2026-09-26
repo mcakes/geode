@@ -11985,6 +11985,21 @@ run_mutation "draft: an unknown generation is not evidence of movement" \
   geode-marketdata \
   a_same_time_republish_is_a_different_generation_when_both_ids_are_known
 
+# The one wire between the generation the store reported and the pair a
+# draft compares. Mutated to drop it, nothing complains: the type checks,
+# provenance still names the right generation, and every generation entry
+# above still reports `caught` — but a corrected republish at the same
+# source time is invisible again. The panel installs the republished grid
+# under the open draft, each edit keyed by grid position lands on whichever
+# node now sits where it was made, and the trader sees another node's
+# number marked as their own edit and uploads it.
+run_mutation "matrix: a model's base carries the generation, not the source time alone" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        generation: freshness.generation,' \
+  '        generation: None,' \
+  geode-marketdata \
+  a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it
+
 # A rebase matches by LABEL. Mutated to keep each edit's old index, a term
 # that moved up a row has its edit reassigned to a different expiry, and a
 # label the new document lacks is never reported dropped.
