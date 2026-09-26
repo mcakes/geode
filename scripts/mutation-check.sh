@@ -19372,11 +19372,13 @@ run_mutation "service: a failed local publish sends no LocalPublishFailed" \
 
 # Local-write outcomes share one mailbox key per document, apart from that
 # document's `Published` entry.
-run_mutation "mailbox: a local-write outcome merges into Published" \
+# Every local-write outcome is some writer's answer (a sheet load deferred
+# behind its save waits for it), so none may coalesce into another.
+run_mutation "mailbox: local-write outcomes coalesce" \
   crates/geode-app/src/events.rs \
-  '            Key::Local(dataset.clone(), batch.clone())' \
-  '            Key::Published(dataset.clone(), batch.clone())' \
-  geode-app local_write_outcomes_keep_the_latest_per_document_apart_from_published
+  '        | DataEvent::ForgetFailed { .. } => Key::Local(seq),' \
+  '        | DataEvent::ForgetFailed { .. } => Key::Local(0),' \
+  geode-app every_local_write_outcome_is_delivered_in_order
 
 run_mutation "bridge: a forgotten document leaves a watched catalog stale" \
   crates/geode-app/src/bridge.rs \
@@ -19415,6 +19417,75 @@ run_mutation "prune: file_books rows of evicted generations survive" \
   '        "delete from file_books where file_id in ({ORPHANS})"' \
   '        "delete from file_books where false and file_id in ({ORPHANS})"' \
   geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
+
+# A publish or forget refused at the service must still answer its writer,
+# or a sheet load deferred behind the save waits forever.
+run_mutation "service: a refused local publish answers nothing" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::LocalPublishFailed {
+                batch: geode_core::document::join_key(&publish.rows.key),
+                dataset: publish.dataset,
+                reason: "not a local dataset".to_string(),
+            });' \
+  '' \
+  geode-data a_publish_refused_at_the_service_answers_local_publish_failed
+
+run_mutation "service: a refused forget answers nothing" \
+  crates/geode-data/src/service.rs \
+  '            let _ = (self.sink)(DataEvent::ForgetFailed {
+                batch: geode_core::document::join_key(&forget.key),
+                dataset: forget.dataset,
+                reason: why,
+            });' \
+  '' \
+  geode-data a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing
+
+# The drain hands every pricer_sheets local-write outcome to the pricer
+# factory: a tile may wait on any one of them with no timeout.
+run_mutation "bridge: a stored sheet save is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.save_answered(sheet, Ok(()), cx);' \
+  '                            let _ = sheet;' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a failed sheet save is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.save_answered(sheet, Err(reason), cx);' \
+  '                            let _ = (sheet, reason);' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a failed sheet forget is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.forget_answered(sheet, Err(reason), cx);' \
+  '                            let _ = (sheet, reason);' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: a forgotten sheet is not routed to the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '                            pricer.forget_answered(sheet, Ok(()), cx);' \
+  '                            let _ = sheet;' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+run_mutation "bridge: another dataset's local-write outcome reaches the pricer" \
+  crates/geode-app/src/bridge.rs \
+  '    (dataset == PRICER_SHEETS_DATASET).then_some(batch)' \
+  '    Some(batch).filter(|_| !dataset.is_empty())' \
+  geode-app every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does
+
+# Sheets persist only through the DuckDB store; the in-memory one loses
+# them at a restart (and never answers a save, so a deferred load hangs).
+run_mutation "bridge: start builds the pricer over the in-memory store" \
+  crates/geode-app/src/bridge.rs \
+  '        Rc::new(DuckSheetStore::new(handle.clone())),' \
+  '        Rc::new(geode_pricer::store::MemorySheetStore::default()),' \
+  geode-app a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart
+
+run_mutation "main: the builtin layer omits pricer_sheets" \
+  crates/geode-app/src/main.rs \
+  '        LayerDoc::builtin("datasets", geode_pricer::core::PRICER_SHEETS_DECLARATION)
+            .expect("PRICER_SHEETS_DECLARATION is well-formed TOML"),' \
+  '' \
+  geode-app the_builtin_layer_declares_pricer_sheets_as_a_local_dataset
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
