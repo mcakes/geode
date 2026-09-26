@@ -188,7 +188,10 @@ removed or reverted.
 when a definition is forked. Browse drift compares that baseline against the
 current inherited definition. It does not compare the user's deliberate edits
 with the inherited object. Missing or stale records cannot establish drift;
-sidecar cleanup accompanies relevant fork/removal batches.
+sidecar cleanup accompanies relevant fork/removal batches. Entries are keyed
+`<doc>.<object>`; one recorded under a renamed document's old name
+(`colours.<name>`) still counts for the current document, is removed with its
+object, and is pruned as stale once a current-spelled entry exists.
 
 Drift is informational, not a conflict lock. There is no optimistic version
 check against another editor: read-modify-write preserves other objects in the

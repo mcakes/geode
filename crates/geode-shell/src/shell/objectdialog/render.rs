@@ -2366,10 +2366,9 @@ fn removal_edits(
     let mut keys: Vec<(&'static str, String)> =
         touched.into_iter().map(|doc| (doc, name.clone())).collect();
     // the sidecar entry rides the same removal — never created just to remove nothing,
-    // hence the `has_override_entry` gate rather than an unconditional key.
+    // hence only the keys the sidecar actually holds rather than an unconditional key.
     if let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) {
-        let okey = super::override_key(domain.doc(), &name);
-        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {
+        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {
             keys.push((super::OVERRIDES_DOC, okey));
         }
     }

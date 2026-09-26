@@ -385,11 +385,20 @@ pub fn shadow_of(config: &Config, doc: &str, object: &str) -> Option<(Layer, tom
         .next_back()
 }
 
-/// The overrides sidecar's own entries, user layer only, as `key ->
-/// (shadowed_layer, shadowed_text)`. Private: every reader outside this
-/// module goes through [`stale_override_keys`] or `derive_rows`'s own
-/// drift computation, never the raw map.
-fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+/// The sidecar key as the current document name spells it: an entry recorded
+/// before a document rename (`colours.<name>`) names the renamed document
+/// (`colors.<name>`), so its fork baseline still counts.
+fn current_override_key(raw: &str) -> String {
+    raw.split_once('.')
+        .and_then(|(doc, object)| {
+            geode_core::config::renamed_doc(doc).map(|new| override_key(new, object))
+        })
+        .unwrap_or_else(|| raw.to_string())
+}
+
+/// The overrides sidecar's well-formed user-layer entries under their spelling in
+/// the file, as `(raw key, (shadowed_layer, shadowed_text))`.
+fn raw_override_entries(config: &Config) -> Vec<(String, (String, String))> {
     config
         .layered_docs(OVERRIDES_DOC)
         .iter()
@@ -409,21 +418,53 @@ fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
         .collect()
 }
 
-/// Whether `doc.object` has a recorded override entry — the gate
-/// [`render::removal_edits`] uses to decide whether a delete/revert also
-/// touches `overrides.toml`, so a missing sidecar is never created just
-/// to remove nothing from it.
-pub(super) fn has_override_entry(config: &Config, doc: &str, object: &str) -> bool {
-    override_entries(config).contains_key(&override_key(doc, object))
+/// The overrides sidecar's own entries, user layer only, as `key ->
+/// (shadowed_layer, shadowed_text)` under current document names; a
+/// current-spelled key wins over an old-spelled one for the same object.
+/// Private: every reader outside this module goes through
+/// [`stale_override_keys`] or `derive_rows`'s own drift computation, never
+/// the raw map.
+fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    for (raw, entry) in raw_override_entries(config) {
+        let key = current_override_key(&raw);
+        if key == raw {
+            out.insert(key, entry);
+        } else {
+            out.entry(key).or_insert(entry);
+        }
+    }
+    out
+}
+
+/// The sidecar keys, as spelled in the file, recording `doc.object` — what
+/// [`render::removal_edits`] removes beside a delete/revert, so a missing
+/// sidecar is never created just to remove nothing from it, and an entry
+/// recorded under an old document name goes with its object.
+pub(super) fn override_keys_of(config: &Config, doc: &str, object: &str) -> Vec<String> {
+    let key = override_key(doc, object);
+    raw_override_entries(config)
+        .into_iter()
+        .map(|(raw, _)| raw)
+        .filter(|raw| current_override_key(raw) == key)
+        .collect()
 }
 
 /// Entries that describe nothing any more: the user layer no longer holds the object,
-/// or no layer beneath shadows it. Ignored by `derive_rows` and pruned by the next
-/// overrides write.
+/// or no layer beneath shadows it, or an old-spelled key duplicates a current one.
+/// Ignored by `derive_rows` and pruned by the next overrides write. Keys are
+/// returned as the file spells them, so the prune removes them.
 pub fn stale_override_keys(config: &Config) -> Vec<String> {
-    override_entries(config)
-        .keys()
-        .filter(|key| {
+    let raws: Vec<String> = raw_override_entries(config)
+        .into_iter()
+        .map(|(raw, _)| raw)
+        .collect();
+    raws.iter()
+        .filter(|raw| {
+            let key = current_override_key(raw);
+            if key != **raw && raws.contains(&key) {
+                return true;
+            }
             let Some((doc, object)) = key.split_once('.') else {
                 return true;
             };
@@ -3476,6 +3517,51 @@ mod tests {
         ]);
         assert!(!Domain::Views.objects(&config)[0].drifted);
         assert_eq!(stale_override_keys(&config), vec!["views.tree".to_string()]);
+    }
+
+    /// An override recorded before `colours` became `colors` is keyed
+    /// `colours.<name>`: it still measures drift for the colors object, a
+    /// revert removes it under its own spelling, and beside a current-spelled
+    /// entry it is stale so the next overrides write prunes it.
+    #[test]
+    fn an_override_recorded_under_the_old_colours_key_still_counts() {
+        let desk_v1 = "[delta]\nhue = 240\n";
+        let user = "[delta]\nhue = 10\n";
+        let shadow_text = object_text(
+            "delta",
+            toml_value_to_item(&desk_v1.parse::<toml::Table>().unwrap()["delta"]),
+        );
+        let entry = |key: &str| {
+            format!(
+                "[\"{key}\"]\nshadowed_layer = \"desk\"\nshadowed_text = '''\n{shadow_text}'''\n"
+            )
+        };
+        let legacy = entry("colours.delta");
+        let desk_v2 = "[delta]\nhue = 250\n";
+        let config = config_from(&[
+            (Layer::Desk, "colors", desk_v2),
+            (Layer::User, "colors", user),
+            (Layer::User, "overrides", legacy.as_str()),
+        ]);
+        let rows = Domain::Colors.objects(&config);
+        assert!(rows[0].overridden);
+        assert!(rows[0].drifted, "the old-keyed baseline measures drift");
+        assert_eq!(
+            override_keys_of(&config, "colors", "delta"),
+            vec!["colours.delta".to_string()]
+        );
+        assert!(stale_override_keys(&config).is_empty());
+
+        let both = format!("{legacy}{}", entry("colors.delta"));
+        let config = config_from(&[
+            (Layer::Desk, "colors", desk_v1),
+            (Layer::User, "colors", user),
+            (Layer::User, "overrides", both.as_str()),
+        ]);
+        assert_eq!(
+            stale_override_keys(&config),
+            vec!["colours.delta".to_string()]
+        );
     }
 
     #[test]

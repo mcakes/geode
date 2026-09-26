@@ -10040,8 +10040,8 @@ run_mutation "objectdialog: an unmatched diagnostic stays on the header" \
 # removal_edits`), distinct from the fork's own insert above.
 run_mutation "objectdialog: revert removes the overrides entry" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
-  '        if false && super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  '        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {' \
+  '        for okey in Vec::<String>::new() {' \
   geode-shell \
   a_fork_records_an_override_entry_and_revert_removes_it
 
@@ -20406,6 +20406,20 @@ run_mutation "color rename: a session slot saved as colour restores" \
   '    match r.get("color").or_else(|| r.get("colour")) {' \
   '    match r.get("color") {' \
   geode-timeseries the_old_colour_key_is_read_and_rewritten_as_color
+
+# An overrides entry recorded as colours.<name> names the colors object.
+run_mutation "color rename: an old colours override key still measures drift" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            geode_core::config::renamed_doc(doc).map(|new| override_key(new, object))' \
+  '            None::<String>' \
+  geode-shell an_override_recorded_under_the_old_colours_key_still_counts
+
+# Beside a current-spelled entry the old-spelled one is stale and pruned.
+run_mutation "color rename: a duplicate old override key is stale" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if key != **raw && raws.contains(&key) {' \
+  '            if false {' \
+  geode-shell an_override_recorded_under_the_old_colours_key_still_counts
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
