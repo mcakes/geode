@@ -25,7 +25,9 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
-use gpui::{App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div};
+use gpui::{
+    AnyElement, App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
@@ -45,10 +47,8 @@ pub(crate) const EMPTY_HINT: &str = "no series — a adds one, x composes";
 
 /// The swatch beside a chip's label, in pixels at the design rem.
 const SWATCH: f32 = 8.0;
-/// The swatch's click target (mouse pass, 2026-09-24): the dot sits
-/// centred in a square this wide, which is what takes the hover fill —
-/// a hover painted on the dot itself would replace the one colour the
-/// dot exists to show.
+/// Square pointer target around the swatch. Hover fills the surrounding
+/// control so the dot continues to show the series color.
 const SWATCH_TARGET: f32 = 16.0;
 
 /// The empty state's two doors, as the button labels and the actions
@@ -195,6 +195,9 @@ pub(crate) fn render_header(
     tile_id: u64,
     stack: Option<&StackHandle>,
     menu_open: bool,
+    // The open colour picker: the slot number it targets and the
+    // component element, which takes that chip's swatch position.
+    mut colour_picker: Option<(u8, AnyElement)>,
 ) -> impl IntoElement {
     let mut row = h_flex()
         .w_full()
@@ -223,14 +226,9 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // 2. `range · freq`, in the data face — a bare control (mouse pass,
-    //    2026-09-24): a click opens the range popup, which is where
-    //    both halves of the readout are set. Through `dispatch` on the
-    //    verb's own id, the path `r` takes.
-    // One bare-control derivation for the readout, every swatch target
-    // and the `⋯` button: all three are muted text (or no text) on the
-    // tile surface, and `control::paint` can run an OKLab bisection —
-    // not a per-chip-per-frame cost.
+    // 2. Range/frequency readout: click to toggle the range editor.
+    // Derive shared bare-control pointer states once for this readout, the swatch
+    // targets, and the menu button, avoiding repeated contrast calculations.
     let bare_states = control::paint(
         theme,
         control::Rest::Bare,
@@ -254,11 +252,9 @@ pub(crate) fn render_header(
                 Some("timeseries::range"),
                 None,
             ))
-            // Capture phase, the `⋯` button's reason (below): an open
-            // range popup's own `on_mouse_down_out` is a capture
-            // listener that would close it before a bubble handler
-            // here could see it open, and the click meant to close
-            // would reopen on a fresh seed instead.
+            // Run before the popup's outside-press close so a second press toggles shut.
+            // Prevent default ancestor focus from overriding the range handle focused by
+            // this press. Propagation still lets the shell focus the tile.
             .capture_any_mouse_down({
                 let tile = tile.clone();
                 move |event: &MouseDownEvent, window, cx| {
@@ -266,6 +262,7 @@ pub(crate) fn render_header(
                         return;
                     }
                     tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                    window.prevent_default();
                 }
             }),
     );
@@ -288,6 +285,46 @@ pub(crate) fn render_header(
         }
         let states = control::for_chip(theme, &paint, theme.background);
         let number = chip.number;
+        // Replace only the target slot's swatch with an equally sized component
+        // trigger. It consumes its press so visibility and chip selection do not also run.
+        let picker = colour_picker
+            .take_if(|(target, _)| *target == number)
+            .map(|(_, el)| el);
+        let swatch = match picker {
+            Some(picker) => picker,
+            None => div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("ts-swatch"),
+                    number as u64,
+                ))
+                .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
+                .size(scale::design(SWATCH_TARGET))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius_tokens().sm)
+                .pointer_states(bare_states)
+                .tooltip(tips::tip_with(
+                    chip.swatch_tip_selector.clone(),
+                    SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
+                    Some("timeseries::toggle_visible"),
+                    None,
+                ))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_: &MouseDownEvent, _window, cx| {
+                        tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
+                    }
+                })
+                .child(
+                    div()
+                        .size(scale::design(SWATCH))
+                        .rounded_full()
+                        .bg(chip.swatch),
+                )
+                .into_any_element(),
+        };
         let mut el = div()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("ts-chip"),
@@ -306,45 +343,9 @@ pub(crate) fn render_header(
             // A hidden series stays in the strip — `v` is a toggle, and a
             // chip that vanished would leave nothing to press again.
             .when(chip.hidden, |d| d.opacity(0.5).line_through())
-            // The swatch is the show/hide toggle (mouse pass,
-            // 2026-09-24): a square target round the dot with the bare
-            // control's hover, and a click that takes `v`'s own path.
-            // No propagation stop, for the chip's reason below — the
-            // chip's own handler also runs and moves the cursor onto
-            // the slot just toggled, which is the slot `v` would act on.
-            .child(
-                div()
-                    .id(ElementId::NamedInteger(
-                        SharedString::new_static("ts-swatch"),
-                        number as u64,
-                    ))
-                    .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
-                    .size(scale::design(SWATCH_TARGET))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(theme.radius_tokens().sm)
-                    .pointer_states(bare_states)
-                    .tooltip(tips::tip_with(
-                        chip.swatch_tip_selector.clone(),
-                        SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
-                        Some("timeseries::toggle_visible"),
-                        None,
-                    ))
-                    .on_mouse_down(MouseButton::Left, {
-                        let tile = tile.clone();
-                        move |_: &MouseDownEvent, _window, cx| {
-                            tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
-                        }
-                    })
-                    .child(
-                        div()
-                            .size(scale::design(SWATCH))
-                            .rounded_full()
-                            .bg(chip.swatch),
-                    ),
-            )
+            // Use the visibility target normally, or the component's trigger while a
+            // colour picker is open for this slot. The component owns its trigger press.
+            .child(swatch)
             .child(chip.label.clone())
             .child(
                 div()
@@ -373,8 +374,7 @@ pub(crate) fn render_header(
                     tile.update(cx, |t, cx| t.chip_clicked(index, cx));
                 }
             })
-            // The context menu (mouse pass, 2026-09-24): a right-click
-            // selects the slot and opens the action list on it.
+            // Right-click selects this slot and opens its action menu.
             .on_mouse_down(MouseButton::Right, {
                 let tile = tile.clone();
                 move |_: &MouseDownEvent, window, cx| {
@@ -392,16 +392,9 @@ pub(crate) fn render_header(
         row = row.child(el);
     }
 
-    // 4. `⋯` — the mouse door onto the action list (mouse pass,
-    //    2026-09-24), the click's own form of `.`, at the strip's right
-    //    edge behind a spacer. The market-data `⋯` button's shape
-    //    exactly, including the two things that are easy to get wrong:
-    //    it toggles in the CAPTURE phase (ahead of an open menu's own
-    //    `on_mouse_down_out`, which would otherwise close the menu one
-    //    beat before this handler asked whether it was open, so a
-    //    second click reopened it) and it does NOT stop propagation
-    //    (the shell's click-to-focus must still run, or the menu's keys
-    //    drive whichever tile the shell still had focused).
+    // 4. Action-menu toggle. Handle the press in capture phase before the open
+    // popup's outside-press listener can close it; otherwise a second click would
+    // reopen it. Keep propagation so the shell focuses the tile receiving the click.
     let muted = theme.muted_foreground;
     row = row.child(div().flex_1()).child(
         div()
@@ -413,9 +406,7 @@ pub(crate) fn render_header(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
-            // Open, the button keeps its persistent fill and answers the
-            // pointer with nothing, as the guide asks of a button that
-            // owns a popup.
+            // While open, retain the popup-owner fill without additional hover feedback.
             .when(!menu_open, |d| d.pointer_states(bare_states))
             .child("⋯")
             .tooltip(tips::tip(
@@ -482,11 +473,8 @@ pub(crate) fn render_footer(text: SharedString, theme: &Theme) -> impl IntoEleme
         .child(text)
 }
 
-/// The chart's place while the tile holds no slot: the hint naming
-/// the two keys, and (mouse pass, 2026-09-24) the same two verbs as
-/// ghost buttons under it — the design guide's "useful empty state
-/// that explains the next action", reachable by either hand. Each
-/// button dispatches its action id, the key's own path.
+/// Empty-chart guidance with Add and Compose buttons. Each button dispatches
+/// the same action as its keyboard equivalent.
 pub(crate) fn render_empty(
     theme: &Theme,
     tile: &Entity<TimeseriesTile>,
@@ -538,6 +526,7 @@ mod tests {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         }
     }
 

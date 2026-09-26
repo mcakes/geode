@@ -1,5 +1,4 @@
-//! Where a sheet lives between tiles (line-pricer spec §7.1): the tile
-//! never holds a document request of its own, only this seam.
+//! Sheet loading and whole-document saves shared by pricer tiles.
 //!
 //! `load` answers at once when it can, `Pending` when the answer is on its
 //! way, and `Refused` when the request was never submitted.
@@ -29,7 +28,7 @@ use std::time::Instant;
 #[derive(Debug)]
 pub enum Loaded {
     Rows(DocumentRows),
-    /// No document under that name: an empty sheet, not an error (§7.2).
+    /// No document under that name: open an empty sheet without blocking saves.
     Missing,
     /// On its way; the tile paints `loading` until `PricerTile::loaded`.
     Pending,

@@ -1,18 +1,13 @@
-//! What a panel is (market-data spec §8.1).
-//!
-//! A spec is code in slice 1, not config: one panel exists (CVI), and
-//! making specs configurable before a second one shows what actually
-//! varies would be guessing. A `&'static PanelSpec` is what the factory
-//! carries, which is why every field is `&'static` — a spec is never
-//! built at runtime.
+//! Compiled panel definitions for CVI pivots and dividend schedules.
+//! Factories hold `&'static PanelSpec` values; column names, labels, and
+//! choice vocabularies are static program data rather than user config.
 
 use geode_core::schema::ColumnType;
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 
-/// One document-level attribute the header paints (spec 2026-09-14 §4):
-/// the column it reads, the short label the dense row shows, and the
-/// declared type a typed edit is parsed as — on the SPEC for the same
-/// reason `value_type` is (a `Snapshot` carries no declared type).
+/// A header attribute's source column, display label, and edit type.
+/// The declared type belongs here because snapshot metadata does not
+/// carry the dataset's schema type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderAttr {
     pub column: &'static str,
@@ -20,11 +15,9 @@ pub struct HeaderAttr {
     pub ty: ColumnType,
 }
 
-/// A verb this document kind owns (spec 2026-09-14 §6.3): listed in the
-/// panel's action menu under the kind's own section, registered as an
-/// action so the palette and a keymap reach it. `built: false` paints
-/// greyed "not built yet"; when built it is an egress REQUEST to the
-/// upstream system (charter: Geode computes nothing).
+/// A kind-specific action advertised in the menu, palette, and keymap.
+/// `built: false` disables the menu row with a reason. The tile's action
+/// dispatcher owns execution; this declaration performs no computation or I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KindAction {
     pub id: &'static str,
@@ -32,16 +25,12 @@ pub struct KindAction {
     pub built: bool,
 }
 
-/// One value a document says once per ROW-AXIS slice rather than once
-/// per cell (2026-09-17): CVI's `forward`/`atm`/`skew` per term. Stored
-/// in the long form repeated on every node row of its slice, painted as
-/// the first grid columns ahead of the pivot's own ladder, each with its
-/// own format — a forward is a price, an ATM vol a decimal — and skipped
-/// by a row bump, which walks the ladder alone.
+/// A value constant across a row-axis slice, such as CVI's forward per
+/// term. The long document repeats it on every node row; the grid paints
+/// it before the ladder using its own format. Row bumps skip these columns.
 ///
-/// A slice value is `f64` only: its cell is edited through the spec's
-/// `value_type` exactly as a ladder cell is, and the pivot's
-/// within-slice disagreement check reads it through `Snapshot::f64_at`.
+/// Slice values are read and uploaded as `f64`; their editors use the
+/// panel's `value_type`, which must therefore be compatible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceValue {
     pub column: &'static str,
@@ -64,13 +53,10 @@ pub enum RowIdentity {
     Minted,
 }
 
-/// Whether the row label gets a column of its own. `Hidden` withholds
-/// it (user ruling 2026-09-20: a feed's opaque `dividend_id` means
-/// nothing to a trader) — the label is still the row's IDENTITY for the
-/// draft, the session and every rebase; it is just not painted, so the
-/// table's column 0 is the first value column, `/` searches the painted
-/// cells and `yy` copies them alone. A hidden label can only be `Minted`:
-/// a `Typed` axis needs the label column to type into.
+/// Whether to paint a row-label column. Hidden labels still identify draft
+/// rows across restoration and rebase; table column 0 becomes the first value,
+/// and search/copy operate on painted cells. Shipped specs hide only minted
+/// labels, since typed row identities need a visible row-label editor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowLabel {
     Shown,
@@ -126,7 +112,7 @@ pub struct PanelSpec {
     pub kind: &'static str,
     pub title: &'static str,
     pub dataset: &'static str,
-    /// The document kind `:upload` writes back through (Part 4).
+    /// The document kind used to serialize `:upload`.
     pub document: &'static str,
     /// The axis down the side.
     pub rows: RowAxis,
@@ -137,34 +123,20 @@ pub struct PanelSpec {
     /// (`Columns::Axis` only; a flat panel has no slice).
     pub slice_values: &'static [SliceValue],
     pub format: ColumnFormat,
-    /// The declared type of the value column(s) this panel's cells hold —
-    /// what a typed cell edit is parsed as
-    /// ([`crate::core::draft::parse_cell`]).
-    ///
-    /// It lives on the SPEC rather than being read off a delivered
-    /// snapshot because a `Snapshot` carries no declared type at all
-    /// (`ColumnMeta` is name + attribution + scope semantics): the type is
-    /// the dataset's own declaration, and the panel — which already names
-    /// its dataset, its axes and its format — is the one place in this
-    /// crate that knows it. Reading it off the arrow array's runtime kind
-    /// would be the wrong answer for the same reason a formatter is not a
-    /// schema: an `i64` column whose values all happen to fit a `f64`
-    /// array would then silently accept `0.5`.
+    /// Declared numeric edit and upload type for a pivot's ladder. Flat
+    /// columns declare their own types in [`ValueColumn`]. Snapshot metadata
+    /// does not expose schema types, and the runtime array representation
+    /// alone cannot decide whether an editor may accept fractional input.
     pub value_type: ColumnType,
-    /// Verbs the kind itself owns (spec §6.3): listed in the panel's
-    /// action menu under this spec's own `title` section, registered
-    /// through `register_actions` so the palette and a keymap reach them.
+    /// Kind-specific actions listed under this panel's title and registered
+    /// for palette and keymap dispatch.
     pub actions: &'static [KindAction],
 }
 
 impl PanelSpec {
-    /// Whether this spec itself names `column` — the row axis, the pivot
-    /// axis, or a header attribute.
-    ///
-    /// [`crate::core::matrix::MatrixModel::build`] reads the document key
-    /// off the columns ahead of the row axis (`document_columns()` emits
-    /// the key first, spec §3.3), and this is how it declines to count a
-    /// column the panel is already painting somewhere else.
+    /// Whether the panel names this row axis, pivot axis, flat value, header
+    /// attribute, or slice value. Key extraction excludes these columns from
+    /// the prefix before the row axis.
     pub fn names(&self, column: &str) -> bool {
         self.rows.column == column
             || matches!(self.columns, Columns::Axis(a) if a == column)
@@ -205,15 +177,9 @@ const CVI_FORMAT: ColumnFormat = ColumnFormat {
     scale: Scale::None,
 };
 
-/// The CVI surface (spec §6.3/§8.1): one document per underlying, terms
-/// down the side, nodes across the top, one `param` per cell.
-///
-/// `precision: 4` because a CVI parameter is a small number whose fourth
-/// place is a real number a trader trades on; `thousands: false` for the
-/// same reason (a grouped `1,234` would be a lie about the magnitude
-/// anyone expects here), and no scale, since a parameter is already in
-/// its own units. `Colour::None`: the sign of a CVI parameter carries no
-/// good/bad meaning, so painting one red would invent a claim.
+/// One CVI document per underlying, with terms as rows and nodes as columns.
+/// Parameters retain their own units at four decimals, without grouping or
+/// scaling. Sign carries no profit/loss meaning, so it has no sign colour.
 pub const CVI: PanelSpec = PanelSpec {
     kind: "cvi",
     title: "CVI",
@@ -273,26 +239,15 @@ pub const CVI: PanelSpec = PanelSpec {
     ],
 };
 
-/// The dividend schedule's closed status vocabulary (design spec §6.1,
-/// §6.5). Copied here rather than imported: `geode-marketdata` must not
-/// depend on `geode-documents` (CLAUDE.md's layering rules — a module
-/// crate is one of "the modules" the shell/data boundary is drawn
-/// around, and `geode-documents` sits below it), so this and
-/// `geode_documents::dividend::STATUSES` are two declarations of the
-/// same four words. A `geode-app` test — the one crate where every layer
-/// meets — asserts they agree; `geode-demo-data`'s own copy (fed to the
-/// generator) is checked against `geode-documents`' the same way.
+/// Closed dividend-status vocabulary. Feature crates do not depend on
+/// sibling document implementations, so this declaration is checked against
+/// `geode_documents::dividend::STATUSES` by a composition-root test in
+/// `geode-app`; the demo generator's vocabulary is checked there too.
 pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
 
-/// The dividend schedule's cell format (spec §6.5): four places, because
-/// a per-share amount can carry fractional cents a trader trades on
-/// exactly as a CVI parameter's fourth place does (see [`CVI_FORMAT`]);
-/// no grouping, since a dividend amount never reaches a size where
-/// `1,234` reads as anything but noise; and — unlike a P&L figure —
-/// `Colour::None` rather than `Colour::Sign`, because every dividend
-/// amount here is a positive per-share payment: there is no "bad" sign
-/// for red to mark, and colouring it anyway would paint a claim the
-/// number itself never makes.
+/// Dividend amounts display four decimals to retain fractional cents,
+/// without grouping or scaling. Sign colour is disabled because this is
+/// a payment amount rather than a profit/loss measure.
 const DIVIDEND_FORMAT: ColumnFormat = ColumnFormat {
     precision: 4,
     thousands: false,
@@ -301,31 +256,14 @@ const DIVIDEND_FORMAT: ColumnFormat = ColumnFormat {
     scale: Scale::None,
 };
 
-/// The dividend schedule surface (spec §6.4/§6.5): one document per
-/// underlying, one row per scheduled dividend. `Columns::Values`, not a
-/// pivot — a schedule is a handful of rows with a handful of values
-/// each, the shape that variant's own doc comment describes — and rows
-/// are minted by the panel (`RowIdentity::Minted`) rather than typed,
-/// since a dividend's identity is the document's own `dividend_id`, a
-/// generated key rather than a value a trader would ever type.
+/// One dividend schedule per underlying, with a row per payment and typed
+/// flat value columns. Minted row IDs provide identity without a visible
+/// label column or a user-entered row name.
 ///
-/// The three date columns (`ex`/`announced`/`pay`) share
-/// [`ColumnFormat::TEXT`]: precision, grouping, sign and scale are all
-/// irrelevant to them, because [`crate::core::matrix::cell_text`] paints
-/// every `Value::Date` as `%Y-%m-%d` regardless of what the column's
-/// format says — the same reason `status`, also `Utf8`, uses it too.
-///
-/// Every column is `required`
-/// ([`Draft::incomplete_rows`](crate::core::draft::Draft::incomplete_rows)'s
-/// gate on when an inserted row counts as complete, spec §5.2), including
-/// `announced_date` and `pay_date` (ruling 2026-09-23): an undeclared
-/// dividend still carries an ISSUER-ESTIMATED announce and pay date on the
-/// wire, so a trader inserting a row ahead of the formal declaration types
-/// the estimate the desk is already working from rather than leaving the
-/// row incomplete for dates that in fact already exist, just not yet as
-/// facts the issuer has confirmed. `status` is the one column with a
-/// closed vocabulary (`choices`), stepped in place exactly as a config
-/// dialog's `Choice` field is (spec §4.4).
+/// Dates paint as ISO text and status as literal text, so their formats
+/// use [`ColumnFormat::TEXT`]. Every column is required for inserted rows,
+/// including announced and pay dates: an estimated schedule still supplies
+/// estimates for those dates. Status alone has a closed choice vocabulary.
 pub const DIVIDEND: PanelSpec = PanelSpec {
     kind: "dividend",
     title: "Dividend",
@@ -431,13 +369,8 @@ mod tests {
         assert!(CVI.slice_value("param").is_none());
     }
 
-    /// §4.2: a flat panel names its columns; `names` covers them, and
-    /// `value_column` answers each by name so the build can refuse a
-    /// value the spec does not list rather than paint it unlabelled.
-    /// A hidden row label (user ruling 2026-09-20, "dividend_id shouldn't
-    /// be displayed") is still the row's identity — only its column is
-    /// withheld — and it can only be minted: a `Typed` axis needs the
-    /// label column to type into.
+    /// Shipped specs hide only minted row identities. A hidden label still
+    /// identifies the draft row; a typed axis needs a visible label editor.
     #[test]
     fn a_hidden_row_label_is_minted_on_every_shipped_spec() {
         assert_eq!(DIVIDEND.rows.label, RowLabel::Hidden);
@@ -501,11 +434,8 @@ mod tests {
         assert_eq!(CVI.rows.identity, RowIdentity::Typed(ColumnType::Date));
     }
 
-    /// The second panel spec (dividend design spec §6.5): a flat layout
-    /// (`Columns::Values`, so `flat_columns` is non-empty and `names`
-    /// covers every listed column plus the two header attributes) with
-    /// rows the panel itself mints rather than the trader typing a
-    /// label.
+    /// The dividend panel declares all flat value columns and both header
+    /// attributes, with row identities minted by the panel.
     #[test]
     fn the_dividend_spec_names_its_own_columns_and_header_attributes() {
         assert_eq!(DIVIDEND.kind, "dividend");
@@ -527,11 +457,9 @@ mod tests {
         assert!(DIVIDEND.slice_values.is_empty());
     }
 
-    /// Every column is required (see [`DIVIDEND`]'s own doc comment for
-    /// why `announced`/`pay` are, ruling 2026-09-23), and `status` alone
-    /// carries a closed vocabulary — the one [`STATUSES`] this crate must
-    /// keep in step with `geode_documents::dividend::STATUSES` (checked
-    /// in `geode-app`, the one crate where both are visible).
+    /// Every dividend column is required. Status alone carries the closed
+    /// vocabulary whose consistency with document parsing is tested by
+    /// `geode-app`, where both declarations are available.
     #[test]
     fn the_dividend_spec_requires_every_column() {
         let required = |label: &str| DIVIDEND.value_column(label).unwrap().required;

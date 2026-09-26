@@ -27,14 +27,37 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Local publish | Storage produces `Published` then `LocalPublished`. Any refusal or failure — the service refusing a dataset that is not local, the writer's validation or store error, a contained panic — produces an error diagnostic and `LocalPublishFailed`. Every admitted local publish answers exactly once. |
 | Local forget | `Forgotten` (including a key that held nothing) or `ForgetFailed`. The service refuses a dataset that is not local or a key of the wrong arity with an error diagnostic and `ForgetFailed`; nothing is queued. |
+| Document upload | `Upload`, addressed by tile key and upload tag; target validation, serialization, target-queue refusal, and transport results use the same outcome. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
 Cancellation is itself an ordinary queued request and can be refused. It
-targets query-pool and pricing work by key, does not cancel fetch or ingest
-work, and cannot retract a result already emitted. It has no acknowledgement.
+targets query-pool and pricing work by key, does not cancel uploads, fetch,
+or ingest work, and cannot retract a result already emitted. It has no acknowledgement.
 Receivers still need stale-result checks. See
 [`handle.rs`](../../crates/geode-data/src/handle.rs).
+
+## Document uploads
+
+Upload admission has two stages. `DataHandle::upload` first offers the request
+to the ordinary service queue. A refusal has no outcome. Once serviced,
+`EgressWorkers` resolves the target and document kind, expands the address,
+and serializes the complete document on the service thread. It then offers
+the bytes to the target's eight-entry queue. Each target has one worker that
+runs transport calls serially; serialization can still delay other service
+requests.
+
+Validation, serialization, and target-queue failures emit an error with the
+original tile key and tag. Transport results and contained transport panics
+use the same outcome path; a panic produces a target-named error and leaves the
+worker available for subsequent jobs.
+
+This is not a durable delivery receipt: startup failure, a blocked serializer
+or transport, an uncontained serialization panic, or event-sink refusal can
+prevent delivery. Egress has no automatic retry. An `Ok` acknowledges transport
+success, not a new local generation; subscription ingestion and the panel's
+echo check are separate. See [document egress](data-path.md#egress-and-uploads)
+for configuration and worker details.
 
 ## View replacement and shutdown
 
@@ -55,9 +78,10 @@ The service then stops its workers in dependency order, the ingest writer
 last. The writer runs its queued local writes (the app's own publishes and
 forgets) in order, each answering as usual, and drops every other queued job:
 feed documents, series and files are resent by their sources after a restart.
-It is not a flush beyond that. Fetch calls, discovery, and publication can
-delay joining. Final-handle drop also joins on whichever
-thread releases it, so the app's quit hook runs explicit shutdown on the
+It is not a flush beyond that. Egress workers drain already queued uploads
+before joining, with no transport timeout. Fetch calls, discovery,
+publication, and uploads can therefore delay joining. Final-handle drop also
+joins on whichever thread releases it, so the app's quit hook runs explicit shutdown on the
 background executor. See [worker shutdown](data-path.md#queues-and-shutdown).
 
 ## The event mailbox
@@ -71,6 +95,7 @@ delivery, not applied to a window.
 | Event | Pending-state rule |
 |---|---|
 | Query, series, distinct, catalog, price | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
+| Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
 | Local-write outcome (saved, save failed, forgotten, forget failed) | Never coalesced: each is keyed by its arrival sequence and every one is delivered, in the writer's order. A writer may be waiting on one exact outcome (a pricer load deferred behind a queued save), so a later outcome for the same document must not replace it. The count is bounded by the writes the app queued, not by a feed's rate. |
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
@@ -92,7 +117,7 @@ every event through `window.update`. A closed window ends the drain on its
 next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
-Keyed query, series, and pricing results go to the matching shell occupant;
+Keyed query, series, pricing, and upload results go to the matching shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results go to the picker, which checks its current tag, column, and

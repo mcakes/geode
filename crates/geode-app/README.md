@@ -38,9 +38,9 @@ demo series walk; nothing migrates an existing database.
 |---|---|
 | `main` | Startup order: logging, config, registry and keymap, roster, service, window. `parse_args` and `config_dirs` are pure and tested. |
 | `bridge` | Service setup and module factories, window event routing, catalog refresh/retry, and forwarding view reloads to the data service. |
-| `events` | Coalesced pending outcomes and state with a one-slot wakeup channel. Retains publication book unions and highest-tagged results; local-write outcomes never coalesce. |
+| `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write outcomes never coalesce. |
 | `demo` | `--demo`: the temp directory, the emitted sources, the compiled-in demo config layer. |
-| `demo_bus` | Demo mode's producer for the market-data path: a thread generating CVI documents and publishing them onto a `ChannelAdapter` through the same wire format a real subscribed source's receiver parses. Registered only under `--demo`. |
+| `demo_bus` | Demo-only CVI and dividend producers publishing through `ChannelAdapter` and the normal document writers/parsers. The same adapter accepts configured uploads, whose bus messages follow subscription ingestion. |
 | `demo_series` | Demo mode's fetch adapter: seeded, span-independent one-minute bars for two dozen identities, behind two sources (`demo_kdb` with a catalogue, `demo_rest` without). |
 | `crash` | Log-file trimming at startup and the process panic hook that tells a contained panic from a fatal one and writes a crash file. |
 | `assets` | The asset source: gpui-kit's component icons plus the catalogue icons Geode's own surfaces name. |
@@ -97,3 +97,10 @@ cargo check -p geode-app --features profiling
   but reloads only when `pricer_config_key` changed from the last applied key
   (seeded with the startup key `start` carries on `Bridge`), so an unrelated reload
   neither restarts its tiles' refresh timers nor repeats a bad value's warning.
+
+Upload targets resolve against registered adapters at startup. The bridge passes
+target/document lists to market-data factories and routes outcomes to the
+submitting tile, including hidden occupants. Each upload tag retains its own
+mailbox entry. A closed tile cannot receive its outcome; data-tier logging
+still records completed transport calls and normal refusals. Egress edits mark
+restart required and do not replace running transports or panel target lists.

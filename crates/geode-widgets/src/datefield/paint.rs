@@ -1,10 +1,6 @@
-//! The date-time field's painter (spec §4.3): the segments in the data
-//! face with the three states — rest, active, typing — separators
-//! between, an optional suffix after. Every colour is the host's, handed
-//! in as a [`SegmentPaint`]: the painter never reads `cx.theme()`, so it
-//! can be called from a closure that cannot borrow it (the `key_chip`
-//! precedent), and a host derives its colours once (the panel's
-//! `FlooredTones`, the shell's chip/control doors) rather than per paint.
+//! Date-time segments with rest, active, and typing states, separators, and an optional
+//! suffix. The host supplies prepared SegmentPaint colours and padding policy; the
+//! painter does not read the theme. The caller also supplies the font family.
 
 use gpui::prelude::*;
 use gpui::{App, Div, Hsla, MouseButton, Pixels, SharedString, Window, div};
@@ -12,8 +8,8 @@ use gpui_component::h_flex;
 
 use super::{Segment, SegmentText};
 
-/// Every colour the painter uses. `Copy`, derived once by the host and
-/// handed in per paint.
+/// Every colour the painter uses, and whether segments are padded.
+/// `Copy`, derived once by the host and handed in per paint.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SegmentPaint {
     pub rest_text: Hsla,
@@ -25,6 +21,10 @@ pub struct SegmentPaint {
     pub separator: Hsla,
     pub suffix: Hsla,
     pub radius: Pixels,
+    /// Remove horizontal segment padding for a field replacing plain date text in a
+    /// grid cell. Separators, font metrics, and any suffix still determine the rendered
+    /// width.
+    pub flush: bool,
 }
 
 /// The separator painted BEFORE segment `i`: none before the year, `-`
@@ -77,7 +77,7 @@ pub fn paint(
         let sel = selector.clone();
         row = row.child(
             div()
-                .px_0p5()
+                .when(!paint.flush, |d| d.px_0p5())
                 .rounded(paint.radius)
                 .text_color(text)
                 .when_some(fill, |d, f| d.bg(f))
@@ -154,6 +154,7 @@ mod tests {
                 separator: hsla(0., 0., 0.5, 1.),
                 suffix: hsla(0., 0., 0.5, 1.),
                 radius: px(3.),
+                flush: false,
             };
             div().child(super::paint(
                 &segments,

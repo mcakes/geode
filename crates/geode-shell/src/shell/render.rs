@@ -722,15 +722,9 @@ impl Render for ShellView {
                                 cx.notify();
                             }),
                         )
-                        // A RIGHT press focuses the tile too (timeseries
-                        // mouse pass, 2026-09-24): a module's context
-                        // menu opens on it, and the menu's keys reach the
-                        // occupant only through the focused tile's key
-                        // context — a right-click on an unfocused tile
-                        // used to paint a menu whose `j`/`k`/`enter`
-                        // drove whichever tile the shell still had. The
-                        // left press's focus tail exactly, with none of
-                        // its gestures: no double-click, no drag arm.
+                        // Right press selects the tile so its context-menu keys route
+                        // to that occupant. Reuse focus restoration without arming a
+                        // drag or handling double-click gestures.
                         .on_mouse_down(
                             MouseButton::Right,
                             cx.listener(move |view, _event: &MouseDownEvent, window, cx| {

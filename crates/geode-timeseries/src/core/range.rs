@@ -1,5 +1,6 @@
-//! One date range per tile (spec ruling 4, §9.8): a preset kept
-//! RELATIVE so a restored `1y` tile is a year to today, or two dates.
+//! One query range per tile: a relative preset or two inclusive UTC dates.
+//! Sessions retain presets as labels, so restoration resolves them against
+//! the current time and frame as-of instead of freezing their original span.
 
 use chrono::{DateTime, Days, Months, NaiveDate, Utc};
 use geode_core::query::AsOf;
@@ -41,13 +42,29 @@ impl Preset {
     pub fn parse(s: &str) -> Option<Preset> {
         Self::ALL.into_iter().find(|p| p.as_str() == s)
     }
-    /// `1`..=`7` in `ALL` order — the range popup's digit keys (§9.8).
-    pub fn digit(d: u8) -> Option<Preset> {
-        (1..=7).contains(&d).then(|| Self::ALL[(d - 1) as usize])
+    /// The label's leading count — the digit a trader types first in
+    /// the range popup to name this preset.
+    fn count(self) -> u8 {
+        self.as_str().as_bytes()[0] - b'0'
     }
-    /// The start of the span that ends at `to`. Months and years are
-    /// calendar months (a `1m` on 31 March starts on 28/29 February);
-    /// a week is seven days.
+    /// Whether this preset's label begins with the digit `d`.
+    pub fn starts_with(self, d: u8) -> bool {
+        self.count() == d
+    }
+    /// Whether any preset's label begins with the digit `d`.
+    pub fn any_starts_with(d: u8) -> bool {
+        Self::ALL.into_iter().any(|p| p.starts_with(d))
+    }
+    /// The preset whose label is `d` followed by `unit` — the range
+    /// popup's typed form of a chip (`3` `m` is `3m`).
+    pub fn typed(d: u8, unit: char) -> Option<Preset> {
+        Self::ALL.into_iter().find(|p| {
+            let label = p.as_str().as_bytes();
+            p.starts_with(d) && label[1] as char == unit
+        })
+    }
+    /// Subtract UTC calendar months (clamping month-end dates) or seven days.
+    /// Date arithmetic overflow leaves the start at `to`.
     fn start_before(self, to: DateTime<Utc>) -> DateTime<Utc> {
         let months = |n: u32| to.checked_sub_months(Months::new(n)).unwrap_or(to);
         match self {
@@ -80,7 +97,7 @@ impl Default for Range {
 }
 
 impl Range {
-    /// `:range 1y` or `:range <from> <to>` (§9.9).
+    /// Parse one exact preset label or two ordered YYYY-MM-DD dates.
     pub fn parse(words: &[&str]) -> Result<Range, String> {
         match words {
             [one] => Preset::parse(one).map(Range::Relative).ok_or_else(|| {
@@ -107,10 +124,11 @@ impl Range {
         }
     }
 
-    /// The half-open span to fetch and query. `to` is `now`, clipped to
-    /// the frame's as-of (ruling 4); a relative range measures its width
-    /// back from the CLIPPED end, so a `1y` under an as-of is still a
-    /// year of data.
+    /// Resolve a half-open UTC span for fetches and queries. Relative presets
+    /// measure backward from now clipped to the frame's as-of; calendar months
+    /// retain their width relative to that clipped endpoint.
+    /// Absolute dates span UTC midnights through the day after `to`, clipped
+    /// only by as-of, not by now. An as-of before `from` yields an empty span.
     pub fn resolve(&self, now: DateTime<Utc>, as_of: &AsOf) -> (DateTime<Utc>, DateTime<Utc>) {
         let clip = |t: DateTime<Utc>| match as_of {
             AsOf::Live => t,
@@ -183,14 +201,28 @@ mod tests {
     }
 
     #[test]
-    fn presets_round_trip_and_map_to_digits() {
+    fn presets_round_trip() {
         for p in Preset::ALL {
             assert_eq!(Preset::parse(p.as_str()), Some(p));
         }
-        assert_eq!(Preset::digit(1), Some(Preset::W1));
-        assert_eq!(Preset::digit(7), Some(Preset::Y5));
-        assert_eq!(Preset::digit(8), None);
         assert_eq!(Preset::parse("4m"), None);
+    }
+
+    /// The range popup's typed labels: a digit narrows to the presets
+    /// it starts, and digit plus unit is the preset of that label.
+    #[test]
+    fn a_typed_digit_narrows_and_a_unit_completes_the_label() {
+        assert!(Preset::W1.starts_with(1));
+        assert!(Preset::M1.starts_with(1));
+        assert!(Preset::Y1.starts_with(1));
+        assert!(!Preset::M3.starts_with(1));
+        assert!(!Preset::any_starts_with(4));
+        assert!(Preset::any_starts_with(5));
+        assert_eq!(Preset::typed(1, 'y'), Some(Preset::Y1));
+        assert_eq!(Preset::typed(3, 'm'), Some(Preset::M3));
+        assert_eq!(Preset::typed(5, 'y'), Some(Preset::Y5));
+        assert_eq!(Preset::typed(2, 'm'), None);
+        assert_eq!(Preset::typed(1, 'd'), None);
     }
 
     #[test]

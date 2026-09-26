@@ -4,11 +4,12 @@
 //! request loop. One worker per target runs its uploads one at a time, in
 //! submission order, behind a queue of [`EGRESS_QUEUE_BOUND`] waiting jobs.
 //!
-//! Every upload answers exactly one `DataEvent::Upload`. A refusal decided on
-//! the service thread (unknown target, unaccepted document, missing kind,
-//! write error, full queue) answers at once; a transport result answers from
-//! the worker. Each `Err` names the target, so the asking tile can report it
-//! without knowing the configuration.
+//! A serviced upload normally emits one `DataEvent::Upload`. Validation,
+//! serialization, and queue refusals answer on the service thread; transport
+//! results answer from the worker. Transport panics become errors naming the
+//! target, and the worker continues with queued jobs. Serialization has no panic
+//! boundary, neither call has a timeout, and the event sink can refuse an outcome.
+//! There is no automatic retry.
 //!
 //! Shutdown drops the job senders and joins the workers. A worker finishes
 //! the jobs already queued first, so shutdown can wait on a slow transport;
@@ -107,8 +108,8 @@ pub(crate) struct EgressWorkers {
     sink: EventSink,
 }
 
-/// Log and deliver one upload result. The only door an outcome leaves by,
-/// so every path logs and answers exactly once.
+/// Log one result and offer its outcome to the event sink. Sink refusal is
+/// ignored here; logging does not establish that the tile received the outcome.
 fn answer(
     sink: &EventSink,
     target: &str,
@@ -138,9 +139,18 @@ fn answer(
 
 fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: EventSink) {
     while let Ok(job) = jobs.recv() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '{name}': {e}"));
+        // Convert transport panics into this upload's error and keep servicing the
+        // queue. Mark the catch boundary so the app logs a contained panic without
+        // creating a crash report.
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '{name}': {e}")),
+            Err(payload) => Err(format!(
+                "egress '{name}': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,
@@ -154,10 +164,10 @@ fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: Ev
 }
 
 impl EgressWorkers {
-    /// One worker per spec, owning that adapter's egress. A spec whose
-    /// adapter is missing or has no egress side (only reachable from a
-    /// config built in code; `resolve` drops them from files) keeps its
-    /// name, so uploads to it answer why rather than "unknown target".
+    /// Start one transport worker per target. Missing adapters, unavailable
+    /// egress handles, and thread-start failures retain the target's name and
+    /// reason so subsequent uploads can report the startup failure. The earlier
+    /// `resolve` check obtains a separate handle and cannot guarantee this succeeds.
     pub(crate) fn spawn(specs: &[EgressSpec], adapters: &AdapterRegistry, sink: EventSink) -> Self {
         let mut targets = HashMap::new();
         for spec in specs {
@@ -199,8 +209,10 @@ impl EgressWorkers {
         EgressWorkers { targets, sink }
     }
 
-    /// Resolve, write and queue one upload. Every refusal here answers its
-    /// own `DataEvent::Upload`; an accepted job answers from the worker.
+    /// Resolve, serialize, and queue an upload. Validation and queue refusals
+    /// offer an error outcome on the service thread. The worker offers the
+    /// transport result if it completes; panic and blocked-call limits are
+    /// described in the module documentation.
     pub(crate) fn upload(&self, p: UploadParams, documents: &DocumentRegistry) {
         let document_key = p.rows.key.join("/");
         let refuse = |message: String| {
@@ -618,6 +630,79 @@ mod tests {
         assert_eq!(
             next_upload(&rx).result,
             Err("egress 'sophis': stopped".into())
+        );
+        assert_silent(&rx);
+    }
+
+    /// The message a [`PanickingEgress`] transport panics with. A constant so
+    /// the assertion and the panic that produced it cannot drift apart.
+    const UPLOAD_PANIC: &str = "the transport fell over";
+
+    /// Panic for the configured number of calls, then succeed. The fixture
+    /// exercises both the error outcome and continued use of the same worker.
+    struct PanickingEgress {
+        panics_left: usize,
+    }
+
+    impl Egress for PanickingEgress {
+        fn upload(&mut self, _target: &str, _bytes: Vec<u8>) -> Result<(), AdapterError> {
+            if self.panics_left > 0 {
+                self.panics_left -= 1;
+                panic!("{UPLOAD_PANIC}");
+            }
+            Ok(())
+        }
+    }
+
+    struct PanicAdapter {
+        egress: Mutex<Option<Box<dyn Egress>>>,
+    }
+
+    impl Adapter for PanicAdapter {
+        fn name(&self) -> &'static str {
+            "panic"
+        }
+        fn subscription(&self) -> Option<Box<dyn Subscription>> {
+            None
+        }
+        fn egress(&self) -> Option<Box<dyn Egress>> {
+            self.egress.lock().unwrap().take()
+        }
+    }
+
+    #[test]
+    fn a_panicking_transport_answers_the_upload_and_keeps_the_worker() {
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(PanicAdapter {
+            egress: Mutex::new(Some(Box::new(PanickingEgress { panics_left: 1 }))),
+        }));
+        let (sink, rx) = event_sink();
+        let workers = EgressWorkers::spawn(
+            &[spec("panic", &[(DIVIDEND, "panic/{key}")])],
+            &adapters,
+            sink,
+        );
+        let documents = documents();
+
+        workers.upload(params(1, TARGET, DIVIDEND, "K0"), &documents);
+        let first = next_upload(&rx);
+        let message = first.result.expect_err("a panicking transport is an error");
+        assert!(
+            message.contains(UPLOAD_PANIC),
+            "the answer carries the panic payload: {message}"
+        );
+        assert!(
+            message.contains(&format!("egress '{TARGET}'")),
+            "the answer names its target: {message}"
+        );
+        assert_silent(&rx);
+
+        workers.upload(params(2, TARGET, DIVIDEND, "K1"), &documents);
+        let second = next_upload(&rx);
+        assert_eq!(
+            second.result,
+            Ok(()),
+            "the worker survived, so the next upload succeeds"
         );
         assert_silent(&rx);
     }

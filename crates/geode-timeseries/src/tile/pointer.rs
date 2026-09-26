@@ -1,24 +1,14 @@
-//! The chart surface's pointer gestures (mouse pass, 2026-09-24): a
-//! wheel zooms about the pointer or pans, a drag on a plot pans, a drag
-//! on the band between the panes moves the split. Every gesture ends
-//! at the tail its key would — a pan or zoom at `view_moved`, a split
-//! at `apply_changed` — so the mouse and the keyboard cannot disagree
-//! about what a view move costs.
+//! Chart pointer gestures: dominant horizontal wheel motion pans, vertical
+//! motion zooms about the pointer, plot drags pan, and divider drags change split.
+//! View changes finish through `view_moved`; split changes use `apply_changed`.
 //!
-//! **Where the chart is.** A listener gets a window position and
-//! nothing else, so the surface paints a zero-cost `canvas` sibling
-//! whose prepaint stores the surface's bounds in [`ChartBounds`]; a
-//! gesture reads the LAST frame's bounds, solves `geode_chart`'s own
-//! layout over them and asks [`geode_chart::hit_test`]. The one-frame
-//! lag is harmless: bounds move on a resize, and a press mid-resize is
-//! not a gesture anyone makes.
+//! Hit testing solves chart layout using the surface bounds recorded by the last
+//! prepaint. Before first paint no gesture can start; during resizing the bounds
+//! may lag the current layout by one frame.
 //!
-//! **Why a drag never sticks.** gpui's `on_mouse_move` is hover-gated,
-//! so while a drag is armed the tile paints an occluding catcher over
-//! the surface that owns every move and release; a release outside it
-//! reaches the capture-phase `on_mouse_up_out`, and a move that arrives
-//! with no button held is treated as the release that was missed — the
-//! shell's own divider-drag rule, applied tile-locally.
+//! An armed drag paints an occluding catcher over the chart surface. It handles
+//! moves and releases there, ends on outside release, and treats a buttonless
+//! move as a missed release. Move delivery remains limited to the surface.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -37,17 +27,13 @@ use crate::core::model::ZOOM_FACTOR;
 /// records them and the listeners that read them.
 pub(crate) type ChartBounds = Rc<Cell<Option<Bounds<Pixels>>>>;
 
-/// How many wheel pixels make one `ZOOM_FACTOR` step. A notched mouse
-/// wheel reports a line at a time (one line is the window's line
-/// height, ~16 px), so a notch is about a third of a keyboard `=`; a
-/// trackpad's precise deltas make the zoom continuous.
+/// Vertical wheel pixels per ZOOM_FACTOR step. Line deltas convert through
+/// the window's line height; pixel deltas allow fractional zoom steps.
 pub(crate) const WHEEL_ZOOM_PX: f32 = 48.0;
 
-/// The split is quantised to this while dragged: `split` sits in the
-/// chart key, so every distinct value rebuilds the chart model (a copy
-/// of every visible value), and a drag that produced a new `f32` per
-/// pixel would do that hundreds of times. A hundredth is finer than
-/// the keyboard's `SPLIT_STEP` and invisible at any pane height.
+/// Split-ratio increment while dragging. Since split is part of the chart
+/// cache key, quantization avoids rebuilding the chart for smaller pointer moves.
+/// The resulting ratio is also clamped to the supported pane limits.
 pub(crate) const SPLIT_QUANTUM: f32 = 0.01;
 
 /// An armed drag. `Pan` carries the pointer's last x so each move pans
@@ -87,16 +73,10 @@ impl TimeseriesTile {
         self.drag
     }
 
-    /// A wheel over the surface. The dominant axis wins — a trackpad
-    /// reports both, and a swipe meant as a pan must not also zoom —
-    /// and only a plot answers: a wheel over an axis or the x strip
-    /// does nothing, because there is no "about" there.
-    ///
-    /// Sign: gpui's `delta.y` is positive when the wheel rolls away
-    /// from the trader (the direction that scrolls a list toward its
-    /// top), and that zooms IN, the mapping every map and chart tool
-    /// uses; a positive `delta.x` moves the content right, which shows
-    /// EARLIER buckets, so the view pans left.
+    /// Handle wheel input only over a plot. The dominant axis decides the gesture;
+    /// equal magnitudes use vertical zoom. Positive y zooms in, negative y out.
+    /// Positive x shifts the visible range earlier. Convert horizontal pixels using
+    /// plot width and preserve the pointer's fractional x position during zoom.
     pub(crate) fn wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -132,19 +112,10 @@ impl TimeseriesTile {
         self.view_moved(changed, cx);
     }
 
-    /// A left press on the surface: on a plot it arms a pan, on the
-    /// divider band a split drag, anywhere else nothing. A second press
-    /// of a double-click arms nothing — a tile's double-click is the
-    /// shell's (with the mod key it toggles fullscreen), and a pan armed
-    /// under it would follow the pointer into the toggle. A MODIFIED
-    /// press arms nothing either: with the mod key the shell arms a
-    /// tile drag on the same press, and a second catcher under its own
-    /// would only paint a second cursor.
-    ///
-    /// Deliberately no `stop_propagation`: the shell's tile-level
-    /// mouse-down (click-to-focus, the command-line leave, the
-    /// focus-restore re-arm) must still run — the header chip's own
-    /// rule, for the same reason.
+    /// Arm a pan over a plot or a split drag over the divider. Ignore modified
+    /// presses and second/subsequent clicks so shell drag/fullscreen gestures retain
+    /// ownership. Do not stop propagation: tile focus and command-line dismissal
+    /// still belong to the shell's mouse-down handler.
     pub(crate) fn chart_pressed(
         &mut self,
         event: &MouseDownEvent,

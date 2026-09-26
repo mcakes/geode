@@ -1,52 +1,23 @@
-//! One market-data panel tile (market-data spec §8.2): asks for one
-//! document by key through `DataHandle`, keeps the prepared
-//! [`MatrixModel`] a frame paints from, and owns the cursor, the yank, the
-//! `/` find and the `:` vocabulary over it.
+//! Market-data document tile: requests one dataset/key/as-of through DataHandle and
+//! owns its prepared MatrixModel, draft, cursor, clipboard, find, and commands.
 //!
-//! The BODY is gpui-component's table, driven by this crate's own
-//! [`MatrixDelegate`] (user ruling 2026-09-14 — visual unity with the
-//! blotter, superseding roadmap ruling 6's hand-painted uniform row list).
-//! The chip header above it is this tile's own, unchanged. Two rules the
-//! seam rests on: **the tile's cursor stays the truth** and the delegate
-//! only mirrors it ([`Self::sync_cursor`]), and **every model swap goes
-//! through [`Self::install_model`]**, which calls `TableState::refresh` —
-//! the component caches `column()`'s answers in `col_groups` and paints
-//! its header from that cache alone, so a swap without a refresh paints
-//! the previous document's columns.
+//! The tile's cursor is authoritative; MatrixDelegate mirrors it. Every model
+//! installation refreshes TableState's cached column groups so changed document axes
+//! appear in the table header.
 //!
-//! What this tile is NOT is a blotter. There is no view, no grouping and
-//! no scope: a document request is (dataset, key, as-of) and nothing else
-//! (Part 1 §7), so the only frame counters it follows are `as_of` and
-//! `data` — narrowed by a publication watch to this dataset and document key. `flip` is
-//! deliberately not among them, for the reason CLAUDE.md gives for the
-//! blotter: `flip` never means "requery".
+//! Requests follow as-of and publication versions for this dataset and key. Scope,
+//! grouping, and flip changes do not trigger document queries. The tile still answers
+//! flip barriers: deliveries can wait for a coordinated promotion, while changes
+//! requiring no query are acknowledged directly. Promotion checks the followed
+//! versions, so an unrelated barrier replacement cannot discard the only staged answer
+//! to the current request.
 //!
-//! It does still ANSWER the flip barrier for every change (Phase 4
-//! §3.10), because `ShellView::visible_tile_keys` cannot know which tiles
-//! follow which counters: a change it requeries for is answered by its
-//! own delivery (`arrive`), and one it does not is answered on the spot
-//! (`self_arrive`). Following fewer counters than the blotter is exactly
-//! why that second door has to exist — a panel that stayed silent would
-//! hold every blotter on screen to the 250 ms deadline on every scope
-//! keystroke.
-//!
-//! Cell EDITING is here (spec §8.3/§8.6): `edit` opens one tile-owned
-//! `InputState` in the cursor cell and `key_context` reports `mode ==
-//! insert`, which is what makes the shell hand every bare keystroke to
-//! that input instead of matching it; `commit` parses the text through the
-//! column's declared type and writes the [`Draft`]; `:bump` and `:revert`
-//! are the same draft from the `:` line.
-//!
-//! The draft STATES (spec §8.4) are here too: a delivery whose `as_of`
-//! differs from the draft's own base goes `Behind`, and the panel keeps
-//! painting the BASE generation (`base_snapshot`) under the edits rather
-//! than the newer one it just received — `:rebase` moves the edits onto
-//! the newer document by label (a dropped label is reported, never
-//! silently lost) and starts painting it; `:revert` drops the edits and
-//! shows the newer document, clean. Both are refused outside `Behind`
-//! (there is no "newer" to move onto), and so are `edit`/`:bump`
-//! (controller ruling 2026-09-14) — an edit made now would be keyed
-//! against a grid `:rebase` is about to move away from underneath it.
+//! Editors commit typed values into Draft. With a newer generation held Behind, the
+//! tile retains the actual base snapshot when available. Rebase maps edits by labels
+//! onto the newer document and reports drops; revert discards edits and shows the
+//! newest usable snapshot. Hold/Rebase/Replace policies govern new live generations,
+//! with restore and Sent-echo handling taking precedence. Behind drafts and differing
+//! upload echoes refuse further edits until resolved.
 
 use crate::commands::{self, BumpAxis, Command, KEY_DISPLAY_SEPARATOR};
 use crate::core::cursor::{self, Cursor, Grid, Motion};
@@ -74,6 +45,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
@@ -103,47 +75,24 @@ const HALF_PAGE: isize = 5;
 /// own ±10, the blotter's `page_down_full`.
 const FULL_PAGE: isize = 10;
 
-/// `/` over the row labels (spec §8.3). The vim jump model only: a
-/// document's rows ARE its axis, in the desk's own order, so narrowing
-/// them (`FindStyle::Fzf`) would hide rows a cell reference is counted
-/// against — the panel moves its cursor instead, which is what
-/// `find_match` is for.
+/// Find moves through visible row text without filtering the document axis. Row labels
+/// are searched when painted; panels hiding those labels search their painted cells
+/// instead. Escape restores the full starting cursor.
 pub struct FindState {
-    /// Where the cursor was when `/` opened; `escape` returns here. The
-    /// whole `Cursor`, not a row (final review, T4): a find started from
-    /// the attribute strip must cancel back INTO the strip, and a row
-    /// alone would land it on grid row 0.
+    /// Full cursor captured when find starts. Escape can restore either a grid cell or
+    /// an attribute-strip position.
     origin: Cursor,
     /// The last committed query, for `n`/`N`.
     committed: Option<String>,
 }
 
-/// The two header tones a theme colour cannot be trusted to paint as
-/// TEXT, floored to Part 2c's 3:1 readability ratio against the window
-/// background (`geode_core::colour::readable_on`, lightness moved toward
-/// the foreground, hue and chroma kept). The finding is 2c's own: a
-/// theme's `warning` and `danger` are fills and tints, and on nine bundled
-/// light themes `warning` reads under 2.3:1 as text — and
-/// `warning_foreground`, which the first build painted `Warn` chips in
-/// with no fill under them, is the BACKGROUND family (1.00:1 on twenty
-/// themes: an invisible `3 edits`).
+/// Cached contrast-adjusted header tones. Warning and danger text are adjusted against
+/// the window background toward the theme foreground. The date field's active-segment
+/// text is adjusted against primary toward whichever of black or white contrasts more,
+/// allowing even a matching text/background pair to separate.
 ///
-/// `primary_text` (2026-09-19) is the date field's active-segment text:
-/// `primary_foreground` floored against `primary` itself, the solid fill
-/// it sits on — seven bundled themes (Gruvbox Light at 2.19:1, Ayu Light,
-/// Everforest Light, Catppuccin Latte, Flexoki Light, Asciinema,
-/// Spaceduck) ship the pair under 3:1. The floor moves lightness toward
-/// pure black or pure white, whichever contrasts more with `primary` —
-/// not toward the theme's own `foreground`, which on three light themes
-/// (Everforest Light's grey on its mid green) is itself under 3:1 against
-/// `primary`, leaving `readable_on` no `t` that clears. Every colour
-/// clears 3:1 against one of black and white, so this floor always lands.
-///
-/// Memoised, not derived per frame: `readable_on` is a 16-step bisection
-/// through OKLab, and PHILOSOPHY §6 forbids that per chip per frame.
-/// `key` is EVERY colour `derive` reads and nothing else — the blotter's
-/// theme-signature rule at the scale of six inputs — so a theme switch
-/// recomputes on its first frame and every other frame is one compare.
+/// The six-input theme signature covers every colour read by derive. Refresh runs the
+/// contrast calculation only when that signature changes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FlooredTones {
     key: [Hsla; 6],
@@ -203,43 +152,27 @@ impl FlooredTones {
     }
 }
 
-/// What `edit` and `:bump` answer with nothing on screen (controller
-/// ruling): an edit is keyed by a grid cell and recorded against the
-/// generation that grid came from, so with neither there is nothing
-/// honest to open an editor over.
+/// Refusal when editing has no displayed document and therefore no cell or source
+/// generation to attach an edit to.
 const NO_DOCUMENT: &str = "no document to edit";
 
 /// What a commit answers when the grid moved under the open editor — see
 /// [`Editing::labels`] for how that happens and why it is refused.
 const CELL_MOVED: &str = "the document changed under the edit — nothing was written";
 
-/// What `edit` and `:bump` answer while the draft is `Behind` (controller
-/// ruling 2026-09-14): an edit made now would be keyed against the BASE
-/// generation's grid while a newer one already sits underneath it, and
-/// `:rebase` would then map that parked value onto whatever cell the same
-/// label resolves to in the newer document — a live edit and a restored
-/// one are exactly the same risk here, so this checks the draft's state
-/// and not how it got there. `:rebase`/`:revert` are the only doors
-/// forward, and the notice names both.
+/// Refusal for a Behind draft. The painted base is older than the held document; rebase
+/// or revert must resolve that difference before further edits.
 const BEHIND_REFUSED: &str = "the draft is behind — :rebase or :revert first";
 
-/// What every edit door answers while a differing echo is held (egress
-/// spec §7): the panel paints the sent draft over its BASE while a newer
-/// generation — the upstream's answer — waits, which is `Behind`'s own
-/// situation, and an edit made there would be stamped against a document
-/// that is no longer the newest. The same two doors forward.
+/// Refusal while a differing upload echo is held. The sent edits still cover their
+/// base; rebase or revert resolves the newer upstream document first.
 const ECHO_REFUSED: &str = "the echo differs — :rebase or :revert first";
 
-/// What every edit door answers on a `Deleted` row (dividend spec §5.2):
-/// the row is still painted, struck through, so the cursor can land on
-/// it, but a value written into a row the draft is about to remove would
-/// be an edit with nowhere to go. `:revert` is the door back, and the
-/// notice names it.
+/// Refusal for editing a row marked Deleted. It remains visible, but new values would
+/// target a row scheduled for removal. Revert restores the draft's rows.
 pub(crate) const DELETED_REFUSED: &str = "row is deleted — :revert restores it";
 
-/// What `:upload` answers while the draft is `Behind` (egress spec §6):
-/// an upload is of the document the trader has seen whole, and a `Behind`
-/// panel is painting a generation that is no longer the newest.
+/// Upload refusal while Behind: the displayed draft is based on an older document.
 const UPLOAD_BEHIND: &str =
     "rebase or revert first: an upload must be of a document you have seen whole";
 
@@ -253,16 +186,12 @@ const UPLOAD_CANCELLED: &str = "upload cancelled";
 /// painted until the next key.
 const UPLOAD_CANCELLED_ARRIVED: &str = "upload cancelled: a new document arrived";
 
-/// An armed `:upload` confirm (egress spec §6): the document is assembled
-/// at arm time, so what the prompt counts is exactly what `y` sends.
+/// Upload confirmation holding the rows assembled when it was armed. The prompt's
+/// counts and the submitted payload therefore describe the same document.
 ///
-/// The confirm holds the keyboard on its own `focus` handle, tracked by
-/// the prompt the header paints, whose `on_key_down` runs before the
-/// shell root's listener ([`MarketDataTile::confirm_key`]). `_blur` is the
-/// focus-leaving half: any move of window focus off the prompt — a tile
-/// focus move, the palette, a click into the grid — cancels. Dropping
-/// this struct drops the subscription, so a confirm answered by a key
-/// never also hears its own blur.
+/// Its focus handle receives keys before the shell listener. Losing focus cancels
+/// confirmation. Dropping the confirmation also drops its blur subscription, preventing
+/// a key answer from triggering a second cancellation.
 struct PendingUpload {
     target: String,
     rows: DocumentRows,
@@ -292,11 +221,9 @@ struct InFlightUpload {
     target: String,
 }
 
-/// What the last echo of an upload said (egress spec §7), painted as its
-/// own header run rather than as the error-toned `notice`, which the next
-/// painting delivery clears: a confirmation is good news that stays up
-/// until the next edit, and a difference stays up for as long as the
-/// draft is `Sent` against it.
+/// Upload echo result in a header slot separate from transient errors. Matching echo
+/// confirmation survives painting deliveries until the next edit; a differing echo
+/// remains associated with its Sent draft.
 #[derive(Debug, Clone)]
 enum Echo {
     /// `sent HH:MM, confirmed HH:MM` — the draft has cleared; dropped by
@@ -327,24 +254,16 @@ enum EchoStep {
 /// "newer" document to move onto or fall back to.
 const NOT_BEHIND: &str = "nothing to rebase — the draft is on the live document";
 
-/// What `:rebase` answers on a `Sent` draft with no differing echo held
-/// (controller ruling, egress spec §7 follow-up): the upload is still
-/// awaiting its echo upstream, so there is nothing newer to rebase onto.
-/// Running the ordinary rebase here would carry the draft back to
-/// `Editing` on the SAME generation and re-arm `:upload` of edits already
-/// in flight, a possible duplicate upload. `:revert` is the door named,
-/// since it drops the awaited echo along with the draft.
+/// Refuse rebase while Sent has no differing echo. Rebasing onto the same base would
+/// make already-uploaded edits sendable again. Revert can explicitly drop the draft and
+/// stop awaiting its echo.
 const REBASE_AWAITING_ECHO: &str =
     "nothing newer to rebase onto — the upload is awaiting its echo; :revert to drop it";
 
-/// What the row verbs (`o`, `shift+o`, `d d`; dividend spec §5.3) answer
-/// with the cursor in the attribute strip: an attribute is not a row, so
-/// there is nothing to insert beside or delete.
+/// Row-operation refusal when the cursor is in the attribute strip.
 const NOT_A_ROW: &str = "not a row";
 
-/// What `d d` answers on a row already marked `Deleted` (spec §5.3): the
-/// mark is idempotent, so the notice names the door back rather than
-/// pretending a second mark did something.
+/// Refusal for deleting an already-Deleted row; revert is the recovery route.
 const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 
 /// One cell a `:bump` writes: where it is, the labels that make the edit
@@ -352,15 +271,13 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 /// [`Draft::bump`] consumes.
 type BumpCell = ((usize, usize), (String, String), f64, ColumnType);
 
-/// The open cell or attribute editor (spec §8.6/§5.2): the input the
-/// trader is typing into, and what it was opened on.
+/// Open cell or attribute editor, including its input and original target.
 struct Editing {
     state: EditorState,
     target: EditTarget,
 }
 
-/// The two forms an editor takes (header spec §5.2, 2026-09-19; a cell
-/// opens either by its column's [`CellKind`] since spec §4.4).
+/// Text and segmented-date editor states, chosen by cell kind or attribute type.
 enum EditorState {
     /// A text `Input` — every `Number`/`Text` cell, and every attribute
     /// but a `Date` (a `Choice` cell opens `Popup::Choice` instead).
@@ -460,10 +377,8 @@ enum EditTarget {
         /// are (a header attribute's own "did the grid move" rule).
         column: SharedString,
     },
-    /// The row-label editor a `Typed` axis opens on `o`/`shift+o`
-    /// (dividend spec §5.3): a provisional row the draft holds under its
-    /// minted `label`, painted in the row-label column, whose commit
-    /// RENAMES it to what the trader typed.
+    /// Typed-axis row-label editor over a provisionally inserted row. Commit renames
+    /// its minted label to the validated typed label.
     RowLabel {
         /// The row's model index when the editor opened — the paint-time
         /// position, checked against `label` at commit as a cell's
@@ -484,7 +399,7 @@ enum AttrInput<'a> {
     Value(Value),
 }
 
-/// Which of the three yanks (spec §8.3) is being taken.
+/// Clipboard operation: cell, row, or column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Yank {
     Cell,
@@ -506,14 +421,9 @@ pub struct MarketDataTile {
     /// asked for.
     key: Option<Vec<String>>,
     tag: u64,
-    /// The eligible upload targets for this panel's own document: every
-    /// resolved `egress.toml` target whose `documents` list
-    /// names [`PanelSpec::document`], in `egress.toml` order — set once
-    /// at construction from `MarketDataFactory::create`'s own
-    /// `targets_for`, since the resolved list is a startup fact (egress
-    /// spec §10 amendment 2, restart-required like `sources.toml`), not
-    /// something a live reload changes. `:upload` resolves its target
-    /// against it and the command line completes from it.
+    /// Resolved upload targets whose documents include this panel's document kind, in
+    /// egress.toml order. Captured at construction because egress configuration
+    /// requires restart; upload target resolution and completions use this list.
     egress_targets: Vec<SharedString>,
     /// The frame versions the last request was made under; `None` until
     /// the first.
@@ -530,66 +440,36 @@ pub struct MarketDataTile {
     query_in_flight: bool,
     publication: Option<PublicationWatch>,
     visible: bool,
-    /// The newest delivered snapshot. While the draft is `Behind` this is
-    /// the newer generation the panel is NOT painting — `base_snapshot`
-    /// is — kept so Task 8's `:rebase` has it in hand.
+    /// Newest accepted delivered snapshot, retained for rebase even when a Behind draft
+    /// continues painting base_snapshot.
     snapshot: Option<Arc<Snapshot>>,
-    /// The generation the draft's edits were made against, retained the
-    /// moment a newer one arrives under them (roadmap ruling 9: a newer
-    /// document never clobbers a draft). `None` whenever the panel is
-    /// painting the newest snapshot — including a draft restored from a
-    /// session, which lands `Behind` with no base generation ever having
-    /// been received, and is honestly painted against the newest one
-    /// until `:rebase`/`:revert` (Task 8).
+    /// Actual draft base retained when a newer generation arrives. A restored draft
+    /// whose base was never delivered has no retained base; it paints against the
+    /// newest snapshot while preserving Behind state until resolved.
     base_snapshot: Option<Arc<Snapshot>>,
-    /// `Rc`, not a plain `MatrixModel`: the delegate paints from this on
-    /// every frame — every shell repaint, not just this tile's own
-    /// rebuilds — and a `MatrixModel` clone per paint would reallocate
-    /// every row and bump every cell's `SharedString` (the diagnostics
-    /// tile's own MAJ-4, same shape). Replaced wholesale by
-    /// `rebuild_model` and never mutated in place; `install_model` is
-    /// what hands the new `Rc` to the delegate.
+    /// Share the prepared model with the delegate through Rc so ordinary paints do not
+    /// clone every row and cell. Rebuilds replace the model through install_model; cell
+    /// commits can instead release the delegate's clone, patch the uniquely owned
+    /// model, and reinstall it.
     model: Rc<MatrixModel>,
     draft: Draft,
-    /// What a different generation does to a draft with edits (spec
-    /// §8.4, 2026-09-19): `Hold` is today's `Behind`; `Rebase` and
-    /// `Replace` are applied by [`Self::apply`] at the moment `Behind`
-    /// would otherwise be entered, so a switch never acts retroactively
-    /// on a draft already `Behind`. Set by `:auto`, the menu's `On new
-    /// document` rows and the three `marketdata::auto_*` actions; carried
-    /// in the session as `auto` when not the default.
+    /// Policy for new live generations with edits: Hold, Rebase, or Replace. Changing
+    /// it does not resolve an already-Behind draft or act on a redelivery. Commands,
+    /// menu rows, and actions share the setter; nondefault policy persists in the
+    /// session. Restore and Sent-echo rules take precedence.
     policy: UpdatePolicy,
-    /// A restored draft's edits are parked out of every grid's range
-    /// (`Draft::from_toml`, which stores label pairs and not indices), so
-    /// they paint nowhere until a model resolves them. Set at
-    /// construction and cleared by the first delivery, which is the one
-    /// that has a model to rebase against.
-    ///
-    /// `set_key` SETS it, to whether the draft it installs is non-empty
-    /// (2026-09-19, per-underlying drafts): a switch back to an
-    /// underlying with a parked draft is a restore in every respect —
-    /// the same label-pair form, the same resolution against the first
-    /// non-empty built model, the same "first delivery is `hold`" rule —
-    /// and a switch to one without is an empty draft with nothing to
-    /// resolve. Either way it can never be left set against a document
-    /// its labels did not come from.
+    /// Draft edits restored as label pairs await a successfully built nonempty model
+    /// before resolving grid positions. Set on session restore or switching to a parked
+    /// nonempty draft; cleared only after resolution. The first usable restore delivery
+    /// follows Hold regardless of the live update policy.
     unresolved_restore: bool,
-    /// Every OTHER underlying's unsent draft, keyed by document key
-    /// (user ruling 2026-09-19, "keep them per underlying"): a switch
-    /// parks the current draft here as `Draft::to_toml`'s label-pair
-    /// table — the session's own portable form, which is what makes
-    /// grid indices irrelevant across documents — and a switch back
-    /// removes the entry and installs it through the restore path. The
-    /// table IS the parked form: nothing here is parsed until it is
-    /// needed (a picker's row marks, a session write), so a parked draft
-    /// costs no model, no snapshot and no cursor. Every draft verb
-    /// (`:revert`, `:bump`, `:set`, a cell edit) acts on `draft` — the
-    /// CURRENT underlying's — alone; the header's dirty dot likewise.
+    /// Other keys' drafts parked as portable TOML label-pair tables. Switching back
+    /// removes and restores that entry. Parked state holds no grid, snapshot, or
+    /// cursor; parsing occurs when needed for restore, picker marks, or serialization.
+    /// Draft commands and the header dirty marker describe only the current key.
     parked: BTreeMap<Vec<String>, toml::Table>,
-    /// A grid cell — the same index a `Draft` edit is keyed by, and the
-    /// truth the table's own selection mirrors (never the other way
-    /// round) — or an attribute in the header strip (spec 2026-09-14
-    /// §5.1).
+    /// Authoritative cursor: a grid cell or header attribute. Table selection mirrors
+    /// it.
     cursor: Cursor,
     /// The grid column the cursor left from on entering the strip —
     /// `cursor::step`'s own memory, kept here because the tile is what
@@ -600,10 +480,9 @@ pub struct MarketDataTile {
     /// focused (see `geode_marketdata::init`, which binds its context's
     /// keys to `NoAction` for the one frame a click gives it gpui focus).
     table: Entity<TableState<MatrixDelegate>>,
-    /// `Some` while the cell editor holds the keyboard, which is the
-    /// whole of what `mode == insert` means to the shell (spec §8.6).
-    /// Opened by `marketdata::edit`, closed by `commit`/`cancel` through
-    /// the one door [`Self::close_editor`] — blur, then drop.
+    /// Open text or date editor. Commit/cancel close it through close_editor, which
+    /// blurs its input only if it owns focus before releasing it. Picker, choice, and
+    /// confirmation state can also select insert mode.
     editor: Option<Editing>,
     find: Option<FindState>,
     /// The one line the header says about the last thing that went wrong
@@ -619,24 +498,10 @@ pub struct MarketDataTile {
     /// header's own time text so the staleness rule is a comparison per
     /// frame rather than an RFC-3339 parse.
     source_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// An outcome that arrived while the flip barrier (Phase 4 §3.10)
-    /// still wanted this panel's key — held here, NOT applied, until
-    /// [`Self::promote`] puts it through [`Self::apply`] exactly as an
-    /// un-barriered delivery would have been.
-    ///
-    /// Without this the panel would paint the new as-of — its grid, its
-    /// header, its source-time chip — a frame ahead of every blotter,
-    /// whose own heavier outcomes are still staged: the half-updated
-    /// screen the barrier exists to prevent. A document select is cheap,
-    /// which makes this panel the one most likely to win that race.
-    ///
-    /// Stamped with the versions it was delivered FOR: a second
-    /// scope/as-of mutation inside the same 250 ms window replaces the
-    /// barrier before this panel's own fresh requery lands, so a `flip`
-    /// bump from the NEWER barrier must not promote a snapshot staged for
-    /// the older one (the blotter's fix round 1, Finding 1, reached the
-    /// same way). `requery` also clears it at its own top: a fresh
-    /// question always supersedes whatever was staged before it.
+    /// Snapshot staged while the flip barrier waits for this tile, with the request
+    /// versions it answers. Promote applies it only if followed versions still match.
+    /// Requery clears superseded staging; unrelated scope/grouping barrier changes must
+    /// not discard a valid document answer.
     staged: Option<(Arc<Snapshot>, FrameVersions)>,
     /// `versions().flip` as of the last promotion — this panel's own half
     /// of the bump. Starts at `0` (the blotter's own seed): the first
@@ -646,9 +511,7 @@ pub struct MarketDataTile {
     /// The header's floored tone colours, refreshed at the top of `render`
     /// (see [`FlooredTones`]).
     tones: FlooredTones,
-    /// The tile-owned popup — `.`/`⋯` open `Menu` (spec §6.1); Task 7
-    /// adds `Picker`. `None` most of the time, so most frames pay nothing
-    /// for it beyond the tag check.
+    /// Optional tile-local action menu, underlying picker, or cell choice popup.
     popup: Option<Popup>,
     /// The `⋯` button's tooltip selector (`"tip-marketdata-menu-button-
     /// {id}"`), built once here — it depends only on the tile id, never
@@ -657,32 +520,20 @@ pub struct MarketDataTile {
     /// The `Behind` state run's tooltip selector (`"tip-marketdata-
     /// state-{id}"`), built once alongside `menu_tip_selector`.
     state_tip_selector: SharedString,
-    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
-    /// the header (Task 9); `None` while not a stack member.
+    /// Stack membership rendered in the header; None outside a stack.
     stack: Option<StackHandle>,
-    /// [`Self::title`]'s cache (whole-branch review, Minor 5), same
-    /// shape as the blotter's own `title` field — a pure function of
-    /// `spec.title` and `key`, replaced only in `set_key`, never
-    /// `format!`-ed in `title()` itself.
+    /// Prepared title from the panel title and key. Updated by set_key so title()
+    /// returns cached text without formatting.
     title: SharedString,
-    /// The `AppClock` global (as-of dialog spec §6.1), read once at
-    /// construction and refreshed by an `observe_global::<AppClock>`
-    /// handler — carried here, not read fresh from every formatting
-    /// site, so `HeaderModel::prepare` stays a pure function of its
-    /// `HeaderInputs` and `menu::rows` of its own arguments. `pub(crate)`
-    /// so tests read it directly (`t.clock`) rather than reaching for the
-    /// global themselves.
+    /// Clock copied from AppClock at construction and refreshed by its observer.
+    /// Prepared header and menu formatting receive it as an explicit input.
     pub(crate) clock: geode_core::clock::Clock,
-    /// The armed `:upload` confirm, if any (egress spec §6).
+    /// Armed upload confirmation, if any.
     pending_upload: Option<PendingUpload>,
-    /// The rows of the upload last submitted — kept for the echo
-    /// (egress spec §7). Held only while that upload is in flight
-    /// (`submitted`) or the draft is `Sent` from it: `rebuild_chrome` drops
-    /// it otherwise, so a refused submit, a failed outcome, an edit made
-    /// in flight, a further edit, `:revert`, `:rebase` and a matching echo
-    /// all end it through one rule rather than one line per door. Nothing
-    /// outside `Sent` compares against it, and rows left behind by an
-    /// upload the draft has moved on from are rows nobody should.
+    /// Rows of the latest submitted upload, retained while submitted or Sent. Rebuild
+    /// drops them once neither state applies, ending comparison after refusal, failure,
+    /// draft changes, revert, rebase, or a matching echo. Only Sent compares new
+    /// generations against these rows.
     sent: Option<DocumentRows>,
     /// What the last echo said; see [`Echo`].
     echo: Option<Echo>,
@@ -732,14 +583,9 @@ impl MarketDataTile {
                     .collect::<Vec<_>>()
             })
             .filter(|k| !k.is_empty());
-        // Every underlying's unsent draft rides the session as
-        // `[drafts.<display key>]` (spec §8.5, 2026-09-19). The restored
-        // underlying's own entry is the CURRENT draft, installed exactly
-        // as the legacy single `draft` key was; every other entry stays
-        // parked, as a table, until its underlying is loaded. `draft`
-        // itself is still read — a session written before this change —
-        // and means the current underlying's draft, but only when no
-        // `drafts` entry already speaks for it.
+        // Restore per-key drafts from [drafts.<display key>]. Install the current key's
+        // entry and leave the others parked. The legacy draft field supplies the
+        // current draft only when the per-key table has no entry for it.
         let mut parked: BTreeMap<Vec<String>, toml::Table> = restored
             .and_then(|t| t.get("drafts"))
             .and_then(|v| v.as_table())
@@ -793,57 +639,38 @@ impl MarketDataTile {
         // tones for that field's active segment.
         let tones = FlooredTones::derive(cx.theme());
         let weak_tile = cx.weak_entity();
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global, read here and observed below (`on_ui_settings`).
+        let line_numbers = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
-            TableState::new(
-                MatrixDelegate::new(spec, weak_tile, id.0, tones),
-                window,
-                cx,
-            )
-            .row_selectable(true)
-            .col_selectable(false)
-            .cell_selectable(true)
-            .row_header(false)
-            .loop_selection(false)
-            .col_resizable(false)
-            .col_movable(false)
-            .sortable(false)
+            let mut delegate = MatrixDelegate::new(spec, weak_tile, id.0, tones);
+            delegate.line_numbers = line_numbers;
+            TableState::new(delegate, window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(true)
+                .row_header(false)
+                .loop_selection(false)
+                .col_resizable(false)
+                .col_movable(false)
+                .sortable(false)
         });
-        // The mouse's part in this panel: a click selects a cell — the
-        // cursor moves to it, a click on the row-label column moves the
-        // row and leaves the column alone — and a DOUBLE-click opens the
-        // editor on that cell (user ruling 2026-09-17, reversing the
-        // 2026-09-14 "editing is keyboard-only" ruling), exactly as `i`
-        // would: the same refusals (`Behind`, no document), and none at
-        // all on the row-label column, where there is no cell to edit.
+        // SelectCell moves the cursor; row-label clicks preserve its grid column. The
+        // second press emits SelectCell before DoubleClickedCell, so selection cancels
+        // any prior editor before double-click opens the new cell editor. Row-label
+        // double-clicks have no value cell to edit.
         //
-        // What made the mapping honourable is a SHELL rule, not anything
-        // here: every tile mouse-down re-arms the shell's
-        // `pending_focus_restore` (CLAUDE.md's focus rule), and
-        // `ShellView::render` now withholds the restore while a tile's
-        // occupant holds the keyboard in insert mode
-        // (`occupant_holds_insert_focus`) — so the editor `begin_edit`
-        // focuses on the click keeps it past the next frame. The table
-        // emits `SelectCell` and then `DoubleClickedCell` for the second
-        // click of a pair, so the first arm below has already cancelled
-        // any open editor by the time the second opens one.
-        //
-        // `SelectRow`/`SelectColumn` are deliberately not matched:
-        // `sync_cursor` emits both, so matching them would re-enter this
-        // handler on every cursor move.
-        //
-        // `subscribe_in` (and so a `Window`) for the cancel and the open.
+        // Ignore SelectRow/SelectColumn: sync_cursor emits them while mirroring state,
+        // and handling them here would reenter selection. Window access permits input
+        // blur and focus; the shell preserves a focused insert-mode field across
+        // render.
         cx.subscribe_in(&table, window, |this, _, event: &TableEvent, window, cx| {
             match event {
                 TableEvent::SelectCell(row, col) => {
-                    // A click while the cell editor is open CANCELS it
-                    // (controller ruling 2026-09-14, review Minor 5) —
-                    // through `close_editor`, so blur then drop, and never
-                    // a commit: a click is not `enter`, and silently
-                    // writing a half-typed number because the trader
-                    // clicked elsewhere is the one outcome nobody asked
-                    // for. Cancelling is not optional either: left open,
-                    // the editor would sit painted on the cell the cursor
-                    // just left while `mode == insert` is still claimed.
+                    // Cancel and blur an open editor before moving the cursor. Clicking
+                    // another cell does not commit partially typed text.
                     if this.editor.is_some() {
                         this.close_editor(window, cx);
                         // `cancel`'s own chrome step in `dispatch`: the
@@ -871,12 +698,9 @@ impl MarketDataTile {
         })
         .detach();
         cx.observe(&frame, |this, _frame, cx| {
-            // A flip released (Phase 4 §3.10): promote whatever is staged,
-            // and do it REGARDLESS of visibility — a panel hidden between
-            // staging and the flip must not come back showing the old
-            // generation. `flip` is checked here and never in
-            // `follows_changed`: it means "you may promote", never
-            // "requery" (CLAUDE.md).
+            // Promote staged results on flip even if the tile became hidden after
+            // staging. Flip releases prepared results; it never triggers a document
+            // query.
             let now = this.versions(cx);
             if now.flip != this.last_flip {
                 this.last_flip = now.flip;
@@ -898,13 +722,9 @@ impl MarketDataTile {
         })
         .detach();
         cx.observe(&diagnostics, |this, _diagnostics, cx| {
-            // A fresh catalog only matters LIVE while the picker is open
-            // (spec §7): `completions()` already reads the catalog
-            // pull-style at call time, and a closed panel gets a fresh
-            // one the next time it opens (`open_picker`'s own
-            // re-request) — so most notifications from this entity
-            // (a source's health, say) cost this one `matches!` and
-            // nothing else.
+            // Refresh prepared picker rows only while the picker is open. Command
+            // completions read the catalog directly, and opening requests a fresh
+            // catalog.
             if !matches!(this.popup, Some(Popup::Picker(_))) {
                 return;
             }
@@ -912,28 +732,22 @@ impl MarketDataTile {
             let Some(Popup::Picker(p)) = &mut this.popup else {
                 return;
             };
-            // Review fix round 1, IMPORTANT-2: this observer fires on
-            // EVERY notification this entity emits, not only a catalog
-            // change (a source's health ticks about twice a second with
-            // a diagnostics tile open) — comparing first is what keeps an
-            // unrelated notification from resetting the highlight and
-            // from re-cloning the catalog into `labels` for nothing.
+            // Diagnostics also notifies for health changes. Compare keys first so
+            // unrelated notifications neither reset picker selection nor copy the same
+            // catalog.
             if p.rows.all() == all.as_slice() {
                 return;
             }
-            // Review fix round 2: `replace_all` captures the highlighted
-            // KEY STRING before `all` is overwritten and re-places by it
-            // (`PickerRows::replace_all`'s own doc comment has the full
-            // story).
+            // Preserve the highlighted key string across catalog replacement and
+            // sorting.
             p.rows.replace_all(all);
             cx.notify();
         })
         .detach();
-        // `AppClock` (as-of dialog spec §6.1): refresh the tile's own
-        // reading and re-prepare the header — the field the header's
-        // freshness/`Behind` text and the `⋯` menu's "Rebase onto …" row
-        // all read — then notify, the same shape every other mutation
-        // that reaches `rebuild_chrome` follows (`changed`, just above).
+        // Observe line-number settings so the delegate and cached widths stay in sync.
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
+            .detach();
+        // Refresh the cached clock and prepared time labels when AppClock changes.
         cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
             this.clock = cx
                 .try_global::<geode_shell::clock::AppClock>()
@@ -1008,49 +822,19 @@ impl MarketDataTile {
             upload_error: None,
         };
         this.rebuild_chrome();
-        // The delegate starts with the model this tile starts with (review
-        // Minor 3). Both are empty here, so nothing paints differently —
-        // but "the delegate's model IS the tile's model" is an invariant
-        // every other path maintains, and starting the two apart would
-        // leave the one window in which it does not hold, for a future
-        // constructor that seeds a model to fall through.
+        // Install the tile's initial model into the delegate through the same path as
+        // every later model replacement.
         this.install_model(cx);
         this
     }
 
-    /// Pushed onto the keymap context stack while this tile is focused.
-    /// `insert` while the cell editor holds the keyboard OR the
-    /// underlying picker or a choice cell's typeahead is open (spec
-    /// §7/§8.6, dividend spec §4.4 — a `Popup::Picker`'s or
-    /// `Popup::Choice`'s field holds the keyboard exactly as the cell
-    /// editor does, which is the shell's insert branch's own one pair to
-    /// key on), `menu` exactly
-    /// while the action list is open (spec §6.1; `editor` wins over
-    /// `popup` since the two are exclusive by construction, see
-    /// `toggle_menu`/`open_picker`), else `normal`. `counts()` stays on in
-    /// every mode deliberately: stopping a typed `3` from becoming a
-    /// count prefix is the shell's job there, not this context's.
+    /// Keymap mode while focused: insert for an editor, picker, choice field, or upload
+    /// confirmation; menu for the action list; normal otherwise. Mode reports open
+    /// state, while holds_focus reports actual keyboard ownership.
     ///
-    /// **No context distinguishes the picker from the plain cell editor
-    /// (controller ruling, superseding this crate's own earlier attempt
-    /// at one).** The picker's highlight moves on bare `up`/`down` alone
-    /// (the neutral `insert_up`/`insert_down` pair, which nudges the
-    /// editor's number instead when the editor is what is open —
-    /// `dispatch` tells the two apart, not the context), deliberately
-    /// not a chord: CLAUDE.md's standing rule for a module's
-    /// insert-mode field is that a shipped chord (`ctrl+k` is the
-    /// palette) still fires from inside it, because a chord resolves
-    /// against the WHOLE context stack and a module must never take a
-    /// shell chord away — narrowing that shadow to "only while the picker
-    /// is open" still takes the palette away exactly when a trader is
-    /// typing in the picker, which is no better than taking it from the
-    /// cell editor. Spec §7 named `ctrl+j`/`ctrl+k` in error; Task 8
-    /// records the amendment.
-    ///
-    /// An armed `:upload` confirm is `insert` too, and wins over every
-    /// other state: its prompt holds the keyboard exactly as a field does,
-    /// and `insert` is what makes the shell withhold its root focus
-    /// restore while it does (`TileContent::holds_focus` below).
+    /// Insert contexts retain shell chords. Bare arrows route through insert_up/down to
+    /// the active field's navigation or nudge behavior; the shell prevents typed digits
+    /// from becoming count prefixes despite counts() remaining enabled.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.pending_upload.is_some()
             || self.editor.is_some()
@@ -1065,13 +849,9 @@ impl MarketDataTile {
         KeyContext::new("marketdata").pair("mode", mode).counts()
     }
 
-    /// `TileContent::holds_focus` (review C-1, 2026-09-17): does THIS
-    /// panel's open editor, its picker's field or a choice popup's field
-    /// hold window focus? The
-    /// mode above says an editor is OPEN; this says whose field the
-    /// keyboard is actually in — two different facts once an editor has
-    /// been left open by a tile-focus move (I-3), and the shell's
-    /// insert-focus predicate needs the second.
+    /// Whether this tile's editor, picker, choice field, or upload confirmation
+    /// actually owns window focus. Open state alone is insufficient after focus moves
+    /// to another tile or shell surface.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         let editor = self
             .editor
@@ -1106,25 +886,15 @@ impl MarketDataTile {
         Self::differs_on_followed(acted, now)
     }
 
-    /// Whether `versions` and `now` disagree on any counter this panel
-    /// follows. The one comparison [`Self::follows_changed`] and
-    /// [`Self::promote`]'s own gate both go through, so "what this panel
-    /// requeries for" and "what invalidates something it has already
-    /// staged" can never drift apart (I-1, final whole-branch review).
+    /// Shared followed-version comparison for deciding both requery and staged-result
+    /// validity. Only as-of and watched publication data affect this document request.
     fn differs_on_followed(versions: FrameVersions, now: FrameVersions) -> bool {
         versions.as_of != now.as_of || versions.data != now.data
     }
 
-    /// Answer an open flip barrier for a change this panel is NOT going
-    /// to requery for (a scope or grouping bump, or no key to ask about).
-    ///
-    /// `ShellView::visible_tile_keys` cannot know which tiles follow
-    /// which counters, so every visible occupant is in the barrier's key
-    /// set (Phase 4 §3.10). Left unanswered, this panel would hold every
-    /// blotter on screen open until `FLIP_DEADLINE` — 250 ms — on every
-    /// scope keystroke, for a tile with nothing coming. The blotter's own
-    /// `on_frame_changed` has this exact branch, for the exact same
-    /// reason (a pinned tile under a grouping change).
+    /// Acknowledge a barrier change that requires no document query, such as a scope or
+    /// grouping change. The shell includes all visible occupants, so silence would
+    /// delay other tiles until the barrier deadline.
     fn self_arrive(&mut self, now: FrameVersions, cx: &mut Context<Self>) {
         // An unrelated notification is not an answer to the query this
         // barrier is already waiting for.
@@ -1208,12 +978,9 @@ impl MarketDataTile {
         self.query_in_flight = queued;
         if !queued {
             self.notice = Some("document request refused: the data service is busy or gone".into());
-            // A refused submit means nothing is coming (review fix round
-            // 1, MIN-3): arrive, or an open barrier holds every other tile
-            // to the 250 ms deadline waiting for an outcome that will
-            // never exist — then clear `acted`, so the next frame change
-            // retries rather than deciding this panel is already up to
-            // date. In that order: `arrive` reads `acted`.
+            // A refused submission has no future delivery. Arrive before clearing
+            // acted, which arrival reads; clearing then permits a later frame change to
+            // retry.
             self.arrive(cx);
             self.acted = None;
             self.query_in_flight = false;
@@ -1235,20 +1002,10 @@ impl MarketDataTile {
         let acted = self.acted;
         match outcome.snapshot {
             Ok(snapshot) => {
-                // The notice is cleared in `apply`, on the delivery that
-                // PAINTS (M-5, final whole-branch review): clearing it
-                // here wiped a `:rebase` dropped-edit report or a
-                // `BEHIND_REFUSED` line on any unrelated publish — and
-                // would wipe the restored-draft report `apply` itself
-                // writes, on the very next `data` bump.
-                //
-                // Phase 4 §3.10 (review fix round 1, the Important): if a
-                // barrier is open and still wants this key, STAGE rather
-                // than apply. A document select is cheap, so this panel is
-                // the one most likely to paint the new as-of — grid,
-                // header and source-time chip — a frame before every
-                // blotter promotes its own, which is exactly the
-                // half-updated screen the barrier exists to prevent.
+                // Stage while the barrier waits for this key so document and other tile
+                // results promote together. Clear notices only when apply paints the
+                // delivery, before it writes any new restore, policy, or validation
+                // notice.
                 let wants = acted.is_some_and(|acted| {
                     self.frame
                         .read(cx)
@@ -1281,18 +1038,12 @@ impl MarketDataTile {
         self.changed(cx);
     }
 
-    /// An upload outcome routed to this tile (egress spec §6 "Outcome").
-    /// An outcome whose `tag` is not this tile's latest upload is ignored.
-    /// `Ok` enters `Sent` (the header reads `sent HH:MM`) — but only
-    /// while the draft still IS what was submitted: an edit made, or a
-    /// rebase applied, while the upload was in flight is unsent, so the
-    /// draft stays `Editing`. `Err` leaves the draft `Editing` and paints `upload
-    /// failed: <e>` until the next edit or upload.
+    /// Handle the latest tagged upload outcome. Success enters Sent only if the draft
+    /// still matches the submitted snapshot; changes made in flight remain unsent.
+    /// Failure leaves it editable and records an upload error.
     ///
-    /// An outcome for an underlying no longer shown (the trader switched
-    /// away while it was in flight) is a notice naming key and target and
-    /// nothing else: the draft on screen, its error line and `sent` belong
-    /// to another document.
+    /// For an upload whose underlying is no longer displayed, report the key and target
+    /// without changing the current document's draft or upload state.
     pub fn deliver_upload(&mut self, u: UploadDelivery, cx: &mut Context<Self>) {
         if u.tag != self.upload_tag {
             return;
@@ -1356,7 +1107,7 @@ impl MarketDataTile {
         self.changed(cx);
     }
 
-    // ---- `:upload` (egress spec §6) ----------------------------------
+    // Upload confirmation and submission.
 
     /// `:upload [target]`, the menu's `Upload` row and the palette's
     /// action: resolve the target, refuse what cannot be sent, assemble
@@ -1643,18 +1394,12 @@ impl MarketDataTile {
     /// panel, before the armed confirm is checked against it.
     fn apply_snapshot(&mut self, snapshot: Arc<Snapshot>, cx: &mut Context<Self>) {
         let as_of = source_time_of(&snapshot);
-        // Everything below is decided on a COPY of the draft and built
-        // before a single field is committed (M-2, final whole-branch
-        // review): a generation `MatrixModel::build` refuses must change
-        // NOTHING but the notice. The last good model always stayed on
-        // screen, but `self.snapshot` and the draft's own state used to
-        // move anyway — so the panel went `Behind` against a generation it
-        // never painted, and `:rebase` was left pointed at a document that
-        // cannot be laid out as a grid.
+        // Evaluate delivery on a draft copy and build the resulting model before
+        // committing either. An unbuildable generation changes only the notice, keeping
+        // the last usable snapshot, draft state, and model together.
         let mut draft = self.draft.clone();
         let mut moved = as_of.as_ref().is_some_and(|t| draft.on_delivered(t));
-        // The echo (egress spec §7), decided on the same copy and committed
-        // with everything else below.
+        // Evaluate the upload echo on the same draft copy before committing state.
         let echo = match self.echo_of(&snapshot, as_of.as_deref(), &mut draft) {
             Ok(echo) => echo,
             Err(unbuildable) => {
@@ -1665,42 +1410,11 @@ impl MarketDataTile {
         if matches!(echo, EchoStep::Unchecked) {
             moved = true;
         }
-        // The update policy (spec §8.4, 2026-09-19) is applied HERE and
-        // only here: `on_delivered` is the `hold` decision, and `Behind`
-        // after it means "today's code would hold" — a draft with edits
-        // met a different generation (a further one under an
-        // already-`Behind` draft included, so a `rebase`/`replace` panel
-        // that was left `Behind` under `hold` moves onto the NEWEST on
-        // the next delivery, never retroactively on the switch). A clean
-        // draft and the base's own round trip never reach this branch.
-        // The notice is decided now and written at the commit point
-        // below, ahead of the restore block's own, so it is never wiped
-        // by the "clear on the delivery that paints" rule.
-        //
-        // **Gated on `moved` — a real TRANSITION, never a redelivery**
-        // (review I-1): this panel requeries on every `data` bump (any
-        // dataset's publish, every few seconds on the demo bus), and a
-        // draft already `Behind` reads `Behind` again on every one of
-        // those same-generation redeliveries. Gated on the state alone,
-        // `:auto replace` was a `:revert` executed by an unrelated
-        // publish seconds after the switch, and the restore rule below
-        // protected a draft for exactly one data bump. `on_delivered`
-        // answers `true` for `Editing → Behind` and `Behind{a} →
-        // Behind{b}` alone, so a redelivery of the generation the draft
-        // is already behind leaves it there, `:rebase`/`:revert` its
-        // doors, until the next NEW generation.
-        //
-        // **The first delivery after a restore is always `hold`**
-        // (ruling 2026-09-19): the policy governs LIVE deliveries while
-        // the trader is working, and a draft restored from the session
-        // has not been seen this session at all — `replace` dropping it
-        // on a delivery nobody was watching breaks §8.5's "unsent work
-        // survives a restart" with only a notice for company, and
-        // `rebase` would move edits onto a generation the trader never
-        // chose. So while `unresolved_restore` is set the delivery takes
-        // the `hold` path (a differing base lands `Behind`, a matching
-        // one resolves through the restore block below as today), and
-        // the policy resumes from the next delivery.
+        // Apply live update policy only to a transition to a different Behind
+        // generation. Changing policy or redelivering the same generation leaves
+        // existing state alone. Unresolved restores always take Hold, preserving unsent
+        // work before its first usable model; Sent drafts use echo handling separately.
+        // Commit any policy notice after the delivery's ordinary notice clear.
         let mut notice: Option<SharedString> = None;
         if moved
             && draft.is_behind()
@@ -1710,17 +1424,9 @@ impl MarketDataTile {
             match self.policy {
                 UpdatePolicy::Hold => unreachable!("guarded above"),
                 UpdatePolicy::Rebase => {
-                    // The rebase guard (spec §2, amendment 4) needs the
-                    // OUTGOING document's own group sizes before this
-                    // rebase moves `draft` onto the incoming one —
-                    // `painted_snapshot` is exactly what is on screen
-                    // right now (still `self.base_snapshot`/
-                    // `self.snapshot`, neither overwritten yet), and
-                    // `capture_groups_if_base` is what confirms it is
-                    // really this draft's base and not a fallback (its own
-                    // doc comment has the M-1 story). Skipped in silence
-                    // otherwise, the same "leave groups as they were" the
-                    // restore path below takes.
+                    // Capture same-day group sizes only from the outgoing snapshot when
+                    // it is the draft's actual base. A fallback newer snapshot must not
+                    // overwrite restored base-group metadata before rebase.
                     self.capture_groups_if_base(&mut draft);
                     // Two builds, on purpose: `Draft::rebase` re-places
                     // the edits by the NEW document's row and column
@@ -1736,14 +1442,9 @@ impl MarketDataTile {
                             return;
                         }
                     };
-                    // An EMPTY new document (no rows for this key at
-                    // this as-of — `compile_document`'s `and false` arm)
-                    // is not a document to move edits onto: rebasing
-                    // against an empty label map drops every edit in
-                    // silence (review I-2, the restore block's own
-                    // guard below). The draft stays `Behind` — the
-                    // `hold` path, no extra notice — and `:rebase`
-                    // remains the trader's explicit door.
+                    // An empty new document supplies no label map for automatic rebase.
+                    // Keep the draft Behind with edits intact; explicit rebase remains
+                    // available.
                     if !clean.rows.is_empty() {
                         let (_, dropped) = draft.rebase(&clean);
                         if !dropped.is_empty() {
@@ -1766,15 +1467,9 @@ impl MarketDataTile {
                 }
             }
         }
-        // While `Behind`, keep painting the generation the edits were made
-        // against; `snapshot` below still records the delivered one for
-        // `:rebase` (Task 8). Retained only when the OUTGOING snapshot
-        // really IS that base (M-1): a restored draft lands `Behind` with
-        // its base never delivered at all, and pinning whatever happened
-        // to be painted froze the panel on a generation that was neither
-        // the base nor the newest, with the header naming a third. Under
-        // `rebase`/`replace` the draft is no longer `Behind` by here, so
-        // nothing is retained and the new document is painted.
+        // Retain the outgoing snapshot only when it is the draft's actual base and the
+        // new state still needs it. Restored drafts may have no delivered base; never
+        // pin their newest-snapshot fallback as if it were that base.
         let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
@@ -1786,11 +1481,9 @@ impl MarketDataTile {
         } else {
             None
         };
-        // The DELIVERED snapshot is what gets recorded, so it is what has
-        // to build (M-2) — while `Behind` it is not the one painted, but
-        // it is the one `:rebase` will be run against, and recording a
-        // generation that cannot be laid out as a grid is how `:rebase`
-        // came to fail against a document the panel never showed.
+        // Validate the delivered snapshot even while Behind paints the retained base.
+        // It becomes the target for rebase, so recording an unbuildable document would
+        // leave the draft without a usable resolution target.
         let built = match MatrixModel::build(&snapshot, self.spec, &draft) {
             Ok(model) => model,
             Err(e) => {
@@ -1811,11 +1504,9 @@ impl MarketDataTile {
             None => Rc::new(built),
         };
 
-        // Committed from here down. The notice is cleared here rather than
-        // in `deliver`'s `Ok` arm (M-5) — on the delivery that paints, and
-        // ahead of every notice this method itself writes below; the
-        // policy's own notice (`None` under `hold`) is what it is cleared
-        // TO, so a `replace` disclosure is never lost to the clear.
+        // Commit only after validation. Replace the prior notice with the policy notice
+        // on the delivery that paints, before this method writes any restore or
+        // validation notice. Preserve the replace disclosure through this clear.
         self.notice = notice;
         self.draft = draft;
         match echo {
@@ -1838,36 +1529,17 @@ impl MarketDataTile {
         self.snapshot = Some(snapshot);
         self.model = model;
         self.clamp_cursor();
-        // A restored draft's edits have no grid position until a model
-        // resolves them by label (Task 5's own note on `Draft::from_toml`)
-        // — and only a NON-EMPTY, successfully built model can resolve
-        // one (I-2's ruling, final whole-branch review). An empty snapshot
-        // (no document for this key in this database, or a persisted
-        // as-of that predates its first publish — `compile_document`'s
-        // `and false` arm) and a refused build both leave the model empty,
-        // and rebasing against one dropped every restored edit silently:
-        // the one path on this branch that lost unsent work, which §8.5
-        // says survives a restart. Until then the draft stays parked and
-        // `rebuild_chrome` says so.
+        // Resolve restored label pairs only against a successfully built nonempty
+        // document. Empty or refused deliveries leave the edits parked and visible as
+        // unresolved work in the header.
         if self.unresolved_restore && !self.model.rows.is_empty() {
             self.unresolved_restore = false;
-            // A draft that landed `Behind` is not rebased here: moving
-            // edits onto a generation the trader has not seen is exactly
-            // the decision `:rebase` exists to ask for (§8.4).
+            // Keep a restored Behind draft parked until explicit rebase or revert.
             if !self.draft.is_behind() {
-                // Against the DOCUMENT's own grid, never `self.model`:
-                // that one was built WITH this draft, so it already
-                // carries the draft's inserted rows spliced in — `rebase`
-                // would read each as a row the document now carries and
-                // drop it as a conflict (§5.1), and would key every cell
-                // edit by its post-splice position rather than the
-                // document position `Draft::edits` holds. The same rule
-                // `:rebase` and the update policy's `rebase` arm follow.
-                // One extra build, once per restore, never per delivery.
-                // Not `Behind`, so the painted snapshot is the delivered
-                // one; it built a moment ago, so this cannot fail, and a
-                // failure would leave the draft parked (the honest state)
-                // rather than rebased against nothing.
+                // Resolve against the document-only grid. A model containing this
+                // draft's inserted rows would mistake them for upstream conflicts and
+                // use post-splice indices for document edits. This extra build occurs
+                // once per restore; failure leaves the draft unresolved.
                 let clean = self
                     .painted_snapshot()
                     .and_then(|s| MatrixModel::build(&s, self.spec, &Draft::default()).ok());
@@ -1878,12 +1550,8 @@ impl MarketDataTile {
                 };
                 let (_, dropped) = self.draft.rebase(&clean);
                 self.rebuild_model(cx);
-                // Reported, never pruned in silence — `:rebase` names
-                // every dropped pair on the same situation, and a reader
-                // of §8.7.17 would expect the same disclosure here.
-                // Written after the rebuild so a build failure's own
-                // message wins by arriving first, exactly as `rebase`
-                // orders its own two.
+                // Report dropped restored edits. Rebuild first so its failure notice
+                // takes precedence over the dropped-edit report.
                 if !dropped.is_empty() && self.notice.is_none() {
                     self.notice = Some(dropped_notice(&dropped).into());
                 }
@@ -1898,29 +1566,14 @@ impl MarketDataTile {
         self.install_model(cx);
     }
 
-    /// The echo check (egress spec §7), run by [`Self::apply_snapshot`] on
-    /// its working copy of the draft before anything is committed.
+    /// Compare a Sent draft's saved upload rows with a different delivered generation.
+    /// Matching content clears the draft and follows the delivery; a difference keeps
+    /// Sent over its base. Reuse a difference result for the same source time.
     ///
-    /// Only a `Sent` draft meeting a generation other than its base is
-    /// compared — `on_delivered` leaves such a draft `Sent`, so neither
-    /// `Behind` nor the update policy ever sees it. The delivered document
-    /// is assembled exactly as an upload would be (a clean model, an empty
-    /// draft) and compared with `sent`: equal reverts the copy and follows
-    /// the new generation; different keeps it `Sent` over its base. A
-    /// redelivery of the generation already found different is not
-    /// compared again (every publish anywhere redelivers). A delivered
-    /// document that cannot be assembled at all — empty, or a value of the
-    /// wrong type — cannot confirm anything and is held as a difference
-    /// that names why.
-    ///
-    /// `Sent` with no `sent` rows to compare (not reachable: `sent` is
-    /// dropped only once the draft leaves `Sent`) must not claim a
-    /// confirmation it cannot check: the copy goes `Behind`, the ordinary
-    /// disclosure, and the caller treats that as a real transition.
-    ///
-    /// `Err` is a delivered generation that cannot be laid out as a grid,
-    /// which the caller reports and commits nothing for — the same rule
-    /// as its own build below.
+    /// Assemble incoming content from a clean document model. Empty or invalid upload
+    /// content cannot confirm the send and produces a differing-echo notice. A
+    /// model-build failure returns Err so apply commits nothing. Missing saved send
+    /// rows instead transitions the draft to Behind rather than claiming confirmation.
     fn echo_of(
         &self,
         snapshot: &Snapshot,
@@ -1969,27 +1622,11 @@ impl MarketDataTile {
         Ok(held(format!("echo differs ({differing} rows)")))
     }
 
-    /// Apply a staged snapshot, if any — from the `flip` bump in the frame
-    /// observer, or from this panel's own `deliver` when its arrival was
-    /// the one that emptied the barrier. A no-op with nothing staged, so
-    /// calling it on every `flip` costs nothing.
-    ///
-    /// The gate asks "does this still answer what I FOLLOW", never "is
-    /// the barrier's identity unchanged" (I-1, final whole-branch
-    /// review). `requery` and `set_key` both clear `staged`, so a staged
-    /// snapshot is by construction the answer to this panel's latest
-    /// question; the flip identity (`scope`, `grouping`, `as_of`) is the
-    /// blotter's rule, and the blotter can afford it only because it
-    /// follows scope and grouping. This panel follows neither — a barrier
-    /// replaced by a scope keystroke or a grouping step comes with no
-    /// requery at all, so the snapshot thrown away here was the only
-    /// answer the panel would ever get for the new as-of, and what stayed
-    /// painted was the PRE-as-of generation under the window-wide
-    /// historical stripe, with `acted` claiming the panel was current.
-    ///
-    /// A stage IS dropped when a counter this panel follows has moved
-    /// under it — reachable while hidden, where no requery replaces it —
-    /// because it answers a question nobody is asking any more.
+    /// Promote a staged document when flip releases it or this tile's arrival finishes
+    /// the barrier. Compare followed versions, not the barrier's full identity: scope
+    /// and grouping changes need no new query, so their replacement barrier still uses
+    /// this answer. Discard staging when as-of or watched data changed; requery and key
+    /// changes also clear it.
     fn promote(&mut self, cx: &mut Context<Self>) {
         let Some((snapshot, versions)) = self.staged.take() else {
             return;
@@ -2017,13 +1654,8 @@ impl MarketDataTile {
             // An in-flight document nothing will paint is a round trip
             // spent for nothing.
             self.data.cancel(QueryKey(self.id.0));
-            // And the cancelled request's own `acted` must go with it
-            // (review fix round 1, MIN-2): it records "this panel has
-            // already asked under these versions", which is no longer
-            // true of anything that will arrive — left set, a panel hidden
-            // mid-round-trip comes back and decides it is up to date, and
-            // paints the generation it had before it was hidden until the
-            // next publish happens along.
+            // Clear acted with the cancelled request so showing the tile cannot treat
+            // an undelivered request as current.
             self.acted = None;
             self.query_in_flight = false;
         }
@@ -2054,29 +1686,10 @@ impl MarketDataTile {
         self.base_snapshot.clone().or_else(|| self.snapshot.clone())
     }
 
-    /// Capture `draft`'s same-day group sizes (spec §2's rebase guard,
-    /// amendment 4) against the snapshot on screen right now — but ONLY
-    /// when that snapshot really IS `draft`'s own base generation, never
-    /// merely `painted_snapshot()`'s best guess (review finding, controller
-    /// ruling: a capture site captures only when the model it is about to
-    /// count was built from a snapshot whose source time equals
-    /// `draft.base`).
-    ///
-    /// `painted_snapshot()` falls back to the NEWEST delivered snapshot
-    /// when no base is retained — the M-1 path in `apply`: a restored or
-    /// parked draft whose base generation was never delivered this
-    /// session at all. Trusting that fallback here would silently replace
-    /// a previously correct `groups` (captured against the true base, by
-    /// an earlier call or carried in from the session) with the NEWER
-    /// document's own sizes, disarming the guard it exists to run — a
-    /// same-day group that in truth changed size between the draft's real
-    /// base and the newer document would then read as unchanged. Skipped
-    /// in silence otherwise: leaving `groups` untouched is always the safe
-    /// choice, since a stale-but-correct-for-its-generation count only
-    /// ever makes the guard MORE willing to refuse, never less.
-    ///
-    /// Every capture site in this file calls this rather than
-    /// `Draft::capture_groups` directly, so the rule lives in one place.
+    /// Capture same-day group sizes only if the painted snapshot's source time equals
+    /// the draft base. A restored or parked draft may paint a newer fallback because
+    /// its real base was never delivered here; keep its stored base-group sizes in that
+    /// case. All capture sites share this guard before calling Draft::capture_groups.
     fn capture_groups_if_base(&self, draft: &mut Draft) {
         let Some(base) = self.painted_snapshot() else {
             return;
@@ -2112,18 +1725,11 @@ impl MarketDataTile {
         self.install_model(cx);
     }
 
-    /// Hand the current model to the delegate and refresh the table.
-    ///
-    /// **Every model swap ends here**, and the `refresh` is the reason:
-    /// the pinned release (`gpui-component-0.6.2/src/table/state.rs`)
-    /// caches each `column()`'s answer in `col_groups` at prepare time
-    /// and paints its HEADER from that cache alone, so a document whose
-    /// node ladder changed would keep the previous one's headers (and
-    /// lay its cells out at the previous widths) until something else
-    /// happened to refresh. The same trap CLAUDE.md records for the
-    /// blotter's gutter.
-    ///
-    /// One `Rc::clone` — a refcount — never the model itself.
+    /// Share the current model with the delegate, then refresh cached columns
+    /// and headers before synchronizing the cursor. A model swap can change
+    /// the node ladder or gutter width; replacing only the delegate's model
+    /// would leave TableState painting stale headers and widths.
+    /// Sharing the model clones its Rc, not its prepared cells.
     fn install_model(&mut self, cx: &mut Context<Self>) {
         let model = Rc::clone(&self.model);
         self.table.update(cx, |t, cx| {
@@ -2150,24 +1756,26 @@ impl MarketDataTile {
         self.cursor = cursor::clamp(self.cursor, self.grid());
     }
 
-    /// Mirror the cursor and the open editor into the delegate, and move
-    /// the table's own selection to match — which is also what keeps the
-    /// cursor row and column in view (`set_selected_row` and
-    /// `set_selected_col` each scroll, non-strictly, so a cell already on
-    /// screen never jumps).
-    ///
-    /// While the cursor is in the strip (`Cursor::Attr`) the delegate
-    /// mirrors NO selection at all (`clear_selection`) — the pinned
-    /// component's own clear door, confirmed at implementation time — so
-    /// the grid paints no highlighted row behind an attribute edit.
-    ///
-    /// In the grid, the column is shifted by one: the table's column 0 is
-    /// the row-label column, which the cursor never enters. The column is
-    /// set BEFORE the row deliberately — each setter switches the
-    /// component's selection mode, and the row highlight is painted only
-    /// in row mode, so ending on the row is what makes the panel read
-    /// like the blotter (a highlighted row plus a bordered cursor cell)
-    /// rather than painting nothing at all.
+    /// Mirror line-number settings and refresh the table when they change.
+    /// The pinned column includes the gutter, and TableState caches column widths.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            if d.line_numbers != mode {
+                d.line_numbers = mode;
+                t.refresh(cx);
+                cx.notify();
+            }
+        });
+    }
+
+    /// Mirror cursor, editor, and choice state into the delegate and table.
+    /// Translate model columns through the optional row-label offset. Set the
+    /// column before the row so the table finishes in row-selection mode while
+    /// keeping the cell in view. An attribute cursor clears grid selection.
     fn sync_cursor(&self, cx: &mut Context<Self>) {
         let editor = self.delegate_editor();
         let choice = self.delegate_choice();
@@ -2216,10 +1824,8 @@ impl MarketDataTile {
         Some(DelegateEditor { row, col, paint })
     }
 
-    /// The open choice popup as the delegate paints it (dividend spec
-    /// §4.4): the cell it hangs under and the tile's own prepared paint —
-    /// an `Rc` bump, never a re-preparation. `None` with no popup, or a
-    /// popup of another kind.
+    /// Prepared choice popup and its cell anchor, mirrored into the delegate by Rc.
+    /// Return None for other popup states without rebuilding choice rows.
     fn delegate_choice(&self) -> Option<DelegateChoice> {
         match &self.popup {
             Some(Popup::Choice(c)) => {
@@ -2256,11 +1862,8 @@ impl MarketDataTile {
         });
     }
 
-    /// Move the cursor to a clicked cell — the mouse's form of §8.3's
-    /// motions, clamped into the grid. `col: None` is a click on the
-    /// row-label column: the row moves and the column stays where it was
-    /// (`last_grid_col` when the click arrives from the strip, since
-    /// there is no grid column of the cursor's own yet).
+    /// Select a clicked cell, clamping to the grid. A row-label click changes only the
+    /// row, using last_grid_col when returning from the attribute strip.
     fn cursor_to(&mut self, row: usize, col: Option<usize>, cx: &mut Context<Self>) {
         if self.model.rows.is_empty() {
             return;
@@ -2278,17 +1881,8 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// Move the cursor to an attribute in the header strip — the mouse's
-    /// form of `k` (spec §5.1: "a click on an attribute value moves the
-    /// cursor to `Attr(i)` and opens nothing"). `header::render` attaches
-    /// this to each attribute value's own mouse-down.
-    ///
-    /// An open cell editor is CANCELLED first (final review, B4) — the
-    /// `SelectCell` handler's own rule, and for the same reason: this
-    /// mouse-down has already re-armed the shell's focus restore, so an
-    /// editor left open would be painted on a cell the cursor just left,
-    /// deaf, with `mode == insert` still claimed. Never a commit: a click
-    /// is not `enter`. That is the only reason this takes a `Window`.
+    /// Select an attribute without opening it. Cancel an existing editor first,
+    /// blurring only its own focused input; clicking is not a commit.
     pub(crate) fn cursor_to_attr(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let attrs = self.model.header.len();
         if attrs == 0 {
@@ -2303,15 +1897,9 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// An attribute value's mouse-down with its click count
-    /// (`header::render` attaches this): every press is
-    /// [`Self::cursor_to_attr`], and the second press of a pair ALSO
-    /// opens the editor on that attribute (user ruling 2026-09-17,
-    /// reversing 2026-09-14's "editing is keyboard-only") — `i`'s exact
-    /// path, refusals included. The strip focuses nothing of its own, so
-    /// the editor `begin_edit` focuses here holds the keyboard when the
-    /// shell's tile-level listener arms its focus restore on this same
-    /// press, and `ShellView::render`'s insert-mode rule withholds it.
+    /// Attribute mouse-down selects the target; the second press also invokes the
+    /// ordinary edit route, including its refusals. The shell preserves the newly
+    /// focused field while the tile reports insert mode.
     pub(crate) fn attr_clicked(
         &mut self,
         i: usize,
@@ -2334,9 +1922,8 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// Prepare the header (spec §4): the kind badge and underlying, the
-    /// dirty dot, each header attribute, the one short state run, the
-    /// notice, and the generation's source time.
+    /// Prepare header identity, attributes, draft/upload state, notices, and
+    /// source-time text from current tile state.
     fn rebuild_chrome(&mut self) {
         if self
             .upload_error
@@ -2385,9 +1972,7 @@ impl MarketDataTile {
         });
     }
 
-    /// Whether the painted generation is old enough to warrant the
-    /// header's stale marker — the blotter's own rule (spec §6.5) at this
-    /// panel's configured `stale_after`.
+    /// Whether the painted generation exceeds this panel's stale_after interval.
     fn is_stale(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
         self.source_at.is_some_and(|at| {
             now.signed_duration_since(at).to_std().unwrap_or_default() > self.stale_after.get()
@@ -2396,9 +1981,8 @@ impl MarketDataTile {
 
     // ---- keys --------------------------------------------------------
 
-    /// `window` is here for the cell editor alone: creating an
-    /// `InputState`, giving it the keyboard and giving the keyboard back up
-    /// all need one (spec §8.6). Nothing else in this match touches it.
+    /// Dispatch tile actions with window access for editor, popup, and confirmation
+    /// focus transitions.
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -2409,24 +1993,10 @@ impl MarketDataTile {
         let Some(verb) = action.0.strip_prefix("marketdata::") else {
             return false;
         };
-        // "Any other dispatched action closes the popup first, then
-        // runs" (spec §6.1) — the one rule that keeps the popup from
-        // needing the shell's modal machinery. The five menu verbs are
-        // the popup's own grammar and must not close it out from under
-        // themselves; `commit`/`cancel` join them (Task 7) because with
-        // a picker open they route to IT rather than closing it —
-        // `key_context` reports `insert` while one is open, which is
-        // exactly what puts `commit`/`cancel` in a trader's hand for it.
-        // The four `insert_*` verbs join them too (2026-09-17): with a
-        // picker open they ARE its highlight step, so closing it first
-        // would leave them nothing to move.
-        //
-        // `close_popup_with_window`, never plain `close_popup`: this is
-        // reachable with a `Popup::Picker` open (any OTHER action, an
-        // ordinary cursor motion say), and its field holds the keyboard —
-        // dropping it unblurred would leave `Window::focused` pointing at
-        // a dead input for the rest of the session (`close_editor`'s own
-        // rule).
+        // Close popups before unrelated actions. Menu commands, commit/cancel, and
+        // insert navigation retain their active popup so they can act on it. Use the
+        // window-aware close to blur a focused picker or choice field before dropping
+        // it.
         if !matches!(
             verb,
             "menu"
@@ -2445,14 +2015,9 @@ impl MarketDataTile {
             self.close_popup_with_window(window, cx);
         }
         let n = count.unwrap_or(1).max(1) as isize;
-        // Whether this action touched something the HEADER paints (review
-        // fix round 1, MIN-5, extended by Task 5 to the strip): a motion
-        // that STAYS in the grid, a yank and an `n`/`N` step must not
-        // re-prepare the chips — `changed` formats, and a held `j` would
-        // then format the whole header per keystroke for a row number
-        // nothing shows. A motion that crosses into or out of the strip
-        // is the one exception: the strip's own cursor border is header
-        // paint (spec §5.1).
+        // Rebuild prepared header text only when the action changes header state.
+        // Grid-only motion, yank, and repeat-find need notification, while moving into
+        // or out of the attribute strip also changes header cursor styling.
         let chrome = match verb {
             "down" | "up" | "left" | "right" | "page_down" | "page_up" | "page_down_full"
             | "page_up_full" | "top" | "bottom" | "first_col" | "last_col" => {
@@ -2482,9 +2047,8 @@ impl MarketDataTile {
                     "yank_row" => Yank::Row,
                     _ => Yank::Col,
                 };
-                // `yc` in the strip has no column to yank (spec §5.1): a
-                // notice, not a silent no-op — the one yank that touches
-                // the header at all.
+                // Column yank has no target in the attribute strip; report that
+                // refusal.
                 if what == Yank::Col && matches!(self.cursor, Cursor::Attr(_)) {
                     self.notice = Some("nothing to yank in a column here".into());
                     true
@@ -2575,16 +2139,9 @@ impl MarketDataTile {
                 }
                 false
             }
-            // The insert-mode arrow pair (2026-09-17), whose meaning
-            // follows which input is open: the picker's highlight step
-            // while the picker holds the keyboard (`_big` is the same one
-            // step — a list has no "big"), the choice popup's highlight
-            // step while IT does (a bare step wraps, §20.5's one motion
-            // rule — the picker's clamp is header spec §7's own), a nudge
-            // of the editor's number while the cell or attribute editor
-            // does, and nothing at all with none (the palette can reach
-            // these; a `false` there is "not handled", not a silent
-            // success).
+            // Insert arrows act on the open input: clamped picker navigation, wrapping
+            // choice navigation, or numeric nudging. Large picker steps still move one
+            // row. With no applicable input, return unhandled.
             "insert_up" | "insert_down" | "insert_up_big" | "insert_down_big" => {
                 let up = verb.starts_with("insert_up");
                 match &mut self.popup {
@@ -2630,8 +2187,7 @@ impl MarketDataTile {
                 self.open_picker(window, cx);
                 false
             }
-            // `space`/`shift+space` on a choice cell (dividend spec §4.4):
-            // the next/previous option, in place, no popup.
+            // Step a choice cell forward or backward without opening its popup.
             "step" | "step_back" => {
                 let delta = if verb == "step" { n } else { -n };
                 if let Err(e) = self.step_choice(delta, window, cx) {
@@ -2639,10 +2195,8 @@ impl MarketDataTile {
                 }
                 true
             }
-            // The row verbs (dividend spec §5.3): `o`/`shift+o` insert a
-            // row below/above the cursor row, `d d` deletes it. Every
-            // one touches what the header paints — the dirty dot, the
-            // incomplete chip, or a refusal.
+            // Insert/delete row actions update dirty, incomplete, or refusal header
+            // state.
             "insert_below" | "insert_above" => {
                 if let Err(e) = self.insert_row(verb == "insert_below", window, cx) {
                     self.notice = Some(e.into());
@@ -2670,8 +2224,7 @@ impl MarketDataTile {
                 self.set_policy(UpdatePolicy::Replace, cx);
                 false
             }
-            // The menu's `Upload` row and the palette's action: `:upload`
-            // with no argument (egress spec §6).
+            // The menu and palette upload action uses the no-argument upload route.
             "upload" => {
                 if let Err(e) = self.arm_upload(None, window, cx) {
                     self.notice = Some(e.into());
@@ -2684,10 +2237,8 @@ impl MarketDataTile {
                 .iter()
                 .any(|a| a.id.strip_prefix("marketdata::") == Some(verb)) =>
             {
-                // Every `KindAction` in this slice is `built: false`
-                // (spec §6.3): when a future one is built it becomes an
-                // egress REQUEST designed in its own slice, never
-                // computation this crate performs.
+                // Unbuilt kind actions report their unavailable status; computation and
+                // outbound requests require their own implemented handler.
                 self.notice = Some("not built yet".into());
                 true
             }
@@ -2703,11 +2254,8 @@ impl MarketDataTile {
 
     // ---- the cell editor ---------------------------------------------
 
-    /// Why no edit can be made right now, if none can: the draft is
-    /// `Behind`, or a differing echo is held (egress spec §7). Both paint a
-    /// generation that is no longer the newest under the edits, and an
-    /// edit there would be stamped against it; `:rebase` and `:revert` are
-    /// the doors forward from either.
+    /// Editing is blocked by Behind state or a held differing echo. Both require rebase
+    /// or revert before further changes against the painted generation.
     fn held_refusal(&self) -> Option<&'static str> {
         if self.draft.is_behind() {
             Some(BEHIND_REFUSED)
@@ -2718,17 +2266,10 @@ impl MarketDataTile {
         }
     }
 
-    /// The generation an edit is recorded against, or why there can be no
-    /// edit at all.
-    ///
-    /// An absent `source_time` gives an EMPTY base rather than a refusal:
-    /// `compile_document` always stamps one (Part 1 §4.5 — a document
-    /// request reports its own resolved generation's source time), so this
-    /// is unreachable from the real query path, and refusing here would
-    /// turn a provenance gap into a panel a trader cannot type into at all.
-    /// An empty base simply never matches a delivered `as_of`, so such a
-    /// draft reads `Behind` on the next delivery — visible and
-    /// recoverable, never a silently restamped edit.
+    /// Return the edit's base source time, or a refusal when no usable document exists.
+    /// If provenance lacks source_time, use an empty base. Production document queries
+    /// supply it; an empty base will differ from a later dated delivery, making the
+    /// provenance gap visible through Behind state.
     fn edit_base(&self) -> Result<String, String> {
         if self.model.rows.is_empty() || self.model.columns.is_empty() {
             return Err(NO_DOCUMENT.to_string());
@@ -2747,28 +2288,10 @@ impl MarketDataTile {
         Ok(self.model.source_time.clone().unwrap_or_default())
     }
 
-    /// `marketdata::edit` (`i`/`enter`): open an editor in the cursor cell
-    /// or, on `Cursor::Attr`, in the strip — seeded with what is already
-    /// painted there (the draft's own value where one has been made,
-    /// since that is what `MatrixModel::build`/`header_of` painted) — and
-    /// give it the keyboard.
-    ///
-    /// WHICH editor is the column's [`CellKind`] (spec §4.4): a `Date`
-    /// cell opens the segmented date field exactly as a `Date` attribute
-    /// does, a `Number` or `Text` cell the text `Input`, and a `Choice`
-    /// cell the typeahead popup ([`Self::open_choice`]) — after the same
-    /// refusals as the other two, since a popup over a `Behind` draft or
-    /// an empty grid would be exactly as dishonest as an editor. The two
-    /// text-or-date decisions — a cell's kind, an attribute's declared
-    /// type — resolve to the one `wants_date` below, so the field opens
-    /// the same way from either.
-    ///
-    /// Every painted cell is editable, in both pivots: `Columns::Axis`
-    /// fills the grid from the document's one value column, and
-    /// `Columns::Values` lays out the value columns and nothing else, so
-    /// there is no attribute cell for a refusal to be about. A NULL cell is
-    /// editable on purpose — filling a hole the desk left is an edit like
-    /// any other, and it opens on the empty text it paints.
+    /// Open the cursor's cell or attribute editor seeded from its painted draft value.
+    /// CellKind chooses text, segmented date, or choice typeahead; attribute type
+    /// chooses text or date. Apply the same document, draft-state, and deleted-row
+    /// guards before opening any form. Editable NULL cells open empty.
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
             // Already editing. `i` is not bound in insert mode, so this is
@@ -2786,9 +2309,7 @@ impl MarketDataTile {
                     self.notice = Some(e.into());
                     return;
                 }
-                // A deleted row's cells refuse edits (dividend spec
-                // §5.2) — here, ahead of the editor and the choice popup
-                // alike, so nothing opens over a row that is going.
+                // Reject Deleted rows before creating either an editor or choice popup.
                 if self.model.rows[row].state == RowState::Deleted {
                     self.notice = Some(DELETED_REFUSED.into());
                     return;
@@ -2829,11 +2350,8 @@ impl MarketDataTile {
             }
         };
         let state = if wants_date {
-            // A `Date` attribute or cell opens the segmented field (header
-            // spec §5.2, 2026-09-19; spec §4.4), seeded with the painted
-            // date — or, when that does not parse (a NULL painted empty,
-            // say), today's date on the trader's clock, so the field
-            // always opens on something a step or a digit can act on.
+            // Seed a date field from painted text, falling back to today's date on the
+            // configured clock when the text is empty or invalid.
             let date = chrono::NaiveDate::parse_from_str(text.as_ref(), "%Y-%m-%d")
                 .unwrap_or_else(|_| self.clock.today(chrono::Utc::now()));
             let field = DateTimeField::open(
@@ -2859,22 +2377,11 @@ impl MarketDataTile {
         self.notice = None;
     }
 
-    /// The date field's own keys (header spec §5.2, 2026-09-19), run from
-    /// its `on_key_down` in `header::render` — which sits on the focused
-    /// element and so runs BEFORE the shell root's listener. Answers
-    /// whether the key was consumed; the listener stops propagation on
-    /// `true`, so the shell never also resolves it. A chord (ctrl, alt or
-    /// cmd) is never consumed: it reaches the shell exactly as it does
-    /// from any editor (`ctrl+k` still opens the palette). Shift alone is
-    /// the arrows' "ten steps", the number nudge's own rule.
-    /// `geode_widgets::datefield::route` is the ONE key table this
-    /// consults — the panel just computes `chord` and matches the two
-    /// arms (`Commit`/`Cancel`) it alone owns, `field.apply` the rest.
-    ///
-    /// `enter` and `escape` are ALSO bound by the fragment
-    /// (`marketdata::commit`/`cancel`) for the shell's dispatch: both
-    /// doors end in the same `commit_edit`/`close_editor`, so which one a
-    /// keystroke reaches cannot change what it does.
+    /// Handle date-field keys before the shell listener. Shared datefield routing owns
+    /// segment edits; this tile owns commit/cancel. Consumed keys stop propagation,
+    /// while Ctrl/Alt/Cmd chords continue to the shell. Shift modifies arrow stepping.
+    /// Both direct Enter/Escape and registered commit/cancel actions use the same
+    /// editor lifecycle.
     pub(crate) fn date_field_key(
         &mut self,
         event: &KeyDownEvent,
@@ -2924,14 +2431,8 @@ impl MarketDataTile {
         true
     }
 
-    /// A click on one of the field's segments (`header::render` attaches
-    /// this): the mouse form of `left`/`right`. It also takes the keyboard
-    /// back for the field when the field has lost it (review M4) — an
-    /// editor orphaned by a tile-focus move (I-3) is still open, and a
-    /// click on its segment is the trader asking to type into it again. A
-    /// module focusing its OWN handle, never the shell's (CLAUDE.md's
-    /// focus rule); the shell's insert-focus rule then withholds its
-    /// restore exactly as it does after `begin_edit`.
+    /// Select a date segment and focus the field's own handle, including when the
+    /// editor remained open after focus moved elsewhere.
     pub(crate) fn date_segment_clicked(
         &mut self,
         segment: Segment,
@@ -2975,15 +2476,9 @@ impl MarketDataTile {
                 self.commit_attr_edit(index, column, AttrInput::Text(&text), window, cx)
             }
             (EditorState::Date { field, paint, .. }, EditTarget::Attr { index, column }) => {
-                // A digit still waiting in a segment is finished FIRST
-                // (user ruling 2026-09-19, review I-1): `1` in the day
-                // then `enter` means the 1st, not the day that was there
-                // before with the edit marked as landed. A pending entry
-                // that cannot stand — `0`, a short year — refuses the
-                // commit and names the segment, the editor staying open
-                // with the digits as typed (the cell rule). Both `enter`
-                // doors (the field's own listener, the fragment's
-                // `commit`) come through here, so they cannot disagree.
+                // Finish a pending segment digit before committing. Invalid partial
+                // dates keep the editor open with a segment-specific refusal. Both
+                // keyboard commit routes use this check.
                 if let Err(segment) = field.complete_pending() {
                     self.notice =
                         Some(format!("finish the {} or backspace", segment.name()).into());
@@ -2996,10 +2491,8 @@ impl MarketDataTile {
                 self.commit_attr_edit(index, column, AttrInput::Value(value), window, cx)
             }
             (EditorState::Date { field, paint, .. }, EditTarget::Cell { cell, labels }) => {
-                // A `Date` cell (spec §4.4): the attribute arm's own two
-                // steps — finish a waiting digit or refuse naming the
-                // segment, then hand the field's (always valid) date to
-                // the value door. Both `enter`s land here.
+                // Finish pending date digits before passing the validated cell date to
+                // the shared value commit path.
                 if let Err(segment) = field.complete_pending() {
                     self.notice =
                         Some(format!("finish the {} or backspace", segment.name()).into());
@@ -3010,13 +2503,9 @@ impl MarketDataTile {
                 self.commit_cell_value(cell, labels, value, window, cx)
             }
             (EditorState::Text(state), EditTarget::RowLabel { row, label }) => {
-                // A typed row label (dividend spec §5.3) is parsed by the
-                // axis's own type — `parse_attr`, the attribute rule —
-                // and its canonical spelling (`attr_text`) is the label,
-                // so `2027-1-5` on a `Date` axis and `2027-01-05` name
-                // the same row. A `Minted` axis never opens this editor;
-                // refused as a moved grid rather than declared
-                // impossible.
+                // Parse typed row labels using the axis type and canonicalize their
+                // spelling. A Minted axis has no row-label editor; encountering one is
+                // treated as a moved-target refusal.
                 let RowIdentity::Typed(ty) = self.spec.rows.identity else {
                     self.close_editor(window, cx);
                     self.notice = Some(CELL_MOVED.into());
@@ -3051,16 +2540,10 @@ impl MarketDataTile {
         }
     }
 
-    /// The row-label editor's commit (dividend spec §5.3): `new` is
-    /// already the canonical label. The row must still be where the
-    /// editor opened (the grid-moved rule), the label must not already
-    /// name a row on screen — a document row, a deleted one or another
-    /// insert alike — and the draft must still hold the provisional row;
-    /// then the row is renamed, the editor closed (the rename is what
-    /// keeps `close_editor` from dropping the row as provisional), the
-    /// grid rebuilt with the cursor on the renamed row, and the FIRST
-    /// cell's editor opened, since a row with a name and no values is
-    /// the next thing to fill.
+    /// Commit a canonical row label only if the provisional target still occupies its
+    /// opening row and the label is unused, including by deleted rows. Rename before
+    /// closing so close_editor retains the row, then rebuild and open its first value
+    /// cell.
     fn commit_row_label(
         &mut self,
         row: usize,
@@ -3095,22 +2578,11 @@ impl MarketDataTile {
         true
     }
 
-    /// `marketdata::insert_up`/`insert_down` (and `_big`) with the editor
-    /// open (2026-09-17): step the number the editor currently spells by
-    /// `steps` units and write the result back into the SAME editor —
-    /// nothing is committed, `enter` commits and `escape` cancels exactly
-    /// as before. The unit is the target's own painted precision: a cell
-    /// steps at its column's format (a slice column's own `precision`,
-    /// else the panel's), an `F64`/`I64` attribute at the places its text
-    /// paints (attributes paint with `{}`, so `5000` steps by one), and a
-    /// `Date` attribute by whole days — [`crate::core::nudge_text`] is
-    /// the arithmetic, this only decides the type and precision. The two
-    /// sources differ on purpose: a cell's precision comes from its
-    /// COLUMN's format, because that is what the cell paints with, while
-    /// an attribute's comes from its own TEXT, because an attribute has no
-    /// format and paints exactly the places the document sent.
-    /// Text that does not parse leaves the editor untouched and says so
-    /// in the notice. Answers whether the header needs re-preparing.
+    /// Nudge the open numeric editor by the target's displayed precision without
+    /// committing. Cells use their column format; numeric attributes derive precision
+    /// from their own text because attributes have no column format. Date fields handle
+    /// their own segment stepping. Invalid text remains unchanged with a notice. Return
+    /// whether the header needs rebuilding.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(editing) = self.editor.as_mut() else {
             return false;
@@ -3118,10 +2590,8 @@ impl MarketDataTile {
         let state = match &mut editing.state {
             EditorState::Text(state) => state.clone(),
             EditorState::Date { field, paint, .. } => {
-                // The field owns dates (2026-09-19): the shell's
-                // `insert_up`/`insert_down` reach here only when the
-                // field's own listener did not consume the key, and step
-                // the same way it would have.
+                // Insert navigation that reaches a date editor delegates to the field's
+                // segment stepping, matching its direct key listener.
                 field.step(steps);
                 *paint = DateFieldPaint::of(field, self.id.0);
                 return self.notice.take().is_some();
@@ -3130,17 +2600,9 @@ impl MarketDataTile {
         let text = state.read(cx).value().to_string();
         let (ty, precision) = match &editing.target {
             EditTarget::Cell { cell: (_, col), .. } => {
-                // `declared_type` answers `None` for the other three
-                // `CellKind`s (Task 4's), reachable while their text
-                // editor is still open — a `Text`/`Choice`/`Date` cell
-                // COMMITS through `commit_cell_edit`'s own arms, but a
-                // nudge is number arithmetic and has nothing to step
-                // there, so it is refused here with a notice instead.
-                // This is the ONE refusal: the precision lookup below
-                // does not repeat it, because `declared_type` already
-                // proved `kind_of` is `Number` here — a second refusal
-                // over the same fact would be a defence the first one
-                // hides from the mutation harness.
+                // Only Number cells support arithmetic nudging. Reject other kinds
+                // without changing typed text. This declared-type check also
+                // establishes the kind used by the precision lookup below.
                 let Some(ty) = declared_type(self.spec, &self.model, *col) else {
                     self.notice = Some("not a numeric cell".into());
                     return true;
@@ -3192,21 +2654,11 @@ impl MarketDataTile {
         }
     }
 
-    /// `commit_edit`'s text-editor cell arm: the text is PARSED before
-    /// anything is written, by the column's [`CellKind`] (spec §4.4) — a
-    /// `Number` through [`parse_cell`] and the column's declared type
-    /// (`Value::F64`/`I64` by that type, never by what the text happens
-    /// to parse as), a `Text` trimmed and taken verbatim, empty refused
-    /// only where the column is `required` (an optional note may
-    /// honestly be cleared), a `Date` through the ISO spelling its cell
-    /// paints (unreachable from `begin_edit`, which opens the field on a
-    /// `Date` cell, but parsed rather than declared impossible), and a
-    /// `Choice` as a `Text` — unreachable the same way since Task 5's
-    /// popup, and kept the same way. A refusal is inline, with the editor
-    /// left open and focused, because retyping a value is one keystroke
-    /// away where dropping the editor would throw the whole line back at
-    /// the trader. What is written, and how, is
-    /// [`Self::commit_cell_value`]'s.
+    /// Parse cell input before writing: Number uses its declared numeric type, Text is
+    /// trimmed with requiredness checked, Date uses ISO text, and Choice uses text.
+    /// Date/Choice normally open their specialized fields, but this route still
+    /// validates them. Refusal keeps the text editor open; valid values proceed through
+    /// commit_cell_value.
     fn commit_cell_edit(
         &mut self,
         cell: (usize, usize),
@@ -3264,9 +2716,7 @@ impl MarketDataTile {
         self.commit_cell_value(cell, labels, value, window, cx)
     }
 
-    /// Whether a flat column must hold a value ([`ValueColumn::required`]);
-    /// a pivot's cells are never required — a NULL there is the desk's own
-    /// "no value here" (§6.3), and every cell of it is a number anyway.
+    /// Flat-column requiredness comes from ValueColumn. Pivot NULL cells are permitted.
     fn column_required(&self, col: usize) -> bool {
         self.spec
             .flat_columns()
@@ -3274,37 +2724,14 @@ impl MarketDataTile {
             .is_some_and(|vc| vc.required)
     }
 
-    /// Write one already-valid cell value into the draft and paint it —
-    /// the door both editor forms end at (the text editor after
-    /// [`Self::commit_cell_edit`] parsed, the date field with its own
-    /// date), so the identity check, the base stamp and the repaint are
-    /// spelled once.
+    /// Commit a validated cell value after checking its opening identity and base.
+    /// Document rows write Draft::edits by the cell's document reference, not its
+    /// post-insertion grid index. Inserted rows write RowEdit.cells by column label;
+    /// Deleted rows refuse changes.
     ///
-    /// The repaint PATCHES the one cell in the model the tile already
-    /// holds (spec §4.5, [`MatrixModel::patch_cell`]) rather than
-    /// rebuilding: the flat build is the per-commit cost `docs/perf.md`
-    /// records at the edge of the 8 ms pure-UI budget for a 10,000-row
-    /// schedule, and a commit changes one cell. The delegate's `Rc` clone
-    /// is taken back FIRST so `Rc::make_mut` finds the model uniquely
-    /// held and patches in place — with the delegate's clone still alive
-    /// it would copy every row to patch one, the cost this exists to
-    /// avoid — and `install_model` then hands the same `Rc` back and
-    /// refreshes the table. Two cases still rebuild, honestly: a patch
-    /// that answers `false` (the cell is out of the model's range, which
-    /// the identity check above makes unreachable, kept as the belt), and
-    /// a draft that was `Sent` — `Draft::set` moves it back to `Editing`,
-    /// which changes EVERY cell's `sent` flag, not this one's.
-    ///
-    /// WHERE the value is written is the row's state (dividend spec
-    /// §5.1/§5.2). A document row's edit goes into `Draft::edits` under
-    /// the cell's own `cell_ref` — the row's DOCUMENT position, which is
-    /// `cell` itself only while no row is inserted above it — never under
-    /// the cursor's model index. An inserted row's value goes into its
-    /// `RowEdit.cells` by column label through `Draft::set_row_cell`,
-    /// since such a row has no document position for an index-keyed edit
-    /// to name. A deleted row refuses: `begin_edit` already declines to
-    /// open an editor on one, and this is the belt for the doors that
-    /// open nothing (a choice step).
+    /// Patch the prepared cell in place after releasing the delegate's Rc clone, then
+    /// reinstall the model. Rebuild if patching fails or the draft was Sent: leaving
+    /// Sent changes state styling across the whole grid.
     fn commit_cell_value(
         &mut self,
         cell: (usize, usize),
@@ -3396,10 +2823,8 @@ impl MarketDataTile {
         true
     }
 
-    /// `commit_edit`'s attribute arm (spec §5.2): the same parse-first
-    /// discipline as [`Self::commit_cell_edit`], through
-    /// [`crate::core::draft::parse_attr`] and the attribute's own declared
-    /// type rather than the panel's cell type.
+    /// Parse and commit attribute text using its declared type before mutating the
+    /// draft.
     fn commit_attr_edit(
         &mut self,
         index: usize,
@@ -3409,10 +2834,7 @@ impl MarketDataTile {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.model.header.get(index).map(|h| &h.column) != Some(&column) {
-            // The header moved under the editor — unreachable today (a
-            // panel's header is fixed by its spec), refused rather than
-            // guessed at, the same rule `commit_cell_edit` applies to a
-            // moved cell.
+            // Reject a changed attribute target rather than writing to its replacement.
             self.close_editor(window, cx);
             self.notice = Some(CELL_MOVED.into());
             return true;
@@ -3432,10 +2854,7 @@ impl MarketDataTile {
             AttrInput::Text(text) => match parse_attr(text, attr.ty) {
                 Ok(value) => value,
                 Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.notice = Some(e.into());
                     return true;
                 }
@@ -3456,32 +2875,13 @@ impl MarketDataTile {
         true
     }
 
-    /// Give the keyboard up, then drop the editor — in that order, and
-    /// BOTH halves (Task 4's own note in `geode_shell::module::recording`,
-    /// verified at the pinned gpui-component rev):
+    /// Blur a focused editor before releasing it. Root can retain a strong input handle
+    /// after its element leaves the tree, so dropping alone does not release keyboard
+    /// ownership. Never blur another surface when this editor has lost focus.
     ///
-    /// `blur` is what the shell's dropped-focus net (`render`'s
-    /// `focused(cx).is_none()`) is waiting for, and dropping the entity is
-    /// NOT enough to produce it — `Root` registers the focused input as a
-    /// strong `AnyInputState` (`input::state::sync_focused_input_registry`)
-    /// and only ever unregisters it from the `Input`'s own render, which an
-    /// input removed from the tree never reaches. So the last clone would
-    /// outlive this call, `Window::focused` would stay `Some`, and the net
-    /// could never fire — leaving every chord dead for the rest of the
-    /// session. Blurring is a module GIVING UP focus, never taking the
-    /// shell's: no module touches the shell's own handle (CLAUDE.md's focus
-    /// rule), and the shell decides where focus lands next. The blur is
-    /// conditional on the editor's own field holding focus, for
-    /// `close_popup_with_window`'s reason: an editor orphaned by `mod+l`
-    /// and closed from a `:` line must not blur the command line.
-    ///
-    /// A ROW-LABEL editor closing on a row still provisional — the draft
-    /// holds its minted label as an `Inserted` row with no cell filled —
-    /// drops that row (dividend spec §5.3): a row nobody named and
-    /// nothing was typed into is not unsent work, and leaving `new-1`
-    /// behind on a `Typed` axis would paint a row the axis's own type
-    /// cannot name. A commit renames the row BEFORE closing, so the
-    /// minted label is gone from the draft by the time this looks.
+    /// Closing an unfinished typed row-label editor removes its provisional row.
+    /// Successful commit renames that row first, so the minted target is no longer
+    /// present for cancellation to remove.
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(e) = &self.editor
             && e.state.is_focused(window, cx)
@@ -3506,7 +2906,7 @@ impl MarketDataTile {
         }
     }
 
-    // ---- the row verbs (dividend spec §5.3) ---------------------------
+    // Row insertion and deletion.
 
     /// The cursor row a row verb acts on, with every refusal the three
     /// share: an open editor is cancelled first (a row verb is
@@ -3532,29 +2932,15 @@ impl MarketDataTile {
         Ok((row, base))
     }
 
-    /// `o`/`shift+o` (`marketdata::insert_below`/`insert_above`): insert a
-    /// row beside the cursor row and start filling it.
+    /// Insert beside the cursor and start entry. Below anchors on the selected row and
+    /// rehangs its prior follower beneath the new row. Above a document row uses the
+    /// preceding painted row as anchor; above an inserted row takes its anchor and
+    /// reanchors the original row beneath it. These links preserve insertion order
+    /// through rename and rebase.
     ///
-    /// WHERE it lands is the anchor (controller ruling 2026-09-19). `o`
-    /// anchors on the cursor row itself, document or inserted alike —
-    /// and a follower that row already had is re-hung onto the new row
-    /// (`Draft::rehang_followers`), so the new row sits IMMEDIATELY below
-    /// the cursor row rather than beside its earlier sibling in label
-    /// order, where a later rename would re-sort the pair on commit.
-    /// `shift+o` on a DOCUMENT row anchors on the row painted above it
-    /// (`None` at the top) — which may itself be an inserted row; on an
-    /// INSERTED row the new row takes that row's own anchor and the row
-    /// is re-anchored onto the new one (`Draft::reanchor_row`), so the
-    /// chain paints new-above-old and survives a rebase as a chain.
-    ///
-    /// WHO names it is the axis (`RowIdentity`): a `Minted` axis mints
-    /// `new-<n>` against the rows on screen and opens the first CELL's
-    /// editor at once; a `Typed` axis opens the row-label editor on the
-    /// minted row instead — the segmented date field for a `Date` axis
-    /// (opening on today's date on the trader's clock, the strip's own landing), the text
-    /// `Input` for any other type — whose commit renames the row and then
-    /// opens the first cell (`commit_row_label`), and whose cancel drops
-    /// the row (`close_editor`).
+    /// Minted axes open the first value cell. Typed axes first open a provisional
+    /// row-label editor: a date field seeded from the configured clock, or blank text.
+    /// Label commit renames the row then opens its first cell; cancellation drops it.
     fn insert_row(
         &mut self,
         below: bool,
@@ -3611,11 +2997,9 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// Open the row-label editor on the provisional row at `row` (spec
-    /// §5.3): `begin_edit`'s two forms, seeded EMPTY — a `Date` axis's
-    /// field on today's date on the trader's clock, since there is no painted text to
-    /// open on, and any other type's text `Input` blank — with the
-    /// keyboard, so the shell's insert branch hands it every bare key.
+    /// Open the provisional row's label editor for a Typed axis. Date starts at today
+    /// on the configured clock; other types start as empty text. Focus its own input so
+    /// bare keys reach entry.
     fn begin_label_edit(
         &mut self,
         row: usize,
@@ -3673,24 +3057,9 @@ impl MarketDataTile {
 
     // ---- the action list ---------------------------------------------
 
-    /// `.`/`⋯` (spec §6.1): open the action list, or close it if it is
-    /// already open. Insert mode and the popup are exclusive — opening it
-    /// with an editor still open cancels the editor first (never commits
-    /// it, exactly as a click elsewhere does), which is why this takes
-    /// `window`.
-    ///
-    /// **The popup match is exhaustive on purpose** (review fix round 1,
-    /// IMPORTANT-1): a Picker open when this runs — reachable via
-    /// `ctrl+k` → palette → "Actions menu", which is not bound by mode at
-    /// all — must be closed through [`Self::close_popup_with_window`]
-    /// (blur, then drop) before the Menu overwrites `self.popup`, or the
-    /// picker's still-focused `InputState` would be dropped with no
-    /// blur, leaving `Window::focused` pointing at a dead input for the
-    /// rest of the session (`close_editor`'s own rule). Unlike the editor
-    /// case just below, this one does NOT return: opening the action
-    /// list is the whole point of the row that reached here, so closing
-    /// the picker falls through into building the menu rather than
-    /// merely toggling it off.
+    /// Toggle the action menu. Close a picker/choice through the focus-aware popup
+    /// closer and cancel any editor before opening the menu. Switching from a picker
+    /// continues into menu construction; it does not merely dismiss the picker.
     pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match &self.popup {
             Some(Popup::Menu(_)) => {
@@ -3718,39 +3087,10 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// Close whatever popup is open — THE one door (final review, B1).
-    /// Harmless when none is (`dispatch`'s own "any other action closes
-    /// it first" rule calls this unconditionally).
-    ///
-    /// The keyboard is given up first when the popup is a
-    /// [`Popup::Picker`] — `close_editor`'s own blur-then-drop order
-    /// (blur, THEN drop, both halves): its field holds the keyboard, and
-    /// dropping it without blurring would leave `Window::focused`
-    /// pointing at a dead input for the rest of the session. There used
-    /// to be a second, `Window`-less `close_popup(cx)` for the sites
-    /// believed unreachable with a Picker open (`find`, `command`, the
-    /// menu's `on_mouse_down_out`); every one of them WAS reachable —
-    /// `u` then `ctrl+k` then the palette's "Find", or `u` then `mod+l`
-    /// (the shell moves focus to its root and the picker stays `Some`)
-    /// then `/` or `:` — and every one of them already had a `Window` in
-    /// hand, so the door without one is gone rather than guarded.
-    ///
-    /// The blur is conditional on the picker's OWN field holding focus
-    /// (re-review of that wave): a picker can be orphaned with the
-    /// keyboard elsewhere — `u`, `ctrl+k` (the palette takes focus), the
-    /// palette's "Find" (the shell's command line takes it, the picker
-    /// still `Some`) — and the first find keystroke reaches here. An
-    /// unconditional blur then blurred the FIND FIELD, and the shell's
-    /// focus backstop cancelled the command line on the next render: the
-    /// trader's find died after one character. Blurring is a module
-    /// giving up focus it holds, never focus something else holds.
-    ///
-    /// A [`Popup::Choice`] (dividend spec §4.4) is the picker's twin here
-    /// in both halves: its field holds the keyboard the same way, and it
-    /// is orphaned the same ways. It is also MIRRORED into the delegate
-    /// (painted under its cell), so the close re-mirrors — this door is
-    /// reachable from the popup's own `on_mouse_down_out`, which ends in
-    /// no `dispatch` tail.
+    /// Close any popup. Blur picker/choice input only when it owns focus, then drop it;
+    /// an orphaned popup must not blur the shell's command field or another tile.
+    /// Refresh the delegate's choice mirror because outside-click closure has no
+    /// dispatch tail to do so.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let own_field_focused = match &self.popup {
             Some(Popup::Picker(p)) => p.input.read(cx).focus_handle(cx).is_focused(window),
@@ -3795,11 +3135,8 @@ impl MarketDataTile {
         cx.notify();
     }
 
-    /// `enter` on the highlighted row, or a click on any row (spec
-    /// §6.2): a disabled row's reason becomes the notice and the popup
-    /// stays open; an enabled one closes the popup and re-enters
-    /// [`Self::dispatch`] on its own id, so a menu row and a keybinding
-    /// (or a `:` line) take exactly one path from here on.
+    /// Pick a menu row by pointer or Enter. Disabled rows report their reason and
+    /// remain open; enabled rows close and invoke the same dispatch route as keys.
     pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Popup::Menu(m)) = &self.popup else {
             return;
@@ -3826,18 +3163,10 @@ impl MarketDataTile {
 
     // ---- the underlying picker -----------------------------------
 
-    /// `u` (normal mode) and the menu row (spec §7): open the underlying
-    /// picker over the dataset's catalog keys, ranked by `listfilter` as
-    /// the trader types. Never refused for a dirty draft (2026-09-19):
-    /// a pick PARKS the current draft under its underlying (`set_key`),
-    /// and a row whose underlying already holds a parked draft says so in
-    /// its label (`NKY.Z · 1 cell, spot_ref`, prepared here from
-    /// [`Self::parked_marks`], never in `render`). Re-requests the catalog
-    /// on the way in (the existing rule: `request_catalog()` +
-    /// `cx.notify()` in the same update) so the list is fresh even if
-    /// this panel has never asked before; a catalog that arrives later,
-    /// while the picker is still open, is folded in by the diagnostics
-    /// observer in `new`.
+    /// Open the underlying picker with ranked catalog keys and prepared parked-draft
+    /// marks. Dirty drafts do not block it: selecting a key parks the current work.
+    /// Request a fresh catalog on entry and incorporate later catalog changes through
+    /// the diagnostics observer.
     pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Defensive: unreachable through the shipped keymap (`edit` is a
         // normal-mode binding, and `load_underlying`'s own `dispatch`
@@ -3872,20 +3201,10 @@ impl MarketDataTile {
         self.changed(cx);
     }
 
-    /// `commit` (`enter`) with the picker open (spec §7): re-rank from the
-    /// field's CURRENT text before resolving the highlighted row. A real
-    /// keystroke already kept the ranking current through the `Change`
-    /// subscription in `open_picker`, but `InputState::set_value` emits
-    /// none at all (CLAUDE.md's own trap, exercised by a test harness that
-    /// writes the field that way) — trusting whatever was last ranked
-    /// would let the choice depend on a rank that was never actually run.
-    /// `refilter` is a no-op when the text has not actually changed
-    /// (`PickerRows`'s own doc comment, review fix round 1, CRITICAL),
-    /// so this defensive call never resets the highlight the trader
-    /// already moved to — it only re-ranks, preserving the highlighted
-    /// KEY, when there is a real query to catch up on. Nothing painted
-    /// (no catalog, or nothing matches) is inert (spec §7): nothing to
-    /// load, and the picker stays open.
+    /// Before picker commit, reconcile the ranking with the input's current text;
+    /// programmatic set_value emits no Change event. Unchanged text preserves the
+    /// highlight, and a changed query retains key identity where possible. With no
+    /// painted option, leave the picker open.
     fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return;
@@ -3899,14 +3218,8 @@ impl MarketDataTile {
         self.picker_pick(index, window, cx);
     }
 
-    /// A row click, or `enter` after [`Self::commit_picker`]'s own
-    /// re-rank (spec §7): load the key at painted row `index` (a
-    /// WINDOW-relative index, matching [`PickerRows::highlighted`] and
-    /// the row a click carries) through the same door `:underlying`/`:key`
-    /// use, closing the picker first — exactly as [`Self::menu_pick`]
-    /// closes the menu before dispatching its own row, and for the same
-    /// reason: `set_key` needs no keyboard, and the picker's own field is
-    /// done being useful the moment a row is chosen.
+    /// Resolve the painted, window-relative picker index, close its input, then switch
+    /// keys through the same route as key/underlying commands.
     pub(crate) fn picker_pick(
         &mut self,
         index: usize,
@@ -3924,17 +3237,11 @@ impl MarketDataTile {
         self.set_key(parse_display_key(&key), window, cx);
     }
 
-    // ---- the choice cell (dividend spec §4.4) --------------------------
+    // Choice-cell typeahead and stepping.
 
-    /// `begin_edit`'s `Choice` arm: open the typeahead popup over the
-    /// column's own vocabulary, placed on the cell's current text, and
-    /// give its field the keyboard — the picker's contract, spec §7.
-    /// The popup is exclusive with the editor and every other popup
-    /// (`begin_edit` returned early on an open editor; `dispatch` closed
-    /// any other popup before `edit` ran; a double-click's mouse-down
-    /// closed one through `on_mouse_down_out`), and the one path that
-    /// could still find one — the palette's `Edit cell` with a picker
-    /// open — is closed through the one door, blur first.
+    /// Open a choice typeahead from the column vocabulary, seeded with its current cell
+    /// text. Close any existing popup through the focus-aware path before installing
+    /// the new field.
     fn open_choice(
         &mut self,
         cell: (usize, usize),
@@ -4106,18 +3413,9 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// `:revert` (spec §8.4) — drop every edit. The document's own numbers
-    /// are back on the same keystroke, so the only thing worth reporting is
-    /// the nothing-to-do case.
-    ///
-    /// **Controller ruling 2026-09-14:** a draft emptied by `:revert` while
-    /// `Behind` is `Clean` afterwards — `Draft::revert`'s own doing — and
-    /// `Clean` means "on the live document". `leave_behind()` makes that
-    /// true of the PANEL too: without it, `base_snapshot` stayed set with
-    /// no draft left to explain it, the panel kept painting a generation
-    /// the header no longer said anything about, and `:rebase`/`:revert`
-    /// were both refused (there is no draft to move or drop) — the only
-    /// way out was a `:key` retype or waiting for the next delivery.
+    /// Discard draft edits and return to the newest usable document. Clear retained
+    /// base state as well as Draft so a Clean panel cannot keep painting an obsolete
+    /// base. Report the no-edits case without pretending a change occurred.
     fn revert(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if self.draft.is_empty() {
             return Err("no edits to revert".to_string());
@@ -4167,13 +3465,11 @@ impl MarketDataTile {
         }
         let base = self.edit_base()?;
         let Cursor::Cell { row, col } = self.cursor else {
-            // `:bump` walks a grid row or column (spec §8.3); the strip
-            // has neither, and there is no cell here to name.
+            // Bump requires grid cells; the attribute strip has no row or column
+            // target.
             return Err("bump needs a grid cell — the cursor is in the header".to_string());
         };
-        // A row bump on a deleted row is refused outright (dividend spec
-        // §5.2: a deleted row's cells refuse edits); a column bump skips
-        // one, below, rather than refusing the whole column for it.
+        // Reject a bump of a Deleted row. Column bumps skip Deleted rows individually.
         if matches!(axis, BumpAxis::Row) && self.model.rows[row].state == RowState::Deleted {
             return Err(DELETED_REFUSED.to_string());
         }
@@ -4195,15 +3491,8 @@ impl MarketDataTile {
                 Some(Value::Utf8(_) | Value::Date(_)) | None => None,
             })
         };
-        // Each cell's own declared type — `Draft::bumped`'s one typing
-        // rule, read off the spec rather than guessed from the painted
-        // value: `Columns::Values` names each column's own type by its
-        // grid position (`column_required`'s own convention — a flat
-        // model's columns are built from `flat_columns()` in that exact
-        // order); `Columns::Axis` gives every ladder cell the spec's
-        // `value_type`, except a leading slice-value cell, which is
-        // always `F64` regardless (`SliceValue`'s own doc comment: a
-        // slice value is f64 only).
+        // Use each column's declared numeric type. Flat panels follow flat_columns
+        // order; pivot values use value_type, while a leading slice-value cell is F64.
         let ty_of = |ci: usize| -> ColumnType {
             match self.spec.columns {
                 Columns::Values(_) => self
@@ -4286,19 +3575,9 @@ impl MarketDataTile {
                 }
             }
         }
-        // Every cell's `bumped()` result is checked — document rows AND
-        // inserted rows together — before either write door opens
-        // (controller ruling): a mixed row with an I64 node
-        // behind an F64 one must not land the F64 cells through
-        // `Draft::bump` and only then hit the I64 refusal in the
-        // `set_row_cell` loop below, since a partial bump on a row an
-        // inserted-row cell shares with document cells is exactly the
-        // half-applied edit `Draft::bump`'s own check-then-write exists to
-        // rule out. `bumped` is a pure function of its four arguments, so
-        // validating it here and letting `Draft::bump`/`set_row_cell`
-        // recompute the identical result when they actually write is a
-        // second pass over a keystroke's worth of cells, not a risk of
-        // disagreement.
+        // Validate every document and inserted cell's bump before either write path. A
+        // fractional delta rejected by an I64 cell must not leave earlier F64 changes
+        // applied. The write pass recomputes the same pure bumped results.
         for (_, labels, value, ty) in &document {
             bumped(*value, delta, *ty, &labels.1)?;
         }
@@ -4315,44 +3594,23 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// `:rebase` (spec §8.4): move every edit onto the newer document,
-    /// by label, and start painting it.
-    ///
-    /// `self.snapshot` is the newer generation — while `Behind`,
-    /// `base_snapshot` is what is on screen and `snapshot` is what just
-    /// arrived (see the module doc and the two fields' own docs). Built
-    /// against an EMPTY draft, deliberately: `Draft::rebase` reads only a
-    /// model's row/column labels and its source time, never a cell's
-    /// painted value, so the draft about to be replaced has nothing to
-    /// contribute here and using it would only invite confusion about
-    /// which draft a reader is looking at.
-    ///
-    /// From `Sent` too (egress spec §7): after a differing echo it moves
-    /// the sent edits onto the upstream's answer, and the draft is
-    /// `Editing` — unsent against that document — whatever it was before.
+    /// Rebase edits by labels onto the newest document and begin painting it. Build the
+    /// label map with an empty draft so inserted rows and painted edit values cannot
+    /// affect target identity. A Sent draft can rebase only after a differing echo; the
+    /// result becomes unsent Editing state.
     fn rebase(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
         if !self.draft.is_behind() && !self.draft.is_sent() {
             return Err(NOT_BEHIND.to_string());
         }
-        // A `Sent` draft only has somewhere to rebase onto once a
-        // differing echo is held — otherwise the upload is still in
-        // flight upstream and this would be a rebase onto the very
-        // generation already submitted (controller ruling).
+        // Sent without a differing echo has no newer target. Refuse a rebase that would
+        // make already-submitted edits sendable on the same generation.
         if self.draft.is_sent() && !matches!(self.echo, Some(Echo::Differs { .. })) {
             return Err(REBASE_AWAITING_ECHO.to_string());
         }
-        // The rebase guard (spec §2, amendment 4) needs the group sizes
-        // of the document currently on screen — `painted_snapshot` while
-        // `Behind` — before `rebase` below moves the draft onto the newer
-        // one. Skipped, not refused, on a build failure or when the
-        // painted snapshot is not really this draft's base (the M-1 path
-        // — `capture_groups_if_base`'s own doc comment): the guard is a
-        // refinement of `rebase`'s own report, never a gate on running it
-        // at all. `self.draft` is taken out and put back rather than
-        // borrowed in place, since `capture_groups_if_base` also reads
-        // `self` (`painted_snapshot`, `spec`) and a method call cannot
-        // hold both an immutable borrow of `self` and a mutable one of
-        // `self.draft` at once.
+        // Capture outgoing group sizes only from the actual base snapshot. Build
+        // failure or a newer fallback leaves stored group metadata intact without
+        // blocking rebase. Temporarily take the draft so the capture helper can also
+        // borrow tile state.
         let mut draft = std::mem::take(&mut self.draft);
         self.capture_groups_if_base(&mut draft);
         self.draft = draft;
@@ -4383,11 +3641,8 @@ impl MarketDataTile {
         Ok(())
     }
 
-    /// The cursor's row when it is on a grid cell, `0` when it is in the
-    /// strip — `find` and `repeat_find` never touch the strip (spec
-    /// §5.1: "`/` matches row and column labels as today and never the
-    /// strip"), so a search that somehow starts from `Attr` has nowhere
-    /// better to begin than the top.
+    /// Find's starting grid row, or zero when invoked from the attribute strip. Find
+    /// searches document rows and never attribute values.
     fn cursor_row(&self) -> usize {
         match self.cursor {
             Cursor::Cell { row, .. } => row,
@@ -4405,15 +3660,10 @@ impl MarketDataTile {
         self.cursor = Cursor::Cell { row, col };
     }
 
-    /// The blotter's own tab-separated spelling (§8.3): a cell is its
-    /// text, a row is its label then its cells, a column is its cells one
-    /// per line. Always the PREPARED text, so what is yanked is exactly
-    /// what is on screen — a NULL yanks as nothing, never as `0.0000`.
-    ///
-    /// In the strip (spec §5.1), `y` yanks the attribute's own value and
-    /// `yy` its label and value the same way; `yc` has no column to yank
-    /// and answers `None` (the dispatcher turns that case into a notice
-    /// before it ever reaches here).
+    /// Yank prepared display text: a cell, a tab-separated row, or a newline-separated
+    /// column. Include row labels only when painted; NULL remains empty. In the
+    /// attribute strip, cell/row yank use the value or label/value pair, while column
+    /// yank has no target.
     fn yank_text(&self, what: Yank) -> Option<String> {
         match self.cursor {
             Cursor::Cell { row: r, col: c } => {
@@ -4478,16 +3728,9 @@ impl MarketDataTile {
         }
     }
 
-    /// `/` (spec §6.1's own example of a shell-owned door the popup must
-    /// not survive): `/`/`:` are `tile`-context bindings the shell
-    /// resolves before ever reaching this module's own dispatch, so the
-    /// popup's own "any other dispatched action closes it first" rule
-    /// (`dispatch`'s own guard) never sees them. Closing here,
-    /// unconditionally and on every variant, is what keeps a find
-    /// session that starts with the menu open from painting `mode ==
-    /// menu` under the find field for even one keystroke. The `window`
-    /// is for that close alone: a Picker can be open here too (`u`,
-    /// `ctrl+k`, the palette's "Find"), and closing one blurs first.
+    /// Close popups at the find entry point. Find is shell-routed and bypasses the tile
+    /// dispatch guard; use the focus-aware closer so a picker can be dismissed without
+    /// blurring the shell field now receiving query text.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popup_with_window(window, cx);
         match event {
@@ -4534,10 +3777,8 @@ impl MarketDataTile {
             }
         }
         self.sync_cursor(cx);
-        // A plain notify, for MIN-5's reason at this site too: `/` moves
-        // the cursor and nothing else, and it does so on every keystroke
-        // of the query — re-preparing the header there would format the
-        // whole thing per character for something no chip shows.
+        // Find only moves the cursor. Notify without reformatting header chips on every
+        // query character.
         cx.notify();
     }
 
@@ -4574,32 +3815,18 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        // `completions` takes `&App` and can queue nothing, so this is
-        // the door an `underlying` line's own catalog request rides — the
-        // next completion list is then the fresh one (spec §8.3's
-        // "completions from the catalog's keys").
-        //
-        // UNCONDITIONALLY, not `request_catalog_if_needed` (review fix
-        // round 1, MIN-4, controller ruling): a held catalog listing this
-        // dataset is not a FRESH one, and documents arrive while the panel
-        // is open — a subscribed feed publishes a new key every few
-        // seconds. Gated on staleness, the panel asked once and then
-        // offered a completion list that could never grow. `set_visible`'s
-        // own request stays gated: there, one catalog is as good as
-        // another and the point is only to have one at all.
+        // Request catalog refresh when handling a key/underlying command, even if one
+        // is already held. Completions are read-only and cannot submit that refresh; a
+        // held catalog proves availability, not freshness. Visibility requests only
+        // need to establish that a catalog exists.
         if matches!(line.split_whitespace().next(), Some("underlying" | "key")) {
             self.request_catalog(cx);
         }
         let command = commands::parse(line)?;
-        // The other half of `find`'s own door (spec §6.1): `:` is a
-        // shell-owned `tile`-context binding too, so the popup's own
-        // "any other dispatched action closes it first" guard in
-        // `dispatch` never sees a `:` line either. Every parsed command
-        // but `Menu` itself (which TOGGLES the popup, and so must decide
-        // for itself rather than have this close it out from under that
-        // decision) closes it here, once parsing has succeeded — a
-        // failed parse leaves the popup exactly as `dispatch`'s own
-        // guard would, since nothing here ran at all.
+        // After successful parsing, close popups for every command except Menu, which
+        // must inspect the current popup to toggle it. Parse failures leave state
+        // alone. This explicit close covers shell command routing outside tile
+        // dispatch.
         if !matches!(command, Command::Menu) {
             self.close_popup_with_window(window, cx);
         }
@@ -4631,14 +3858,9 @@ impl MarketDataTile {
         }
     }
 
-    /// The one setter for the update policy (spec §8.4, 2026-09-19) —
-    /// `:auto`, the menu rows and the palette actions all land here. It
-    /// changes what the NEXT delivery does and nothing on screen now: a
-    /// draft already `Behind` stays `Behind` (`:rebase`/`:revert` are
-    /// still its doors), so no model or chrome is rebuilt. The menu's
-    /// tick cannot be stale either — every door here closes an open
-    /// popup first — and the session flush compares `serialize()` on its
-    /// own tick, so the notify is the ordinary "state moved" one.
+    /// Set the policy used by a future new generation. Existing Behind state and
+    /// current pixels remain unchanged; notify for session persistence. Command, menu,
+    /// and palette routes close an existing popup before reaching this setter.
     fn set_policy(&mut self, policy: UpdatePolicy, cx: &mut Context<Self>) {
         self.policy = policy;
         cx.notify();
@@ -4649,16 +3871,9 @@ impl MarketDataTile {
         self.policy
     }
 
-    /// `:set <attr> [value]` (spec §5.2): the typed door onto the same
-    /// attribute vocabulary `i`/`enter` on `Cursor::Attr` writes through —
-    /// same parse, same refusals, attribute names as completions
-    /// ([`Self::completions`]).
-    ///
-    /// `value: None` answers with the current value AS A NOTICE
-    /// (`Err`, the command line's own inline-error slot — the same
-    /// contract every other module's `command` keeps for a one-line
-    /// answer that changed nothing), never `Ok`, since nothing was
-    /// written.
+    /// Read or set an attribute using the editor's declared-type parsing and guards.
+    /// Without a value, return the current value through the command notice/error
+    /// channel because no mutation occurred.
     fn set_attr_command(
         &mut self,
         attr: &str,
@@ -4677,9 +3892,8 @@ impl MarketDataTile {
         };
         match value {
             None => {
-                // With no document there is no value to report for ANY
-                // attribute — say so, rather than "no attribute 'spot_ref'"
-                // about a name the spec does declare (final review, T1).
+                // Without a document, report missing data before looking for an
+                // attribute value.
                 if self.model.header.is_empty() {
                     return Err(NO_DOCUMENT.to_string());
                 }
@@ -4711,33 +3925,13 @@ impl MarketDataTile {
         }
     }
 
-    /// Point the panel at another document.
+    /// Switch document keys by parking the outgoing draft as portable label-pair TOML
+    /// and restoring any incoming draft through the session-resolution path. Its first
+    /// usable delivery follows Hold, even under an automatic update policy.
     ///
-    /// **A switch is a restore** (user ruling 2026-09-19, "keep them per
-    /// underlying", superseding the 2026-09-14 refusal): a draft's cells
-    /// are grid indices into the document they were made on, so they
-    /// cannot travel to another document's ladder — instead the current
-    /// draft is PARKED under the outgoing key as `Draft::to_toml`'s
-    /// label pairs (the session's own form, where indices do not exist),
-    /// and a parked draft for the INCOMING key is installed through the
-    /// restore path: `Draft::from_toml` parks every edit at
-    /// `UNRESOLVED_COLUMN` and `unresolved_restore` hands it to the first
-    /// non-empty built model, which re-places it by label — or lands it
-    /// `Behind` when the document moved while the trader was away, with
-    /// the `:auto` policy's "first delivery after a restore is `hold`"
-    /// rule covering it exactly as a session restore is covered. Nothing
-    /// is ever refused and nothing is ever dropped: unsent work on every
-    /// underlying survives, each under its own key.
-    ///
-    /// An open cell editor is CANCELLED, never committed, before the
-    /// document is swapped (final review, B2) — a key change is
-    /// navigation, and an editor left open across it would pass its own
-    /// label-identity check on a same-ladder underlying and file the typed
-    /// number into the NEW document's draft. Reachable: `i`, then `mod+l`
-    /// (focus to the shell root, editor still open), then `:underlying`.
-    /// That close is the only reason this takes a `Window`. It happens
-    /// BEFORE the park, so the parked table is the draft as committed,
-    /// never the draft plus a half-typed cell.
+    /// Cancel uncommitted editor text before parking. Otherwise a same-label target
+    /// could commit that text into the next key's draft. Drafts without an outgoing key
+    /// remain available for the first named key to claim.
     fn set_key(&mut self, key: Vec<String>, window: &mut Window, cx: &mut Context<Self>) {
         if self.key.as_deref() == Some(key.as_slice()) {
             return;
@@ -4748,28 +3942,15 @@ impl MarketDataTile {
         // A question about the outgoing document must not stand over the
         // incoming one.
         let _ = self.disarm_upload(window, cx);
-        // The outgoing draft gives up its echo check (final-review
-        // ruling): it parks, and restores, as `Editing`, like a session
-        // restore — `sent` rows, the `submitted` snapshot and the error
-        // line all describe it, not the incoming draft. An upload still
-        // in flight keeps `in_flight`, so its outcome is reported by key.
+        // A parked draft restores as Editing and stops comparing the outgoing upload's
+        // echo. Clear its submitted payload and error state; retain an in-flight
+        // request so its eventual outcome can be reported by key.
         self.sent = None;
         self.submitted = None;
         self.upload_error = None;
-        // Park the outgoing draft under its own underlying. A non-empty
-        // draft with NO key (a hand-edited session's `draft` with no
-        // `underlying`) has nothing to park under and stays put — the
-        // first underlying named claims it, exactly as the constructor
-        // already leaves it waiting for one.
-        //
-        // The rebase guard's group sizes are captured here too (controller
-        // ruling), still under `capture_groups_if_base`'s same source-time
-        // rule: `self.painted_snapshot()`/`self.key` still name the
-        // OUTGOING underlying at this point (the reset a few lines below
-        // has not run yet), so a park is exactly one more place the
-        // painted model can be the draft's own base. `self.draft` is taken
-        // out and put back rather than borrowed in place, the same
-        // borrow-shape reason `fn rebase` does — see that call site.
+        // Park under the outgoing key, retaining a keyless draft for the first key to
+        // claim. Capture group sizes before resetting snapshots, and only when the
+        // outgoing painted snapshot is the true draft base.
         if let Some(outgoing) = self.key.take()
             && !self.draft.is_empty()
         {
@@ -4798,13 +3979,8 @@ impl MarketDataTile {
         self.acted = None;
         self.query_in_flight = false;
         self.publication = None;
-        // The tag moves on EVERY switch, visible or not (final review of
-        // the per-underlying drafts branch, Minor 6): `requery` bumps it
-        // on the visible path, but a hidden panel only `changed` — and an
-        // outcome for the OLD key that slipped past `set_visible(false)`'s
-        // cancel would then pass `deliver`'s tag check and be rebased onto
-        // the new key's restored draft. Bumping here makes the invariant
-        // hold by construction rather than by reachability.
+        // Advance the request tag on every switch, including while hidden, so an old
+        // key's late delivery cannot enter the newly restored draft.
         self.tag += 1;
         self.cursor = Cursor::Cell { row: 0, col: 0 };
         self.last_grid_col = 0;
@@ -4816,11 +3992,8 @@ impl MarketDataTile {
         }
     }
 
-    /// The picker's row marks (spec 2026-09-14 §7, amended 2026-09-19):
-    /// every parked underlying's display key to its draft's own
-    /// `count_phrase`. Parsed from the parked tables HERE, once per
-    /// picker open, never in `render`; the current underlying's own draft
-    /// is not among them — the header's dirty dot already says so.
+    /// Prepare picker marks from parked draft count phrases once per open. The current
+    /// draft is excluded because the header already identifies its edits.
     fn parked_marks(&self) -> BTreeMap<String, String> {
         self.parked
             .iter()
@@ -4840,9 +4013,7 @@ impl MarketDataTile {
             line,
             cursor,
             &self.catalog_keys(cx),
-            // `:rebase` is a verb of a `Sent` draft too (egress spec §7),
-            // but only once a differing echo is held — otherwise there is
-            // nothing newer to offer it for (controller ruling).
+            // Offer Sent rebase only when a differing echo supplies a newer target.
             self.draft.is_behind()
                 || (self.draft.is_sent() && matches!(self.echo, Some(Echo::Differs { .. }))),
             &attrs,
@@ -4850,10 +4021,7 @@ impl MarketDataTile {
         )
     }
 
-    /// This panel's dataset's document keys, as the catalog holds them:
-    /// one partition per document (Part 1 publishes a document under its
-    /// joined key as the `batch`), spelled back with the typeable
-    /// separator.
+    /// Catalog document keys decoded from dataset partition IDs into typeable key text.
     fn catalog_keys(&self, cx: &App) -> Vec<String> {
         let diagnostics = self.diagnostics.read(cx);
         let Some(dataset) = diagnostics
@@ -4873,14 +4041,9 @@ impl MarketDataTile {
         keys
     }
 
-    /// Whether the held catalog can answer this panel's key completions at
-    /// all. A catalog with no entry for this dataset is as good as none:
-    /// the dataset exists, so the answer is missing, not empty.
-    ///
-    /// This is a "have I got one" test, never a "is mine current" one —
-    /// nothing in a `CatalogSnapshot` could answer the second (review fix
-    /// round 1, MIN-4), which is why the `:key` line asks unconditionally
-    /// and only `set_visible` consults this.
+    /// Whether the held catalog contains this dataset, independent of freshness.
+    /// Visibility uses this availability check; key commands request refresh even when
+    /// the answer is already present.
     fn needs_catalog(&self, cx: &App) -> bool {
         self.diagnostics
             .read(cx)
@@ -4920,30 +4083,14 @@ impl MarketDataTile {
                 toml::Value::Array(key.iter().map(|s| toml::Value::String(s.clone())).collect()),
             );
         }
-        // Unsent edits are work and survive a restart (spec §8.5), as
-        // label pairs — never indices, so a restart onto a newer
-        // generation lands `Behind` instead of against misaligned cells.
-        // One `[drafts.<display key>]` per underlying that carries any
-        // (2026-09-19): the current one's beside every parked one, the
-        // parked tables written verbatim since they already ARE this
-        // form. `toml::Table` insertion quotes a dotted key (`"SPX.Z"`)
-        // on the way out, so the spelling round-trips through the
-        // session file untouched. The legacy bare `draft` is written only
-        // for a non-empty draft with no underlying at all — the one
-        // shape that has no key to file it under.
+        // Serialize current and parked unsent work as per-key label-pair tables. Dotted
+        // display keys are quoted by TOML. Preserve the legacy bare draft only for
+        // nonempty work without an underlying key to file it under.
         let mut drafts = toml::Table::new();
         if !self.draft.is_empty() {
-            // The rebase guard (spec §2, amendment 4) needs group sizes
-            // captured against the document currently painted — but only
-            // when `painted_snapshot` really NAMES the base rather than
-            // falling back to a newer arrival nobody's base ever was (the
-            // M-1 path — `capture_groups_if_base`'s own doc comment).
-            // Computed on a CLONE, not `self.draft` itself: `serialize`
-            // takes `&self`, and this is the one capture site with no
-            // `&mut` to write it back onto the live draft, so a same-day
-            // group that changed size while nobody ran `:rebase` this
-            // session is still caught on the NEXT restart rather than
-            // only on the next explicit rebase.
+            // Capture actual-base group sizes on a draft clone for the session record.
+            // serialize takes &self, so live state stays unchanged while restored work
+            // keeps the group metadata needed to detect changed same-day ordinals.
             let mut draft = self.draft.clone();
             self.capture_groups_if_base(&mut draft);
             match &self.key {
@@ -4984,8 +4131,7 @@ impl MarketDataTile {
         &self.draft
     }
 
-    /// The state of model row `row` (dividend spec §5.2), `None` past the
-    /// grid's end.
+    /// State of a model row, or None beyond the grid.
     #[cfg(test)]
     pub(crate) fn row_state_at(&self, row: usize) -> Option<RowState> {
         self.model.rows.get(row).map(|r| r.state)
@@ -5033,8 +4179,7 @@ impl MarketDataTile {
         })
     }
 
-    /// Whether the open editor is the ROW-LABEL editor (dividend spec
-    /// §5.3) — in either form.
+    /// Whether either editor form targets a provisional row label.
     #[cfg(test)]
     pub(crate) fn label_editor_open(&self) -> bool {
         matches!(
@@ -5065,8 +4210,7 @@ impl MarketDataTile {
         }
     }
 
-    /// Whether the choice cell's typeahead popup is open (dividend spec
-    /// §4.4) — a test-only door; production code matches `popup` itself.
+    /// Test access to whether a choice-cell popup is open.
     #[cfg(test)]
     pub(crate) fn choice_popup_open(&self) -> bool {
         matches!(self.popup, Some(Popup::Choice(_)))
@@ -5174,10 +4318,7 @@ impl MarketDataTile {
         self.header_texts_at(chrono::Utc::now())
     }
 
-    /// [`Self::header_texts`] at an injected clock — the only way a test
-    /// reaches [`Self::is_stale`]'s comparison (final review, B3): the
-    /// wall-clock door above cannot say whether a fixed past `BASE` reads
-    /// stale without knowing how far `now` has drifted past it.
+    /// Header text at an injected time, allowing deterministic stale-threshold checks.
     #[cfg(test)]
     pub(crate) fn header_texts_at(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
         let mut h = self.header.clone();
@@ -5245,9 +4386,8 @@ fn as_of_text(
     }
 }
 
-/// A delivered document's own source time — the identity a [`Draft`]
-/// compares its `base` against (§8.4: per-document `as_of`, never the
-/// dataset-wide `gen_id` a live query's provenance carries).
+/// Delivered document source time used as draft generation identity. Dataset-wide
+/// gen_id is not an individual document's base.
 fn source_time_of(snapshot: &Snapshot) -> Option<String> {
     snapshot
         .provenance()
@@ -5271,26 +4411,10 @@ fn dropped_notice(dropped: &[(String, String)]) -> String {
     format!("dropped {n} edit{plural} whose rows or columns the new document lacks: {list}")
 }
 
-/// The declared [`ColumnType`] a NUMBER cell is parsed and nudged through
-/// — `None` for the other three `CellKind`s (`Date`/`Text`/`Choice`,
-/// which have no number to step or parse: `nudge` refuses on it, and
-/// `commit_cell_edit` reaches it only from its `Number` arm) — the one
-/// place both [`MarketDataTile::nudge`] and
-/// [`MarketDataTile::commit_cell_edit`] read it, so a mutation to the
-/// lookup itself has one site to anchor on rather than two that could
-/// drift apart. The panel's own `value_type`
-/// under a pivot (one value column, one declared type); the column's OWN
-/// `ValueColumn::ty` under a flat panel, since a schedule's columns need
-/// not agree — and need not even be the same NUMBER type: a flat `I64`
-/// column commits `"3"` as `Value::I64(3)`, not `Value::F64(3.0)`,
-/// because this reads the declared type rather than letting `parse_cell`
-/// guess from what the text happens to parse as.
-///
-/// A free function, not a method: `nudge` calls it while a mutable
-/// borrow of `self.editor` is already alive (`self.editor.as_mut()`),
-/// which a `&self` method call would conflict with — passing `spec` and
-/// `model` as their own arguments borrows only those two fields, exactly
-/// as the inlined lookup this replaces already did.
+/// Declared type for Number cells, shared by commit and nudge. Other CellKinds return
+/// None. Flat columns use their own ValueColumn type; pivot columns use the panel value
+/// type, with slice values handled separately. Explicit model/spec arguments permit
+/// access while the editor is mutably borrowed.
 fn declared_type(spec: &PanelSpec, model: &MatrixModel, col: usize) -> Option<ColumnType> {
     match model.kind_of(col)? {
         CellKind::Number(_) => Some(match &spec.columns {
@@ -5340,10 +4464,8 @@ impl gpui::Render for MarketDataTile {
             self.state_tip_selector.clone(),
             self.stack.as_ref(),
         );
-        // The popup is anchored off a zero-size, absolutely positioned
-        // sibling at the header's own right edge (spec §6.1) — `relative`
-        // on the wrapper is what makes that positioning read against the
-        // header rather than the window.
+        // Anchor the popup at the header's right edge using a positioned sibling and
+        // the wrapper's relative coordinate system.
         let header =
             div()
                 .relative()
@@ -5371,13 +4493,8 @@ impl gpui::Render for MarketDataTile {
                     )
                 });
 
-        // The body: one `DataTable` over this tile's own delegate, in the
-        // blotter's chrome (`Size::XSmall`, unbordered, unstriped) so the
-        // two read as one application — the whole point of the 2026-09-14
-        // ruling. The column strip is the table's own header now, and the
-        // rows, the cell styles and the cell editor are `MatrixDelegate`'s.
-        // `min_h_0` beside `flex_1`: without it the table's own scroll area
-        // cannot shrink below its content and the header scrolls away.
+        // Render the prepared delegate through DataTable. min_h_0 lets the body shrink
+        // inside flex layout so scrolling does not push the header out of view.
         let body = div().flex_1().min_h_0().w_full().child(
             DataTable::new(&self.table)
                 .with_size(Size::XSmall)
@@ -5430,19 +4547,9 @@ mod tests {
     use geode_shell::tiling::TileId;
     use gpui::{Entity, Window};
 
-    /// Every header tone this tile COLOURS ITSELF must be readable on the
-    /// window background of EVERY bundled theme at Part 2c's 3:1 floor.
-    /// Before `FlooredTones`, `Warn` painted `warning_foreground` (1.00:1
-    /// on twenty themes — an invisible `3 edits`) and `Time`-while-stale
-    /// and `Error` painted the raw `warning`/`danger`, under 3:1 on nine
-    /// and eight light themes respectively.
-    ///
-    /// `Plain` and quiet `Time` are the theme's own `muted_foreground` —
-    /// the secondary text every other surface (blotter header, status bar,
-    /// dialogs) paints unchanged — and nine bundled themes ship it under
-    /// 3:1 (Catppuccin Latte 2.20:1). Flooring it in one tile would make
-    /// the panel disagree with the rest of the window; that is a theme
-    /// authoring matter, not a pairing error, and deliberately not swept.
+    /// Header tones derived by this tile must meet 3:1 contrast on every bundled
+    /// window background. Plain and quiet-time text use the theme's unmodified
+    /// muted foreground and are outside this test's contrast floor.
     #[gpui::test]
     fn every_header_tone_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         use crate::delegate::tests::ground;
@@ -5631,18 +4738,9 @@ mod tests {
         document_with(&TERMS, &NODES, p)
     }
 
-    /// The view under the window's `Root`: renders the tile, and nothing
-    /// else — what a test reads comes out of [`Built`], not out of here.
-    ///
-    /// `clicks` stands in for the shell's own tile-level bubble-phase
-    /// mouse-down (`focus_main_tile`/`focus_dock_tile`, drag arming,
-    /// `pending_focus_restore` — CLAUDE.md's focus rule): this crate's
-    /// harness has one tile and no shell, so a real click-to-focus
-    /// listener does not exist to observe directly. A plain bubble-phase
-    /// `on_mouse_down` wrapping the tile stands in for it — if this
-    /// crate's own capture-phase handlers ever swallowed propagation, a
-    /// click on them would leave this counter unmoved exactly as it
-    /// would leave the shell's own listeners unmoved.
+    /// Test host rendering one tile beneath Root. Its bubble-phase mouse counter stands
+    /// in for shell click-to-focus and drag listeners, verifying that capture handlers
+    /// preserve propagation where ordinary tile clicks require it.
     struct Host {
         tile: Entity<MarketDataTile>,
         clicks: Rc<StdCell<u32>>,
@@ -5728,12 +4826,8 @@ mod tests {
         open_spec(cx, &CVI, restored)
     }
 
-    /// A flat, dividend-schedule-shaped panel (spec §4.3, Task 3's typed
-    /// cells) — `open`/`open_with` build over CVI's pivot, where every
-    /// column is `Number`; this is the one both this crate's own
-    /// `:bump`/`edit` refusal tests and Task 4's own tests build over
-    /// instead, so a flat panel mixing `Date`/`Number`/`Choice` columns is
-    /// exercised through the real tile, not just `matrix.rs`'s pure core.
+    /// Flat schedule fixture mixing Date, Number, and Choice columns. Exercises typed
+    /// editing and bump guards through the tile rather than only the matrix core.
     fn open_flat(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
         open_spec(cx, &test_fixtures::SCHEDULE, None)
     }
@@ -5945,10 +5039,8 @@ mod tests {
         fn rows(&self, vcx: &gpui::VisualTestContext) -> usize {
             self.tile.read_with(vcx, |t, _| t.model().rows.len())
         }
-        /// What the keymap engine is told — `insert` exactly while the cell
-        /// editor holds the keyboard (spec §8.6), read through the trait
-        /// rather than off the field, since the context is the only thing
-        /// the shell ever sees.
+        /// Keymap context exposed through TileContent, including insert state for open
+        /// editors, picker/choice fields, and confirmation.
         fn mode(&self, vcx: &gpui::VisualTestContext) -> String {
             self.tile.read_with(vcx, |_, cx| {
                 self.content
@@ -6176,15 +5268,9 @@ mod tests {
         });
     }
 
-    /// The body is gpui-component's table (user ruling 2026-09-14): one
-    /// row-label column carrying the row axis's own name, then one column
-    /// per value column.
-    ///
-    /// The second delivery is the `refresh` probe. `columns_count` reads
-    /// the delegate live, so it moves either way — but the HEADER is
-    /// painted from `TableState`'s cached column groups
-    /// (`prepare_col_groups`, re-run only by `refresh`), so a dropped node
-    /// keeps a header cell unless the model swap refreshed the table.
+    /// Model replacement must refresh DataTable's cached column groups. The second
+    /// delivery changes columns, and painted headers must follow the new model as well
+    /// as the delegate's live column count.
     #[gpui::test]
     fn the_table_shows_one_label_column_plus_the_models_columns(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6292,14 +5378,8 @@ mod tests {
         assert_eq!(h.selection(&vcx), (Some(1), Some(3)));
     }
 
-    /// A double-click opens the editor on the clicked cell (user ruling
-    /// 2026-09-17, reversing 2026-09-14's "editing is keyboard-only"):
-    /// the cursor lands on it, the editor is seeded with the cell's own
-    /// painted text, `key_context` reports `insert`, and after a draw the
-    /// editor's input still holds window focus. What made the mapping
-    /// honourable is the shell's insert-mode rule on its focus restore
-    /// (`ShellView::render`, tested in `geode-shell`); this crate's part
-    /// is to open on the click and focus the input.
+    /// Double-click selects a value cell, opens its seeded editor, and focuses it. The
+    /// field remains focused after drawing while the context reports insert.
     #[gpui::test]
     fn a_double_click_opens_the_editor_on_the_cell(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6394,15 +5474,8 @@ mod tests {
         );
     }
 
-    /// A click while the cell editor is open CANCELS it and then moves the
-    /// cursor (controller ruling 2026-09-14) — a cancel, never a commit:
-    /// the typed text is dropped and the draft stays empty, because a click
-    /// is not `enter`.
-    ///
-    /// Cancelling is what stops the editor being left painted on the cell
-    /// the cursor just left, deaf to the keyboard (the same mouse-down has
-    /// already re-armed the shell's focus restore) while `key_context` still
-    /// claims `insert`.
+    /// Clicking another cell cancels typed editor text before moving selection; it does
+    /// not commit and leaves no editor attached to the previous cell.
     #[gpui::test]
     fn a_click_while_editing_cancels_the_editor_then_moves(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6437,12 +5510,8 @@ mod tests {
         );
     }
 
-    /// The delegate mirrors the tile's cursor and its open editor — which
-    /// is where `render_td` reads both from, so the cursor cell's border
-    /// and the in-cell editor are painted off this mirror and nothing
-    /// else. (The border itself is a style, invisible to `debug_bounds`:
-    /// this pins its one input, and the painted border is a display
-    /// check — spec §8.8.7.)
+    /// Delegate cursor/editor mirrors supply cell border and editor rendering. Test the
+    /// mirror values; actual border appearance requires a display check.
     #[gpui::test]
     fn the_delegate_mirrors_the_cursor_and_the_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6477,9 +5546,8 @@ mod tests {
         );
     }
 
-    /// The editor is painted IN the cell it edits (spec §8.3), which is
-    /// also what makes it typeable at all: gpui installs a text-input
-    /// handler only for a focused `Input` that has been drawn.
+    /// The focused editor is drawn in its target cell so GPUI installs its text-input
+    /// handler and accepts typing.
     #[gpui::test]
     fn the_editor_is_painted_in_the_cursor_cell(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6631,9 +5699,7 @@ mod tests {
         );
     }
 
-    /// The stack marker (tile-stacks spec §5.1) paints only while the
-    /// tile is a stack member with more than one member, first in the
-    /// header strip.
+    /// Stack markers appear first in the header only for a stack with multiple members.
     #[gpui::test]
     fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6654,9 +5720,7 @@ mod tests {
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.title()).as_ref(), "CVI");
     }
 
-    /// Whole-branch review, Minor 7: the title's cache (`Self::title`,
-    /// `compute_title`) must follow a real key change too, not just read
-    /// correctly with no underlying set.
+    /// The cached title follows key changes, including from an initially unset key.
     #[gpui::test]
     fn title_follows_the_underlying(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6676,11 +5740,9 @@ mod tests {
             + chrono::Duration::seconds(secs)
     }
 
-    /// The time chip reads ` stale` once `now` is past the painted
-    /// generation's source time by more than `stale_after` (the harness's
-    /// factory is built with fifteen minutes) and not a second before —
-    /// `is_stale`'s comparison, reachable only through the injected clock
-    /// (final review, B3).
+    /// The time chip becomes stale only after the painted source time exceeds the
+    /// configured fifteen-minute threshold. The injected clock exercises both sides of
+    /// the boundary.
     #[gpui::test]
     fn the_time_chip_says_stale_past_stale_after(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6711,13 +5773,9 @@ mod tests {
         );
     }
 
-    /// Review finding (Task 7): no test installed `AppClock` before this
-    /// fix, so a tile that hard-coded `Clock::machine()` — or whose
-    /// `observe_global` handler were deleted — would have passed
-    /// everything else. `BASE` is `"2026-09-12T14:00:00Z"`: Tokyo is
-    /// UTC+9, so the header's source time reads `23:00:00` there and
-    /// `14:00:00` once the global switches to UTC — both spelled by
-    /// hand, not derived through `Clock` (the thing under test).
+    /// AppClock determines the header's source-time zone at construction and after
+    /// global changes. BASE is 14:00 UTC, so the hand-written expectations are 23:00 in
+    /// Tokyo and 14:00 in UTC.
     #[gpui::test]
     fn the_header_time_reads_the_installed_app_clock_and_follows_a_later_change(
         cx: &mut gpui::TestAppContext,
@@ -6788,16 +5846,9 @@ mod tests {
         assert_eq!(notice.as_deref(), Some("the document select failed"));
     }
 
-    /// MIN-5 split the dispatch tail: a motion notifies without
-    /// re-preparing the header (nothing there shows the cursor), while an
-    /// action that writes or clears the notice must still rebuild it. This
-    /// pins both halves of that decision — the two `true` arms — since
-    /// getting one wrong leaves a header the trader can read that no
-    /// longer matches the tile.
-    ///
-    /// The notice is written here by a REFUSED commit (Task 7): `edit`
-    /// itself no longer writes one now that it opens a real editor instead
-    /// of saying which task the editing lands in.
+    /// Cursor motion notifies without preparing the header again. Actions that write or
+    /// clear a notice rebuild it, including a refused commit and the action that clears
+    /// its refusal.
     #[gpui::test]
     fn a_notice_reaches_the_header_and_escape_clears_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6829,12 +5880,8 @@ mod tests {
         );
     }
 
-    /// Review fix round 1, the Important: while a barrier still wants this
-    /// panel's key, a delivery is STAGED, not painted. A document select is
-    /// cheap, so this panel is the one most likely to paint the new as-of
-    /// — grid, header, source-time chip — a frame before every blotter
-    /// promotes its own heavier outcome, which is the half-updated screen
-    /// the barrier exists to prevent.
+    /// A delivery stays staged while the barrier still waits for this tile. Grid,
+    /// header, and source-time chip promote together with the other visible tiles.
     #[gpui::test]
     fn a_delivery_under_an_open_barrier_is_staged_until_the_flip(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6872,12 +5919,9 @@ mod tests {
         assert_eq!(h.rows(&vcx), 5, "the flip is what puts it on screen");
     }
 
-    /// Found while writing the staging path, not by the review: a key
-    /// change bumps no frame version, so a snapshot staged for the OLD key
-    /// still passes `promote`'s flip-identity check — and `promote` runs
-    /// regardless of visibility (a panel hidden between staging and the
-    /// flip must not come back stale), so a hidden panel could put the
-    /// previous document's grid on screen under the new key's header.
+    /// A key change clears a staged answer even though it bumps no frame counter.
+    /// Promotion can run while hidden, so retaining the old key's answer could paint it
+    /// under the new key's header.
     #[gpui::test]
     fn a_key_change_drops_what_was_staged_for_the_old_key(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6943,10 +5987,8 @@ mod tests {
         );
     }
 
-    /// MIN-2: `set_visible(false)` cancels the in-flight request, so no
-    /// outcome will ever arrive for the versions `acted` records — leaving
-    /// it set makes the re-shown panel decide it is already up to date and
-    /// keep painting whatever it had before it was hidden.
+    /// Hiding cancels the outstanding request and clears acted. Showing the tile again
+    /// must query rather than treat an undelivered request as current.
     #[gpui::test]
     fn a_tile_hidden_mid_flight_requeries_on_reshow(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -6963,10 +6005,8 @@ mod tests {
         assert!(second.tag > first.tag);
     }
 
-    /// MIN-3, the panel's half (the blotter's own is
-    /// `a_refused_query_arrives_at_the_barrier_and_retries_on_the_next_change`):
-    /// a refused submit means nothing is coming, so it answers the barrier
-    /// at once and clears `acted` so the next frame change is a real retry.
+    /// A refused submission has no future outcome. It answers the barrier immediately
+    /// and clears acted so the next frame change retries.
     #[gpui::test]
     fn a_refused_request_arrives_at_the_barrier_and_retries(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -7004,14 +6044,9 @@ mod tests {
         );
     }
 
-    /// Phase 4 §3.10: `ShellView::visible_tile_keys` puts every visible
-    /// occupant in the barrier's key set, because it cannot know which
-    /// tiles follow which counters. A scope change is not a change this
-    /// panel requeries for — so if it does not answer the barrier, every
-    /// blotter on screen waits out `FLIP_DEADLINE` (250 ms) on every
-    /// scope keystroke. The shell's own observer is registered first, so
-    /// the mutation and `open_flip` really do land before this panel's
-    /// observer runs, which is what this update block reproduces.
+    /// A visible tile acknowledges scope/grouping barriers without querying because its
+    /// document does not follow those counters. Register the shell-like observer first
+    /// so mutation and open_flip precede the tile's observer.
     #[gpui::test]
     fn a_panel_self_arrives_on_a_scope_change_it_does_not_requery_for(
         cx: &mut gpui::TestAppContext,
@@ -7100,12 +6135,9 @@ mod tests {
         );
     }
 
-    /// User ruling 2026-09-19 ("keep them per underlying"), superseding
-    /// the 2026-09-14 refusal: a key change with edits pending PARKS the
-    /// current draft under its own underlying and switches. Nothing is
-    /// discarded and nothing is refused — the new document is requested,
-    /// the header's dot goes off (it reads the CURRENT draft alone) and
-    /// the parked draft is on record for the picker and the session.
+    /// Switching keys parks pending edits under their underlying and requests the new
+    /// document. The header's dirty marker reflects only the current draft; the parked
+    /// draft remains available to the picker and session.
     #[gpui::test]
     fn a_key_change_parks_the_draft_instead_of_refusing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -7189,11 +6221,9 @@ mod tests {
         assert_eq!(state, DraftState::Editing, "same generation: not Behind");
     }
 
-    /// The document moved while the draft was parked: the return lands
-    /// `Behind` with the edits parked at their labels and the header
-    /// reading `update HH:MM` — and, being a restore, the first delivery
-    /// is `hold` even under `:auto replace` (ruling 2026-09-19); the
-    /// policy acts only on the NEXT new generation.
+    /// Returning to a parked draft whose document advanced yields Behind with edits
+    /// intact and an update time. Restore holds the first usable delivery even under
+    /// auto replace; policy acts on the next new generation.
     #[gpui::test]
     fn a_parked_draft_whose_document_moved_returns_behind_and_holds_once(
         cx: &mut gpui::TestAppContext,
@@ -7310,11 +6340,9 @@ mod tests {
         assert_eq!(h.cell(&vcx, 0, 0), ("9.90".to_string(), true));
     }
 
-    /// Parked drafts ride the session (spec §8.5, amended 2026-09-19):
-    /// one `[drafts.<underlying>]` per underlying with edits — the
-    /// current one's beside every parked one — and a restore installs the
-    /// restored underlying's own entry as the current draft, keeping the
-    /// rest parked until each is loaded.
+    /// Sessions store the current and parked drafts in separate drafts.<underlying>
+    /// entries. Restore installs the selected underlying's draft and keeps the others
+    /// parked.
     #[gpui::test]
     fn parked_drafts_ride_the_session(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -7550,8 +6578,8 @@ mod tests {
         );
     }
 
-    /// Spec §20.5 on the panel: a bare `j` wraps, a counted one clamps,
-    /// the full-page pair moves ten, and `h`/`l` never wrap.
+    /// Bare j wraps, counted j clamps, full-page motions move ten rows, and h/l never
+    /// wrap.
     #[gpui::test]
     fn a_bare_row_step_wraps_and_the_full_page_keys_move_ten(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -7562,11 +6590,9 @@ mod tests {
         let terms: Vec<&str> = terms.iter().map(String::as_str).collect();
         h.deliver(&mut vcx, tag, Arc::new(document_of(&terms, &NODES, BASE)));
 
-        // The strip sits ABOVE the wrap cycle (panel-header spec §11's
-        // merge ruling): with attributes to enter, `k` on row 0 goes to
-        // the strip rather than wrapping, so the wrap is shown through
-        // `j` at the bottom; the no-attribute `k` wrap is a pure
-        // `core::cursor` test.
+        // With attributes present, k on row zero enters the strip. Exercise wrapping
+        // through j at the bottom; the cursor unit tests cover k wrapping without
+        // attributes.
         let row = |vcx: &gpui::VisualTestContext| match h.tile.read_with(vcx, |t, _| t.cursor()) {
             Cursor::Cell { row, .. } => row,
             Cursor::Attr(_) => panic!("expected a grid cursor"),
@@ -7633,12 +6659,9 @@ mod tests {
             "the verb position is the pure core's vocabulary"
         );
 
-        // MIN-4 (controller ruling): a `:key` line asks for a fresh
-        // catalog EVEN THOUGH one is already held — documents arrive while
-        // the panel is open (a subscribed feed publishes a new key every
-        // few seconds), and nothing in a held `CatalogSnapshot` can say
-        // whether it is still current. Gated on staleness, the panel asked
-        // once and then offered a list that could never grow.
+        // A key command requests a fresh catalog even when one is held. A cached
+        // catalog proves availability, not freshness, and new keys can arrive while the
+        // tile remains open.
         let already = h
             .diagnostics
             .update(&mut vcx, |d, _| d.take_pending_catalog_request());
@@ -7707,9 +6730,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// A session written before 2026-09-19 carries the current draft as
-    /// a bare `draft`: it is still read as the restored underlying's own
-    /// and written back under `drafts.<underlying>`.
+    /// The legacy bare draft field restores as the current underlying's draft and is
+    /// serialized under drafts.<underlying>.
     #[gpui::test]
     fn a_legacy_draft_key_still_restores_as_the_underlyings_draft(cx: &mut gpui::TestAppContext) {
         let legacy: toml::Table = format!(
@@ -7860,14 +6882,11 @@ edits = [["2026-11-20", "-1", 9.5]]
             "escape restores the origin"
         );
     }
-    // ---- Task 7: cell editing ---------------------------------------
+    // ---- Cell editing ------------------------------------------------
 
-    /// The whole round trip (spec §8.3/§8.6): `edit` opens a tile-owned
-    /// input seeded with the cell's own text, `commit` parses it through
-    /// the column's DECLARED type and writes the draft, and the header
-    /// counts it. The value assertion is the point — a commit that wrote
-    /// the raw text without parsing it would put `0.0` in the cell and
-    /// every marker assertion here would still pass.
+    /// Editing seeds the field from the cell, commit parses the column's declared type,
+    /// and the draft/header record the edit. Assert the typed value as well as markers
+    /// so a raw-text write cannot pass.
     #[gpui::test]
     fn edit_commit_paints_the_cell_as_edited_and_the_header_counts_it(
         cx: &mut gpui::TestAppContext,
@@ -7912,15 +6931,10 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// R1 (Task 4, verified at the pinned gpui-component rev): `blur`
-    /// FIRST, then drop. Dropping the `InputState` alone does not make
-    /// `Window::focused` `None` — `Root` holds the focused input as a
-    /// strong `AnyInputState` and only ever unregisters it from the
-    /// `Input`'s own render, which an input removed from the tree never
-    /// reaches. Without the blur the window keeps handing focus to a dead
-    /// editor, the shell's `render` net (`window.focused(cx).is_none()`)
-    /// never fires, and every chord is gone for the rest of the session.
-    /// A module gives focus UP; it never takes the shell's (CLAUDE.md).
+    /// Closing a focused Input blurs it before dropping the editor. Root retains the
+    /// focused InputState, so removing it from the tree alone leaves a stale focus
+    /// handle and prevents the shell's missing-focus recovery. The tile releases focus;
+    /// the shell chooses the next target.
     #[gpui::test]
     fn the_editor_gives_up_focus_before_it_is_dropped(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -7963,10 +6977,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// The keys really do reach the cell (spec §8.6): the shell's insert
-    /// branch hands a bare keystroke to the focused input, and this is the
-    /// panel's own half of that — a painted, focused `Input` that takes
-    /// characters.
+    /// The painted, focused cell Input accepts characters, exercising the tile's side
+    /// of the shell's insert-mode keystroke route.
     #[gpui::test]
     fn typed_text_reaches_the_cell_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -8076,10 +7088,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.col_texts(&vcx, SLICE), vec!["2.1000", "2.4000"]);
     }
 
-    /// The slice values (2026-09-17): a ROW bump walks the term's ladder
-    /// and leaves its `fwd`/`atm`/`skew` alone — bumping a term's vols
-    /// must not move its forward — while a COLUMN bump with the cursor on
-    /// `fwd` bumps every term's forward, which is what that column means.
+    /// A slice row bump changes the term's value ladder while preserving its
+    /// fwd/atm/skew cells. A column bump on fwd changes every term's forward.
     #[gpui::test]
     fn a_row_bump_skips_the_slice_cells_and_a_column_bump_on_fwd_moves_every_term(
         cx: &mut gpui::TestAppContext,
@@ -8108,10 +7118,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// A flat panel's row bump (spec §4.3): `SCHEDULE`'s three columns are
-    /// `ex` (`Date`), `amount` (`Number`) and `status` (`Choice`) — only
-    /// `amount` is `Number`-kind, so a row bump moves it alone and leaves
-    /// the other two with no edit at all, never a coerced one.
+    /// A row bump on the flat SCHEDULE panel changes only its Number column, amount.
+    /// The Date column ex and Choice column status remain unedited.
     #[gpui::test]
     fn a_flat_panels_row_bump_moves_only_the_number_column(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8140,14 +7148,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// A row bump whose only `Number` column is itself NULL (spec §4.3):
-    /// `ex`/`status` are skipped for their KIND, `amount` for being NULL
-    /// — three cells, zero values, either way. What distinguishes this
-    /// from the happy-path row-bump test above is the REFUSAL: it must
-    /// still name two columns skipped for their kind, not fall back to
-    /// the generic "no values to bump" a `CellKind`-blind row walk would
-    /// produce (the outcome — nothing edited — is identical either way,
-    /// so only the message tells the two apart).
+    /// When amount is NULL, a SCHEDULE row bump writes nothing and reports the two
+    /// columns skipped for their nonnumeric kinds. The refusal distinguishes kind skips
+    /// from the generic no-values case.
     #[gpui::test]
     fn a_flat_panels_row_bump_names_the_kind_skipped_count(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8163,9 +7166,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     }
 
-    /// A flat panel's column bump (spec §4.3): the cursor on `status` (a
-    /// `Choice` column) refuses the whole column outright rather than
-    /// silently bumping nothing.
+    /// A column bump on the Choice column status refuses the column outright.
     #[gpui::test]
     fn a_flat_panels_column_bump_on_a_non_numeric_column_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8182,15 +7183,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// The shipped `DIVIDEND` panel's own `Columns::Values` branch of
-    /// `ty_of`: a row bump lands `amount` as
-    /// `Value::F64` — proven against the REAL spec, not `SCHEDULE`'s
-    /// three-column stand-in, since `ty_of`'s positional read off
-    /// `spec.flat_columns()` is only as trustworthy as the spec it is
-    /// actually tested against. `ex`/`announced`/`pay` are `Date` and
-    /// `status` is a `Choice`, so the row bump reaches `amount` (index 3)
-    /// alone, the same shape `a_flat_panels_row_bump_moves_only_the_number_column`
-    /// proves over `SCHEDULE`.
+    /// The shipped DIVIDEND declaration maps amount at index three to F64. A row bump
+    /// changes that column alone, skipping the three Date columns and the Choice status
+    /// column.
     #[gpui::test]
     fn a_dividend_panels_row_bump_lands_amount_as_f64(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &DIVIDEND, None);
@@ -8260,12 +7255,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(cells.get("n"), Some(&Value::I64(4)));
     }
 
-    /// Bump atomicity (controller ruling): a row bump across an inserted row's `F64` cell and `I64`
-    /// cell, with a FRACTIONAL delta the `I64` cell refuses, must not
-    /// land the `F64` cell first and then refuse — every cell's `bumped`
-    /// result is computed before either write door (`Draft::bump`,
-    /// `set_row_cell`) opens, so the refusal leaves BOTH cells exactly as
-    /// they were.
+    /// A fractional row bump across inserted F64 and I64 cells refuses atomically.
+    /// Every candidate value is validated before any write, leaving both cells
+    /// unchanged when the I64 value rejects the delta.
     #[gpui::test]
     fn a_fractional_row_bump_on_a_mixed_inserted_row_writes_nothing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
@@ -8305,17 +7297,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
     }
 
-    /// A session carrying an inserted row, a deleted row and a cell edit
-    /// on the row below the insert, restored onto the schedule (spec
-    /// §5.4): the first delivery splices the inserted row in, keeps the
-    /// deleted row painted and marked, and lands the cell edit on D2 —
-    /// which now sits one row lower than its document index — rather
-    /// than on whatever row took its old index. The restore's rebase runs
-    /// against the DOCUMENT's own grid: against the spliced model it would
-    /// read the draft's own `new-1` as a row the document now carries and
-    /// drop it as a conflict. A second inserted row chained on the first
-    /// (`new-2 after new-1`) rides through that rebase with its anchor
-    /// intact and paints directly under it.
+    /// Restore resolves labels against the clean document grid before splicing draft
+    /// rows. An inserted row, a deleted row, and a D2 cell edit keep their identities
+    /// despite shifted painted indices. Chained inserts retain their anchors and order.
     #[gpui::test]
     fn a_restored_draft_with_rows_splices_them_and_keeps_its_edits_in_place(
         cx: &mut gpui::TestAppContext,
@@ -8414,10 +7398,9 @@ deleted = true
         );
     }
 
-    /// A commit on an inserted row's cell writes `RowEdit.cells` by column
-    /// label, never `Draft::edits` by index (spec §5.1) — and paints on
-    /// the same keystroke, patched; the incomplete chip follows. A row
-    /// bump on it composes with what it painted, the same way.
+    /// An inserted-row commit writes RowEdit.cells by column label and patches the
+    /// painted cell immediately, including its incomplete marker. A subsequent bump
+    /// composes with that value.
     #[gpui::test]
     fn a_commit_on_an_inserted_row_writes_its_own_cells(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -8492,10 +7475,8 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(amount, Some(Value::F64(3.5)));
     }
 
-    /// A deleted row's cells refuse edits (spec §5.2): `i`, a choice
-    /// step, and a row bump all answer "row is deleted — :revert restores
-    /// it" and open nothing; a column bump skips the row rather than
-    /// writing a value into a row that is going.
+    /// Deleted rows refuse editing, choice steps, and row bumps without opening an
+    /// editor. Column bumps skip deleted rows.
     #[gpui::test]
     fn a_deleted_rows_cells_refuse_edits(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -8567,12 +7548,9 @@ deleted = true
         );
     }
 
-    /// §4.4: a Text cell commits its text verbatim (trimmed); a Date cell
-    /// opens the segmented date field IN the cell rather than a text
-    /// input; both land in the draft as typed values and paint by the
-    /// column's kind. The text half runs over [`SCHEDULE_REQUIRED_NOTE`]
-    /// — [`SCHEDULE`]'s own `status` is a `Choice` column, which opens
-    /// the typeahead popup (Task 5), never the text input.
+    /// Text commits trimmed text; Date opens a segmented field in the cell. Both write
+    /// typed values and use the column's renderer. The text fixture uses a note column
+    /// because SCHEDULE's status opens a Choice popup.
     #[gpui::test]
     fn a_text_cell_commits_verbatim_and_a_date_cell_opens_the_date_field(
         cx: &mut gpui::TestAppContext,
@@ -8641,9 +7619,9 @@ deleted = true
         assert_eq!(h.cell(&vcx, 1, 0), ("2027-03-19".to_string(), false));
     }
 
-    /// The fragment's own `commit` verb reaches a date CELL's field exactly
-    /// as the field's `enter` does — with a pending digit completed first
-    /// (the strip's review I-1 rule) — and `cancel` blurs then drops it.
+    /// The commit action completes a date cell's pending segment digits before
+    /// committing, just like the field's Enter handler. Cancel blurs and drops the
+    /// field.
     #[gpui::test]
     fn a_date_cell_commits_and_cancels_through_the_fragments_verbs(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8706,10 +7684,8 @@ deleted = true
         );
     }
 
-    /// A one-column flat panel whose value is REQUIRED free text — the
-    /// plain `Text` cell every text-editor test runs over, since
-    /// [`SCHEDULE`]'s own `status` is a `Choice` (Task 5's popup, not the
-    /// text input). Otherwise [`SCHEDULE_OPTIONAL_NOTE`]'s twin.
+    /// Required free-text fixture for text-editor tests. SCHEDULE's status is a Choice
+    /// popup; this panel instead matches SCHEDULE_OPTIONAL_NOTE with a required value.
     const SCHEDULE_REQUIRED_NOTE: PanelSpec = PanelSpec {
         kind: "sched_note_req",
         title: "Dividends (note)",
@@ -8784,12 +7760,8 @@ deleted = true
         )
     }
 
-    /// §4.5: a cell commit patches the ONE cell in the model the tile
-    /// already holds rather than building a new model — the `Rc` the
-    /// delegate paints from is the same allocation before and after, so
-    /// a 10,000-row schedule pays for one cell per keystroke, not every
-    /// row (the flat build is the per-commit cost `docs/perf.md` records
-    /// at the edge of the 8 ms budget).
+    /// A cell commit patches the existing prepared model. The delegate retains the same
+    /// Rc allocation, avoiding a full document rebuild per keystroke.
     #[gpui::test]
     fn a_cell_commit_patches_the_model_in_place(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8815,6 +7787,178 @@ deleted = true
             )
         });
         assert_eq!(painted, (after, "2.5000".to_string()));
+    }
+
+    /// A grid date editor ends at the cell's right edge and occupies the width
+    /// of its plain date text, without the header field's padding or border.
+    /// This verifies relative alignment; actual font metrics still determine
+    /// whether the date fits the fixed cell width.
+    #[gpui::test]
+    fn a_date_cells_field_is_right_aligned_inside_its_cell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-editor-0-1").is_some(),
+            "the field paints in the cursor cell (row 0, table column 1)"
+        );
+        // The cell's own bounds, not the editor slot's: a slot grows to
+        // fit what it holds, so an oversized field widens the slot with it.
+        let cell = vcx
+            .debug_bounds("marketdata-cell-0-1")
+            .expect("the cell is painted");
+        let segment = |vcx: &mut gpui::VisualTestContext, i: usize| {
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-date-seg-{TILE}-{i}").into_boxed_str(),
+            ))
+            .expect("every segment is painted")
+        };
+        let (year, day) = (segment(&mut vcx, 0), segment(&mut vcx, 2));
+        assert!(
+            (cell.right() - day.right()).abs() <= gpui::px(1.),
+            "the day segment ends at the cell's right edge ({:?}), not at {:?}",
+            cell.right(),
+            day.right()
+        );
+        // The data face is monospaced, so the date as plain text is ten
+        // cells of the year's quarter-width; a padded segment widens it.
+        let glyph = year.size.width / 4.;
+        assert!(
+            ((day.right() - year.left()) - glyph * 10.).abs() <= gpui::px(1.),
+            "the field is as wide as the date as plain text ({:?}), not {:?}",
+            glyph * 10.,
+            day.right() - year.left()
+        );
+    }
+
+    /// `[ui] line_numbers` reaches a live panel through the shell's
+    /// `UiSettings` global: off paints no gutter; publishing `rel` paints
+    /// one per row on the next draw, numbered from the cursor with the
+    /// cursor row showing its absolute number, and widens the pinned
+    /// column by exactly the gutter — BESIDE the row-label cell, which
+    /// keeps its own width, so the cursor border and a row's fill never
+    /// reach the number. A cursor move re-derives the offsets; with the
+    /// cursor in the header strip there is no row to measure from, so
+    /// `rel` numbers absolutely. Off gives the width back.
+    #[gpui::test]
+    fn the_line_numbers_global_paints_a_gutter_beside_the_row_label(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-0").is_none(),
+            "no gutter while the setting is off (the default with no global set)"
+        );
+        let bounds = |vcx: &mut gpui::VisualTestContext, sel: &'static str| {
+            vcx.debug_bounds(sel).expect("painted")
+        };
+        let label = bounds(&mut vcx, "marketdata-cell-0-0");
+        let value = bounds(&mut vcx, "marketdata-cell-0-1");
+
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Relative,
+            })
+        });
+        draw(&mut vcx);
+        let gutter = bounds(&mut vcx, "marketdata-gutter-0");
+        let width = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table().read(cx).delegate().gutter_px());
+        assert!(width > 0.0, "sanity: a live gutter has width");
+        let label_on = bounds(&mut vcx, "marketdata-cell-0-0");
+        let value_on = bounds(&mut vcx, "marketdata-cell-0-1");
+        assert!(
+            (f32::from(value_on.left() - value.left()) - width).abs() < 0.5,
+            "the pinned column widened by the gutter ({width}); `on_ui_settings` \
+             must `refresh` the table, which caches `column()`'s width"
+        );
+        assert!(
+            (label_on.size.width - label.size.width).abs() < gpui::px(0.5),
+            "the label cell keeps its own width"
+        );
+        assert!(
+            gutter.right() <= label_on.left(),
+            "the gutter sits beside the label cell, not inside it: \
+             {gutter:?} then {label_on:?}"
+        );
+
+        let texts = |vcx: &mut gpui::VisualTestContext| -> Vec<String> {
+            h.tile.update(vcx, |t, cx| {
+                t.table().update(cx, |t, _| {
+                    let d = t.delegate_mut();
+                    (0..2)
+                        .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
+                        .collect()
+                })
+            })
+        };
+        assert_eq!(
+            texts(&mut vcx),
+            vec!["1", "1"],
+            "cursor on row 0: its absolute number, then distances"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(texts(&mut vcx), vec!["1", "2"], "cursor on row 1");
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table().update(cx, |t, _| t.delegate_mut().cursor = None)
+        });
+        assert_eq!(
+            texts(&mut vcx),
+            vec!["1", "2"],
+            "no grid cursor: `rel` numbers absolutely"
+        );
+
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Off,
+            })
+        });
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-0").is_none(),
+            "off again on the next draw"
+        );
+        assert!(
+            (bounds(&mut vcx, "marketdata-cell-0-1").left() - value.left()).abs() < gpui::px(0.5),
+            "and the pinned column gave the width back"
+        );
+    }
+
+    /// Under a hidden row label the first VALUE column is the pinned one,
+    /// so the gutter rides there — beside the value cell, which keeps its
+    /// width and its right-aligned value.
+    #[gpui::test]
+    fn a_hidden_label_panel_paints_its_gutter_beside_the_first_value(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+        h.with_flat_document(&mut vcx);
+        draw(&mut vcx);
+        let first = vcx.debug_bounds("marketdata-cell-0-0").expect("painted");
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        draw(&mut vcx);
+        let gutter = vcx
+            .debug_bounds("marketdata-gutter-0")
+            .expect("the gutter paints in the first value column");
+        let first_on = vcx.debug_bounds("marketdata-cell-0-0").expect("painted");
+        assert!(
+            gutter.right() <= first_on.left(),
+            "{gutter:?} then {first_on:?}"
+        );
+        assert!(
+            (first_on.size.width - first.size.width).abs() < gpui::px(0.5),
+            "the value cell keeps its own width"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-1").is_some(),
+            "one gutter per row"
+        );
     }
 
     /// The delegate mirrors a date CELL's field exactly as it mirrors the
@@ -8876,12 +8020,9 @@ deleted = true
         );
     }
 
-    /// `nudge`'s own refusal (spec §4.3, `declared_type`'s door): a
-    /// `Text` cell's editor is the plain text `Input`, so `insert_up` on
-    /// a note is reachable and must refuse rather than step, leaving the
-    /// typed text untouched — there is no unit to step a word by. Over
-    /// [`SCHEDULE_REQUIRED_NOTE`], since `status` is a `Choice` whose
-    /// `insert_up` moves the popup's highlight instead (Task 5).
+    /// Nudging a Text editor refuses and preserves typed text. Choice columns use a
+    /// popup whose insert_up moves the highlight, so the test uses the required-note
+    /// fixture.
     #[gpui::test]
     fn a_flat_panels_nudge_on_a_non_numeric_cell_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &SCHEDULE_REQUIRED_NOTE, None);
@@ -8907,9 +8048,8 @@ deleted = true
         assert_eq!(h.mode(&vcx), "insert");
     }
 
-    /// The flat `Columns::Values` success arm (spec §4.3): `amount` is
-    /// `F64`, so a commit on it parses and lands as `Value::F64`, and the
-    /// cell paints back through its OWN format (four places).
+    /// The flat amount column parses as F64 and renders the committed value through its
+    /// own four-place format.
     #[gpui::test]
     fn a_flat_panels_commit_on_amount_parses_as_f64(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -8947,12 +8087,10 @@ deleted = true
         );
     }
 
-    // ---- the Choice cell (dividend spec §4.4, Task 5) ----------------
+    // ---- Choice cells ------------------------------------------------
 
-    /// §4.4: `space`/`shift+space` (`step`/`step_back`) step a choice
-    /// cell in place through the options in declared order, wrapping at
-    /// both ends and composing on the draft's own current value; on any
-    /// other kind of cell they say so and write nothing.
+    /// Choice stepping follows declared option order, wraps at both ends, and starts
+    /// from the draft's current value. Other cell kinds refuse without writing.
     #[gpui::test]
     fn space_steps_a_choice_cell_and_refuses_elsewhere(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -9236,9 +8374,8 @@ deleted = true
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// A double-click on a choice cell opens the popup exactly as `i`
-    /// does (header spec §8.8.6 applies to every kind), and `i` has the
-    /// same refusal gate every editor has: `Behind` opens nothing.
+    /// Double-click and i open the same Choice popup. Both obey the editor refusal
+    /// gate, so Behind opens nothing.
     #[gpui::test]
     fn a_double_click_opens_the_choice_popup_and_behind_refuses_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -9380,10 +8517,8 @@ deleted = true
         );
     }
 
-    /// Controller ruling 2026-09-14: `:revert` while `Behind` is the whole
-    /// story — `Clean` means "on the live document" — so the newer
-    /// document paints, not the base the edits were made against with
-    /// nothing left to explain why.
+    /// Reverting a Behind draft clears edits and paints the newest document rather than
+    /// the retained base.
     #[gpui::test]
     fn revert_while_behind_shows_the_newer_document_clean(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -9455,11 +8590,8 @@ deleted = true
         assert_eq!(h.mode(&vcx), "normal", "and so does a cancel");
     }
 
-    /// Controller ruling: an edit needs a document. With no grid there is
-    /// no cell to key an edit by and no generation to record it against, so
-    /// `edit` and `:bump` refuse rather than opening an editor over
-    /// nothing — a draft whose base were the empty string could never be
-    /// told from one made against a real generation.
+    /// Without a document, edit and bump refuse: there is no cell identity or source
+    /// generation against which to record an edit.
     #[gpui::test]
     fn editing_with_no_document_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -9526,11 +8658,8 @@ deleted = true
         assert!(h.editor_value(&vcx).is_none(), "and the editor is dropped");
     }
 
-    /// One committed edit, then a delivery for the SAME tag under a
-    /// different `as_of` (a subscribed feed republishing without this
-    /// panel ever requerying) — spec §8.4's core rule: `Behind` keeps
-    /// painting the base generation under the edit rather than the newer
-    /// one that just arrived.
+    /// A delivery with the same request tag but a newer source time moves an edited
+    /// draft Behind. The retained base stays painted under the edit.
     #[gpui::test]
     fn a_newer_generation_under_a_draft_goes_behind_and_keeps_painting_the_base(
         cx: &mut gpui::TestAppContext,
@@ -9693,12 +8822,9 @@ deleted = true
         );
     }
 
-    /// The rebase guard (spec §2, amendment 4), through `:rebase` on a
-    /// real dividend panel: an edit keyed by a same-date ORDINAL
-    /// (`2026-09-18#2`) is refused when the newer document's group grew
-    /// from two rows to three, and the notice names the row and the size
-    /// change; the edit is gone rather than landing on whichever row
-    /// `2026-09-18#2` now happens to be.
+    /// Rebase drops a same-date ordinal edit when that date's group size changes. A
+    /// DIVIDEND group growing from two rows to three invalidates 2026-09-18#2, and the
+    /// notice reports the size change.
     #[gpui::test]
     fn rebase_refuses_a_same_day_group_edit_through_the_command_line(
         cx: &mut gpui::TestAppContext,
@@ -9789,17 +8915,9 @@ deleted = true
         );
     }
 
-    /// The M-1 path (review finding 1): a draft restored from the session
-    /// carries `groups` captured against its TRUE base, and that base
-    /// generation is never delivered THIS session at all — the very first
-    /// delivery is a newer one, so `base_snapshot` is never retained and
-    /// `painted_snapshot()` falls back to that newer snapshot. A capture
-    /// site that trusted the fallback would silently overwrite the
-    /// restored `groups` with the newer document's own sizes (a group of
-    /// two reading as "was two" instead of the true base's two) and the
-    /// guard would never fire. `capture_groups_if_base` must instead
-    /// leave the session's `groups` untouched, so `:rebase` still refuses
-    /// the shifted edit.
+    /// A restored draft retains same-day group sizes from its true base even when that
+    /// generation is never delivered. The newer painted fallback must not overwrite
+    /// those sizes, so rebase can still detect a shifted ordinal edit.
     #[gpui::test]
     fn rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered(
         cx: &mut gpui::TestAppContext,
@@ -9819,10 +8937,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         let (h, mut vcx) = open_spec(cx, &DIVIDEND, Some(restored));
         h.visible(&mut vcx, true);
         let tag = h.document_request().unwrap().tag;
-        // The FIRST delivery this tile has ever seen — `BASE` never
-        // arrives, so `base_snapshot` has nothing to retain and this is
-        // exactly the M-1 path. The same-date group has grown from the
-        // session's captured two rows to three.
+        // The first delivered generation is newer than BASE, so no true base snapshot
+        // can be retained. Its same-date group has grown from the session's captured
+        // two rows to three.
         h.deliver(
             &mut vcx,
             tag,
@@ -9929,10 +9046,8 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         assert!(behind.contains(&"rebase".to_string()));
     }
 
-    /// Controller ruling 2026-09-14: an edit on top of a `Behind` draft —
-    /// live or restored — can double-count a cell and lets `:rebase` map a
-    /// parked value over a newer one, so both surfaces refuse outright
-    /// rather than opening an editor or writing another edit.
+    /// Both live and restored Behind drafts refuse editing and bumps until the newer
+    /// document is resolved.
     #[gpui::test]
     fn edit_and_bump_are_refused_while_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10012,15 +9127,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// I-1 (final whole-branch review): a stage taken under an as-of
-    /// barrier must survive the barrier being REPLACED by a mutation this
-    /// panel does not follow. A scope keystroke (or a grouping step, or
-    /// `mod+z`) within the 250 ms window replaces the barrier without
-    /// bumping `flip`; the panel does not requery for it — so the staged
-    /// snapshot is the only answer it will ever get for the new as-of,
-    /// and dropping it left the PRE-as-of generation painted under the
-    /// window-wide historical stripe with `acted` claiming the panel was
-    /// current (no requery until some dataset's next publish).
+    /// An as-of answer survives replacement of its barrier by scope/grouping changes,
+    /// which this tile does not follow. It remains the only answer for the current
+    /// request and must promote under the newer barrier.
     #[gpui::test]
     fn a_stage_survives_a_barrier_replaced_by_a_change_the_panel_does_not_follow(
         cx: &mut gpui::TestAppContext,
@@ -10112,12 +9221,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         );
     }
 
-    /// I-2 (final whole-branch review), trace 1: the first delivery is an
-    /// EMPTY snapshot — the key has no document in this database, or the
-    /// session's persisted as-of predates the document's first publish
-    /// (`compile_document`'s `and false` arm). Rebasing a restored draft
-    /// against that model dropped every edit silently and left a clean
-    /// panel: the one path on the branch that lost unsent work (§8.5).
+    /// An empty first delivery preserves restored edits. Resolving them against an
+    /// empty label map would silently drop unsent work, so restoration remains pending
+    /// until a usable document arrives.
     #[gpui::test]
     fn a_restored_draft_survives_an_empty_first_delivery(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -10156,11 +9262,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(cell.edited, "the restored edit is placed by label at last");
     }
 
-    /// I-2, trace 2: the first delivery is a malformed generation that
-    /// `MatrixModel::build` refuses (a repeated pivot pair). The model
-    /// stays empty, so the restored draft must stay parked — rebasing
-    /// against an unbuildable delivery's empty last-good model destroyed
-    /// it just as silently.
+    /// A malformed first delivery with a repeated pivot pair leaves the model empty and
+    /// the restored draft unresolved. Build failure must not trigger rebase against an
+    /// empty model.
     #[gpui::test]
     fn a_restored_draft_survives_a_first_delivery_that_cannot_be_built(
         cx: &mut gpui::TestAppContext,
@@ -10198,10 +9302,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(cell.edited);
     }
 
-    /// I-2, trace 3: a restored edit whose row or column the delivered
-    /// document no longer has is DROPPED — and the trader is told, as
-    /// `:rebase` tells them on the same situation. It used to be pruned
-    /// with nothing said at all.
+    /// Restoration reports edits dropped because the delivered document lacks their row
+    /// or column, just as explicit rebase reports missing targets.
     #[gpui::test]
     fn a_restored_edit_the_document_lacks_is_named_in_the_notice(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -10231,13 +9333,9 @@ edits = [["2026-11-20", "-1", 9.5], ["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// M-1 (final whole-branch review): once a restored draft has landed
-    /// `Behind` with the newest generation painted (§8.7.17 — no base was
-    /// ever delivered, so there is nothing to retain), a LATER delivery
-    /// must not pin that painted generation as if it were the edits'
-    /// base. It is not: the base is `2026-09-12T14:00:00Z`, which this
-    /// session has never seen. Pinning it froze the panel on a generation
-    /// that was neither the base nor the newest.
+    /// If the true base of a restored Behind draft was never delivered, later
+    /// deliveries must not retain a newer painted fallback as that base. The fallback
+    /// continues to show the newest usable generation.
     #[gpui::test]
     fn a_restored_behind_draft_keeps_following_the_feed(cx: &mut gpui::TestAppContext) {
         const NEWEST: &str = "2026-09-12T14:15:00Z";
@@ -10273,12 +9371,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// M-2 (final whole-branch review): a generation that cannot be laid
-    /// out as a grid must change NOTHING but the notice. The last good
-    /// model stays on screen (it always did) and so must `self.snapshot`
-    /// and the draft's own state — otherwise the panel goes `Behind`
-    /// against a generation it never painted and `:rebase` has an
-    /// unbuildable document to rebase onto.
+    /// An unbuildable generation changes only the notice. Keep the last usable model,
+    /// snapshot, and draft together so rebase never targets a document that could not
+    /// be painted.
     #[gpui::test]
     fn a_delivery_that_cannot_be_built_changes_nothing_but_the_notice(
         cx: &mut gpui::TestAppContext,
@@ -10319,10 +9414,9 @@ edits = [["2026-11-20", "-1", 9.5]]
             .expect("the draft is not behind");
     }
 
-    /// The other half of M-5's move: the delivery notice is cleared on
-    /// the delivery that PAINTS (in `apply`) rather than in `deliver`'s
-    /// `Ok` arm, so a select failure's message goes away exactly when the
-    /// document that replaces it reaches the screen.
+    /// A delivery clears the prior query failure only when its replacement document
+    /// paints. Staging a successful answer leaves the failure notice visible until
+    /// promotion.
     #[gpui::test]
     fn a_painting_delivery_clears_the_previous_deliverys_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10340,11 +9434,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// M-5 (final whole-branch review): the notice a delivery's own
-    /// `apply` sets — the restored-draft dropped-edit report here —
-    /// survives that delivery. The `Ok` arm used to clear `notice` before
-    /// staging, so the clear now happens on the delivery that PAINTS, in
-    /// `apply`, ahead of every notice `apply` itself writes.
+    /// A delivery preserves notices generated by its own apply, including restored-edit
+    /// drops. Clear the prior notice when applying the painted delivery, before
+    /// producing any new notice.
     #[gpui::test]
     fn a_notice_set_while_applying_a_delivery_survives_it(cx: &mut gpui::TestAppContext) {
         let restored: toml::Table = format!(
@@ -10369,7 +9461,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    // ---- Task 5: the strip's own cursor, editing, and `:set` ---------
+    // ---- Attribute cursor, editing, and set ---------------------------
 
     /// `k` from the top row enters the strip at the nearest attribute —
     /// the grid paints no selection behind it — and `i`/`enter` edits the
@@ -10413,10 +9505,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A refused parse stays in insert mode with the typed text intact —
-    /// the cell rule, spec §5.2 — and writes nothing to the draft. On
-    /// `spot_ref` (F64): a `Date` attribute opens the segmented field
-    /// since 2026-09-19, which has nothing to refuse.
+    /// A refused F64 attribute parse keeps insert mode and typed text intact and writes
+    /// no draft value.
     #[gpui::test]
     fn a_bad_number_stays_in_insert_mode_with_the_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10435,7 +9525,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
     }
 
-    // ---- nudging (2026-09-17) -----------------------------------------
+    // ---- Nudging -----------------------------------------------------
 
     /// `up` in an open cell editor steps the text by one unit of the
     /// column's painted precision — a `param` at four places by `0.0001`
@@ -10598,8 +9688,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// `:set <attr>` with no value answers the current value as a notice
-    /// (spec §5.2) — an `Err`, since nothing was written.
+    /// Set without a value returns the current attribute value as an Err notice and
+    /// performs no write.
     #[gpui::test]
     fn set_with_no_value_answers_the_current_value_as_a_notice(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10610,9 +9700,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A single click on an attribute value moves the cursor to `Attr(i)`
-    /// and opens nothing (spec §5.1) — the same rule a grid cell's single
-    /// click keeps.
+    /// A single attribute click selects Attr(i) without opening an editor, matching
+    /// grid-cell selection.
     #[gpui::test]
     fn a_click_on_an_attribute_moves_the_cursor_and_opens_nothing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10624,12 +9713,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.editor_value(&vcx), None, "the click opened no editor");
     }
 
-    /// A double-click on an attribute value opens its editor (user ruling
-    /// 2026-09-17), seeded with the painted value, in the strip — and
-    /// the press's own listener does not swallow the event, so the
-    /// host's tile-level mouse-down (the shell's focus re-arm stand-in)
-    /// still saw both presses. After a draw the editor's input holds
-    /// window focus.
+    /// Double-clicking an attribute opens its seeded editor and focuses it after
+    /// drawing. Both presses propagate to the host's tile-level mouse-down handler for
+    /// focus restoration.
     #[gpui::test]
     fn a_double_click_on_an_attribute_opens_its_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10658,10 +9744,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().attrs.len()), 1);
     }
 
-    /// An attribute edit is unsent work exactly as a cell edit is: a
-    /// newer generation under it goes `Behind`, and `:rebase` carries the
-    /// attribute edit forward (by column name — spec §5.3) and marks the
-    /// header attribute as edited on the newer document.
+    /// A newer generation moves an attribute-edited draft Behind. Rebase carries the
+    /// attribute edit by column name and marks it edited on the new document.
     #[gpui::test]
     fn an_attribute_edit_goes_behind_and_rebase_keeps_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10703,7 +9787,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    // ---- the action list (Task 6, spec §6) ----------------------------
+    // ---- Actions -----------------------------------------------------
 
     #[gpui::test]
     fn dot_opens_the_menu_and_escape_closes_it(cx: &mut gpui::TestAppContext) {
@@ -10777,11 +9861,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// Task 5's Chords fixture: the fragment's own bindings, built exactly
-    /// as `content.rs`'s keyboard tests do (a registry from `ACTIONS`,
-    /// `fragment_doc`, then `build_keymap`), installed as the
-    /// `tips::Chords` global — the module-visible keymap read `chord_for`
-    /// resolves a tooltip's chord against.
+    /// Install Chords from ACTIONS, fragment_doc, and build_keymap so tooltip chord
+    /// lookup uses the module's effective keymap.
     fn install_fragment_chords(vcx: &mut gpui::VisualTestContext) {
         let mut registry = geode_shell::actions::ActionRegistry::default();
         for (id, title) in crate::content::ACTIONS {
@@ -10898,13 +9979,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Fix round 1, IMPORTANT-1: the `⋯` button's capture-phase handler
-    /// must decide the click first WITHOUT stopping propagation, or the
-    /// shell's own tile-level bubble listeners (click-to-focus, drag
-    /// arming, `pending_focus_restore`) never run for that click — this
-    /// crate's harness has one tile and no shell, so [`Host`]'s own
-    /// bubble-phase counter stands in for them. Both clicks (open, then
-    /// close) must reach it.
+    /// The actions button toggles its popup in capture without stopping propagation.
+    /// Both opening and closing clicks reach the host's bubble listener, standing in
+    /// for shell click-to-focus, drag arming, and focus restoration.
     #[gpui::test]
     fn a_menu_button_click_still_reaches_the_tiles_own_listeners(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -10926,13 +10003,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// User report 2026-09-17: "mousing over the list items should focus
-    /// them but instead it's still changing the highlighting of the rows
-    /// in the grid underneath." Two halves. The popup must OCCLUDE — a
-    /// hover over it may not reach anything painted beneath (the host's
-    /// hover-gated counter stands in for the grid's row hover) — and a
-    /// hover over an action row moves the highlight, the mouse form of
-    /// `j`/`k`.
+    /// The popup occludes the grid beneath it. Hovering an action row moves its
+    /// highlight without triggering the host's underlying hover listener.
     #[gpui::test]
     fn hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid(
         cx: &mut gpui::TestAppContext,
@@ -11000,7 +10072,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    // ---- the segmented date field (header spec §5.2, 2026-09-19) -------
+    // ---- Segmented date field ----------------------------------------
 
     /// Opens the field on `anchor_date` (Attr 0) and paints it: the
     /// field's `on_key_down` is a listener on the painted, focused element,
@@ -11032,10 +10104,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         draw(vcx);
     }
 
-    /// `i` on a `Date` attribute opens the segmented field, not the text
-    /// editor: insert mode, the field's own handle holding the keyboard,
-    /// the fixture's date across the three segments, and the DAY active
-    /// (user ruling 2026-09-19).
+    /// Editing a Date attribute opens the segmented field in insert mode with its own
+    /// focus handle, the existing date, and the day segment active.
     #[gpui::test]
     fn i_on_a_date_attribute_opens_the_field_on_the_day_segment(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11188,10 +10258,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert!(vcx.update(|window, cx| window.focused(cx).is_none()));
     }
 
-    /// `enter` with a single digit still waiting in a segment completes
-    /// it as `0d` before committing (review I-1): `2` in the day then
-    /// `enter` writes the 2nd, never the 12th that was there. Through
-    /// both doors — the field's own `enter` and the fragment's `commit`.
+    /// Enter completes a pending single digit before committing: typing 2 in the day
+    /// writes the second, not the previous twelfth. Exercise both the field's Enter
+    /// handler and the commit action.
     #[gpui::test]
     fn enter_completes_a_pending_digit_rather_than_committing_the_old_date(
         cx: &mut gpui::TestAppContext,
@@ -11272,9 +10341,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A click on a segment reclaims the keyboard for the field when it
-    /// has lost it (review M4): the orphaned-editor state, where the
-    /// field is still open but window focus is elsewhere.
+    /// Clicking a segment returns focus to an open date field whose keyboard focus
+    /// moved elsewhere.
     #[gpui::test]
     fn a_segment_click_refocuses_an_unfocused_field(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11362,17 +10430,10 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.editor_value(&vcx).as_deref(), Some("5000"));
     }
 
-    /// User report 2026-09-18: `shift+up` in an open cell editor moved the
-    /// GRID's row selection instead of nudging. gpui-base's `Input` binds
-    /// `shift-up`/`shift-down` to `SelectUp`/`SelectDown`; a single-line
-    /// input returns from `select_up` without stopping propagation, so the
-    /// action bubbled to the enclosing `DataTable`'s own `SelectUp` handler
-    /// — one action type, re-exported by gpui-component — and moved the
-    /// selection out from under the tile's cursor, before the shell's key
-    /// handler ever saw the keystroke. The shell now reclaims both keys in
-    /// the `Input` context (`dialog::init_reclaimed_keybindings`), so the
-    /// keystroke falls through to the keymap; this pins the half a panel
-    /// harness can see — the table's selection stays put.
+    /// Single-line Input selection actions can bubble into DataTable and move its
+    /// selection. The shell reclaims Shift-Up/Down in Input context so the keymap can
+    /// route nudging. This tile harness checks that the table selection remains
+    /// unchanged.
     #[gpui::test]
     fn shift_up_in_the_editor_no_longer_moves_the_tables_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11398,11 +10459,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.selection(&vcx), (Some(1), Some(1)));
     }
 
-    /// Fix round 1, IMPORTANT-2: `/` is a shell-owned `tile`-context
-    /// binding that never reaches `dispatch`'s own "any other action
-    /// closes the popup" guard, so `find` must close it itself — on the
-    /// very first keystroke of a find session started with the menu
-    /// open.
+    /// Find is shell-owned and bypasses dispatch, so its first keystroke must close any
+    /// open popup itself.
     #[gpui::test]
     fn a_find_keystroke_closes_the_popup(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11413,9 +10471,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    /// The other half of fix round 1, IMPORTANT-2: `:` is the same kind
-    /// of shell-owned door, so `command` closes the popup itself for
-    /// every parsed command but `Menu` (which toggles it).
+    /// Parsed commands close an open popup themselves because the shell command route
+    /// bypasses dispatch. Menu instead toggles the popup.
     #[gpui::test]
     fn a_command_line_closes_the_popup(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11426,7 +10483,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.mode(&vcx), "normal");
     }
 
-    // ---- the underlying picker (Task 7, spec §7) ----------------------
+    // ---- Underlying picker -------------------------------------------
 
     /// `u` opens the picker (`mode == insert`, its field holds the
     /// keyboard); typing filters `ranked` over the catalog's own keys;
@@ -11458,10 +10515,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Exactly as `:key`/`:underlying` now park rather than refuse
-    /// (2026-09-19): `u` with a dirty draft OPENS the picker — a pick
-    /// parks the draft under its underlying, so there is nothing to warn
-    /// about and no `:revert` to name.
+    /// Opening the picker with pending edits is allowed. Selecting a different key
+    /// parks the draft under its current underlying.
     #[gpui::test]
     fn the_picker_opens_while_the_draft_has_edits(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11493,10 +10548,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Opening the picker re-requests the catalog unconditionally (spec
-    /// §7), the same MIN-4 rule `:key`'s own line follows: a held catalog
-    /// is not necessarily a fresh one, and a subscribed feed can publish
-    /// a new key at any time.
+    /// Opening the picker always requests a fresh catalog. A held catalog can omit keys
+    /// published since its delivery.
     #[gpui::test]
     fn opening_the_picker_asks_for_a_fresh_catalog(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11512,13 +10565,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Review fix round 1, CRITICAL: `enter` must load whichever row is
-    /// HIGHLIGHTED, not always the top match. The old `refilter` reset
-    /// the highlight to 0 on every call, and `commit_picker` always
-    /// calls it once (defensively, to cover a test harness's
-    /// `set_value`, which fires no `Change` at all) — so `u`, `down`,
-    /// `down`, `enter` used to silently request the TOP key regardless
-    /// of where the trader had actually moved the highlight.
+    /// Enter selects the highlighted key. Commit defensively refilters current text
+    /// because set_value emits no Change, but unchanged text must preserve keyboard
+    /// navigation.
     #[gpui::test]
     fn enter_loads_the_highlighted_row_not_the_top_match(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11541,12 +10590,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Review fix round 1, IMPORTANT-1: `marketdata::menu` (reachable via
-    /// the palette's "Actions menu" row, not gated by mode at all) must
-    /// close an open PICKER first, blurring before dropping it, rather
-    /// than overwriting `self.popup` out from under a still-focused
-    /// `InputState` — and then still open the menu, since that row's
-    /// whole point was to open it.
+    /// Opening the actions menu while the picker is open blurs and drops its focused
+    /// Input before installing the menu.
     #[gpui::test]
     fn menu_closes_an_open_picker_with_a_blur_before_opening(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11561,12 +10606,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Review fix round 1, IMPORTANT-2: a diagnostics notification that
-    /// carries no real catalog change (a source's health tick, or the
-    /// SAME catalog reported again) must not reset the picker's
-    /// highlight, and a catalog that genuinely changes must re-rank
-    /// keeping the highlight on the same KEY rather than the same
-    /// position.
+    /// Diagnostics with unchanged catalog keys preserve the picker highlight. A changed
+    /// catalog reranks matches while keeping the highlighted key by identity.
     #[gpui::test]
     fn diagnostics_catalog_updates_preserve_the_highlight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11608,16 +10649,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Review fix round 2: the round-1 fix above still tracked the
-    /// wrong row when the catalog RE-SORTS around the highlighted key —
-    /// `catalog_keys()` returns a freshly sorted list, so a new key that
-    /// sorts BEFORE the highlighted one shifts every later index, and
-    /// the old "preserve by ALL-index" logic silently landed on whatever
-    /// key now sat at that number (never falling back to 0, so nothing
-    /// signalled the mistake). Identity must be the KEY STRING: `AAA.Z`
-    /// sorting ahead of the highlighted `CCC.Z` shifts it from index 1
-    /// to index 2, and the highlight must follow it there; a genuine
-    /// removal still falls back to row 0.
+    /// Catalog insertion before the highlighted key shifts its index without changing
+    /// selection. Adding AAA.Z before CCC.Z keeps CCC.Z highlighted; removing the
+    /// selected key falls back to the first match.
     #[gpui::test]
     fn a_resorted_catalog_keeps_the_highlighted_key_not_its_old_index(
         cx: &mut gpui::TestAppContext,
@@ -11660,13 +10694,11 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    // ---- Final review (2026-09-17) ----------------------------------
+    // ---- Popup focus and navigation ----------------------------------
 
-    /// B2: a key change is navigation, and an open cell editor is
-    /// CANCELLED across it — never committed into the new document's
-    /// draft, and never left open and deaf under a swapped grid.
-    /// Reachable for real via `i`, `mod+l` (focus to the shell root, the
-    /// editor still open), then `:underlying`.
+    /// Switching keys cancels an open editor without committing its text into the next
+    /// document. The editor can remain open after focus moves to the shell command
+    /// field, so this path must close it explicitly.
     #[gpui::test]
     fn a_key_change_cancels_an_open_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11693,11 +10725,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// B4: a click on an attribute value while a cell editor is open
-    /// cancels the editor first — `a_click_while_editing_cancels_the_
-    /// editor_then_moves`, for the strip. Without it this was the one
-    /// mouse door that left an editor open and deaf (the mouse-down has
-    /// re-armed the shell's focus restore).
+    /// Clicking an attribute cancels an open cell editor before selecting the strip
+    /// target. No editor remains attached to the previous cell after the shell restores
+    /// tile focus.
     #[gpui::test]
     fn an_attribute_click_cancels_the_editor_then_moves(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11717,26 +10747,13 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(h.cell(&vcx, 0, 0).0, "4500.00");
     }
 
-    /// The menu-row → picker path leaves the picker's field holding the
-    /// keyboard. This no longer rests on the row's own
-    /// `stop_propagation` (B5's original claim, since superseded — see
-    /// `popup.rs`'s comment on that handler): the 2026-09-17 insert-focus
-    /// rule (`occupant_holds_insert_focus`) means `render`'s own
-    /// `pending_focus_restore` consumption is skipped whenever the
-    /// focused tile's occupant holds its own input in insert mode, so a
-    /// bubbled click could no longer take the keyboard back on the next
-    /// render either way. [`Host`]'s counter (its own doc comment) still
-    /// stands in for that bubble and still reads zero here, though the
-    /// stop it once credited is now kept for an unrelated reason (a click
-    /// that means "pick a row" must not also run the shell's ordinary
-    /// tile click handling — see `popup.rs`).
+    /// Selecting the picker action leaves its Input focused. The row click stops
+    /// propagation so the host's ordinary tile-click handling does not also run. Shell
+    /// insert-focus retention is checked separately.
     ///
-    /// The cursor is put in the STRIP first, deliberately: with it in the
-    /// grid, the pinned `TableState::set_selected_row` (which `sync_cursor`
-    /// runs at the end of every `dispatch`) calls `cx.stop_propagation()`
-    /// of its own and would hide the row handler's — in the strip,
-    /// `sync_cursor` calls `clear_selection`, which stops nothing, so the
-    /// row's own stop is the only thing between the click and the bubble.
+    /// Place the cursor in the strip so sync_cursor calls clear_selection, which does
+    /// not stop propagation. A grid cursor would call TableState::set_selected_row and
+    /// mask whether the popup row itself stopped the click.
     #[gpui::test]
     fn the_menu_row_to_picker_path_leaves_the_pickers_field_focused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -11853,11 +10870,8 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// A3: the picker paints at most `PICKER_ROWS` of its ranked keys at
-    /// once (the query narrows the rest). Window semantics (2026-09-19
-    /// ruling): stepping past the cap does not stop the highlight at the
-    /// last painted row — it drags the window along, so the highlight
-    /// lands on the last DECLARED key with the window following.
+    /// The picker paints at most PICKER_ROWS matches. Navigation beyond that window
+    /// scrolls it to keep the highlighted key visible, including the last declared key.
     #[gpui::test]
     fn the_picker_paints_at_most_twelve_rows(cx: &mut gpui::TestAppContext) {
         use crate::popup::PICKER_ROWS;
@@ -11890,13 +10904,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// Re-review of the fix wave: a picker orphaned with the keyboard
-    /// elsewhere (`u`, `ctrl+k`, the palette's "Find" — the shell's
-    /// command line holds focus, the picker is still `Some`) is closed by
-    /// the first find keystroke WITHOUT blurring whoever holds the
-    /// keyboard. The second `InputState` stands in for the shell's
-    /// `command_input`; an unconditional blur would have cancelled the
-    /// trader's find after one character.
+    /// Find closes an orphaned picker without blurring the Input that currently owns
+    /// focus. A second Input stands in for the shell command field, which must continue
+    /// accepting the find query.
     #[gpui::test]
     fn a_find_keystroke_with_an_orphaned_picker_keeps_the_foreign_focus(
         cx: &mut gpui::TestAppContext,
@@ -11926,7 +10936,7 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    // ---- the update policy (spec §8.4, 2026-09-19) ----------------------
+    // ---- Update policy -----------------------------------------------
 
     /// One committed edit, then a newer generation with the SAME labels
     /// under `:auto rebase`: no `Behind`, the newer document is painted,
@@ -12091,12 +11101,9 @@ edits = [["2099-01-01", "-1", 1.0]]
         );
     }
 
-    /// The policy applies on the next NEW generation, never on the
-    /// switch and never on a redelivery: a draft left `Behind` under
-    /// `hold` stays exactly there when the trader switches to `rebase`,
-    /// stays there again when the SAME newer generation is redelivered
-    /// (a `data` bump from an unrelated publish, review I-1), and only a
-    /// further generation moves the edits — onto that newest document.
+    /// Policy changes do not act retroactively. A Behind draft remains held after
+    /// switching to rebase and after redelivery of the same generation; only a further
+    /// new generation triggers rebase.
     #[gpui::test]
     fn switching_to_auto_rebase_does_not_rebase_a_draft_already_behind(
         cx: &mut gpui::TestAppContext,
@@ -12370,11 +11377,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         (h, vcx, tag)
     }
 
-    /// The first delivery after a restore is always `hold` (ruling
-    /// 2026-09-19): under `replace`, a restored draft meeting a newer
-    /// generation lands `Behind` with its edits intact — never dropped on
-    /// a delivery the trader was not watching — and no `replaced` notice
-    /// is written.
+    /// The first usable delivery after restore holds edits even under replace. A newer
+    /// document yields Behind with the restored edits intact and no replaced notice.
     #[gpui::test]
     fn a_restored_drafts_first_delivery_is_hold_under_replace(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx, tag) = restored_first_delivery(cx, "replace");
@@ -12461,11 +11465,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(len, 1);
     }
 
-    /// An EMPTY new generation (no rows, but a source time) under
-    /// `rebase` with a dirty draft: rebasing against an empty label map
-    /// would drop every edit in silence, so the delivery takes the `hold`
-    /// path — `Behind`, edits intact, the base still painted, no extra
-    /// notice (review I-2).
+    /// Automatic rebase against an empty new generation falls back to Hold. The draft
+    /// stays Behind with edits intact and its base painted, without an extra notice.
     #[gpui::test]
     fn an_empty_new_document_never_auto_rebases_a_draft_away(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -12551,12 +11552,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.editor_value(&vcx).is_none());
     }
 
-    /// The rule (command-line locality spec §2): every `:` verb the panel
-    /// accepts changes only the panel — never the frame or the app.
-    /// Checks the frame's three counters (`scope`, `grouping`, `as_of`),
-    /// not any slot/scope/as-of *value* — a `save_slot` would still
-    /// bump `grouping` (and `config`) and be caught that way even
-    /// though nothing here reads what it wrote.
+    /// Tile commands leave the frame's scope, grouping, and as-of counters unchanged.
+    /// Counters detect mutations even when an operation would leave the selected value
+    /// unchanged.
     #[gpui::test]
     fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -12599,7 +11597,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             // revert); the rule is about what it did NOT touch.
         }
     }
-    // ---- row verbs: o / shift+o / d d (dividend spec §5.3) ------------
+    // ---- Row insertion and deletion ----------------------------------
 
     /// The model's row labels in painted order.
     fn row_labels(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
@@ -12612,17 +11610,13 @@ edits = [["2026-11-20", "-1", 9.5]]
         h.tile.read_with(vcx, |t, _| t.notice().map(str::to_string))
     }
 
-    /// §5.3 on a `Minted` axis: `o` inserts `new-1` below the cursor row
-    /// and lands the cursor on its first cell in insert mode; `shift+o`
-    /// on that inserted row chains a new row ABOVE it (the new row takes
-    /// `new-1`'s anchor, `new-1` re-anchors onto it — controller ruling);
-    /// `d d` on the inserted row drops it outright, on a document row
-    /// marks it `Deleted`, and a second `d d` there says so.
-    /// A hidden row label (user ruling 2026-09-20): the table carries no
-    /// label column, so table column 0 is the first value column; `yy`
-    /// yanks the cells alone; `/` searches the painted cells rather than
-    /// the id nobody can see; `o` still mints an id for the draft and
-    /// lands the cursor on the first cell.
+    /// On a Minted axis, insertion below opens the new row's first cell; insertion
+    /// above reanchors the selected inserted row beneath its new predecessor. Deleting
+    /// an inserted row removes it, while deleting a document row marks it Deleted and a
+    /// repeat refuses.
+    ///
+    /// With row labels hidden, table column zero is the first value column, yank copies
+    /// cells, and find searches painted cells. Inserts still mint draft identities.
     #[gpui::test]
     fn a_hidden_row_label_withholds_the_label_column(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
@@ -12751,11 +11745,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
     }
 
-    /// §5.3 on a `Typed(Date)` axis (CVI): `o` inserts a provisional row
-    /// and opens the ROW-LABEL editor on it — the segmented date field,
-    /// painted in the row-label column; `enter` with a new term renames
-    /// the row and opens the first cell; a term already present is
-    /// refused with the editor open; `escape` drops the provisional row.
+    /// On a Typed(Date) axis, insertion opens a segmented row-label editor. Committing
+    /// a unique term renames the provisional row and opens its first cell. A duplicate
+    /// keeps the editor open; cancel drops the provisional row.
     #[gpui::test]
     fn o_on_a_typed_axis_opens_the_label_editor(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -12854,13 +11846,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// Two `o`s on the same document row of a `Typed(Date)` axis (final
-    /// review, Critical): the second `o` re-hangs the first typed row
-    /// onto the MINTED label, and `commit_row_label`'s rename must carry
-    /// that follower with it — otherwise the first row's anchor names a
-    /// label no row holds, the splice cannot place it, and it paints at
-    /// the TOP of the grid. Painted order is `[D1, second, first, D2]`
-    /// with `first.after == Some(second)`.
+    /// Two inserts after the same document row reanchor the first beneath the second.
+    /// Committing the second's typed label updates the follower's anchor, preserving
+    /// painted order D1, second, first, D2.
     #[gpui::test]
     fn a_second_o_on_the_same_row_keeps_the_first_typed_row_below_it(
         cx: &mut gpui::TestAppContext,
@@ -12975,12 +11963,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    /// Row edits ride the session under `[drafts.<key>]` and the parked
-    /// map like any other unsent work (spec §8.5): `o`, fill a cell,
-    /// serialize → `[drafts."SPX.Z".rows.new-1]`; restore → `rows_added`
-    /// 1 with the cell in place; a key switch parks the rows and a switch
-    /// back restores them. `yy` on the inserted row yanks its cells as
-    /// painted.
+    /// Row edits persist under drafts.<key> and park with other edits on key switches.
+    /// Filled inserted cells survive restore, and yank copies their prepared values.
     #[gpui::test]
     fn row_edits_ride_the_session_and_the_parked_map(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -13049,12 +12033,9 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(h.cell(&vcx, 1, 1), ("2.5000".to_string(), true));
     }
 
-    /// `o` on a row that already has a direct follower puts the new row
-    /// IMMEDIATELY below it (controller ruling): the existing follower is
-    /// re-hung onto the new row rather than left as a label-ordered
-    /// sibling — `o` on `D1` twice paints `D1, new-2, new-1`, never
-    /// `D1, new-1, new-2`, and a later rename of either cannot re-sort
-    /// the pair on commit.
+    /// Insertion is immediately after its parent, reanchoring an existing follower
+    /// beneath the new row. Two inserts after D1 paint D1, new-2, new-1, and renaming
+    /// either preserves that order.
     #[gpui::test]
     fn o_rehangs_the_existing_follower_onto_the_new_row(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_flat(cx);
@@ -13249,7 +12230,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         );
     }
 
-    // ---- `:upload` (egress spec §6) ------------------------------------
+    // ---- Upload ------------------------------------------------------
 
     /// CVI's panel with one egress target, `sophis`, that accepts its
     /// document (`cvi_params`) — and a second, `bbg`, that does not.
@@ -14043,7 +13024,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert!(h.upload_request().is_none());
     }
 
-    // ---- the echo (egress spec §7) -------------------------------------
+    // ---- Upload echo -------------------------------------------------
 
     impl Harness {
         /// `:upload`, `y` and an `Ok` outcome over the draft as it stands:
@@ -14247,9 +13228,8 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert!(h.sent_rows(&vcx).is_some(), "kept for the real echo later");
     }
 
-    /// Spec §7: a `Sent` draft is not a `Behind` one, and the update
-    /// policy governs `Behind` alone — `replace` must not drop a sent
-    /// draft whose echo differs, nor `rebase` move it.
+    /// Auto policy governs Behind transitions. A Sent draft with a differing echo
+    /// remains Sent under replace or rebase policy.
     #[gpui::test]
     fn the_update_policy_does_not_apply_to_a_sent_draft(cx: &mut gpui::TestAppContext) {
         for policy in ["replace", "rebase"] {
@@ -14307,12 +13287,9 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
     }
 
-    /// Controller ruling: `:rebase` from `Sent` with no differing echo
-    /// held has nothing newer to rebase onto — the upload is still
-    /// awaiting its echo upstream. Refused rather than rebasing onto the
-    /// same generation, which would re-arm `:upload` of edits already in
-    /// flight (a possible duplicate upload). Completions agree: `rebase`
-    /// is not offered here.
+    /// Rebase refuses a Sent draft without a differing echo and is absent from
+    /// completions. Rebasing onto the submitted generation would make the same edits
+    /// uploadable again while the first request awaits its echo.
     #[gpui::test]
     fn rebase_from_sent_without_a_held_echo_is_refused(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);
@@ -14493,8 +13470,8 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         );
     }
 
-    /// Amendment 5: `Sent` is not persisted — the session writes the
-    /// edits as for any draft, and they come back `Editing`, sendable.
+    /// Sessions persist Sent edits as ordinary draft edits. Restore returns them to
+    /// Editing, where they can be uploaded again.
     #[gpui::test]
     fn a_sent_draft_restores_as_editing(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);

@@ -1,17 +1,12 @@
-//! The tile's popups: the series list, the add picker, the expression
-//! field and the range dialog — opened, keyed, committed and cancelled
-//! here, painted by `crate::popup`.
+//! Lifecycle and routing for the series list, add picker, expression field,
+//! range editor, action menu, and component colour picker. Popup state and custom
+//! painting live in crate::popup; the header hosts expressions and the colour trigger.
 
 use super::*;
 
 impl TimeseriesTile {
-    /// Every popup verb: the series list, the add picker, the
-    /// expression field and the range dialog are all opened, committed
-    /// and cancelled from here.
-    ///
-    /// `e`'s refusal on a SOURCE slot stays this method's: there is no
-    /// expression to open, and a trader who pressed it deserves the
-    /// reason rather than a dead key.
+    /// Route popup actions. Editing a source slot refuses with a notice because
+    /// only expression slots have expression text to edit.
     pub(super) fn popup_verb(
         &mut self,
         verb: &str,
@@ -22,16 +17,14 @@ impl TimeseriesTile {
         let series_open = matches!(self.popup, Some(Popup::Series(_)));
         let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
         match verb {
-            // `.` and the `⋯` button: one toggle for both halves, the
-            // market-data menu's own shape.
+            // Keyboard and header button share the action-menu toggle.
             "menu" => {
                 self.toggle_menu(window, cx);
                 true
             }
-            // The menu's own keys: `j`/`k` step over action rows,
-            // clamped; `enter` picks the highlighted one; `escape`
-            // closes. Reusing the list verbs keeps the fragment small —
-            // the two popups never share a frame.
+            // Menu navigation clamps over enabled action rows, skipping disabled rows
+            // and headings/separators. Pointer hover may still select a disabled row.
+            // Enter picks; Escape closes. Series uses separate context for these actions.
             "list_down" | "list_up" if menu_open => {
                 let delta = if verb == "list_down" {
                     n as isize
@@ -56,8 +49,7 @@ impl TimeseriesTile {
                 self.menu_pick(index, window, cx);
                 true
             }
-            // A second `L` closes it — one key for both halves, the way
-            // the market-data menu's own `menu` verb toggles.
+            // Toggle the fieldless series list.
             "list" => {
                 if self.popup.is_some() {
                     self.close_popup_with_window(window, cx);
@@ -66,10 +58,8 @@ impl TimeseriesTile {
                 }
                 true
             }
-            // The list's cursor IS the chips' cursor, so `j`/`k` are
-            // `tab`/`shift+tab` under another name — and wrap the same
-            // way. Guarded on the list being open: the fragment binds
-            // them only there, but the palette can reach any action.
+            // List and header share the model cursor, including wrapping navigation.
+            // Guard these actions because palette dispatch can bypass keymap context.
             "list_down" if series_open => {
                 let changed = self.model.cursor_next(n);
                 self.apply_changed(changed, cx);
@@ -84,10 +74,7 @@ impl TimeseriesTile {
                 self.close_popup_with_window(window, cx);
                 true
             }
-            // `a` and `x` open their own field, closing whatever was up
-            // first: a trader who pressed one with the list open meant
-            // the new field, and two popups at a time is the thing this
-            // enum exists to forbid.
+            // Opening an editor replaces the current popup.
             "add" => {
                 self.open_picker(window, cx);
                 true
@@ -96,15 +83,8 @@ impl TimeseriesTile {
                 self.open_expr(None, window, cx);
                 true
             }
-            // `r` opens the range popup, closing whatever was up first —
-            // `a` and `x`'s own rule. Note what that means for a SECOND
-            // `r`: the popup is an insert popup, so `dispatch`'s
-            // stage-aware gate has already closed it by the time this
-            // arm runs, and the arm therefore REOPENS it on a fresh
-            // seed rather than toggling it shut. `escape` is the close
-            // (spec §9.8 gives `r` no toggle), and reopening on the
-            // range now in the model is a harmless answer to a key the
-            // trader pressed meaning "the range".
+            // Range opens a fresh draft. Dispatch closes an existing insert popup
+            // first, so repeating this action reopens rather than toggling it shut.
             "range" => {
                 self.open_range(window, cx);
                 true
@@ -129,6 +109,10 @@ impl TimeseriesTile {
                 self.open_expr(Some(seed), window, cx);
                 true
             }
+            "pick_colour" => self.open_colour_picker(window, cx),
+            // The colour picker commits through its own keys (a hex
+            // field's `enter`, a swatch) inside the component; an
+            // `enter` that reaches the tile is inert.
             "commit" => match &self.popup {
                 Some(Popup::Picker(_)) => self.commit_picker(window, cx),
                 Some(Popup::Expr(_)) => self.commit_expr(window, cx),
@@ -139,14 +123,8 @@ impl TimeseriesTile {
                 self.close_popup_with_window(window, cx);
                 true
             }
-            // The picker's own rule is CLAMPED stepping (header spec §7,
-            // the underlying picker's): a bare step at either end stays
-            // put rather than wrapping round to the far end of a list
-            // the trader is reading top-down.
-            // The range popup's own step: `up`/`down` on the active
-            // segment, the same `FieldKey::Step` its listener routes
-            // them to — the keymap path and the listener path must not
-            // be able to disagree about what an arrow means.
+            // Range arrows step the active date segment through the same operation
+            // as its focused listener. Picker arrows instead clamp list navigation.
             "insert_up" | "insert_down" if matches!(self.popup, Some(Popup::Range(_))) => {
                 let delta = if verb == "insert_up" {
                     n as i64
@@ -177,27 +155,19 @@ impl TimeseriesTile {
         }
     }
 
-    /// Open the series list (spec §9.5). The rows are prepared by the
-    /// ONE door that prepares every other piece of chrome, so an empty
-    /// popup can never be painted: `rebuild_chrome` fills it in the same
-    /// update it is opened in.
+    /// Open the fieldless series list and prepare its rows immediately.
+    /// An empty model produces the list's empty state.
     pub(super) fn open_series_popup(&mut self, cx: &mut Context<Self>) {
         self.popup = Some(Popup::Series(SeriesPopup::default()));
         self.rebuild_chrome(cx);
         cx.notify();
     }
 
-    // ---- the add picker (spec §9.6) ----------------------------------
+    // Add picker.
 
-    /// `a`: the typeahead over every catalogued `identity@source`, its
-    /// field holding the keyboard (which is what `mode == insert` and
-    /// `holds_focus` both report off).
-    ///
-    /// The catalogue is re-requested on the way in when there is none to
-    /// rank (the market-data picker's rule, and CLAUDE.md's trap:
-    /// `request_catalog()` queues but never notifies, so the caller must
-    /// — in the same update); one that lands WHILE this is open is
-    /// folded in by the `Diagnostics` observer in `new`.
+    /// Open focused identity typeahead over catalogued `identity@source` pairs.
+    /// Request a catalogue when none has identities; the Diagnostics observer
+    /// incorporates changed options while the identity stage remains open.
     pub(super) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
@@ -207,10 +177,8 @@ impl TimeseriesTile {
         let loaded = self.loaded_marks(&options);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("identity@source"));
         cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
-            // The LIVE path, for a trader actually typing.
-            // `InputState::set_value` emits no `Change` at all, which is
-            // why `commit_picker` re-feeds the field's own text as well
-            // rather than trusting this subscription alone.
+            // User edits update ranking here. Commit also reads live Input text
+            // because programmatic `set_value` emits no Change event.
             if let InputEvent::Change = event {
                 let query = input.read(cx).value().to_string();
                 if let Some(Popup::Picker(p)) = &mut this.popup {
@@ -227,10 +195,9 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// Ask for a catalogue when there is nothing to rank. Queued AND
-    /// notified in one update: `Diagnostics::request_catalog` never
-    /// notifies on its own (CLAUDE.md), so without this the bridge would
-    /// not drain the request until something else woke the entity.
+    /// Request and notify together when the catalogue has no identities.
+    /// `Diagnostics::request_catalog` alone does not wake its observer to drain
+    /// the request.
     pub(super) fn request_catalog(&self, cx: &mut Context<Self>) {
         let have = self
             .diagnostics
@@ -269,8 +236,7 @@ impl TimeseriesTile {
         options
     }
 
-    /// Which of `options` this tile already holds — the `•` mark. A
-    /// marked row is still pickable (spec §9.6).
+    /// Mark pairs already held by this tile without disabling their rows.
     pub(super) fn loaded_marks(&self, options: &[String]) -> Vec<bool> {
         options
             .iter()
@@ -281,14 +247,9 @@ impl TimeseriesTile {
             .collect()
     }
 
-    /// `enter` with the picker open, and the mouse form of the `add`
-    /// row: re-feed the field's LIVE text first (`set_value` emits no
-    /// `Change`, so the last ranking may never have been run), then
-    /// resolve what the stage says the commit means.
-    ///
-    /// The popup closes BEFORE the add, the way the market-data
-    /// picker's `picker_pick` does: adding needs no keyboard, and the
-    /// field is done being useful the moment a pair is chosen.
+    /// Resolve a picker commit from its live Input text and current stage.
+    /// Close before adding a selected pair. A source-selection transition keeps
+    /// the editor open; an empty decision leaves it unchanged.
     pub(crate) fn commit_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(Popup::Picker(p)) = &mut self.popup else {
             return false;
@@ -303,9 +264,7 @@ impl TimeseriesTile {
                 // outright, or the source stage asks which source it
                 // belongs to.
                 Some(_) => match text.trim() {
-                    // Belt and braces: `refresh_add_row` trims, so a
-                    // query of nothing but spaces offers no add row to
-                    // reach this arm through in the first place.
+                    // The add-row builder also excludes whitespace-only identities.
                     "" => Commit::Nothing,
                     typed => match parse_pair(typed) {
                         Some((identity, source))
@@ -331,8 +290,7 @@ impl TimeseriesTile {
                         let (identity, source) = split_option(p.option(i));
                         Commit::Add(identity.to_string(), source.to_string())
                     }
-                    // Nothing ranked and nothing typed: inert, and the
-                    // picker stays open (the market-data rule).
+                    // No ranked choice or typed identity: leave the picker open.
                     None => Commit::Nothing,
                 },
             },
@@ -342,10 +300,7 @@ impl TimeseriesTile {
             },
         };
         match decision {
-            // Nothing to commit: the picker stays open (retyping is one
-            // keystroke away) and the verb answers UNHANDLED, so the
-            // notice `dispatch` took on the way in goes back on screen
-            // rather than being cleared by an `enter` that did nothing.
+            // An inert commit is unhandled so dispatch restores a standing notice.
             Commit::Nothing => return false,
             Commit::Add(identity, source) => {
                 self.close_popup_with_window(window, cx);
@@ -396,7 +351,7 @@ impl TimeseriesTile {
         self.commit_picker(window, cx);
     }
 
-    // ---- the expression field (spec §9.7) ----------------------------
+    // Expression field.
 
     /// `x` (empty) or `e` (prefilled with the cursor's expression and
     /// its slot number). The field is tile-owned and focused, like the
@@ -436,11 +391,9 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// `enter` with the expression field open (spec §9.7): parse against
-    /// this tile's own slots (§7). An error paints INLINE under the
-    /// field and the field stays open and focused — a parse error is
-    /// about the text still on screen, and closing would throw it away.
-    /// A success adds or replaces, then closes.
+    /// Resolve the draft against this tile's slots. A resolution error stays
+    /// inline with the draft open. A resolved expression is added or replaces
+    /// its original slot, then the editor closes, including on a model refusal.
     pub(super) fn commit_expr(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(Popup::Expr(f)) = &self.popup else {
             return false;
@@ -461,11 +414,8 @@ impl TimeseriesTile {
                     f.error = Some(e.into());
                 }
                 cx.notify();
-                // UNHANDLED, like the picker's inert `enter`: nothing
-                // was written, the field is still open on the text that
-                // caused it, and `dispatch`'s tail is what puts a
-                // standing notice back — answering `true` here dropped
-                // one for a keystroke that changed nothing.
+                // Keep the draft and return unhandled so dispatch restores any standing
+                // notice alongside the inline resolution error.
                 return false;
             }
             Ok(expr) => {
@@ -489,24 +439,14 @@ impl TimeseriesTile {
         true
     }
 
-    // ---- the range popup (spec §9.8) ---------------------------------
+    // Range editor.
 
-    /// `r`: two segmented date fields seeded from the range the model
-    /// holds now, with `from` active on its day segment.
-    ///
-    /// A `Relative` range is RESOLVED, so it opens as the dates it
-    /// currently means — and the `to` field shows the INCLUSIVE last
-    /// day, which `resolve`'s half-open end is a second past. Hence the
-    /// second back before the date is taken: `Range::Absolute`'s own
-    /// convention, read in reverse.
-    ///
-    /// An `Absolute` range instead seeds from its STORED dates, as typed
-    /// (a ruling). `resolve` clips its end to the frame's
-    /// as-of — right for what is fetched and queried (ruling 4), wrong
-    /// for a seed: reopening `r` under an as-of inside the stored span
-    /// would show a `to` the trader never typed, and `enter` would then
-    /// write it. Seeding from the stored pair makes the round trip
-    /// lossless under any as-of and across midnight.
+    /// Open From and To date fields with From's Day segment active.
+    /// Absolute ranges use their stored inclusive dates; clipping for a query
+    /// must not silently change a saved range when reopened and committed.
+    /// Relative ranges resolve against now/as-of, then seed UTC dates from the
+    /// start and from one second before the exclusive end (clamped to start).
+    /// Committing those fields converts the draft to an absolute date range.
     pub(super) fn open_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
@@ -544,26 +484,19 @@ impl TimeseriesTile {
             focus,
             error: None,
             edited: false,
+            prefix: None,
             frequency: self.model.frequency(),
         }));
         self.notice = None;
         cx.notify();
     }
 
-    /// The range popup's own keys, run from the `on_key_down` on its
-    /// focused container — which sits on the focused element and so runs
-    /// BEFORE the shell root's listener. Answers whether the key was
-    /// consumed; the listener stops propagation on `true`.
-    ///
-    /// `geode_widgets::datefield::route` is the ONE key table this
-    /// consults (CLAUDE.md), and a chord answers `None` there, so
-    /// `ctrl+k` still opens the palette over an open popup. `tab` is the
-    /// one key this popup adds: `route` has no arm for it, and with two
-    /// fields under one keyboard both directions are the same move.
-    ///
-    /// `enter`, `escape`, `up` and `down` are ALSO bound by the
-    /// fragment's `mode == insert` layer, so both doors end in the same
-    /// four calls — whichever fires first stops the other.
+    /// Handle keys at the focused range container before the shell listener.
+    /// Returning true stops propagation and prevents duplicate dispatch.
+    /// Typed presets run before Tab and the shared datefield router, so a
+    /// pending label owns Enter and Escape. Chords fall through for shell
+    /// actions. Tab and Shift+Tab switch fields without editing either date.
+    /// Insert-mode actions share the commit, cancel, and step operations.
     pub(crate) fn range_key(
         &mut self,
         event: &KeyDownEvent,
@@ -575,6 +508,9 @@ impl TimeseriesTile {
         }
         let modifiers = event.keystroke.modifiers;
         let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        if !chord && self.preset_key(event.keystroke.key.as_str(), modifiers.shift, window, cx) {
+            return true;
+        }
         if !chord && event.keystroke.key.as_str() == "tab" {
             if let Some(Popup::Range(r)) = &mut self.popup {
                 r.switch();
@@ -595,24 +531,102 @@ impl TimeseriesTile {
                 self.commit_range(window, cx);
             }
             FieldKey::Cancel => self.close_popup_with_window(window, cx),
-            // The digit shortcut (§9.8) — see `RangePopup::
-            // digit_is_preset` for when a digit is a preset and when it
-            // belongs to the date.
-            FieldKey::Digit(d)
-                if matches!(&self.popup, Some(Popup::Range(r)) if r.digit_is_preset())
-                    && Preset::digit(d).is_some() =>
-            {
-                let preset = Preset::digit(d).expect("just checked");
-                self.write_range(Range::Relative(preset), window, cx);
-            }
             other => self.apply_range_key(other, cx),
         }
         true
     }
 
-    /// One key onto the active field. A keystroke that moves the field
-    /// answers a refusal about a date that is no longer on screen — the
-    /// expression field's own rule.
+    /// Consume a typed preset while keyboard presets are available. A bare
+    /// digit starts or replaces the prefix; a matching w/m/y unit commits it.
+    /// Shifted units also match. Invalid leading digits clear the prefix and
+    /// refuse inline; an invalid w/m/y unit retains the prefix for correction.
+    ///
+    /// Pending Backspace or Escape clears the label without closing. Pending
+    /// Enter refuses inline instead of committing dates. Other non-chord keys
+    /// clear the label and continue through field routing. Chords bypass this
+    /// handler. See `RangePopup::digit_is_preset` for date-editing ownership.
+    fn preset_key(
+        &mut self,
+        key: &str,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(Popup::Range(r)) = &mut self.popup else {
+            return false;
+        };
+        let mut chars = key.chars();
+        // One character, lower-cased: a shifted unit (`M`, or the
+        // macOS form `m` with shift held) still completes the label.
+        let single = match (chars.next(), chars.next()) {
+            (Some(c), None) => Some(c.to_ascii_lowercase()),
+            _ => None,
+        };
+        if !shift
+            && let Some(d) = single.and_then(|c| c.to_digit(10))
+            && r.digit_is_preset()
+        {
+            let d = d as u8;
+            if Preset::any_starts_with(d) {
+                r.prefix = Some(d);
+                r.error = None;
+            } else {
+                r.prefix = None;
+                r.error = Some(format!("no preset starts with {d} — {}", Preset::WORDS).into());
+            }
+            cx.notify();
+            return true;
+        }
+        let Some(d) = r.prefix else {
+            return false;
+        };
+        let candidates = || {
+            Preset::ALL
+                .into_iter()
+                .filter(|p| p.starts_with(d))
+                .map(Preset::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match (single, key) {
+            (Some(unit @ ('w' | 'm' | 'y')), _) => match Preset::typed(d, unit) {
+                Some(preset) => {
+                    // A refusal (the point cap) keeps the popup open on
+                    // its reason; the label was finished, so it is no
+                    // longer pending.
+                    if !self.write_range(Range::Relative(preset), window, cx)
+                        && let Some(Popup::Range(r)) = &mut self.popup
+                    {
+                        r.prefix = None;
+                    }
+                }
+                None => {
+                    r.error = Some(format!("no preset {d}{unit} — {}", candidates()).into());
+                    cx.notify();
+                }
+            },
+            (_, "backspace" | "escape") => {
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+            }
+            (_, "enter") => {
+                r.error = Some(format!("finish the preset — {}", candidates()).into());
+                cx.notify();
+            }
+            _ => {
+                // Clear the pending label and its refusal before normal field routing.
+                r.prefix = None;
+                r.error = None;
+                cx.notify();
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Apply a key to the active date and clear its inline refusal, including
+    /// when the field reports no state change.
     pub(super) fn apply_range_key(&mut self, key: FieldKey, cx: &mut Context<Self>) {
         let id = self.id.0;
         if let Some(Popup::Range(r)) = &mut self.popup {
@@ -622,10 +636,8 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// A click on one of the two fields' segments: the mouse form of
-    /// `tab` plus `left`/`right`, taking the keyboard back when a
-    /// tile-focus move has left the popup open without it (the
-    /// market-data field's M4).
+    /// Select a date segment and recover the popup's focus after tile focus
+    /// has moved elsewhere. Clear the prior inline refusal.
     pub(crate) fn range_segment_clicked(
         &mut self,
         which: Which,
@@ -644,8 +656,7 @@ impl TimeseriesTile {
         }
     }
 
-    /// A click on a preset chip — the mouse form of the digit, and the
-    /// same door.
+    /// Commit a clicked preset, including after the draft enters date-editing mode.
     pub(crate) fn range_preset_clicked(
         &mut self,
         preset: Preset,
@@ -655,13 +666,9 @@ impl TimeseriesTile {
         self.write_range(Range::Relative(preset), window, cx);
     }
 
-    /// `enter` with the range popup open: finish both fields' pending
-    /// digits, then write the two dates.
-    ///
-    /// Answers whether the keystroke was HANDLED, in the sense
-    /// `dispatch`'s tail means: a refusal that keeps the popup open and
-    /// paints an inline reason is `false`, so a standing notice survives
-    /// it (the expression field's own answer).
+    /// Complete pending digits in both fields and commit their dates.
+    /// A refusal stays inline and returns false, allowing dispatch to retain a
+    /// standing tile notice.
     pub(super) fn commit_range(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let id = self.id.0;
         let Some(Popup::Range(r)) = &mut self.popup else {
@@ -713,11 +720,9 @@ impl TimeseriesTile {
         }
     }
 
-    /// The ONE door the range popup writes through — the digit, the
-    /// chip click and `enter` all take it, so the cap refusal, the
-    /// close and the `apply_changed` tail cannot drift between them.
-    /// A cap refusal is inline too, for the same reason a backwards
-    /// range is: the popup holds what caused it.
+    /// Validate and apply ranges from date Enter, typed labels, and preset clicks.
+    /// Success closes and applies model flags; a refusal stays inline with the
+    /// editor open.
     pub(super) fn write_range(
         &mut self,
         range: Range,
@@ -741,13 +746,11 @@ impl TimeseriesTile {
         }
     }
 
-    // ---- the action menu (mouse pass, 2026-09-24) --------------------
+    // Action-menu lifecycle and pointer controls.
 
-    /// `.` and the `⋯` button: close the menu if it is up, otherwise
-    /// close whatever is (a field blurred first, through the one
-    /// closer) and open it. The rows are built HERE, once per open —
-    /// the model, the default source and the live chords are read
-    /// then, never in `render`.
+    /// Toggle the menu, closing any other popup through the focus-aware closer.
+    /// Opening prepares rows from the model and binding hints; subsequent chrome
+    /// rebuilds refresh them while the menu remains open.
     pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.popup, Some(Popup::Menu(_))) {
             self.close_popup_with_window(window, cx);
@@ -846,9 +849,7 @@ impl TimeseriesTile {
         }
     }
 
-    /// A right-click on a chip: the slot under the pointer becomes the
-    /// cursor and the menu opens on it — the design guide's context
-    /// menu for "commands that act on the object under the pointer".
+    /// Select the clicked slot and replace any open popup with its action menu.
     pub(crate) fn chip_context_menu(
         &mut self,
         index: usize,
@@ -895,11 +896,129 @@ impl TimeseriesTile {
         }
     }
 
+    // ---- the colour picker -------------------------------------------
+
+    /// Open the component picker for the cursor's slot, or report an empty tile.
+    /// Seed without emitting Change. Capture palette and named featured choices
+    /// using the same theme resolver as the chip; later cursor moves do not retarget it.
+    pub(super) fn open_colour_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(slot) = self.model.cursor_slot() else {
+            self.notice = Some("add a series first".into());
+            cx.notify();
+            return false;
+        };
+        let target = slot.number;
+        let current = slot.colour.clone();
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        let colours = Arc::clone(&self.colours.borrow());
+        let (featured, seed) = {
+            let colour_of = colour_fn(Arc::clone(&colours), cx.theme());
+            let featured: Vec<(Hsla, Colour)> = (0..Palette::LEN)
+                .map(Colour::Palette)
+                .chain(colours.names().map(|n| Colour::Named(n.to_string())))
+                .map(|c| (colour_of(&c), c))
+                .collect();
+            (featured, colour_of(&current))
+        };
+        let swatches = featured.iter().map(|(h, _)| *h).collect();
+        let picker = self.colour_picker_state(window, cx);
+        picker.update(cx, |state, cx| {
+            state.set_value(seed, window, cx);
+            state.set_open(true, cx);
+        });
+        self.popup = Some(Popup::Colour(ColourPick {
+            target,
+            swatches,
+            picker,
+        }));
+        self.pick_context = Some(PickContext { target, featured });
+        self.notice = None;
+        cx.notify();
+        true
+    }
+
+    /// Create and subscribe once, then reuse the component state. A nonempty
+    /// Change commits to the captured target. Observing component closure runs the
+    /// shared closer when this tile still has a colour popup.
+    fn colour_picker_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ColorPickerState> {
+        if let Some(picker) = &self.colour_picker {
+            return picker.clone();
+        }
+        let picker = cx.new(|cx| ColorPickerState::new(window, cx));
+        cx.subscribe_in(&picker, window, |this, _picker, event, _window, cx| {
+            // `None` is a cleared value, which this picker never offers.
+            if let ColorPickerEvent::Change(Some(h)) = event {
+                this.colour_picked(*h, cx);
+            }
+        })
+        .detach();
+        cx.observe_in(&picker, window, |this, picker, window, cx| {
+            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {
+                this.close_popup_with_window(window, cx);
+            }
+        })
+        .detach();
+        self.colour_picker = Some(picker.clone());
+        picker
+    }
+
+    /// Apply component commits through set_colour and apply_changed. Sliders
+    /// commit as they move; closing does not revert those changes. Keep using the
+    /// captured context after close so a delayed hex Change can still land.
+    ///
+    /// Ignore a missing target or a value within one RGB byte step of what it paints
+    /// now. Otherwise map against the opening featured snapshot, preserving a palette
+    /// or named identity when close enough and storing opaque Custom RGB otherwise.
+    pub(super) fn colour_picked(&mut self, h: Hsla, cx: &mut Context<Self>) {
+        let Some(pick) = &self.pick_context else {
+            return;
+        };
+        let Some(current) = self
+            .model
+            .slots()
+            .iter()
+            .find(|s| s.number == pick.target)
+            .map(|s| s.colour.clone())
+        else {
+            return;
+        };
+        let painted = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme())(&current);
+        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {
+            return;
+        }
+        let colour = colour_from_pick(h, &pick.featured);
+        if let Ok(changed) = self.model.set_colour(pick.target, colour) {
+            self.apply_changed(changed, cx);
+        }
+    }
+
+    /// Close the picker when the slot it was opened for is gone.
+    pub(super) fn close_orphaned_colour_picker(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Popup::Colour(c)) = &self.popup
+            && self.model.slots().iter().all(|s| s.number != c.target)
+        {
+            self.close_popup_with_window(window, cx);
+        }
+    }
+
     // ---- shared by every popup ---------------------------------------
 
-    /// The ONE door a `(identity, source)` pair is added by — the `:add`
-    /// line's and the picker's both, so the dataset check, its message
-    /// and the `apply_changed` tail cannot drift between them.
+    /// Add a source pair from the picker or `:add`, sharing source/dataset
+    /// validation and the model-change dispatch path.
     pub(super) fn add_pair(
         &mut self,
         identity: &str,
@@ -924,18 +1043,9 @@ impl TimeseriesTile {
         Ok(())
     }
 
-    /// The ONE closer (the market-data panel's rule): every path that
-    /// drops a popup comes through here, because a popup whose own field
-    /// holds the keyboard has to be blurred BEFORE it is dropped — an
-    /// unblurred dead handle leaves `Window::focused` pointing at
-    /// nothing for the rest of the session, and the shell's focus-return
-    /// net never fires.
-    ///
-    /// The series list holds no field, so for it the blur is a no-op;
-    /// the picker's and the expression field's are what make the
-    /// `window` parameter earn its keep. The blur is conditional on the
-    /// popup's OWN field holding focus: a field orphaned by a tile-focus
-    /// move, closed from a `:` line, must not blur the command line.
+    /// Blur the popup's own focused field before dropping it so the shell can
+    /// restore focus. Do not blur a different field that acquired focus while
+    /// the popup stayed open. The fieldless series list needs no blur.
     pub(crate) fn close_popup_with_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let own_field_focused = self
             .popup
@@ -944,16 +1054,17 @@ impl TimeseriesTile {
         if own_field_focused {
             window.blur(cx);
         }
+        // Close reusable component state too. Its observer then sees no colour
+        // popup, while captured commit context remains available for delayed Change.
+        if let Some(Popup::Colour(c)) = &self.popup {
+            c.picker.update(cx, |state, cx| state.set_open(false, cx));
+        }
         self.popup = None;
         cx.notify();
     }
 
-    /// The mouse's form of `tab` (spec §9.3): a chip click moves the
-    /// cursor onto its slot — and so does a click on the series list's
-    /// row, which is the same slot under another painting. Whatever
-    /// popup is open STAYS open: the list's own highlight is this
-    /// cursor, so a row click that closed it would take the thing it
-    /// just moved off the screen.
+    /// Move the shared header/list cursor to a clicked slot without closing
+    /// the current popup.
     pub(crate) fn chip_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
         let changed = self.model.set_cursor(index);
         self.apply_changed(changed, cx);

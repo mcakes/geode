@@ -1,15 +1,10 @@
-//! The tile's `TableDelegate` (line-pricer spec §8.2): a prepared
-//! `Rc<GridModel>` swapped wholesale by `PricerTile::install_model`, a
-//! mirror of the tile's cursor, and mirrors of the open entry
-//! field and cell editor. The tile's own state is the truth; nothing here
-//! decides anything. Column 0 is the tree column (indent, a fixed
-//! chevron slot, shorthand), pinned left; the cursor never enters it.
+//! TableDelegate over a prepared Rc<GridModel> installed by the tile. Cursor, loading
+//! state, entry field, and cell editor are read-only mirrors of tile state. Column zero
+//! is a pinned tree column with indentation, a fixed chevron slot, and shorthand; the
+//! cell cursor does not enter it.
 //!
-//! A row's own ground (a package's `secondary`, the entry row's active
-//! fill) is painted on the ROW by `render_tr`, never per cell: the table
-//! paints its hover and selected-row fills on the row after refining the
-//! delegate's style, so a per-cell fill would sit above them and leave
-//! the highlight showing only in the cell padding.
+//! Package and entry backgrounds belong to render_tr. The table replaces row
+//! backgrounds for hover and selection; per-cell fills would obscure those states.
 
 use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
@@ -111,11 +106,8 @@ impl SheetDelegate {
         }
     }
 
-    /// The chevron's hover and pressed states only ever show under the
-    /// pointer, and a row under the pointer wears the table's hover
-    /// ground in place of its own (`render_tr`'s ground is replaced), so
-    /// they are computed against `row_hover` — its only interactive
-    /// ground — with the package's muted text, which is floored there too.
+    /// Derive chevron pointer states against row_hover, the background the table paints
+    /// under the pointer. Package-muted text is contrast-adjusted there too.
     fn chevron_states(&mut self, theme: &Theme) -> control::ControlPaint {
         let inputs = control::ControlInputs::new(
             theme,
@@ -212,9 +204,8 @@ impl TableDelegate for SheetDelegate {
             .when_some(ground, |el, g| el.bg(g))
     }
 
-    /// Words, not the library's faded icon: the next action, or that the
-    /// sheet is still loading. Muted text floored on the table ground, at
-    /// full opacity.
+    /// Paint loading or entry guidance in full-opacity muted text contrast-adjusted
+    /// against the table background.
     fn render_empty(
         &mut self,
         _window: &mut Window,
@@ -300,7 +291,7 @@ impl TableDelegate for SheetDelegate {
                             .debug_selector(|| format!("pricer-chevron-{row_ix}"))
                             .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
                                 cx.stop_propagation();
-                                // A double-click toggles once (the blotter's rule).
+                                // Toggle only on the first press of a double-click.
                                 if e.click_count() > 1 {
                                     return;
                                 }
@@ -359,11 +350,9 @@ impl TableDelegate for SheetDelegate {
                 })
                 .into_any_element()
             }
-            // A left-aligned cell (text: status, underlying, expiry…) ends
-            // in `…` rather than clipping mid-glyph — a failure's reason
-            // is read whole in the footer. A number never does: dropping
-            // its trailing digits is as wrong as dropping its leading ones,
-            // so the widths are sized to fit it instead (the fit test).
+            // Ellipsize left-aligned text; the footer retains full failure reasons.
+            // Numeric cells keep their digits and rely on column width rather than
+            // ellipsis.
             None => el
                 .when_some(row.cells.get(plan_col), |el, cell| {
                     let text = cell.text.clone();
@@ -400,12 +389,9 @@ mod tests {
     /// `border_1` on the cursor cell, both sides.
     const CURSOR_BORDER: f32 = 2.0;
 
-    /// The widest value a column is expected to paint, produced the way
-    /// the cell produces it (`format_number` at the column's default
-    /// format, `signed` for a shift) from representative extremes. A
-    /// right-aligned cell that overflows loses its LEADING characters
-    /// (`-1,234,567.89` reads `1,234,567.89`), so a width that fits only
-    /// the usual case is a plausible-wrong number waiting for a big book.
+    /// Representative width-test values formatted like cells. A right-aligned number
+    /// that exceeds its width can lose leading characters, including its sign, so the
+    /// fixtures exercise large magnitudes as well as ordinary labels.
     fn worst_case(def: &ColumnDef) -> String {
         let fmt = |v: f64| format_number(v, &def.default_format).text;
         match def.kind {
@@ -418,7 +404,7 @@ mod tests {
             | ColumnKind::Vega
             | ColumnKind::Theta
             | ColumnKind::Rho => fmt(-1_234_567.89),
-            // Text, not numbers: the longest the grammar renders.
+            // Representative text values for the width check.
             ColumnKind::Underlying => "SX5E".into(),
             ColumnKind::Expiry => "20DEC26".into(),
             ColumnKind::Type => "C".into(),
@@ -430,11 +416,9 @@ mod tests {
         }
     }
 
-    /// Column widths are pixels (`view_presentation.toml`'s contract) and
-    /// do not follow the rem, so each default label and worst-case value
-    /// must fit its width at the LARGEST font size, inside the XSmall
-    /// cell padding and the cursor cell's `border_1` (which takes layout
-    /// width: the cursor is exactly where a trader reads the number).
+    /// Check default labels and representative values at the largest font size. Widths
+    /// are fixed pixels, so account for monospace advance, XSmall cell padding, and
+    /// both cursor borders. This is a sizing check, not a numeric bound.
     #[test]
     fn every_default_label_and_worst_case_value_fits_its_width() {
         let advance = FontSize::Large.rem_px() * TABLE_TEXT_REM * MONO_ADVANCE_EM;

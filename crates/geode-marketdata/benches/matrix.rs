@@ -1,23 +1,11 @@
-//! The panel's pure-core costs at the two shapes market-data spec §11
-//! names: the CVI sketch (20 terms × 30 nodes, pivoted) and a broad-index
-//! dividend schedule (10,000 rows × 5 value columns, flat) — the shape
-//! that forced roadmap ruling 6's revision to a `uniform_list`. Plus
-//! `Draft::rebase` over 1,000 edits, the cost a trader pays on `:rebase`
-//! after a republish under a large draft.
+//! Pure model costs for a CVI pivot (20 terms × 30 nodes) and a flat
+//! schedule (10,000 rows × five value columns).
 //!
-//! The dividend-schedule plan (2026-09-19, spec §4.5/§5.2/§8) adds four
-//! more: `patch_cell` at both shapes — the commit-time door that
-//! replaced a `rebuild_model` call, so this is the number that actually
-//! bounds a keystroke now, not `model_build_values_10000x5` — `build`
-//! at the flat shape with 100 rows spliced in (row insert/delete still
-//! rebuilds wholesale), and `Draft::rebase` over the same 1,000 cell
-//! edits plus 100 row inserts.
-//!
-//! What these numbers are for: the model is built once per delivery or
-//! per edit, never per frame, so this is the budget spent on the UI thread
-//! between a snapshot arriving and the frame that shows it — it has to fit
-//! inside spec §7.1's 50 ms requery alongside the paint. Medians are
-//! recorded in docs/perf.md under "Market-data panel".
+//! Measure full builds, individual cell patches, builds with 100 inserted
+//! rows, and rebase with 1,000 cell edits plus optional row inserts. Cell
+//! commits patch prepared data; deliveries and structural edits rebuild it.
+//! These operations spend UI-thread time before painting; current budgets
+//! and measurement conditions are documented in `docs/current/performance.md`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
@@ -60,8 +48,8 @@ fn cvi(terms: usize, nodes: usize) -> Snapshot {
     let mut term_col = Vec::with_capacity(rows);
     let mut node_col = Vec::with_capacity(rows);
     let mut param = Vec::with_capacity(rows);
-    // The per-slice values (2026-09-17), repeated on every node row of
-    // their term — the long form the kind stores them in.
+    // Per-slice values repeat on every node row of their term, matching
+    // the document's long form.
     let mut forward = Vec::with_capacity(rows);
     let mut atm = Vec::with_capacity(rows);
     let mut skew = Vec::with_capacity(rows);
@@ -180,14 +168,9 @@ const SCHEDULE: PanelSpec = PanelSpec {
     actions: &[],
 };
 
-/// A dividend schedule: `rows` dated rows, five value columns each.
-///
-/// The dates are strictly increasing on a 28-day-month calendar, so every
-/// row label is distinct: a row label identifies an edit, so
-/// `MatrixModel::build` refuses a repeat outright — and a fixture whose
-/// dates cycled would measure a refusal rather than a build (and, before
-/// that refusal existed, a `rebase` that quietly collapsed most of its
-/// 1,000 edits onto the last row sharing each label).
+/// A schedule with five value columns and distinct dated row labels.
+/// The synthetic 28-day-month calendar keeps labels unique so these benches
+/// measure full builds and rebases, not duplicate-label refusals.
 fn schedule(rows: usize) -> Snapshot {
     let dates: Vec<Option<String>> = (0..rows)
         .map(|i| {
@@ -259,12 +242,8 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(draft.rebase(&model)))
     });
 
-    // `patch_cell` (spec §4.5, the dividend-schedule plan's Task 4): the
-    // cost of re-preparing ONE cell on a commit, instead of rebuilding
-    // the whole grid — on both shapes, at the same cell each time (the
-    // draft already carries that cell's edit, as it does the moment
-    // after a real commit, so this is the steady-state cost the tile
-    // pays per keystroke, not a cold build).
+    // Measure re-preparing one edited cell on each model shape. Reuse
+    // the same cell and draft edit to isolate steady-state patch cost.
     let pivot_cell = (1, 5);
     let pivot_labels = MatrixModel::build(&sketch, &CVI, &Draft::default())
         .unwrap()
@@ -313,11 +292,9 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // `build` with 100 rows spliced in (spec §5.2): row insert/delete
-    // still rebuilds wholesale, so this is that cost at the flat shape —
-    // anchors spread every 100 document rows so the splice does real
-    // work throughout the grid rather than piling every row under one
-    // anchor at the top.
+    // Build with 100 inserted rows anchored every 100 document rows.
+    // Structural row edits rebuild the grid, so distribute anchors to measure
+    // splicing across the full schedule.
     let mut rows_draft = Draft::default();
     for i in 0..100 {
         let anchor = model.rows[i * 100].label.to_string();
@@ -332,9 +309,7 @@ fn bench(c: &mut Criterion) {
         })
     });
 
-    // `Draft::rebase` over the same 1,000 cell edits plus 100 row
-    // inserts (spec §8, "Benches") — the cost a trader pays on
-    // `:rebase` under a large draft that also has unsent row edits.
+    // Rebase 1,000 cell edits plus 100 inserted rows onto matching labels.
     let mut mixed_draft = Draft::default();
     for i in 0..1_000 {
         let cell = (i % model.rows.len(), i % model.columns.len());

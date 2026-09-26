@@ -1,30 +1,16 @@
-//! The timeseries tile (spec §9.1–§9.4, §9.9, §9.11): the entity the
-//! shell hosts, its normal-mode verbs, its `:` vocabulary, the header it
-//! prepares and the chart element it paints.
+//! The shell-hosted timeseries entity: slot model, requests, prepared header,
+//! chart input, and one tile-owned popup.
 //!
-//! **Three tails, not one.** Every mutation answers a
-//! [`Changed`](crate::core::Changed) bitset and ends at exactly one of
-//! them:
+//! Model changes carry [`Changed`](crate::core::Changed) flags into
+//! [`TimeseriesTile::apply_changed`], which schedules fetches and queries and
+//! refreshes prepared content. View movement uses [`TimeseriesTile::view_moved`]
+//! to retain the chart's cached paths; only visible-window statistics need a
+//! new query. Refusals become notices or inline popup errors.
 //!
-//! - [`TimeseriesTile::apply_changed`] — a change to WHAT is plotted:
-//!   re-prepare the header, rebuild the chart model (bumping its
-//!   `version`, which is what invalidates `geode-chart`'s path and
-//!   chrome caches), notify.
-//! - [`TimeseriesTile::view_moved`] — a pan, a zoom, a jump: the header
-//!   does not depend on the view and neither does the chart MODEL (the
-//!   element takes `model.view()` beside it), so rebuilding either here
-//!   would throw away every cached path for a frame that only scrolled.
-//! - a refusal — the notice, and nothing else.
-//!
-//! **The data half** hangs off the first two: a FETCH asks the data tier
-//! for every pair still waiting (`fetch_pending`), a `SeriesFetched Ok`
-//! sends the query, a QUERY asks for points over the range and stats
-//! over the visible window (`requery`), and the answer lands through
-//! `deliver` — staged behind the flip barrier when one is open over this
-//! tile, painted at once when it is not. `as_of` is the only frame
-//! counter followed (spec §6.5); `flip` is read in the frame observer
-//! and nowhere else, where it means "you may promote". That flow lives in
-//! [`data`]; every popup's open, keys, commit and close in [`popups`].
+//! [`data`] owns fetch tracking, tagged series delivery, and flip-barrier
+//! staging. Only the frame's as-of counter invalidates an established series
+//! request; flip releases staged results without triggering a query.
+//! [`popups`] owns opening, input, commit, and dismissal for local editors.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -56,16 +42,19 @@ use gpui::{
     App, Context, ElementId, Entity, Focusable as _, Hsla, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
 };
+use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Theme, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{Preset, Range, chart, menu, request, resolve, session};
+use crate::core::{
+    Preset, Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+};
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    DateFieldPaint, ExprField, MenuState, PickerStage, PickerState, Popup, RangePopup, SeriesPopup,
-    Which, render_menu, render_picker, render_range, render_series_popup,
+    ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
+    RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range, render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
 
@@ -73,37 +62,19 @@ mod data;
 mod pointer;
 mod popups;
 
-/// Exactly what [`chart::build`] reads, and nothing else — the memo key
-/// that decides whether a chrome rebuild also rebuilds the chart model
-/// (review round 1, I-2).
+/// Inputs used to decide whether prepared chart data must be rebuilt.
+/// `chart::build` clones buckets and per-slot values, so unchanged keys avoid
+/// large copies and preserve the chart element's path caches.
 ///
-/// It exists because a chart model is EXPENSIVE and most chrome changes
-/// do not touch one: `chart::build` clones every slot's `values` and the
-/// whole bucket vector, so at the 500,000-point cap a `tab`, a chip
-/// click, a `set_visible` or a finished fetch would each copy several
-/// megabytes and — through the `version` bump — throw away every path
-/// `geode-chart` has cached, for a model identical to the one it
-/// replaced. Comparing this instead costs a handful of small clones per
-/// slot.
-///
-/// **A field `chart::build` reads must appear here**, or a change to it
-/// paints stale — the same rule `shell::colours::theme_signature`
-/// carries, for the same reason. Note what is deliberately absent: a
-/// source slot's `source`/`identity` (its LABEL is read, and a slot
-/// number is never reused while any slot lives — `:clear` restarts the
-/// numbering, but it also installs an empty key, so a re-added number
-/// can never match a pre-clear entry), its `rule` and the model's
-/// `percentiles` (neither reaches the
-/// chart model — they shape the REQUEST, and the answer arrives as a new
-/// `result`), and the view (the element takes it beside the model).
+/// Every input read by `chart::build` must be represented here or by result
+/// identity. Rules and percentiles affect requests and arrive through a new
+/// result. View bounds are supplied separately to the chart element.
+/// Slot numbers remain unique while slots exist; clearing installs an empty
+/// key before numbering can restart.
 #[derive(Clone, PartialEq)]
 struct ChartKey {
-    /// The result's identity: [`TimeseriesTile::result_seq`], bumped on
-    /// every install. A monotonic counter and NOT the `Arc`'s address,
-    /// which is ABA-prone — the allocator hands the same block back when
-    /// one result replaces another between two frames, and the chart
-    /// would then paint the old points at the new model's key. `0` for
-    /// no result.
+    /// Result installation sequence. Using an allocation address would permit
+    /// a freed result's address to be reused for different points.
     result: u64,
     /// Per slot: everything `chart::build` copies out of it.
     slots: Vec<(u8, Colour, Axis, bool, Option<String>)>,
@@ -130,9 +101,8 @@ struct ChartKey {
 pub struct TimeseriesTile {
     id: TileId,
     frame: Entity<Frame>,
-    /// The catalogue the add picker's identities stage ranks over, and
-    /// the load-lane health a slot's popup row reports. Observed as well
-    /// as read: a fresh catalogue while that stage is open re-ranks it.
+    /// Catalogue used by the add picker. The observer updates an open identity
+    /// list when its options change; series-row provenance comes from results.
     diagnostics: Entity<Diagnostics>,
     /// `Request::Fetch`, `Request::Series` and `Request::Cancel` go
     /// through it.
@@ -160,22 +130,15 @@ pub struct TimeseriesTile {
     query_in_flight: bool,
     /// A delivery staged behind the flip barrier.
     staged: Option<(SeriesResult, FrameVersions)>,
-    /// The last flip counter this tile promoted at.
+    /// Most recently observed flip generation, whether or not a result was staged.
     last_flip: u64,
     visible: bool,
     /// The next delivery resets the view to the new full range.
     reset_view: bool,
-    /// The `(source, identity)` pairs whose fetch has been submitted and
-    /// not yet answered.
-    ///
-    /// `SlotState::Fetching` alone cannot decide what to ask for: it
-    /// means "this slot is waiting for data", and an `add` leaves every
-    /// EARLIER unanswered slot in that state too, so a second add would
-    /// re-ask for the first one's span on every keystroke. This set is
-    /// the "already asked" half, cleared wherever the answer stops
-    /// applying — a hide (which drops what is in flight), a show (whose
-    /// contract is that every show refetches) and a range change
-    /// ([`Self::in_flight_range`], since the span itself moved).
+    /// Submitted `(source, identity)` fetches awaiting an answer.
+    /// A Fetching slot means it needs data; this set prevents a later add from
+    /// resubmitting its outstanding span. Visibility and range/as-of transitions
+    /// clear tracking when a new span must be eligible for submission.
     in_flight: HashSet<(String, String)>,
     /// The range [`Self::in_flight`] was populated under. A range change
     /// asks for a different span, so an unanswered fetch over the old
@@ -186,18 +149,21 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
-    /// The tile's one overlay: the series list, the add picker, the
-    /// expression editor or the range dialog — one at a time, which is
-    /// what this being an `Option<Popup>` rather than four fields
-    /// enforces. The list's rows are PREPARED in `rebuild_chrome` and
-    /// the range dialog's segments in its own key handler, never
-    /// formatted in `render`.
+    /// One local popup: series list, add picker, expression editor, or range
+    /// editor. List rows are prepared with chrome; date segments are prepared
+    /// by field transitions rather than formatted during render.
     popup: Option<Popup>,
     footer: SharedString,
     /// The chart surface's last painted bounds (`tile::pointer`).
     chart_bounds: ChartBounds,
     /// The pointer gesture in progress, if any (`tile::pointer`).
     drag: Option<Drag>,
+    /// Lazily created reusable component state with one set of subscriptions.
+    /// The header renders its trigger while Popup::Colour is active.
+    colour_picker: Option<Entity<ColorPickerState>>,
+    /// What the picker's commits are written against; outlives the
+    /// popup on purpose (see [`PickContext`]), replaced at each open.
+    pick_context: Option<PickContext>,
 }
 
 impl TimeseriesTile {
@@ -212,9 +178,7 @@ impl TimeseriesTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Nothing here opens a field, so `window` is unused; the
-        // parameter is the roster's own `create` signature, kept so a
-        // tile that one day restores an open editor is a body change.
+        // Construction opens no editor; retain the factory's window parameter.
         let _ = window;
         let settings = cx
             .try_global::<SeriesSettings>()
@@ -243,20 +207,15 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
-        // The chart's displayed times follow the app clock (as-of dialog
-        // spec §6.1): a `[time] zone` reload moves `offset_secs`, which
-        // `ChartKey` carries, so this rebuild is a real one.
+        // A clock reload changes the chart's offset input, invalidating its key.
         cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
             this.rebuild_chrome(cx);
             cx.notify();
         })
         .detach();
         cx.observe(&frame, |this, frame, cx| {
-            // A flip released (Phase 4a §3.10): promote whatever is
-            // staged, REGARDLESS of visibility — a tile hidden between
-            // staging and the flip must not come back showing the old
-            // as-of's points. `flip` is read here and nowhere else: it
-            // means "you may promote", never "requery" (CLAUDE.md).
+            // Process flip releases before the visibility guard so hidden tiles can
+            // promote staged data. Promotion still checks the followed as-of version.
             let now = frame.read(cx).versions();
             if now.flip != this.last_flip {
                 this.last_flip = now.flip;
@@ -265,29 +224,16 @@ impl TimeseriesTile {
             if !this.visible {
                 return;
             }
-            // `as_of` is the ONLY followed counter (spec §6.5): a scope
-            // keystroke bumps `scope` on every character, and a CSV
-            // publish bumps `data` for datasets this chart never reads —
-            // neither may cost a series round trip.
+            // Established series requests follow as-of only. Frame scope, grouping,
+            // and unrelated dataset publications do not change their inputs.
             if !this.model.slots().is_empty() && this.follows_changed(now) {
-                // An as-of moves the span's LEFT edge as well as its
-                // right — `AsOf::At(t)` resolves to `(t − preset, t)`,
-                // and live fetching never covered anything before
-                // `now − preset` — so the gaps are asked for before the
-                // points are (review round 1, I-1). The explicit clear
-                // is load-bearing: `fetch_pending` drops the in-flight
-                // set only when the RANGE moved, and an as-of change
-                // leaves `Range` identical.
+                // Changing as-of can move both ends of a relative range. Clear fetch
+                // tracking even though the stored Range is unchanged, then ask for gaps
+                // before querying cached points.
                 //
-                // Gated on a REAL as-of move, not on `follows_changed`:
-                // that answers TRUE while
-                // `acted` is `None` — a tile that has never asked a
-                // query — so on a freshly shown tile whose first fetch
-                // is still out, any frame notify at all (a scope
-                // keystroke, say) re-marked every slot and asked for
-                // each pair's span a second time. The `requery` below
-                // stays on `follows_changed`, where "never asked" really
-                // does mean "ask".
+                // Only a known prior as-of triggers this refetch. `acted == None` also
+                // makes `follows_changed` true, but resubmitting its unanswered fetches on
+                // every unrelated frame notification would duplicate work.
                 if this
                     .acted
                     .is_some_and(|acted| Self::differs_on_followed(acted, now))
@@ -308,15 +254,9 @@ impl TimeseriesTile {
         })
         .detach();
 
-        // A fresh catalogue matters LIVE only while the picker's
-        // identities stage is open (spec §9.6): a closed picker asks for
-        // one on the way in, and the sources stage ranks over the
-        // config, not the catalogue. This observer fires on EVERY
-        // notification the entity emits (a source's health ticks about
-        // twice a second with a diagnostics tile open), so the common
-        // case is one `matches!` and nothing else, and even an open
-        // picker compares the option list before touching the ranking —
-        // re-ranking would move a highlight the trader had placed.
+        // Only the identities stage reads catalogue options. Ignore other
+        // notifications, and retain the highlight when the option list is unchanged.
+        // The source stage instead lists configured sources.
         cx.observe(&diagnostics, |this, _diagnostics, cx| {
             if !matches!(
                 this.popup,
@@ -395,19 +335,16 @@ impl TimeseriesTile {
             footer: header::footer_text(cx),
             chart_bounds: ChartBounds::default(),
             drag: None,
+            colour_picker: None,
+            pick_context: None,
         }
     }
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `insert` exactly while a popup holds a text field (the picker,
-    /// the expression field and the range popup);
-    /// `normal` otherwise — plus the `popup` pair a fieldless popup
-    /// adds. The series list is the fieldless one: it keeps the tile's
-    /// own keyboard, so `j`/`k`/`enter`/`escape` reach the matcher as
-    /// ordinary normal-mode keys and its fragment layer
-    /// (`timeseries && mode == normal && popup == series`) is what tells
-    /// them apart from `h`/`l` and the rest.
+    /// Add, expression, range, and colour editors use insert routing. Fieldless
+    /// series/menu lists keep normal mode with their popup pair. Actual focus
+    /// ownership is checked separately, including colour-picker descendants.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
             "insert"
@@ -442,16 +379,13 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// Every show refetches and, once there is something to re-ask for,
-    /// requeries; a hide cancels what is in flight (spec §9.10).
-    ///
-    /// The refetch is cheap by construction: the data tier subtracts the
-    /// pair's existing coverage, so a span already held answers `Ok(0)`
-    /// without touching the upstream, and the `Ok` is what sends the
-    /// query. That is why a tile with no result yet does NOT requery
-    /// here — its first paint always arrives through `SeriesFetched`,
-    /// and asking before the fetch answers would only draw an empty
-    /// chart a beat sooner.
+    /// On a hidden-to-visible transition, refetch every source pair. With a
+    /// retained result and changed followed versions, also query immediately.
+    /// Otherwise a successful fetch completion triggers the query, including
+    /// `Ok(0)` when the data tier already covers the span.
+    /// Hiding attempts query cancellation and clears request/fetch tracking.
+    /// Cancellation has no acknowledgement and does not stop upstream fetches
+    /// or retract results already emitted by the data tier.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
@@ -472,11 +406,8 @@ impl TimeseriesTile {
             // An in-flight query nothing will paint is a round trip
             // spent for nothing.
             self.data.cancel(QueryKey(self.id.0));
-            // And the cancelled request's own `acted` goes with it: it
-            // records "this tile has already asked under these
-            // versions", which is no longer true of anything that will
-            // arrive. Left set, a tile hidden mid-round-trip comes back
-            // deciding it is up to date.
+            // Clear acted versions so showing a tile cannot treat its cancelled
+            // request as completed work.
             self.acted = None;
             self.query_in_flight = false;
             self.in_flight.clear();
@@ -485,8 +416,8 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// This tile has no find of its own: `/` belongs to the series
-    /// list, which filters through its own `ChoiceList` field.
+    /// This tile ignores the shell's find events; its local popup actions own
+    /// series selection and identity filtering.
     pub fn find(&mut self, event: FindEvent, window: &mut Window, cx: &mut Context<Self>) {
         let _ = (event, window, cx);
     }
@@ -506,48 +437,27 @@ impl TimeseriesTile {
         let Some(verb) = action.0.strip_prefix("timeseries::") else {
             return false;
         };
-        // A notice belongs to the last action that ACTED (review round
-        // 1, MIN-3): the next handled verb clears it before it can set
-        // one of its own, but a verb this tile does NOT handle — a popup
-        // verb with no popup open, and anything unrecognised — must
-        // leave the text still on screen alone, or the state says
-        // "cleared" while the trader reads the old line. So it is taken
-        // here and put back on the two unhandled paths.
+        // Handled verbs replace the standing notice. Restore it on unhandled
+        // paths so an inert action does not silently erase the last refusal.
         let previous = self.notice.take();
         let n = count.unwrap_or(1).max(1) as usize;
-        // A popup closes before any verb that is not its own (the
-        // market-data panel's rule): a trader who pans, zooms or adds
-        // with the list up meant the tile, not the list, and an overlay
-        // left open over the answer is the confusing half.
-        //
-        // The keep-list is STAGE-AWARE: a
-        // popup that holds the KEYBOARD keeps only its own four verbs.
-        // Everything else — including the verbs the series list happily
-        // stays open through — closes it first, because the palette can
-        // dispatch any action over an open field (`ctrl+k` is a chord,
-        // so it opens over one) and a verb that ran with the field still
-        // installed would leave `key_context` reporting `insert` with
-        // nothing focused: a tile deaf to every bare key until `escape`.
-        //
-        // `close_popup_with_window`, never a `Window`-less closer: a
-        // popup whose field holds the keyboard must be blurred before it
-        // is dropped (CLAUDE.md), and this is the path every such verb
-        // reaches it by.
+        // Close a popup before dispatching an action outside its allowed set.
+        // An insert popup retains only commit, cancel, and insert navigation; a
+        // palette-dispatched tile action must not leave an unfocused editor
+        // reporting insert mode. Blur through the window-aware closer first.
         let popup_survives = match &self.popup {
             None => true,
             Some(p) if p.is_insert() => {
                 matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
             }
-            // The action menu keeps only its own keys: a pick closes it
-            // itself before re-dispatching, so any other verb reaching
-            // here came from the palette or a chord and means the tile.
+            // Keep the menu only for its own navigation, pick, and toggle actions.
+            // A menu pick closes before dispatching its action; other tile actions also
+            // close it before changing the model.
             Some(Popup::Menu(_)) => matches!(
                 verb,
                 "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"
             ),
-            // The series list holds no field: a trader who cycles a
-            // colour or an axis with it up meant the list to stay and
-            // show the change (spec §9.5).
+            // The fieldless series list stays open while slot properties change.
             Some(_) => matches!(
                 verb,
                 "list"
@@ -570,8 +480,7 @@ impl TimeseriesTile {
             self.close_popup_with_window(window, cx);
         }
         let (now, as_of) = self.now_and_as_of(cx);
-        // A view move ends at `view_moved`, never `apply_changed` — see
-        // the module doc's three tails.
+        // View movement has a separate path to preserve cached chart geometry.
         let view_move = matches!(
             verb,
             "pan_left"
@@ -612,7 +521,8 @@ impl TimeseriesTile {
             "jump_end" => self.model.jump_end(),
             // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
-            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick" => {
+            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick"
+            | "pick_colour" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -636,16 +546,14 @@ impl TimeseriesTile {
 
     // ---- the `:` line ------------------------------------------------
 
-    /// `window` is unused: no `:` verb this tile has touches a popup or
-    /// a field. It stays in the signature because
-    /// [`TileContent::command`] is spelled that way for every module.
+    /// Commands may remove the colour picker's target. Forward the window so
+    /// that orphaned popup can close through the focus-aware closer.
     pub fn command(
         &mut self,
         line: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        let _ = window;
         self.notice = None;
         let cmd = commands::parse(line)?;
         let (now, as_of) = self.now_and_as_of(cx);
@@ -712,6 +620,9 @@ impl TimeseriesTile {
             }
         };
         self.apply_changed(changed, cx);
+        // `:remove` and `:clear` can take the slot an open picker was
+        // opened for; a pick would then have nowhere to land.
+        self.close_orphaned_colour_picker(window, cx);
         Ok(())
     }
 
@@ -725,34 +636,19 @@ impl TimeseriesTile {
         commands::completions(line, cursor, &slots, &sources, &colours)
     }
 
-    /// `1`..`5` is a palette index; anything else is a `[colours]` name.
+    /// `1`..`5` is a palette index, `#rrggbb` an absolute colour,
+    /// anything else a `[colours]` name (`commands::colour_arg`).
     fn colour_named(&self, name: &str) -> Result<Colour, String> {
-        if let Ok(i) = name.parse::<usize>()
-            && (1..=Palette::LEN).contains(&i)
-        {
-            return Ok(Colour::Palette(i - 1));
-        }
-        if self.colours.borrow().get(name).is_some() {
-            Ok(Colour::Named(name.into()))
-        } else {
-            Err(format!(
-                "no colour named '{name}' — 1..{} or a [colours] entry",
-                Palette::LEN
-            ))
-        }
+        let colours = self.colours.borrow();
+        commands::colour_arg(name, |n| colours.get(n).is_some())
     }
 
     // ---- the tails ---------------------------------------------------
 
-    /// A change to WHAT is plotted. The SESSION bit needs nothing here —
-    /// the shell serialises on its own schedule.
-    ///
-    /// FETCH runs BEFORE QUERY, and a range change carries both: the
-    /// gaps are asked for and the part already cached is re-queried in
-    /// the same breath, so the chart repaints over what is held while
-    /// the rest arrives (§9.10). An `add` carries FETCH without QUERY on
-    /// purpose — its slot has no points yet, and `SeriesFetched Ok` is
-    /// what sends the query.
+    /// Apply model flags. Session serialization follows the shell's schedule.
+    /// Submit FETCH before QUERY: range changes ask for missing coverage and
+    /// query cached points immediately. Source adds request a fetch first;
+    /// successful fetch completion supplies their query trigger.
     fn apply_changed(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if let Some(n) = self.model.take_notice() {
             self.notice = Some(n.into());
@@ -775,14 +671,9 @@ impl TimeseriesTile {
         cx.notify();
     }
 
-    /// A pan, a zoom or a jump. Deliberately NOT `apply_changed`: the
-    /// header does not read the view and neither does the chart model,
-    /// so rebuilding either would bump `ChartModel::version` and throw
-    /// away every cached path in `geode-chart` for a frame that only
-    /// scrolled. It DOES requery when `changed.query()` says so: the
-    /// percentiles and the density are computed over the VISIBLE window,
-    /// so with either on a pan is a new question (and with both off, the
-    /// model answers CHROME alone and nothing is asked).
+    /// Apply a view move without rebuilding prepared chart data or its header.
+    /// Query again only when visible-window statistics require it; with density
+    /// and percentiles off, movement can reuse the current points and paths.
     fn view_moved(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if changed.query() && self.visible && !self.model.slots().is_empty() {
             self.requery(cx);
@@ -815,9 +706,8 @@ impl TimeseriesTile {
         }
     }
 
-    /// The one removal door `d` and `:remove` share — including the
-    /// notice naming what went with the slot (spec §7: removing an
-    /// operand removes every expression that reads it).
+    /// Shared keyboard/command removal. Remove dependent expressions with their
+    /// operand and name the additional removed slots in a notice.
     fn remove(&mut self, number: u8) -> Result<Changed, String> {
         let removal = self.model.remove(number)?;
         self.prune_in_flight();
@@ -832,17 +722,10 @@ impl TimeseriesTile {
         Ok(removal.changed)
     }
 
-    /// Re-prepare everything painted from the model: the header and the
-    /// title always, the chart model only when [`ChartKey`] says one of
-    /// its own inputs moved. The ONE door, so the colour wheel is
-    /// derived once per change and the chips agree with the lines by
-    /// construction rather than by two call sites keeping step.
-    ///
-    /// The chart model is immutable input the element caches against, so
-    /// it is built here and never in `render`; every field the element's
-    /// caches do not key on (`axis_mode`, `step_us`) rides on `version`,
-    /// which is why an actual rebuild bumps it — and why a skipped one
-    /// must not (a bump with no new model is a cache flush for nothing).
+    /// Prepare header, title, and open series-list rows. Rebuild the immutable
+    /// chart input only when [`ChartKey`] changes, bumping its version so the
+    /// chart element invalidates geometry derived from that input.
+    /// Resolve one colour mapping for both chip swatches and chart lines.
     fn rebuild_chrome(&mut self, cx: &mut Context<Self>) {
         let default_source = cx
             .try_global::<SeriesSettings>()
@@ -852,10 +735,8 @@ impl TimeseriesTile {
         let colour_of = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme());
         self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &colour_of);
         self.title = header::title_text(&self.model);
-        // ABOVE the chart-key early return: the list's rows read the
-        // model, the last result and the theme, none of which the chart
-        // key covers on its own — an `axis_next` with the list open
-        // moves a row's letter without touching a single chart input.
+        // List rows have inputs outside the chart key, including fetch state and
+        // provenance. Refresh them even when chart geometry can be reused.
         if matches!(self.popup, Some(Popup::Series(_))) {
             let rows = SeriesPopup::prepare(
                 &self.model,
@@ -925,6 +806,11 @@ impl TimeseriesTile {
     }
 
     #[cfg(test)]
+    pub(crate) fn pick_context(&self) -> Option<&PickContext> {
+        self.pick_context.as_ref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn notice(&self) -> Option<&SharedString> {
         self.notice.as_ref()
     }
@@ -944,12 +830,9 @@ impl TimeseriesTile {
 }
 
 impl TimeseriesTile {
-    /// The chart and its pointer surface (`tile::pointer`): the element
-    /// itself, a zero-cost canvas that records the surface's bounds for
-    /// the listeners, a resize-cursor band over the pane divider while
-    /// there are two panes, and — only while a drag is armed — an
-    /// occluding catcher that owns every move and release until the
-    /// button comes up.
+    /// Render the chart, record its bounds during canvas prepaint, and show a
+    /// divider cursor where two panes meet. During a drag, an occluding catcher
+    /// handles moves and releases over the surface plus releases outside it.
     fn render_chart_surface(
         &self,
         tile: &Entity<TimeseriesTile>,
@@ -1049,20 +932,9 @@ impl TimeseriesTile {
 
 impl Render for TimeseriesTile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A theme change moves every slot's colour, and those colours
-        // live INSIDE the chart model and the prepared chips — so the
-        // models, not just the paint, have to be rebuilt. The full
-        // 28-value signature is the memo key (`shell::colours`' own
-        // rule): anything less and a theme that moves only an anchor
-        // paints stale. On the steady path this is 28 `Hsla` copies and
-        // 28 compares, and nothing else.
-        //
-        // The named colours are checked beside it, against the pointer
-        // the last chart model was built from: `TimeseriesFactory::
-        // set_colours` swaps a fresh `Arc` into the cell this tile
-        // shares, and nothing else would ever tell an OPEN tile that a
-        // reloaded `colours.toml` redefined a name it paints (review
-        // round 1, MIN-4).
+        // Prepared chip and chart colours depend on the full theme signature.
+        // Also check the shared named-colour Arc for reloads. A changed key rebuilds
+        // prepared content here; unchanged renders retain it.
         let signature = theme_signature(cx.theme());
         let colours_ptr = Arc::as_ptr(&self.colours.borrow()) as usize;
         let colours_moved = self
@@ -1083,12 +955,8 @@ impl Render for TimeseriesTile {
                 .into_any_element()
         };
         let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
-        // The popup is anchored off a zero-size, absolutely positioned
-        // sibling at the header's own right edge (the market-data
-        // panel's §6.1 placement) — `relative()` on the wrapper is what
-        // makes that position read against the HEADER rather than the
-        // window, and `deferred` inside it is what lifts the list above
-        // the chart and the neighbouring tiles.
+        // Anchor the deferred popup at the header's right edge. The relative
+        // wrapper supplies its positioning context; deferral paints over the chart.
         let popup = match self.popup.as_ref() {
             Some(Popup::Series(s)) => Some(render_series_popup(
                 s,
@@ -1101,8 +969,31 @@ impl Render for TimeseriesTile {
             Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx)),
             Some(Popup::Menu(m)) => Some(render_menu(m, &tile, tile_id, cx)),
             // The expression field is not an overlay: it is a strip in
-            // the body, below.
-            Some(Popup::Expr(_)) | None => None,
+            // the body, below; the colour picker is drawn in its target
+            // chip, by the header.
+            Some(Popup::Expr(_)) | Some(Popup::Colour(_)) | None => None,
+        };
+        // Render the component trigger in its target chip only while open. State
+        // and subscriptions persist on the tile; the popover element state is transient.
+        let colour_picker = match self.popup.as_ref() {
+            Some(Popup::Colour(c)) => {
+                let target = c.target;
+                Some((
+                    target,
+                    div()
+                        .debug_selector(move || {
+                            format!("timeseries-colour-picker-{tile_id}-{target}")
+                        })
+                        .child(
+                            ColorPicker::new(&c.picker)
+                                .featured_colors(c.swatches.clone())
+                                .accessibility_label(SharedString::new_static("Series colour"))
+                                .xsmall(),
+                        )
+                        .into_any_element(),
+                ))
+            }
+            _ => None,
         };
         let expr_field = match self.popup.as_ref() {
             Some(Popup::Expr(f)) => Some(header::render_expr_field(f, theme)),
@@ -1118,6 +1009,7 @@ impl Render for TimeseriesTile {
                 tile_id,
                 self.stack.as_ref(),
                 menu_open,
+                colour_picker,
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(
@@ -1209,9 +1101,10 @@ fn chart_key(
 }
 
 /// A slot's colour on this theme: a palette index through the floored
-/// five chart colours, a `[colours]` name through the shared wheel, and
-/// a name the trader has since deleted back to the first palette colour
-/// rather than an error — a stale name costs a colour, never a tile.
+/// five chart colours, a `[colours]` name through the shared wheel, an
+/// absolute colour as itself, and a name the trader has since deleted
+/// back to the first palette colour rather than an error — a stale name
+/// costs a colour, never a tile.
 ///
 /// Takes the definitions by `Arc` and the theme's derived pair by value
 /// so the returned closure borrows NOTHING: `rebuild_chrome` holds
@@ -1236,15 +1129,14 @@ fn colour_fn(colours: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Colour) -> H
             Some(def) => to_hsla(geode_core::colour::resolve(def, &anchors, &tokens)),
             None => palette.colour(0),
         },
+        // Absolute: no theme, no readability floor — what was picked.
+        Colour::Custom(c) => c.to_hsla(),
     }
 }
 
-/// The trader's clock offset, for the chart's displayed times — every
-/// DISPLAYED time is local (Phase 4a ruling), while everything stored
-/// and queried is UTC. The clock is the app's (`[time] zone`, as-of
-/// dialog spec §6.1) through the `AppClock` global, never the machine's
-/// own clock (banned by `geode_core::clock`'s sweep); `try_global`
-/// because a module test fixture may never have installed it.
+/// One display offset sampled at the current instant from `AppClock`.
+/// Stored/query timestamps remain UTC. Without an installed global, use
+/// `Clock::machine`; the chart does not resolve historical offsets per point.
 fn local_offset_secs(cx: &App) -> i32 {
     let clock = cx
         .try_global::<geode_shell::clock::AppClock>()

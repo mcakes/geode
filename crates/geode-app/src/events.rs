@@ -6,8 +6,8 @@
 //! is not a chronological event log. See `docs/current/request-delivery.md`.
 //!
 //! An upload outcome keys on `(tile, tag)` rather than the tile alone, so two
-//! uploads from the same tile never coalesce: each is a separate user action
-//! and the spec promises every upload exactly one answer, not just the latest.
+//! distinct uploads from the same tile remain separate. Coalescing by tile
+//! alone could hide an earlier upload's failure behind a later success.
 //! Local-write outcomes never coalesce at all (`Key::Local`): each is some
 //! writer's answer, delivered in the writer's order.
 //!
@@ -28,7 +28,7 @@ enum Key {
     Catalog(QueryKey),
     Price(QueryKey),
     /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
-    /// user actions and each answers exactly once. Keying on the tile would
+    /// user actions whose outcomes must remain distinct. Keying on the tile would
     /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
     /// still-undelivered outcome (e.g. a failure) when a later upload from
     /// the same tile answers before the first is read.

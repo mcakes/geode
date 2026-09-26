@@ -1,16 +1,12 @@
-//! The prepared grid a frame paints (market-data spec §8.2).
+//! Prepared pivot or flat grids for the market-data table.
 //!
-//! Built ONCE per delivery or draft change, never in `render`: every cell
-//! is already formatted text in a `SharedString`, so a frame clones
-//! refcounts and formats nothing (PHILOSOPHY §6, spec §7.1's 8 ms pure-UI
-//! budget). gpui-component's table (`crate::delegate::MatrixDelegate`,
-//! user ruling 2026-09-14) then lays out only the visible rows.
+//! Build on delivery or structural draft changes; patch individual cell
+//! edits. Cells carry formatted `SharedString`s so rendering clones text
+//! without reformatting, and the table lays out only visible rows.
 //!
-//! Two shapes, one model. `Columns::Axis` pivots: the grid is (row axis ×
-//! column axis) and the single value column fills it. `Columns::Values`
-//! flattens: one row per document row, one column per value column. Both
-//! answer the same `Cell`, so the tile's cursor, yank and edit paths know
-//! only about a grid.
+//! `Columns::Axis` pivots one value onto a row-by-column grid with leading
+//! slice columns. `Columns::Values` lays out the declared value columns.
+//! Both expose the same cells to cursor, copy, and edit operations.
 
 use crate::core::draft::{Draft, RowEdit, attr_text};
 use crate::core::spec::{Columns, PanelSpec, ValueColumn};
@@ -23,11 +19,9 @@ use geode_core::view::ColumnFormat;
 use gpui::SharedString;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// One column's edited shape (spec §4.3): a number paints through its own
-/// `ColumnFormat` exactly as before, a date paints ISO, and text/choice
-/// paint themselves. Parallel to [`MatrixModel::columns`] — the pivot's
-/// ladder and slice columns are always `Number`, a flat panel's columns
-/// are whatever each [`ValueColumn::ty`] declares.
+/// A column's display and editor kind, parallel to [`MatrixModel::columns`].
+/// Pivot ladder and slice columns are numeric. Flat columns use their
+/// declared type and optional choice vocabulary.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellKind {
     Number(ColumnFormat),
@@ -70,32 +64,21 @@ pub struct HeaderCell {
 /// One prepared cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
-    /// Formatted through [`cell_text`], or empty for a NULL. Empty is the
-    /// honest rendering of "no value here" (§6.3): a blank cell and a
-    /// `0.0000` are different claims.
+    /// Prepared display text. A missing document value paints blank;
+    /// a missing inserted value paints [`UNFILLED`], distinct from zero.
     pub text: SharedString,
     pub value: Option<Value>,
     pub edited: bool,
     pub sent: bool,
-    /// The key a [`Draft`] edit on this cell is stored under. For a
-    /// document row it is the row's position in the DOCUMENT's own grid
-    /// — the pivot row, or the snapshot row for `Columns::Values` — plus
-    /// the column, which is the cell's model index only while no row is
-    /// inserted above it: an [`RowState::Inserted`] row is spliced into
-    /// the model and shifts every row below it, and `Draft::edits` is
-    /// keyed by the document position precisely so an insert moves no
-    /// edit. For an inserted row it is `(model row, col)` — there is no
-    /// document position to name — and `Draft::edits` never holds one:
-    /// an inserted row's cells live in `RowEdit.cells` by column label
-    /// (spec §5.1). Carried on the cell so a render closure that already
-    /// has the cell never has to reconstruct it.
+    /// The edit key: base-document row and model column for a document cell,
+    /// even when inserted rows shift its painted position. Inserted cells use
+    /// their painted position here, but store values in `RowEdit.cells` by
+    /// column label rather than in `Draft::edits`.
     pub cell_ref: (usize, usize),
 }
 
-/// Whose row this is (spec §5.2): the document's own, one the draft
-/// inserted (spliced in after its anchor, cells from `RowEdit.cells`),
-/// or one the draft marked deleted — still laid out, struck through,
-/// until upload or a rebase drops it outright.
+/// Row origin and deletion state. Inserted rows follow their anchors;
+/// deleted document rows remain visible but upload assembly excludes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowState {
     Document,
@@ -114,10 +97,8 @@ pub struct RowModel {
 pub struct MatrixModel {
     /// The document key, in `document_columns()` order.
     pub key: Vec<String>,
-    /// The generation's source time, RFC 3339 — `Provenance.datasets[0]
-    /// .as_of`, which for a live document read is that document's own
-    /// source time (`Catalog::live_source_time`, Part 1 §4.5). This is
-    /// the identity a [`Draft`] compares, not a `gen_id`.
+    /// Per-document source time from the first provenance dataset's `as_of`,
+    /// in RFC 3339. Draft identity compares this timestamp, not `gen_id`.
     pub source_time: Option<String>,
     /// Header attributes the spec names, in spec order.
     pub header: Vec<HeaderCell>,
@@ -147,10 +128,9 @@ pub struct MatrixModel {
     /// check refuses the upload by name rather than sending a string.
     pub column_values: Vec<Value>,
     pub rows: Vec<RowModel>,
-    /// Where each pivot cell's value was read from (spec §4.5), so
-    /// [`Self::patch_cell`] can re-prepare one cell without re-indexing
-    /// the document; `None` for the flat shape, where a grid row IS a
-    /// snapshot row and the spec's own column list says the rest.
+    /// Snapshot positions for pivot cells, retained so a cell patch does not
+    /// re-index the document. Flat grids use the base row index and spec's
+    /// column list directly.
     pub pivot_index: Option<PivotIndex>,
 }
 
@@ -192,31 +172,18 @@ impl MatrixModel {
         self.column_kinds.get(col)
     }
 
-    /// Pivot or flatten `snapshot` per `spec`, with `draft`'s edits
-    /// painted over the document's own values.
+    /// Build a grid with draft values over the delivered document.
     ///
-    /// `Err` is a document that cannot be laid out as a grid at all: a
-    /// missing axis column, no value column (or more than one under
-    /// `Columns::Axis`, excluding the spec's slice values), a blank axis
-    /// or key cell, a repeated row label, or — for a pivot — a hole, a
-    /// repeated (row, column) pair, a slice whose rows disagree on a
-    /// slice value, or a slice label the column axis also produces. A hole
-    /// is deliberately an error rather than a blank cell: the axes say the
-    /// document claims a value there, so a blank would be this model
-    /// inventing the §6.3 claim "this number does not belong to this row"
-    /// on the document's behalf, and a zero would be worse.
+    /// Refuse missing axes or values, unreadable key/axis cells, repeated flat
+    /// row labels, and malformed pivots: multiple value columns, repeated
+    /// pairs, grid holes, inconsistent slice values, or axis/slice label
+    /// collisions. A grid hole differs from an existing cell containing NULL;
+    /// inventing a blank or zero would hide a missing document row.
     ///
-    /// Between them those refusals are what make the model's row labels
-    /// unique and its column labels unique — the invariant
-    /// [`Draft`]'s own doc states and [`Draft::rebase`] resolves edits
-    /// against.
-    ///
-    /// The draft's row edits (spec §5.2) are applied last, by
-    /// [`splice_rows`]: a document row the draft marks deleted stays in
-    /// the grid as [`RowState::Deleted`], and each inserted row is
-    /// spliced in after its anchor. A document row's cells — and its
-    /// `cell_ref` — are decided BEFORE the splice, against the document's
-    /// own grid, which is what `Draft::edits` is keyed by.
+    /// Compiled specs must provide unique flat and slice labels. Together with
+    /// validated document identities, these let rebase resolve edits by label.
+    /// Apply row edits last: deleted rows retain a marker, inserts follow their
+    /// anchors, and document cells keep their original `cell_ref` positions.
     pub fn build(
         snapshot: &Snapshot,
         spec: &PanelSpec,
@@ -276,30 +243,17 @@ impl MatrixModel {
         })
     }
 
-    /// Re-prepare ONE cell from `snapshot` and `draft` — text, value,
-    /// `edited`, `sent` — and answer whether the cell exists (spec §4.5).
-    /// Identical to what [`Self::build`] would paint for that cell (the
-    /// test `patch_cell_matches_a_rebuild` proves it, on both shapes), so
-    /// a committed edit costs one cell's formatting rather than every
-    /// row's: the flat build is the per-commit cost `docs/perf.md`
-    /// records at the edge of the 8 ms pure-UI budget for a 10,000-row
-    /// schedule.
+    /// Reprepare one cell's text, value, edited flag, and sent flag using the
+    /// same rules as a build. A cell commit then pays for one formatter call
+    /// instead of reformatting the whole grid.
     ///
-    /// `snapshot` must be the document this model was built from — a
-    /// flat grid row is that snapshot's row of the same index, and
-    /// [`PivotIndex`] holds that snapshot's row numbers. The tile hands
-    /// over `painted_snapshot()`, which is exactly that.
+    /// `snapshot` must be the document used to build this model: pivot indices
+    /// and document `cell_ref`s address that snapshot. `row` is a painted
+    /// model position; its cell reference resolves any shift from inserted
+    /// rows. Inserted values come from `RowEdit.cells` by label.
     ///
-    /// `row` is the MODEL row. A document row's position in the document
-    /// (the one `Draft::edits`, `PivotIndex` and the flat snapshot are all
-    /// indexed by) is read off its own `cell_ref`, since an inserted row
-    /// above it has shifted the two apart; an inserted row's cell is
-    /// re-read from `RowEdit.cells` instead, and answers `false` once the
-    /// draft no longer holds that row — the model has a row the draft
-    /// does not, and only a rebuild can say what belongs there.
-    ///
-    /// Out of range answers `false` rather than panicking: the caller
-    /// falls back to a rebuild, the one answer that is always right.
+    /// Return `false` if the position or required mapping is absent, including
+    /// an inserted row removed from the draft. The caller then rebuilds.
     pub fn patch_cell(
         &mut self,
         row: usize,
@@ -374,9 +328,8 @@ impl MatrixModel {
     /// and nothing else. Distinct from a built model only in having no
     /// rows — the tile's header says which.
     pub fn empty(spec: &PanelSpec, key: &[String]) -> MatrixModel {
-        // `spec` is taken for the call site's sake: every other model in
-        // the tile is built from one, and a panel that later wants its
-        // column strip painted while waiting has it here.
+        // Keep the same spec-bearing interface as `build`; an empty model
+        // currently carries only the requested key.
         let _ = spec;
         MatrixModel {
             key: key.to_vec(),
@@ -384,11 +337,9 @@ impl MatrixModel {
         }
     }
 
-    /// The (row label, column label) pair a cell sits at — the identity a
-    /// [`Draft`] records so an edit survives a new generation.
-    ///
-    /// Out of range answers a pair of empty strings rather than panicking:
-    /// a cursor can outlive the model it was set against by one delivery.
+    /// The row and column labels used to identify an edit across generations.
+    /// Each out-of-range coordinate returns an empty label independently; a
+    /// cursor can outlive the model against which it was positioned.
     pub fn label_of(&self, cell: (usize, usize)) -> (SharedString, SharedString) {
         (
             self.rows
@@ -400,19 +351,12 @@ impl MatrixModel {
     }
 }
 
-/// The document key: the columns ahead of the row axis that the spec does
-/// not itself paint.
+/// Read key columns preceding the row axis, excluding spec-named columns
+/// and attributed values. This relies on `document_columns()` emitting
+/// keys first and the panel choosing the dataset's first axis as rows.
 ///
-/// `DatasetSpec::document_columns()` emits the key columns first (spec
-/// §3.3), and a panel's row axis is its dataset's first axis, so the
-/// prefix ahead of it is the key. The `spec.names` filter is the belt: a
-/// spec whose rows were a *later* axis would otherwise show the earlier
-/// axis as part of the key.
-///
-/// A NULL key cell is an error, not a shorter key: the key is what the
-/// panel asked for and what the header shows it is displaying, so
-/// dropping a part of it would leave a two-part document reading as a
-/// one-part one — `["SPX.Z"]` where the truth is `["SPX.Z", <nothing>]`.
+/// Reject unreadable key cells rather than shortening a composite key and
+/// making the header identify a different document.
 fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Result<Vec<String>, String> {
     (0..rows_idx)
         .filter(|i| {
@@ -429,17 +373,10 @@ fn key_of(snapshot: &Snapshot, spec: &PanelSpec, rows_idx: usize) -> Result<Vec<
         .collect()
 }
 
-/// The header attributes the spec names, read off row 0 — a document-level
-/// attribute is constant within one document (spec §3.1), so any row would
-/// do. An attribute the document does not carry is left out rather than
-/// shown blank: the panel says what it has. Unlike an axis or a key cell,
-/// a missing attribute identifies nothing, so there is nothing for it to
-/// corrupt — it is display, and absent display is absence.
-///
-/// The draft's own value paints over a NULL or a real one alike, marked
-/// `edited` — the same rule [`cell_of`] applies to a grid cell — so a
-/// document that carries the column but a NULL row 0 no longer forces
-/// `label_at` to succeed before an edit can be seen at all.
+/// Read declared header attributes from row 0, relying on the document
+/// contract that attributes are constant across rows. Omit absent columns
+/// and unreadable values. A draft override paints even over a NULL value,
+/// but still requires the attribute column to exist in the snapshot.
 fn header_of(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft) -> Vec<HeaderCell> {
     spec.header
         .iter()
@@ -505,15 +442,9 @@ fn label_at(snapshot: &Snapshot, idx: usize, row: usize) -> Option<String> {
     snapshot.f64_at(idx, row).map(|v| format!("{v}"))
 }
 
-/// One label that identifies a row, refusing a blank.
-///
-/// A NULL axis or key cell has no honest rendering here. `""` is not one:
-/// two different rows whose axis value is missing would fold into a
-/// single label, so a pivot would report them as a repeat (or, for the
-/// flat shape, collapse two schedule rows into one) and a draft keyed by
-/// that label could not tell them apart. The document is malformed —
-/// `publish_document` requires every axis value — so the panel says so
-/// rather than inventing a row identity.
+/// Read an axis or key label, refusing NULL or unreadable values instead
+/// of inventing an identity that could merge distinct rows. A present empty
+/// string is still a label here; this function does not validate its syntax.
 fn required_label(
     snapshot: &Snapshot,
     idx: usize,
@@ -945,24 +876,14 @@ fn flatten(snapshot: &Snapshot, spec: &PanelSpec, draft: &Draft, rows_idx: usize
     Ok((columns, column_kinds, rows))
 }
 
-/// Apply the draft's row edits to the document's rows (spec §5.2): mark
-/// each `Deleted` row rather than removing it — it is still laid out,
-/// struck through, so a trader sees what is going — and splice each
-/// `Inserted` row in after its anchor. A row anchored on the top (`None`)
-/// leads; several under one anchor land in label order (the draft's
-/// `BTreeMap` order); a row anchored on another inserted row follows that
-/// one, so a row inserted below an inserted row sits where it was put;
-/// and an anchor naming no row at all — a document row that vanished
-/// before `rebase` re-anchored it, say — lands at the top rather than
-/// losing the row, since unsent work is never dropped in silence.
+/// Apply row edits after document cells and their `cell_ref`s are built.
+/// Deleted rows remain marked in the grid. Inserted rows use their own
+/// label-keyed cells and follow their anchor, including another insert.
+/// Siblings follow draft label order; `None` or an unknown anchor places
+/// a row at the top. Unreachable anchor cycles are appended at the end.
 ///
-/// A document row's cells, and their `cell_ref`, are left exactly as
-/// `pivot`/`flatten` built them — the document's own positions, which
-/// `Draft::edits` is keyed by — so the splice moves rows and never
-/// re-keys an edit. An inserted row's cells come from `RowEdit.cells`
-/// alone, by column label, through [`inserted_cell`].
-///
-/// With no row edits this is the identity and allocates nothing.
+/// Document edit keys remain unchanged when rows shift. With no row edits,
+/// return the original rows without allocating.
 fn splice_rows(
     rows: Vec<RowModel>,
     draft: &Draft,
@@ -1094,11 +1015,9 @@ fn inserted_row(
     }
 }
 
-/// One cell of an inserted row (spec §5.2): the draft's own value for
-/// this column, formatted through `kind` exactly as a document cell's
-/// edit is, or `·` where the trader has not filled it yet — never empty,
-/// which is a document's NULL (§6.3), and never a zero. Every cell of an
-/// inserted row is `edited`: the whole row is unsent work.
+/// An inserted cell uses the draft value formatted through its column
+/// kind, or `·` when unfilled. That marker distinguishes pending input from
+/// a document's blank NULL cell. Every inserted cell is marked edited.
 fn inserted_cell(
     value: Option<&Value>,
     cell_ref: (usize, usize),
@@ -1134,10 +1053,8 @@ fn cell_of(value: Option<Value>, cell_ref: (usize, usize), kind: &CellKind, draf
             cell_ref,
         };
     }
-    // NULL here is a deliberate "this number does not belong to this
-    // row" (never a real value coerced away, since `read_flat_value` and
-    // the pivot's own `f64_at` read both return `None` for one) and reads
-    // back as a blank cell rather than a confident zero.
+    // Missing or unreadable document values paint blank, never zero.
+    // Typed readers can also return `None` for incompatible input.
     Cell {
         text: value
             .as_ref()
@@ -1175,8 +1092,8 @@ mod tests {
     fn meta(name: &str, attribution: Attribution) -> ColumnMeta {
         ColumnMeta {
             name: name.into(),
-            // A document snapshot is depth 0 only (spec §7), which is why
-            // `compile_document` emits exactly one attribution per column.
+            // Document snapshots have depth 0 only, so each column has one
+            // attribution entry.
             attribution_by_depth: vec![attribution],
             scope_semantics: ScopeSemantics::Direct,
         }
@@ -1849,10 +1766,8 @@ mod tests {
 
     #[test]
     fn a_repeated_row_label_is_refused_when_the_columns_are_flat() {
-        // Two schedule rows on one date: a draft resolves an edit by label,
-        // so one label naming two rows would make two edits one — the
-        // reviewer's case, where `rebase` silently kept one and reported
-        // nothing dropped.
+        // Repeated labels would merge distinct edit targets during rebase,
+        // so the model must reject the document.
         let err = MatrixModel::build(
             &flat_snapshot_dated(&["2026-10-16", "2026-10-16", "2026-12-18"]),
             &FLAT_SPEC,
@@ -2008,9 +1923,8 @@ mod tests {
         )
     }
 
-    /// §4.3: a flat panel's cells are typed per column — a date paints
-    /// ISO, text paints itself, a number paints through its column's
-    /// own format — and `column_kinds` runs parallel to `columns`.
+    /// Flat cells use their column kinds: ISO dates, literal text, and
+    /// column-formatted numbers. Kinds remain parallel to column labels.
     #[test]
     fn a_flat_model_types_each_column_by_its_spec() {
         let snapshot = schedule_snapshot(&[
@@ -2074,8 +1988,7 @@ mod tests {
         assert_eq!(model.rows[0].cells[0].text.as_ref(), "2026-12-20");
     }
 
-    /// §4.5: a cell commit patches instead of rebuilding, and the patch
-    /// is exactly what a rebuild would have painted for that cell.
+    /// A cell patch paints the same value and flags as a full rebuild.
     #[test]
     fn patch_cell_matches_a_rebuild() {
         let snapshot = schedule_snapshot(&[
@@ -2155,11 +2068,9 @@ mod tests {
         assert!(!patched.patch_cell(2, 0, &snapshot, &CVI, &draft));
     }
 
-    /// §5.2: an `Inserted` row is spliced after its anchor (the top for
-    /// `None`), several under one anchor in label order; a `Deleted` row
-    /// stays in the grid, marked; an inserted row's cells come from the
-    /// draft's own `RowEdit.cells` by column label, an unfilled one
-    /// painting `·`; and the incomplete count is per row, not per cell.
+    /// Inserted rows follow their anchors and use label-keyed draft cells;
+    /// deleted rows remain marked. Missing inserted cells paint `·`, and
+    /// incomplete counts measure rows rather than individual missing cells.
     #[test]
     fn inserted_rows_splice_after_their_anchor_and_deleted_rows_stay_marked() {
         let snapshot = schedule_snapshot(&[
@@ -2315,10 +2226,8 @@ mod tests {
         );
     }
 
-    /// §4.5 with rows spliced in: a patch on an inserted row re-reads its
-    /// cell from `RowEdit.cells`, a patch on a document row shifted below
-    /// an insert still reads the DOCUMENT's row (the edit stays on D2, not
-    /// on the row now sitting at its old index), and both match a rebuild.
+    /// Patch inserted values from their draft rows and shifted document
+    /// values through `cell_ref`, matching a full rebuild in both cases.
     #[test]
     fn patch_cell_matches_a_rebuild_with_rows_spliced() {
         let snapshot = schedule_snapshot(&[

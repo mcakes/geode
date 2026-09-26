@@ -21,7 +21,7 @@ TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
-`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `dimensions`,
+`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
 `colours`, `pricer_views`, and `overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
@@ -175,6 +175,13 @@ Source and dataset edits require restart to rebuild runtime workers. See
 and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
 for runtime readiness, delivery, and failure behavior.
 
+### Credentials
+
+Shipped adapters require no credentials. Adapters that need them must read
+secrets from the environment. Layered configuration may name the environment
+variable, but must not contain the secret: these files are shared, diffable,
+and writable by the application.
+
 ## Egress configuration
 
 `egress.toml` has one top-level table per upload target, such as
@@ -189,22 +196,30 @@ cvi_params = "marketdata/cvi/{key}"
 dividend_schedule = "marketdata/dividend/{key}"
 ```
 
-`{key}` is replaced by the document key's parts joined with `/`; an address
-with no `{key}` is one fixed address for every key of that document. A
-missing `adapter` or `documents` field, a `documents` value that is missing,
-not a table, or empty, and a `documents` entry naming no document dataset or
-whose address is not a string, each drop that one target at the typed-reader
-stage with a diagnostic addressed to `egress.<name>[.<field>]`. Resolving the
-survivors against the adapter registry separately drops a target whose
-adapter name is not registered, or whose registered adapter has no egress
-side, with a diagnostic at `egress.<name>.adapter`; other targets still load
-either way. See [egress and uploads](data-path.md#egress-and-uploads) for the
-runtime worker, queueing, and failure semantics, and
-[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs) for parsing.
+Targets replace whole named objects across layers. An override must repeat
+its adapter and documents; omitted fields do not inherit from a lower layer.
+`{key}` is replaced literally by document-key parts joined with `/`, without
+escaping. A template without `{key}` is a fixed address for every key of that
+document. Empty address strings and unknown placeholder text are not rejected
+by this reader; transport-specific address validation belongs to the adapter.
 
-Like `sources.toml`, `egress.toml` is restart-required: nothing reloads a
-resolved target's transport live, so a hot reload keeps the last valid set
-without applying it.
+The typed reader skips non-table targets with a warning. A missing or
+non-string adapter, missing/non-table/empty documents table, non-document
+dataset name, or non-string address produces an error and drops that whole
+target. Diagnostics use `egress.<target>` and a known field or document name.
+Other targets remain usable. The reserved `config_version` entry is skipped.
+
+Startup adapter resolution separately drops targets whose adapter is unknown
+or exposes no egress capability. The app passes the surviving target names and
+accepted documents to panel factories. This does not guarantee that a worker
+starts successfully or a transport accepts an upload. See
+[egress and uploads](data-path.md#egress-and-uploads) and
+[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs).
+
+Egress changes require restart. Reload can update the active configuration
+representation, but running workers and panel target lists retain their startup
+configuration. The restart indicator compares the layered egress document with
+its startup baseline; restoring those inputs clears the indicator.
 
 ## Runtime edits
 
@@ -351,8 +366,9 @@ configuration write path.
 `[pricing]` in `app.toml` configures the line pricer. `adapter` names the
 pricer built into the binary; a change needs a restart. `refresh` is the
 pricer tile's default reprice interval: `30s` when absent, `"off"` to disable
-the timer, or any duration. A value that is neither warns at
-`app.pricing.refresh` and keeps 30 seconds. A reload applies `refresh` to every
+the timer, or a positive duration string accepted by the shared duration
+parser. Zero, invalid strings, and non-string values warn at
+`app.pricing.refresh` and use 30 seconds. A reload applies `refresh` to every
 open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 

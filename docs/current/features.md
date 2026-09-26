@@ -53,103 +53,148 @@ registers the concrete CVI and dividend kinds.
 
 `geode-marketdata` renders a document as either a matrix or a flat typed table.
 `PanelSpec` describes axes and value columns. `MatrixModel` is rebuilt on a
-delivery or structural edit and patched for an ordinary cell commit.
+delivery or structural edit. Ordinary cell commits patch it when possible;
+editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base generation. A newer delivery marks the
-draft behind rather than silently rebasing it. Rebase resolves edits by row and
-column labels, keeping stable intent across reordered documents. The module
-supports numeric, date, text, and closed-choice cells, row insertion/deletion,
-and kind-specific actions.
+Edits live in a `Draft` over a base identified by the document's source time.
+The default Hold policy retains the base snapshot when available after a
+document with a different source time arrives. `:auto` selects how later
+deliveries resolve such a transition:
 
-A dividend row's label is Geode's own minted id (the ex date, or
-`<date>#n` for the `n`th row sharing that date), not a wire id — same-date
-rows are identified by their ordinal among that date's group. Rebase
-therefore refuses to carry any cell edit or deleted mark whose label
-belongs to a same-date group whose row count changed between the draft's
-base and the newer document, reporting it through the same dropped-edit
-notice as any other unresolved label, with the reason `row (same-day rows
-changed: <was> → <now>)`: a changed count means the ordinals shifted, and
-the label might now resolve onto a different dividend. Group sizes are
-captured from the painted model whenever it is the draft's own base
-(before a rebase, before an update-policy rebase, and before the session
-is written); a draft restored from a session written before this guard
-existed applies none. **Known limitation:** a pure reorder of two
-same-day dividends upstream, with the group's size unchanged, swaps their
-minted ids undetectably, so a rebased edit can land on the other row of
-the pair — closing this gap needs an upstream row key, which the desk's
-XSD may supply.
+| Policy | Effect on unsent edits |
+|---|---|
+| Hold | Enter Behind and retain the base when available until explicit rebase or revert |
+| Rebase | Move edits by row and column labels, reporting labels that cannot be resolved |
+| Replace | Discard edits and report how much unsent work was replaced |
 
-`:upload [target]` (also the action list's `Upload` row) sends the draft to
-an egress target that accepts the panel's document. It is refused, naming
-why, for a clean, `Behind`, already-sent or incomplete draft, for a missing
-or ineligible target, while another upload from the panel is in flight (`an
-upload of <key> to <target> is in flight`), and while the panel is not live
-(`upload: the panel shows <time>, not live`): the frame's as-of is
-historical, or the generation on screen was delivered for a historical
-request. The second case covers the frame gone live before its live
-generation is painted — behind the barrier, or indefinitely when the live
-requery is refused or fails and the last good generation stays on screen.
-An upload is a whole document, and one assembled over an old generation
-would revert every untouched row upstream. `y` re-checks the same
-condition and sends nothing, naming why, if the panel is no longer live.
-Otherwise it assembles the document and asks
-`upload N cells, [K attributes, ]A rows added, D removed of <key> to
-<target>? (y/n)` in the
-header, where the question holds the keyboard: bare `y` submits, and any
-other key (consumed, chords included), a pointer press on the tile, or focus
-leaving the question cancels with `upload cancelled`. A delivery that
-changes the draft or the painted generation while the question stands (a
-rebase, a replace, or `Behind`) withdraws it at once with `upload cancelled:
-a new document arrived`, since the assembled rows belong to the superseded
-document. An `Ok` outcome marks the draft `sent HH:MM` only if the draft,
-base included, is still what was submitted; an `Err` keeps it editing and shows
-`upload failed: <e>` until the next edit or upload.
+Changing policy does not retroactively apply it to a held delivery. Redelivery
+of the same source time does not trigger it, and the first usable delivery
+after session restoration uses Hold. If the saved base is unavailable, a
+restored Behind draft paints the delivered grid while withholding unresolved
+cell edits. Automatic rebase also holds when the
+incoming document has no rows. Sent drafts follow the separate echo rules
+below. A snapshot that cannot build a valid grid leaves the last usable model
+and draft unchanged and reports the error.
 
-Upload state belongs to the underlying that submitted it. Switching
-underlying while a draft is sent or its upload is in flight gives up that
-draft's echo check: it parks, and restores, as an unsent `Editing` draft,
-exactly as a session restore does, and the trader confirms upstream by eye or
-uploads again. An outcome that arrives for an underlying no longer shown is a
-notice naming it (`upload of <key> to <target> sent` or `... failed: <e>`) and
-never touches the draft on screen.
+Source time is not an immutable generation id: a historical delivery can also
+put the draft Behind, while different contents republished with the same time
+are indistinguishable to this transition logic. Returning to the base time
+restores Editing. The module supports numeric, date, text, and closed-choice
+cells, row insertion/deletion, and kind-specific actions. See the
+[crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
+command-parser contracts.
 
-While a draft is `sent`, the next generation delivered for its key with a
-different source time is compared with the rows that went out as a multiset
-(both sides sorted by every compared column, since the store returns a
-document sorted by its axes while the rows went out in painted order), over
-every column except a minted row label (`f64` within one ULP). Equal clears the draft, the panel follows the new generation, and the
-header reads `sent HH:MM, confirmed HH:MM` until the next edit. Different
-keeps the draft `sent` over its base, reads `echo differs (N rows)`, and
-refuses edits until `:rebase` (which yields an unsent draft on the new
-generation) or `:revert`. The update policy does not apply to a sent draft. An
-upstream that only reorders rows reads as confirmed. A delivered document that
-cannot be assembled reads `echo not comparable: <why>` and is held the same
-way. `:rebase` is refused while a sent draft awaits its echo with no
-difference held (it would re-arm an upload of edits already in flight). `sent`
-is not persisted: a sent draft restores with its edits, unsent.
+`[ui] line_numbers` adds a gutter beside the grid's pinned column: the row
+label when shown, otherwise the first value column. The column widens for the
+gutter while cursor borders, draft fills, and deletion marks stay on the data
+cell. Numbering includes inserted and deleted rows in painted order. Relative
+mode uses absolute numbers while the cursor is in the header attribute strip.
+Numeric and date editors retain the displayed value's alignment and text origin
+inside the cell.
 
-**Known limitations.** An upload is a whole document with no concurrency
-check: the last writer wins, so an upstream generation that lands between the
-panel's last delivery and the trader's `y` is overwritten. An echo that
-arrives before the transport's `Ok` is handled as an ordinary delivery of a
-draft still `Editing` (the update policy applies, as to any newer generation),
-and the late `Ok` then does not enter `Sent`; the demo bus answers `Ok` first,
-but a real transport may not.
+Dividend row labels use the ex date and a same-date ordinal (`<date>#n`).
+Rebase drops cell edits and deletions in a same-date group whose row count
+changed, because the old ordinal may identify a different dividend. The draft
+captures group sizes from its painted base before rebase or session save.
+Restored drafts without these saved sizes cannot apply this guard. A reorder
+within an unchanged-size group remains undetectable and can move an edit to
+the wrong dividend.
+
+Session drafts store cell edits with row and column labels, allowing restore
+to resolve them against a delivered grid. Attribute serialization has a type
+ambiguity: a text attribute that looks like an ISO date restores as a Date.
+The saved draft therefore does not preserve every attribute value's type.
+
+### Uploads
+
+`:upload [target]` and the action list's `Upload` row send the edited document
+to a configured egress target. Upload requires a complete Editing draft, an
+eligible target, and no other upload in flight from the tile. Both the frame
+and the painted generation must be live. A live frame can still show a
+historical generation while a requery is pending or after it fails; uploading
+that document would overwrite untouched rows with old values.
+
+Arming confirmation assembles the rows and snapshots the draft. The header
+shows the target and counts of changed cells, attributes, added rows, and
+removed rows. Bare unmodified `y` submits that snapshot after rechecking the
+live frame, live painted generation, and full draft equality. Every other key
+cancels and is consumed, including chords. A pointer press on the tile or loss
+of focus also cancels. A delivery that changes the draft or painted generation
+withdraws the prompt.
+
+Transport success marks the draft `sent HH:MM` only if the current draft is
+still Editing and equals the submitted draft, including its base. Failure
+keeps the draft editable and shows `upload failed: <e>`. Service admission,
+transport success, and a stored echo are separate stages; see
+[document uploads](request-delivery.md#document-uploads) for delivery limits.
+
+Upload state belongs to the submitting underlying. Switching underlying gives
+up that draft's echo check and parks it as Editing, even if its upload is
+still in flight. A later outcome for an underlying no longer shown produces a
+notice naming it and leaves the visible draft alone. Session restoration also
+restores nonempty drafts as Editing; upload status and echo tracking are not
+saved.
+
+A Sent draft compares the next delivered generation with a different source
+time against the submitted document. Comparison ignores row order and minted
+row labels, compares attributes, and allows one ULP for floating-point values.
+Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
+the next edit. This is a content match, without an upstream correlation id.
+
+Different contents retain the draft over its base and show `echo differs
+(N rows)`; an attribute mismatch counts as one additional row. An uncomparable
+document shows `echo not comparable: <why>` and is held too. Edits remain
+refused until `:rebase` makes an unsent draft on the held generation or
+`:revert` discards the draft. The ordinary update policy does not apply while
+Sent. Rebase is refused while awaiting an echo with no differing generation
+held.
+
+Uploads replace the whole document with no concurrency check: the last writer
+wins. A generation that arrives upstream after the panel's last delivery can
+be overwritten. An echo delivered before transport success follows the
+ordinary Editing update policy. If that changes the draft, the later success
+cannot mark it Sent.
 
 ## Timeseries
 
 `geode-timeseries` owns a chart tile composed from source series and arithmetic
 expressions. Its pure model tracks slots, range, frequency, axis mode,
-statistics, cursor, popups, and session state. Each mutation returns a
-`Changed` bitset so the tile can distinguish fetch, query, chart, chrome, and
-session work.
+statistics settings, cursor, and viewport. Mutations return a `Changed` bitset
+so the retained tile can distinguish fetch, query, chart, chrome, and session
+work. Popup state belongs to the retained tile, separately from the model.
 
-Source identities resolve through the configured fetch sources. Fetch requests
-ask only for uncovered spans; completion is broadcast by `(identity, source)`
-so every interested tile requeries, including when zero new rows were needed.
-Series queries return aligned struct-of-arrays values, percentiles, bins, and
-coverage. Expression slots may narrow the result to buckets shared by their
-operands.
+Runtime responsibilities are split by module:
+
+| Module | Responsibility |
+|---|---|
+| [`tile`](../../crates/geode-timeseries/src/tile/mod.rs) | Entity state, frame observation, actions and local commands, header preparation, chart cache, and rendering |
+| [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
+| [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
+| [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
+| [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
+
+Settings and tiles obtain configured fetch sources from the shell-published
+`SeriesSettings` global. A configured source is not proof that its adapter
+started successfully. Fetch requests ask for the selected range; the data tier
+subtracts covered spans. Completion is broadcast by `(identity, source)` and
+updates affected slots. Visible affected tiles requery on every successful
+completion, including zero new rows. Failed requests retain the last good
+chart and report a notice or failed slot.
+
+Series queries return aligned points, percentiles, bins, and coverage.
+Expression slots may narrow results to buckets shared by their operands.
+Delivery tags reject superseded queries. Results requested under a pending
+frame flip are staged until promotion is allowed. This coordinates ready
+results, but the barrier timeout can release them while lagging tiles still
+show older data.
+
+The series list, add picker, expression editor, range editor, action menu, and
+colour picker share one `Popup` owner. The list has no text field; input popups
+own their fields and key routing. Closing uses one cleanup path and blurs a focused input before
+releasing it. Series and add-picker rows share geometry, theme treatment,
+identity, and pointer handling, while supplying their own labels, controls,
+and activation behavior. The range editor uses separate date-field rows;
+the expression editor renders inline below the header in the tile body.
 
 `geode-chart` is independent of series and shell concepts. Its pure core owns
 scales, axes, layout, viewport, crosshair, hit-testing, decimation, and palette
@@ -157,24 +202,74 @@ derivation. `ChartElement` paints an immutable `ChartModel` through
 gpui-component's plot surface. Paths and chrome are cached by the values that
 affect them; cursor movement does not rebuild the data model.
 
-Every verb has a pointer route beside its key, and both take the tile's one
-`dispatch` path. The header's `⋯` button and a right-click on a chip open an
-action menu (`.` from the keyboard) listing the openers, the cursor slot's
-verbs, the frequency steps, the two toggles with their state, and the view
-reset; a disabled row names its reason as the notice. `j`/`k` step over
-disabled rows as they do over separators and section headings (in every
-tile's action menu); only the pointer rests on a disabled row. A chip click selects
-its slot, a click on its swatch shows or hides it, and the `range · freq`
-readout opens the range popup, which also carries a frequency row whose chips
-write at once and leave the popup open. Over the chart, a wheel zooms about
-the pointer (the dominant axis wins, so a sideways wheel pans instead), a drag
-on a plot pans, and a drag on the band between two panes moves the split. A
-drag ends on release, on a release anywhere off the chart, or on the first
-move that arrives with no button held; a modified press or a double-click's
-second press arms nothing, because those are the shell's tile gestures. The
-empty tile offers the add and compose verbs as buttons under its hint. A
-right press focuses a tile exactly as a left one does, so a module's context
-menu always opens in the tile whose keys it will answer to.
+The header's `⋯` button, a chip's right-click, and `.` open the action menu.
+It offers popup openers, actions for the selected slot, frequency steps,
+toggles, and view reset. Keyboard stepping skips disabled rows, separators, and
+headings. Pointer selection can rest on a disabled row, which has no highlight
+fill; choosing it shows its reason and leaves the menu open. Enabled actions
+close the menu before dispatch. Key hints refresh when the menu opens or its
+chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+
+Pointer controls and keyboard actions use the same model operations and
+change processing:
+
+| Pointer action | Effect |
+|---|---|
+| Click a series chip / its swatch | Select the slot / toggle its visibility |
+| Right-click a series chip | Select the slot and open the action menu |
+| Click the range and frequency readout | Toggle the range editor and keep keyboard focus in its input |
+| Click a frequency chip in the range editor | Apply immediately, leaving draft dates unchanged; cancelling the editor does not undo frequency |
+| Wheel over a plot | Dominant vertical motion zooms about the pointer; dominant horizontal motion pans; ties zoom |
+| Drag a plot / the band between panes | Pan / adjust the split |
+| Click Add or Compose in an empty tile | Open the corresponding editor |
+
+Chart drags end on release, including a release outside the chart, or on a
+move with no button held. Movement outside the chart surface is not tracked.
+Modified presses and subsequent presses in a multi-click do not start chart
+drags, leaving those gestures available to the shell. Right presses focus the
+tile before its context menu handles keys.
+
+An unedited range popup accepts preset labels as printed on its chips:
+`3` then `m` selects `3m`, matching `:range 3m`. A bare digit highlights the
+presets it could start and waits for `w`, `m`, or `y`; shifted units also work.
+An unsupported digit, invalid digit/unit pair, or Enter before the unit shows
+an inline refusal. Backspace or Escape clears a pending digit; another Escape
+closes the popup. Completing a preset applies it and closes the popup unless
+range validation refuses it.
+
+Moving or stepping a date segment, or clicking one, makes later digits edit
+the date. A key that changes nothing does not switch to date entry, and Tab
+alone only switches fields. Closing and reopening with `r` restores preset
+entry. Frequency chips still apply immediately without committing draft dates.
+
+A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolute
+`#rrggbb`. Palette and named colours follow the theme. Absolute colours receive
+no theme or contrast adjustment. Sessions store them as lowercase six-digit
+hex; malformed hex restores the slot's default colour. Colour names beginning
+with `#` are reserved. `c` cycles the palette, starting at colour 1 from a named
+or absolute colour. `:colour s<n> <1..5|name|#rrggbb>` sets the colour directly;
+an explicit hex remains absolute even if it matches a palette colour.
+
+The action menu's `Colour…` row opens a picker at the selected slot's chip.
+Its featured swatches capture the five palette colours and all named colours
+as resolved when the picker opens. Picks are quantized to opaque 8-bit RGB:
+
+- A pick within one step per channel of the slot's currently painted colour
+  leaves its colour setting unchanged.
+- Otherwise, a pick within that tolerance of a featured swatch retains its
+  palette or name identity. The nearest swatch wins, with the first on a tie.
+- Other picks become absolute colours, with alpha discarded.
+
+The tolerance preserves palette and named choices through the component's hex
+field conversion. Swatches and entered hex commit and close; sliders apply
+live and stay open. Escape or an outside click closes without undoing slider
+changes. Picks target the slot that opened the picker even if the cursor moves;
+removing that slot closes it. Picker focus puts the tile in insert mode so hex
+input does not invoke single-key tile commands.
+
+Each slider change rebuilds the chart model and clears its path cache. Measured
+daily and hourly fixtures fit the frame budget; the 500,000-point fixture does
+not. See the [measurement log](../perf.md) for conditions and timings.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
@@ -229,8 +324,9 @@ map and observer, notification, and allocation contracts.
 `Pricer` vocabulary. `geode-pricing` contains implementations of that trait.
 The current `MockPricer` is deterministic test and demo behavior, not a
 financial model. The pricing worker applies one override set per batch,
-contains panics, supports cancellation between lines, and answers every line
-with either values or an error.
+contains panics, and returns values or an error for each completed line.
+Cancellation can drop a queued batch or stop a running batch between lines,
+so cancelled requests need not return an outcome for every submitted line.
 
 `geode-pricer` is the line-pricer module: a pure core (a struct-of-arrays
 sheet, edits and undo, shorthand parsing and rendering, package folding, column
@@ -252,10 +348,10 @@ binary lacks is named in danger text with its recovery (`set [pricing]
 adapter and restart`).
 
 Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
-type`, `priced at`), and the default widths fit each label and a worst-case
-value (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price), inside the
-cursor cell's border, at the largest font size; a view's `label` and `width`
-still override them. Both bundled views end in a `status` column, which says
+type`, `priced at`), and default widths are checked against labels and representative large
+values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
+largest supported font size. These examples do not bound every possible
+value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
 shown by colour alone. The tree column reserves a fixed chevron slot on every
 row, so roots share one leading edge and legs sit one step in; the entry row
@@ -281,7 +377,14 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
-| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer, and `j`/`k` skip separators, section headers and disabled rows; a disabled row takes no fill, and `enter` or a click there (reached by the pointer) names the reason. Key hints are the default bindings; a rebind is not reflected |
+| `.` | Open the action menu |
+
+The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
+and view selection. Key hints show default bindings and do not reflect
+rebindings. Keyboard stepping skips disabled rows, separators, and headings.
+Pointer selection, the initial highlight, or a rebuilt menu can still leave a
+disabled row selected. It has no highlight fill; choosing it shows its reason
+and leaves the menu open.
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
@@ -296,26 +399,22 @@ click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
 typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
 cell's value. Type and barrier type accept only their vocabulary, and `enter`
-commits the highlighted option. An open editor follows its column, and the
-cursor with it, through a view change (a config reload or `:view`) that moves
-it. When the column leaves the view, or the line leaves the grid, the editor
-closes with `the cell moved; edit refused` in the footer and nothing is
-committed; that close has no window of its own, so the field is blurred at the
-end of the same update, before the next frame. A click in the grid, including a
-package chevron, cancels an open editor or entry field and never commits it,
-and acts on the row it was painted on: the entry placeholder is a row, so
-closing it moves the rows below up, but a click below it still lands on (or
-toggles, or double-click edits) the row the trader aimed at. A click or
-double-click on the placeholder itself only closes it. A `:` command or a `/`
-search closes the menu and any open field first. An open menu re-checks its
-rows whenever the tile changes under it (a load answer, a config reload),
-keeping its highlight where it was. A click outside the grid leaves a text
-editor open until the next grid click or verb, as in the market-data panel; the
-typeahead popup closes on an outside click. Both the entry field and the cell
-editor are blurred when they close, and no chord is bound while one is open, so
-`ctrl+k` still opens the palette. Either field puts the tile in insert mode, so
-bare and shifted letters and digits are typed into it and never reach a shell
-binding (`shift+d` would otherwise duplicate the tile).
+commits the highlighted option. An open editor tracks its line id and column kind through model and view
+changes, moving the cursor with it. If either target disappears, it closes
+without committing and shows `the cell moved; edit refused`. Deferred blur
+uses the editor's opening window and checks current focus before blurring.
+
+A grid click cancels an editor or entry field before acting on the painted
+row's identity. Removing an entry placeholder therefore cannot redirect the
+click to a neighboring row. Clicking the placeholder itself only closes it.
+Commands and search close open fields and menus. A text editor remains open
+after a click outside the grid; a typeahead closes on an outside click.
+
+An open action menu recomputes availability and views when tile chrome
+rebuilds, retaining its highlighted action or view when still present. Both
+entry and cell editors put the tile in insert mode: bare and shifted letters
+and digits are typed into the field. Insert bindings leave shell chords such
+as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
@@ -395,9 +494,10 @@ Every edit that changes a line's request bumps that line's revision and marks
 it stale. The tile submits when some stale line is not already in flight at its
 current revision, and each submission carries every stale line in one batch.
 An outcome tagged older than the latest submission is dropped whole. A result
-for an older revision is ignored, and the line, still stale, is resubmitted. A
-hidden tile cancels its in-flight work by key and submits nothing until shown,
-keeping its stale marks.
+for an older revision is ignored, and the line, still stale, is resubmitted.
+Hiding a tile requests cancellation by key and defers further pricing until
+shown, keeping its stale marks. Cancellation is best effort and cannot retract
+emitted outcomes; matching deliveries can still apply while hidden.
 
 A refused submission (a full request queue, or a data service that is gone)
 paints `pricing request refused: …; retrying` over the header notice without

@@ -1,16 +1,13 @@
-//! What an upload sends, and whether an echo confirms it (egress spec §6
-//! "Assembly", §7 "The echo", amendment 3).
+//! Typed upload assembly and comparison with delivered echoes.
 //!
-//! Pure: no element, entity or I/O. The tile calls [`assemble`] on
-//! `:upload`'s `y` and keeps the result as `sent`; when a later generation
-//! is delivered it calls [`echo_differs`] with that generation's rows.
+//! The tile assembles rows when arming upload confirmation, then submits that
+//! captured document on confirmation. Successful transport acceptance retains
+//! the sent document for comparison with a later delivery.
 //!
-//! Every value is written at its DECLARED type — the spec's `ty` for a
-//! flat column, `value_type` for a pivot's ladder, `f64` for a slice
-//! value, `HeaderAttr::ty` for an attribute — and a value of any other
-//! tag is refused naming its row and column rather than coerced: an
-//! upload that quietly turned a typo into a number would publish a
-//! plausible wrong value upstream.
+//! No I/O or entity state lives here. Flat values, ladder values, attributes,
+//! and row axes retain their declared types; slices use `f64`. Missing or
+//! wrong-typed values are refused by name rather than coerced into plausible
+//! values for upstream publication.
 
 use crate::core::draft::{Draft, parse_attr};
 use crate::core::matrix::{MatrixModel, RowModel, RowState, read_flat_value};
@@ -32,10 +29,10 @@ use geode_core::snapshot::Snapshot;
 /// column), the ladder's value then every slice value repeated across the
 /// row's nodes.
 ///
-/// `Err` names the first row and column that cannot be written: an empty
-/// cell (an inserted row not yet filled), a value whose tag is not the
-/// declared type, a typed row label that does not parse, or a document
-/// with nothing left to send.
+/// Refuse missing or wrong-typed values and attributes, unsupported types,
+/// invalid typed row labels, absent required slice columns, or no rows left
+/// to send. Every serialized cell needs a value, even when a flat column's
+/// `required` flag excludes it from the draft's incomplete-row count.
 pub fn assemble(
     snapshot: &Snapshot,
     spec: &PanelSpec,
@@ -281,23 +278,18 @@ fn tag(ty: ColumnType) -> &'static str {
     }
 }
 
-/// How many rows differ between what was sent and a delivered document,
-/// comparing every column except a `Minted` row axis's label; `0` means
-/// the echo confirms the upload. `f64` within one ULP, everything else exact.
-/// Attributes that differ count as one extra row.
+/// Count differences between a sent document and a delivered echo.
+/// The caller must select the same document key; this function does not
+/// compare `DocumentRows::key`. Compare named axes and values, skipping a
+/// minted row-label axis because the inbound parser re-mints IDs. Float cells and
+/// attributes allow one ULP; other typed values compare exactly.
 ///
-/// The minted label is Geode's, not the wire's: the kind writes no id and
-/// the echo arrives re-minted, so comparing it would make every upload
-/// that inserted a row "differ". Rows are compared as a MULTISET: both
-/// sides are sorted by the full tuple of compared columns and matched in
-/// one merge walk. The sent rows are in painted order while the store
-/// hands a document back sorted by its axes, so an out-of-order insert,
-/// an ex-date edited past a neighbour or a term inserted out of date order
-/// would otherwise read as differing on every successful upload. The
-/// count is the larger side's unmatched rows — one changed value is one
-/// row, a row only one side has counts once. The cost: an upstream that
-/// only reorders rows reads as confirmed. A column one side carries and
-/// the other lacks makes every row differ.
+/// Rows are multisets: align columns by name, sort exact tuples, then pair
+/// rows with a merge walk. Painted order can differ from stored axis order,
+/// so reordering alone confirms. Count the larger side's unmatched rows;
+/// incompatible column sets count the larger document's full row count.
+/// Any attribute-set difference adds one more unit, regardless of how many
+/// attributes changed. Zero confirms the compared payload.
 pub fn echo_differs(spec: &PanelSpec, sent: &DocumentRows, delivered: &DocumentRows) -> usize {
     let minted = spec.rows.identity == RowIdentity::Minted;
     let skipped = minted.then_some(spec.rows.column);
@@ -426,9 +418,8 @@ fn compared<'a>(doc: &'a DocumentRows, skipped: Option<&str>) -> Vec<&'a (String
         .collect()
 }
 
-/// How far apart two `f64`s may be and still be the same number: one
-/// unit in the last place, the most a text round trip through a wire
-/// format can move a correctly printed and parsed double.
+/// Allow one ULP for same-sign floating values, plus ordinary numeric
+/// equality (including signed zero), when comparing echoed values.
 const ULPS: u64 = 1;
 
 fn f64_close(a: f64, b: f64) -> bool {
@@ -571,10 +562,9 @@ role = "attribute"
         }
     }
 
-    /// Base rows A, B, C: B's amount edited, C deleted, `new-1` inserted
-    /// under A with every cell set. The upload is the painted order with
-    /// the deleted row gone, the minted label written into the axis
-    /// (amendment 3), and the attributes read typed off the snapshot.
+    /// Base rows A, B, C with B edited, C deleted, and a filled insert under A.
+    /// Assembly preserves painted order, excludes C, retains the minted axis
+    /// labels, and reads attributes at their declared types.
     #[test]
     fn a_dividend_draft_assembles_edits_deletes_and_inserts_in_painted_order() {
         let base = fixture_dividend_rows();

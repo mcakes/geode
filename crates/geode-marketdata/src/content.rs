@@ -1,9 +1,8 @@
-//! What the shell hosts (Phase 3 spec §3.1, §3.2; market-data spec §8.1):
-//! the `TileContent` wrapper over a [`MarketDataTile`] entity, and one
-//! factory per [`PanelSpec`] — so the roster kind is the panel's own
-//! (`cvi`, and the palette reads "CVI: Split") while the KEY CONTEXT every
-//! panel shares is `marketdata`. The factory carries the data handle
-//! (§2.1); the shell never sees it.
+//! Shell integration for document panels. Each PanelSpec has its own roster
+//! kind while all factories declare the shared marketdata key context. The
+//! content wrapper forwards focus-sensitive operations to its MarketDataTile;
+//! the factory supplies the data handle, shared staleness threshold, and eligible
+//! egress targets without exposing them to the shell.
 
 use crate::core::PanelSpec;
 use crate::tile::MarketDataTile;
@@ -23,10 +22,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Every action this module registers, with its palette title. One list,
-/// in one crate, that [`DEFAULT_KEYMAP`] binds and `register_actions`
-/// registers — the two cannot drift, which is exactly what the shell's
-/// retired mirrored tables could not promise.
+/// Shared registered action IDs and palette titles. DEFAULT_KEYMAP binds a
+/// subset; the remaining actions are reachable through menus, commands, or the
+/// palette. PanelSpec contributes kind-specific actions separately.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::down", "Cursor down"),
     ("marketdata::up", "Cursor up"),
@@ -59,66 +57,34 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("marketdata::insert_up_big", "Insert: up (big)"),
     ("marketdata::insert_down_big", "Insert: down (big)"),
     ("marketdata::load_underlying", "Load underlying…"),
-    // A `Choice` cell's in-place step (dividend spec §4.4): the dialogs'
-    // own `space`/`shift+space`, brought to a grid cell.
+    // Step a Choice cell in place without opening its picker.
     ("marketdata::step", "Step value"),
     ("marketdata::step_back", "Step value back"),
-    // The row verbs (dividend spec §5.3): vim's own `o`/`O`/`dd`.
+    // Insert above/below and delete through the normal-mode row commands.
     ("marketdata::insert_below", "Insert row below"),
     ("marketdata::insert_above", "Insert row above"),
     ("marketdata::delete_row", "Delete row"),
     ("marketdata::upload", "Upload"),
     ("marketdata::revert", "Revert edits"),
     ("marketdata::rebase", "Rebase"),
-    // The update policy (spec §8.4, 2026-09-19): palette rows and the
-    // menu's `On new document` section, no default key — a setting a
-    // trader changes a few times a day is not worth a chord.
+    // New-document policies are exposed through the menu and palette, with no
+    // default key assignment.
     ("marketdata::auto_hold", "Auto: hold edits"),
     ("marketdata::auto_rebase", "Auto: rebase edits"),
     ("marketdata::auto_replace", "Auto: replace edits"),
 ];
 
-/// This module's default bindings (market-data spec §8.3/§8.6), handed to
-/// the app through [`ModuleFactory::default_keymap`] and spliced above the
-/// compiled-in shell keymap and below every desk and user layer — so a
-/// trader's own override still wins.
+/// Module bindings supplied above shell defaults and below desk/user overrides.
+/// Normal, insert, and menu contexts match MarketDataTile's current input state.
 ///
-/// Two contexts, matching what [`MarketDataTile::key_context`] pushes.
-/// `normal` is the whole grammar. `insert` is deliberately narrow: while
-/// the cell editor OR the underlying picker holds the keyboard, the shell
-/// resolves BARE keys ONLY against the contexts that carry `mode ==
-/// insert` (spec §8.6), so every key not bound here is a character the
-/// trader is typing into a cell or the picker's field — which is the
-/// point. `enter`/`escape` commit/cancel whichever of the two is open
-/// (`MarketDataTile::dispatch`'s own routing); bare `up`/`down` and
-/// `shift+up`/`shift+down` are the neutral `insert_up`/`insert_down`
-/// (`_big`) pair (2026-09-17), whose meaning follows which input is open
-/// — the picker's highlight step (spec §7) while the picker holds the
-/// keyboard, a nudge of the editor's number by one unit of its painted
-/// precision (ten with `shift`) while the cell or attribute editor does
-/// — and "not handled" with neither. Shift alone is typing to the shell's
-/// insert branch (`Modifiers::is_chord`), so `shift+up` resolves here as
-/// a bare key exactly as `up` does.
+/// Insert bindings handle commit, cancel, and small/large vertical steps. The
+/// tile interprets steps as picker navigation or numeric editing according to the
+/// active surface. Bare keys use insert-carrying contexts; Control/Alt/Command
+/// chords still resolve against the full shell stack. No chord is bound in this
+/// insert block, keeping shared commands such as the palette available.
 ///
-/// **`ctrl+j`/`ctrl+k` are deliberately NOT bound here (controller
-/// ruling, superseding this crate's own first attempt and spec §7's
-/// original wording).** A bare key resolves only against insert-carrying
-/// contexts, but a CHORD resolves against the WHOLE stack (spec §8.6
-/// again) — and `ctrl+k` ships bound to `palette::toggle` at the
-/// workspace level. CLAUDE.md's standing rule for a module's insert-mode
-/// field is that a shipped chord still fires from inside it: the whole
-/// point of resolving chords against the full stack is that a module
-/// must never take one away, and scoping the shadow to "only while the
-/// picker is open" still takes the palette away exactly when a trader is
-/// typing into the picker — no better than taking it from the cell
-/// editor. `up`/`down` (bare, already above) are the picker's whole
-/// highlight vocabulary; Task 8 records the amendment.
-///
-/// `^` and `$` sit beside `home`/`end` as the column-extreme pair (user
-/// ruling 2026-09-12: a general navigation grammar, the blotter its first
-/// surface and this panel its second — the same two keys, not `0`); both
-/// are shifted punctuation on a US layout, so they bind as the bare
-/// character with no `shift` modifier.
+/// Column extremes accept Home/End and the bare ^/$ key spellings. The latter
+/// bindings match the event spelling supplied by the shell's key conversion.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "marketdata && mode == normal"
@@ -185,10 +151,7 @@ impl TileContent for MarketDataContent {
     fn key_context(&self, cx: &App) -> KeyContext {
         self.tile.read(cx).key_context()
     }
-    /// The `window` is forwarded rather than dropped: `marketdata::edit`
-    /// creates the cell editor's `InputState` and focuses it, and
-    /// `commit`/`cancel` blur it (spec §8.6) — none of which is reachable
-    /// from `&mut App` alone.
+    /// Forward the window because edit, commit, and cancel manage input focus.
     fn dispatch(
         &self,
         action: &ActionId,
@@ -221,8 +184,7 @@ impl TileContent for MarketDataContent {
             // This tile asks no series query and holds no
             // `(identity, source)` pair.
             Delivery::Series(_) | Delivery::SeriesFetched { .. } => {}
-            // An upload outcome: `Sent` on `Ok`, the header's
-            // `upload failed` on `Err`, a stale tag ignored.
+            // The tile checks upload tags and draft identity before applying outcomes.
             Delivery::Upload(u) => self.tile.update(cx, |t, cx| t.deliver_upload(u, cx)),
         }
     }
@@ -249,9 +211,8 @@ impl TileContent for MarketDataContent {
 pub struct MarketDataFactory {
     data: DataHandle,
     spec: &'static PanelSpec,
-    /// `[app] blotter.stale_after` (spec §6.5), shared with every tile
-    /// this factory has built exactly as `BlotterFactory`'s is, so a
-    /// config reload reaches them all without recreating any.
+    /// Shared staleness threshold. Updating this Cell changes what existing
+    /// tiles read without recreating them.
     stale_after: Rc<Cell<Duration>>,
     /// Whether [`default_keymap`](ModuleFactory::default_keymap) answers
     /// [`DEFAULT_KEYMAP`] or `None` (see [`Self::without_keymap`]).
@@ -291,25 +252,16 @@ impl MarketDataFactory {
         self
     }
 
-    /// A second document kind's factory over the same shared
-    /// `marketdata` context (CLAUDE.md's market-data documents section,
-    /// "the second panel ships no second fragment"): every panel's
-    /// [`DEFAULT_KEYMAP`] is the identical vocabulary — one `marketdata`
-    /// context, not one per kind — so a second factory that also shipped
-    /// it would splice a second, byte-identical `<module:{kind}>` layer
-    /// binding the same keys in the same context a second time. One
-    /// factory ships the fragment; every later one built through this
-    /// door ships only its own actions (`register_actions` is already
-    /// tolerant of the resulting duplicate `marketdata::*` ids) and, for
-    /// [`PanelSpec::actions`], its own kind-specific ones.
+    /// Suppress the shared fragment for additional panel factories. They still
+    /// declare the marketdata context and register shared and kind-specific actions;
+    /// only one factory needs to contribute identical default bindings.
     pub fn without_keymap(mut self) -> MarketDataFactory {
         self.ships_keymap = false;
         self
     }
 
-    /// A reloaded staleness threshold: every open tile picks it up
-    /// immediately, since they all share this `Rc<Cell<_>>` (the same
-    /// door `BlotterFactory::set_stale_after` is).
+    /// Update the threshold shared with every tile created by this factory.
+    /// This setter does not notify tiles; they read the new value when rendered.
     pub fn set_stale_after(&self, d: Duration) {
         self.stale_after.set(d);
     }
@@ -336,12 +288,8 @@ impl ModuleFactory for MarketDataFactory {
         self.spec.kind
     }
 
-    /// **Not the kind.** The trait's default answers `kind()` — `cvi`
-    /// here — and a fragment binding in a context the factory does not
-    /// declare is dropped with an error diagnostic, so taking the default
-    /// would leave this panel with no keys at all. One vocabulary
-    /// (`marketdata`) is shared by every document kind's panel, which is
-    /// the whole reason `contexts()` is a separate answer from `kind()`.
+    /// Declare the shared keymap context independently of this panel's roster kind.
+    /// Bindings in an undeclared module context are rejected during keymap building.
     fn contexts(&self) -> Vec<&'static str> {
         vec!["marketdata"]
     }
@@ -363,10 +311,8 @@ impl ModuleFactory for MarketDataFactory {
                 category: "Market data".to_string(),
             });
         }
-        // The kind's own verbs (spec §6.3): registered so the palette
-        // lists them and a keymap can bind them, exactly as `ACTIONS`
-        // above — a second document kind's own `KindAction`s land here
-        // too, since this loop is per-spec rather than per-crate.
+        // Register per-kind operations alongside the shared vocabulary so menus,
+        // palette, and custom bindings can address them.
         for a in self.spec.actions {
             let _ = registry.register(ActionDef {
                 id: ActionId(a.id.to_string()),
@@ -434,17 +380,9 @@ mod tests {
         registry
     }
 
-    /// Registered ids the default keymap deliberately binds NO key to
-    /// (spec §6.2): each is reachable from the palette (it is registered)
-    /// and from the `:` line, and the four draft verbs also through the
-    /// action list's own `enter`/click — an internal
-    /// [`crate::tile::MarketDataTile::dispatch`] call, never a keymap
-    /// binding. Binding a bare key to a verb the menu already carries
-    /// would be a second door onto something spec §6.1 keeps to exactly
-    /// one. [`PanelSpec::actions`] (CVI's `cvi_reanchor`/
-    /// `cvi_recalc_forward`) are unbound BY DESIGN: a per-kind verb lists
-    /// in the menu's own section and the palette, and answers "not built
-    /// yet" until egress gives it something to send.
+    /// Registered actions intentionally absent from the default keymap. This list
+    /// includes shared draft/policy actions and the unimplemented CVI operations;
+    /// registration alone does not mean the operation can currently succeed.
     const NO_DEFAULT_KEY: &[&str] = &[
         "marketdata::upload",
         "marketdata::revert",
@@ -456,14 +394,9 @@ mod tests {
         "marketdata::cvi_recalc_forward",
     ];
 
-    /// The twin of `geode_blotter::content`'s own fragment test, made
-    /// EXACT by the final review (A2): every id the fragment binds is
-    /// registered here (a `build_keymap` diagnostic IS that failure),
-    /// [`NO_DEFAULT_KEY`] is a subset of what is registered (a stale
-    /// entry fails), and the set of registered ids the keymap leaves
-    /// unbound EQUALS [`NO_DEFAULT_KEY`] in both directions — a new
-    /// action with no key and no entry here fails, and so does an entry
-    /// for an action that has since gained a key.
+    /// Every bound ID must be registered, and the registered IDs left unbound
+    /// must equal NO_DEFAULT_KEY. This catches both missing bindings and stale
+    /// exceptions when the action vocabulary changes.
     #[test]
     fn the_default_keymap_binds_exactly_the_actions_this_module_registers() {
         use std::collections::BTreeSet;
@@ -519,13 +452,8 @@ mod tests {
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
     }
 
-    /// A second document kind's factory (CLAUDE.md's "the second panel
-    /// ships no second fragment"): `without_keymap` answers `None` from
-    /// `default_keymap` — so `ModuleRoster::keymap_fragments` produces
-    /// no `<module:dividend>` doc at all — while leaving `kind()` and
-    /// `contexts()` untouched and `register_actions` still populating
-    /// the registry: the actions belong to the shared vocabulary, not to
-    /// whichever factory happens to ship the fragment.
+    /// An additional panel factory contributes no duplicate keymap fragment,
+    /// while preserving its roster kind, context declaration, and registrations.
     #[test]
     fn without_keymap_ships_no_fragment_and_still_registers_actions() {
         let (data, _rx) = DataHandle::for_tests();
@@ -577,10 +505,8 @@ mod tests {
         );
     }
 
-    /// `^`/`$` are the column extremes, exactly the blotter's pair (the
-    /// first build bound `0` here and miscited the ruling): both bind as
-    /// the bare character with `shift` cleared, with counts enabled on the
-    /// context so the test proves neither is read as a count digit.
+    /// Column-extreme punctuation matches as bare characters even when numeric
+    /// counts are enabled on the context.
     #[test]
     fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -605,23 +531,8 @@ mod tests {
         }
     }
 
-    /// The insert-mode half of the fragment (spec §8.6): `enter` and
-    /// `escape` must resolve in `marketdata && mode == insert`, because
-    /// while the cell editor holds focus the shell resolves ONLY the
-    /// contexts carrying `mode == insert` for a bare key — a fragment
-    /// that bound them in normal mode alone would leave no way out of a
-    /// cell. Bare `up`/`down` and `shift+up`/`shift+down` — the neutral
-    /// `insert_*` pair (2026-09-17) — are here for the same reason: the
-    /// underlying picker's field holds the keyboard exactly as the cell
-    /// editor does, and its highlight has to move somehow, while over the
-    /// editor the same keys nudge the number. Shift alone is not a chord
-    /// to the shell (`Modifiers::is_chord`), so `shift+up` is a bare key
-    /// resolving against this block exactly as `up` does.
-    /// No chord is bound here at all (controller ruling — see
-    /// `ctrl_k_still_opens_the_palette_from_the_open_picker`): a bare key
-    /// is confined to insert-carrying contexts, but a chord resolves
-    /// against the whole stack, and this module must never take one a
-    /// trader could reach from anywhere else.
+    /// Bare commit/cancel and vertical editing steps resolve in insert context.
+    /// The fragment adds no insert-mode chords that could shadow shared shell actions.
     #[test]
     fn enter_and_escape_resolve_in_insert_mode() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -646,15 +557,9 @@ mod tests {
         }
     }
 
-    /// The real invariant (controller ruling): pressed against the REAL
-    /// builtin keymap (not the fragment alone — a fragment-only keymap
-    /// has no `palette::toggle` binding to shadow in the first place),
-    /// `ctrl+k` still opens the palette with the underlying picker OPEN
-    /// — not just with the plain cell editor — because this module binds
-    /// no chord in insert mode at all. A module must never take a shipped
-    /// chord away from a trader, and "only while the picker is open" is
-    /// still taking it away exactly when a trader is typing into the
-    /// picker.
+    /// With the builtin shell keymap present, the palette chord remains available
+    /// under the picker/editor insert context. A fragment-only test would not detect
+    /// a shadowed workspace binding.
     #[test]
     fn ctrl_k_still_opens_the_palette_from_the_open_picker() {
         use geode_core::config::LayerDoc;
@@ -687,11 +592,8 @@ mod tests {
         }
     }
 
-    /// `.` and `u` are the normal-mode doors onto the action list (spec
-    /// §6.1); once it is open, `mode == menu` is the whole of the menu's
-    /// own grammar — `j`/`k` and the arrow keys (final review, A7: the
-    /// picker already took `down`/`up`, and the menu is the same list
-    /// shape), `enter`/`escape`, and `.` toggling it closed again.
+    /// Normal mode opens the menu with dot and the picker with u. Menu mode
+    /// handles letter/arrow navigation, Enter, Escape, and dot to close.
     #[test]
     fn dot_and_u_bind_in_normal_mode_and_the_menu_keys_in_menu_mode() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
@@ -728,9 +630,7 @@ mod tests {
         }
     }
 
-    /// [`PanelSpec::actions`] rides `register_actions` exactly as
-    /// [`ACTIONS`] does (spec §6.3): the palette and a keymap can only
-    /// reach a `KindAction` if the registry actually knows its id.
+    /// Kind-specific action IDs must be registered for palette and keymap access.
     #[test]
     fn the_kind_actions_are_registered() {
         let mut registry = ActionRegistry::default();

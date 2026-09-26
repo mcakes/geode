@@ -1,14 +1,9 @@
-//! What a pointer position over a painted chart means (mouse pass,
-//! 2026-09-24): a place in a pane's plot, the divider between the two
-//! panes, or nothing the chart owns. Pure geometry over a solved
-//! [`Layout`], so a module can answer a wheel, a press or a drag without
-//! knowing how the element laid the panes out — and so the answer is
-//! testable without a window.
+//! Pure hit testing over a solved chart layout: plot, divider, or outside.
+//! Plot hits include the horizontal fraction used to anchor zoom.
 //!
-//! The divider is the [`PANE_GAP`] between the panes, widened by
-//! [`DIVIDER_MARGIN`] on each side: a 6 px target is under the guide's
-//! floor for a drag handle, and the extra margin is taken from the
-//! plots' edges, where a press was never going to start a pan.
+//! The divider grab band spans the full chart width, including axis columns,
+//! and extends DIVIDER_MARGIN design pixels into each adjacent plot. It takes
+//! precedence over plot hits in that overlap, providing a wider resize target.
 
 use super::axis::Pane;
 use super::layout::Layout;

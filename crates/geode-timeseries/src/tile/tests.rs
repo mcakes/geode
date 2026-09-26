@@ -20,11 +20,34 @@ use geode_shell::series::{FetchSource, SeriesSettings};
 use geode_shell::tiling::TileId;
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
+use gpui_component::color_picker::ColorPickerState;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
 
 const TILE: u64 = 7;
+
+/// What the shell root is to a tile, for focus: a `track_focus`ed
+/// ancestor. gpui's `div` answers a mouse-down's BUBBLE phase on such
+/// an element by focusing it unless a listener called
+/// `prevent_default`, so a popup a tile opens from a press and focuses
+/// in the same press loses the keyboard to the root a moment later.
+/// Without this ancestor the harness has nothing to steal focus and
+/// cannot see that loss.
+struct ShellStandIn {
+    focus: gpui::FocusHandle,
+    tile: Entity<TimeseriesTile>,
+}
+
+impl gpui::Render for ShellStandIn {
+    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        gpui::div()
+            .size_full()
+            .track_focus(&self.focus)
+            .child(self.tile.clone())
+    }
+}
 
 /// What the window closure hands back: it can return only one value,
 /// so everything a test drives or reads is parked here on the way
@@ -262,8 +285,14 @@ fn open_full(
                 // shell: gpui-component registers the focused
                 // `InputState` on the `Root`, so a tile that opens a
                 // field needs one for focus to behave
-                // here as it does in the app.
-                cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                // here as it does in the app. The tile sits under a
+                // focus-tracking stand-in for the shell root, which
+                // takes focus on any press nothing prevented.
+                let host = cx.new(|cx| ShellStandIn {
+                    focus: cx.focus_handle(),
+                    tile,
+                });
+                cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
         })
         .unwrap();
@@ -537,6 +566,18 @@ impl Harness {
             })
             .expect("the range popup is open")
     }
+    /// The range popup's chips a pending typed label still lights, in
+    /// chip order — empty when no label is pending.
+    fn range_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<&'static str> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Range(r)) => Preset::ALL
+                .into_iter()
+                .filter(|p| r.candidate(*p))
+                .map(Preset::as_str)
+                .collect(),
+            _ => Vec::new(),
+        })
+    }
     /// The range popup's inline refusal — a backwards range, an
     /// unfinished segment or the point cap.
     fn range_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
@@ -569,7 +610,7 @@ impl Harness {
                 .and_then(|p| match p {
                     Popup::Picker(p) => Some(p.input.clone()),
                     Popup::Expr(f) => Some(f.input.clone()),
-                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) => None,
+                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) | Popup::Colour(_) => None,
                 })
                 .expect("a field popup is open");
             input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
@@ -672,14 +713,8 @@ fn the_factory_is_kind_timeseries_with_its_fragment_and_actions(cx: &mut gpui::T
         "{bound} keys for {} actions",
         ACTIONS.len()
     );
-    // And every key SPELLS. `check_fragment` only reads predicates,
-    // and the two checks above only read action ids, so an
-    // unparseable keystroke used to reach the running app and be
-    // dropped there with an error diagnostic in the trader's
-    // diagnostics tile — which is where `"+"` was found, on the
-    // first `--demo` boot after the module was registered.
-    // `build_keymap` over the real spliced docs is the production
-    // path and the one that reports it.
+    // Compile the real spliced keymap to validate key spellings as well as
+    // predicates and registered action ids.
     let docs = geode_shell::keymap::fragments::splice(
         &[geode_core::config::LayerDoc::builtin("keymap", "").unwrap()],
         &docs,
@@ -750,9 +785,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
         h.chart(&vcx).version > v0,
         "a chrome change rebuilds the chart model (§8.5's version contract)"
     );
-    // A count steps the cycle that many times: from `Right`, two
-    // steps is `BottomLeft` then `BottomRight` (the brief's `Left`
-    // predates the four-axis cycle the model builds).
+    // Two axis steps from Right pass through BottomLeft to BottomRight.
     h.dispatch(&mut vcx, "axis_next", Some(2));
     assert_eq!(h.model(&vcx).slots()[1].axis, Axis::BottomRight);
     h.dispatch(&mut vcx, "prev", None);
@@ -832,12 +865,7 @@ fn the_edit_verb_on_a_source_slot_says_so(cx: &mut gpui::TestAppContext) {
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
-    // A verb this tile does not handle leaves the notice on screen:
-    // clearing it in state while the old text is still painted is a
-    // lie (review round 1, MIN-3).
-    // (Every popup verb is handled somewhere, so the unhandled one
-    // here is a list key with no list open — `popup_verb`'s guards
-    // fall through to `false` exactly as an unrecognised verb does.)
+    // An unhandled list action with no list open preserves the standing notice.
     h.dispatch(&mut vcx, "list_down", None);
     assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
     // A handled one takes it away and speaks for itself.
@@ -851,11 +879,8 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
     let v = h.chart(&vcx).version;
-    // A cursor move, a chip click, a visibility change and a
-    // finished fetch all touch the HEADER and nothing the chart
-    // model carries — rebuilding one would clone every slot's
-    // points and flush `geode-chart`'s path cache for an identical
-    // model (review round 1, I-2).
+    // Header-only changes retain the chart model and its cached paths;
+    // rebuilding would copy identical point arrays.
     h.dispatch(&mut vcx, "next", None);
     h.dispatch(&mut vcx, "prev", None);
     assert_eq!(h.chart(&vcx).version, v, "a cursor move");
@@ -1018,7 +1043,7 @@ fn a_fetched_ok_marks_the_pair_idle_and_queries_once_and_an_err_marks_it_failed(
     let (h, mut vcx) = open(cx);
     h.visible(&mut vcx, true);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "add SPX.close").unwrap(); // a second slot of the same pair (§9.6)
+    h.command(&mut vcx, "add SPX.close").unwrap(); // a second slot of the same pair
     h.requests(); // drain the fetch
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(0));
     let m = h.model(&vcx);
@@ -1053,13 +1078,8 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     h.visible(&mut vcx, true);
     h.command(&mut vcx, "add SPX.close").unwrap();
     let first = h.fetch_request().expect("the add's own fetch");
-    // A frame notify carrying nothing this tile follows, while that
-    // first fetch is still unanswered, must not re-ask for the same
-    // span: `acted` is `None` — this
-    // tile has never asked a QUERY — so `follows_changed` says true,
-    // and the refetch trio hanging off it alone fired a duplicate
-    // `Fetch` per pair on the first scope keystroke after a show.
-    // The trio is gated on a REAL as-of move instead.
+    // An unrelated frame notification before the first fetch returns must not
+    // resubmit that span. With no acted query yet, requery can still be needed.
     h.frame.update(&mut vcx, |f, cx| {
         f.set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
@@ -1082,14 +1102,8 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     assert!(second.from > first.from, "a narrower span");
 }
 
-/// The as-of observer's own `in_flight.clear()`. `fetch_pending`
-/// drops the in-flight set only when the RANGE moved, and an as-of
-/// change leaves `Range` identical — so without the explicit clear a
-/// pair whose FIRST fetch is still unanswered as the as-of moves
-/// keeps its entry, and the new span (`AsOf::At(t)` resolves to
-/// `t − preset .. t`, a different left edge) is never asked for at
-/// all: the chart paints a truncated left edge with nothing on
-/// screen to say so.
+/// An as-of move invalidates fetch tracking even when Range is unchanged.
+/// The resolved span can have an earlier left edge requiring new coverage.
 #[gpui::test]
 fn an_as_of_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1134,8 +1148,7 @@ fn a_removed_pair_leaves_no_ghost_and_a_re_add_fetches_again(cx: &mut gpui::Test
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.requests();
     h.command(&mut vcx, "remove s1").unwrap();
-    // The answer lands for a pair this tile no longer holds — the
-    // one path that used to leave an entry behind for ever.
+    // Completion clears tracking even for a pair no longer held.
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     h.command(&mut vcx, "add SPX.close").unwrap();
     let f = h
@@ -1172,11 +1185,8 @@ fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(cx: &mut gpui::
     );
     h.deliver_series(&mut vcx, tag - 1, result_with(&[1], 50));
     assert_eq!(h.chart(&vcx).buckets.len(), 5, "stale");
-    // A stale tag is dropped AND does not arrive (review round 1,
-    // MIN-2): the barrier is waiting for the NEWER request's own
-    // answer, and an early arrival would release it — the second key
-    // keeps it open so a real arrival is visibly different from
-    // this.
+    // A stale delivery cannot count as an arrival for the newer request.
+    // A second awaited key keeps the arrival state observable.
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE), QueryKey(99)], at);
     let fresh = h.series_request().expect("the as-of change requeried").tag;
@@ -1327,9 +1337,7 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
     let reqs = h.requests();
-    // The as-of moves the span's LEFT edge too, and live fetching
-    // never covered anything before `now − preset` (review round 1,
-    // I-1): the gaps are asked for before the points are.
+    // An as-of move can require earlier coverage; fetch gaps before querying.
     let Request::Fetch(f) = &reqs[0] else {
         panic!("an as-of change refetches first: {reqs:?}");
     };
@@ -1550,7 +1558,7 @@ fn chip_tones_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext)
     }
 }
 
-// ---- the picker and the expression field (spec §9.6, §9.7) --------
+// Picker and expression-field tests.
 
 #[gpui::test]
 fn a_opens_the_picker_over_the_catalogue_and_enter_adds_the_highlighted_pair(
@@ -1731,8 +1739,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
         before,
         "and the verb itself ran"
     );
-    // The series list, which holds no field, is unchanged: it stays
-    // open through exactly the verbs it always did (spec §9.5).
+    // The fieldless list remains open while changing slot colours.
     h.dispatch(&mut vcx, "list", None);
     h.dispatch(&mut vcx, "colour", None);
     assert!(h.popup_is_series(&vcx));
@@ -1810,10 +1817,12 @@ fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::Test
     );
 }
 
-// ---- the range popup (spec §9.8) ---------------------------------
+// Range-popup tests.
 
 #[gpui::test]
-fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(cx: &mut gpui::TestAppContext) {
+fn r_opens_the_range_popup_on_from_day_and_a_typed_label_commits_a_preset(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.visible(&mut vcx, true);
@@ -1826,7 +1835,10 @@ fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(cx: &mut gpu
     // own listener: gpui dispatches against the LAST frame's focus
     // path (the picker tests' own rule).
     h.draw(&mut vcx);
+    // The label typed as the chip reads: `3` waits for its unit.
     vcx.simulate_keystrokes("3");
+    assert!(h.popup_is_range(&vcx), "a digit alone waits");
+    vcx.simulate_keystrokes("m");
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
     assert!(
@@ -1897,9 +1909,9 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
-    // `0` is no preset (`Preset::digit` has no zero), so it types —
-    // and a day of `0` waits for a second digit it never gets.
-    vcx.simulate_keystrokes("0");
+    // Off the day and back makes the popup edited, so `0` types — and
+    // a day of `0` waits for a second digit it never gets.
+    vcx.simulate_keystrokes("left right 0");
     assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
     vcx.simulate_keystrokes("enter");
     assert!(h.popup_is_range(&vcx), "refused: still open");
@@ -1908,10 +1920,7 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     // A keystroke answers a refusal about a date that has moved on.
     vcx.simulate_keystrokes("backspace");
     assert_eq!(h.range_error(&vcx), None);
-    // `r` over the open popup REOPENS it on a fresh seed rather than
-    // toggling it shut: it is an insert popup, so `dispatch`'s gate
-    // closes it before the arm runs (spec §9.8 gives `r` no toggle;
-    // `escape` is the close).
+    // Repeating range dispatch reopens a fresh draft; Escape closes it.
     vcx.simulate_keystrokes("left");
     assert_eq!(h.range_active_segment(&vcx).1, Segment::Month);
     h.dispatch(&mut vcx, "range", None);
@@ -1922,19 +1931,10 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
     );
 }
 
-/// `edited` is what turns the preset digits off, so
-/// only a keystroke that actually MOVED something may set it — a key
-/// that did nothing must leave the presets reachable. Two such keys,
-/// both of which used to disable them:
-///
-/// - `right` on `from`'s day, already the last segment under
-///   `Precision::Date` (`DateTimeField::apply` answers `false`), and
-/// - `tab`, which `RangePopup::switch` has always documented as "a
-///   trader who tabbed over to read the other date has typed nothing"
-///   — pinned here, since nothing else would notice it starting to
-///   count.
+/// Typed presets remain enabled after ineffective movement and field
+/// switching. Neither Right at the last segment nor Tab edits a date.
 #[gpui::test]
-fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestAppContext) {
+fn a_key_that_moves_nothing_leaves_the_typed_presets_live(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
@@ -1944,7 +1944,7 @@ fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestApp
         (Which::From, Segment::Day),
         "`right` on the last segment moves nothing"
     );
-    vcx.simulate_keystrokes("3");
+    vcx.simulate_keystrokes("3 m");
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
 
@@ -1952,9 +1952,107 @@ fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestApp
     h.draw(&mut vcx);
     vcx.simulate_keystrokes("tab");
     assert_eq!(h.range_active_segment(&vcx).0, Which::To);
-    vcx.simulate_keystrokes("4");
+    vcx.simulate_keystrokes("6 m");
     assert!(h.popup_is_none(&vcx), "`tab` is not an edit either");
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M6));
+}
+
+/// A preset is typed as its chip reads: the digit lights the chips it
+/// could start and waits, and the unit completes the label.
+#[gpui::test]
+fn a_digit_lights_its_presets_and_the_unit_commits_the_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    assert!(
+        h.range_candidates(&vcx).is_empty(),
+        "nothing typed, nothing lit"
+    );
+    vcx.simulate_keystrokes("1");
+    assert_eq!(h.range_candidates(&vcx), vec!["1w", "1m", "1y"]);
+    assert!(h.popup_is_range(&vcx));
+    // A second digit replaces the first.
+    vcx.simulate_keystrokes("5");
+    assert_eq!(h.range_candidates(&vcx), vec!["5y"]);
+    // A shifted unit completes it too.
+    vcx.simulate_keystrokes("1 shift-y");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
+}
+
+/// What a typed label refuses, inline and with the popup still open:
+/// a digit no label starts, a unit that makes no label (the digit
+/// stays), and `enter` before the unit.
+#[gpui::test]
+fn a_typed_label_refuses_what_is_no_preset(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("4");
+    assert!(h.popup_is_range(&vcx));
+    assert!(h.range_candidates(&vcx).is_empty());
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(error.contains("no preset starts with 4"), "{error}");
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+
+    vcx.simulate_keystrokes("2 m");
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(
+        error.contains("no preset 2m") && error.contains("2y"),
+        "{error}"
+    );
+    assert_eq!(h.range_candidates(&vcx), vec!["2y"], "the digit stays");
+
+    vcx.simulate_keystrokes("enter");
+    assert!(
+        h.popup_is_range(&vcx),
+        "enter commits no dates under a label"
+    );
+    let error = h.range_error(&vcx).expect("refused");
+    assert!(error.contains("finish the preset"), "{error}");
+    vcx.simulate_keystrokes("y");
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y2));
+}
+
+/// Backspace and Escape clear a pending label without closing; a second
+/// Escape closes. Field keys clear the label and route normally; an effective
+/// field change or segment click makes later digits edit the date.
+#[gpui::test]
+fn a_pending_label_is_dropped_by_backspace_escape_and_field_keys(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let before = h.model(&vcx).range().clone();
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1 backspace");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert!(h.popup_is_range(&vcx));
+    vcx.simulate_keystrokes("1 escape");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert!(h.popup_is_range(&vcx), "the first escape drops the label");
+    vcx.simulate_keystrokes("escape");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &before);
+
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1 left");
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
+    vcx.simulate_keystrokes("1");
+    assert!(
+        h.range_candidates(&vcx).is_empty(),
+        "edited: a digit is the date's"
+    );
+    assert!(h.popup_is_range(&vcx));
+
+    // A click on a segment is the mouse's field key: it drops the label.
+    h.dispatch(&mut vcx, "range", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("1");
+    assert_eq!(h.range_candidates(&vcx).len(), 3, "fixture check: pending");
+    h.click(&mut vcx, &format!("ts-range-from-{TILE}-0"));
+    assert!(h.range_candidates(&vcx).is_empty());
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Year));
 }
 
 /// `tab` answers a standing refusal, exactly as every other field key
@@ -1965,19 +2063,15 @@ fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
-    vcx.simulate_keystrokes("0"); // no preset; a day mid-entry
+    vcx.simulate_keystrokes("left right 0"); // edited; a day mid-entry
     vcx.simulate_keystrokes("enter");
     assert!(h.range_error(&vcx).is_some(), "fixture check: refused");
     vcx.simulate_keystrokes("tab");
     assert_eq!(h.range_error(&vcx), None);
 }
 
-/// Ruling: an `Absolute` range seeds the popup from
-/// its STORED dates, as typed, and only a `Relative` one resolves
-/// against now/as-of — so reopening `r` under a historical as-of, or
-/// after the clock has rolled over midnight, is lossless. Seeding
-/// both through `resolve` used to round-trip an absolute range
-/// through a half-open end and back.
+/// Absolute ranges seed from stored dates; relative ranges resolve against
+/// now/as-of. Reopening an absolute draft must preserve its original span.
 #[gpui::test]
 fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -1990,12 +2084,8 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
     );
     h.dispatch(&mut vcx, "cancel", None);
 
-    // The case the ruling is actually about: an as-of INSIDE the
-    // stored span. `Range::resolve` clips its end to the as-of by
-    // design (ruling 4) — which is right for what is fetched and
-    // queried, and wrong for what the popup seeds: a trader who
-    // opened `r` here and pressed `enter` would silently have their
-    // `to` rewritten to the as-of's own day.
+    // An as-of inside the stored span clips queries, but must not rewrite the
+    // To date merely because the editor opens and commits.
     h.frame.update(&mut vcx, |f, cx| {
         f.set_as_of(AsOf::At(
             "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
@@ -2074,10 +2164,8 @@ fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppC
     );
 }
 
-/// The chart's `offset_secs` is the APP clock's (`[time] zone`), never
-/// the machine's: installing a Tokyo clock as `AppClock` moves the
-/// offset to +9h and rebuilds the model (the offset is a `ChartKey`
-/// input), so a zone reload repaints the axis labels.
+/// Installing a Tokyo AppClock rebuilds chart input with a +9h offset.
+/// The offset is part of ChartKey, so clock reloads update displayed times.
 #[gpui::test]
 fn the_chart_offset_follows_the_app_clock(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -2097,7 +2185,7 @@ fn the_chart_offset_follows_the_app_clock(cx: &mut gpui::TestAppContext) {
     assert_ne!(before.offset_secs, after.offset_secs);
 }
 
-// ---- the mouse pass (2026-09-24) ---------------------------------
+// Pointer gestures, action-menu routing, and header-control integration.
 
 /// A loaded tile: one source, one delivered result of `n` hourly
 /// buckets, painted once so the chart surface has bounds.
@@ -2467,10 +2555,17 @@ fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
     assert!(h.model(&vcx).slots()[0].visible, "shown again");
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
     assert!(h.popup_is_range(&vcx));
+    // The press that opened the popup must not hand its focus to the
+    // root: `left`/`right` reach the fields only through the popup's
+    // own focused listener (`up`/`down` have a keymap route too, so
+    // they cannot tell).
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+    vcx.simulate_keystrokes("left");
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
     // A second click closes rather than reseeding over typed dates
-    // (`left` onto the month, then a digit typed into it — a bare
-    // digit on an unedited popup would be a preset and commit).
-    vcx.simulate_keystrokes("left 3");
+    // (a digit typed into the month — a bare digit on an unedited
+    // popup would be a preset and commit).
+    vcx.simulate_keystrokes("3");
     assert!(h.popup_is_range(&vcx));
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
     assert!(h.popup_is_none(&vcx), "the readout toggles");
@@ -2543,4 +2638,328 @@ fn the_empty_state_buttons_open_the_picker_and_the_expression_field(cx: &mut gpu
     h.draw(&mut vcx);
     let selector: &'static str = Box::leak(format!("timeseries-empty-{TILE}-0").into_boxed_str());
     assert!(vcx.debug_bounds(selector).is_none());
+}
+
+// ---- the colour picker -------------------------------------------
+
+impl Harness {
+    /// The slot the open colour picker targets, if the picker is up.
+    fn colour_target(&self, vcx: &gpui::VisualTestContext) -> Option<u8> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Colour(c)) => Some(c.target),
+            _ => None,
+        })
+    }
+    /// The open picker's component state and its captured featured row.
+    fn colour_pick(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> (Entity<ColorPickerState>, Vec<(gpui::Hsla, Colour)>) {
+        self.tile
+            .read_with(vcx, |t, _| match (t.popup(), t.pick_context()) {
+                (Some(Popup::Colour(c)), Some(p)) => {
+                    assert_eq!(c.target, p.target);
+                    (c.picker.clone(), p.featured.clone())
+                }
+                _ => panic!("the colour picker is open"),
+            })
+    }
+    /// Commit `colour` through the component's own commit — the method
+    /// a swatch click and the hex field's `enter` both run.
+    fn select_colour(&self, vcx: &mut gpui::VisualTestContext, colour: gpui::Hsla) {
+        let (picker, _) = self.colour_pick(vcx);
+        vcx.update(|window, cx| {
+            picker.update(cx, |s, cx| s.select_color(colour, window, cx));
+        });
+        self.draw(vcx);
+    }
+    fn holds_focus(&self, vcx: &mut gpui::VisualTestContext) -> bool {
+        vcx.update(|window, cx| self.content.holds_focus(window, cx))
+    }
+    /// Open the menu and pick `Colour…` with the menu's own verbs (`j`
+    /// until it is lit, then `enter`).
+    fn pick_colour_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
+        self.dispatch(vcx, "menu", None);
+        let row = self.menu_row_index(vcx, "Colour…");
+        while !self.menu_rows(vcx)[row].1 {
+            self.dispatch(vcx, "list_down", None);
+        }
+        self.dispatch(vcx, "menu_pick", None);
+        // The component's popup surface paints the frame after its
+        // trigger's bounds are known.
+        self.draw(vcx);
+        self.draw(vcx);
+    }
+}
+
+/// A focus handle standing in for the shell root the keyboard sits on
+/// before the picker opens — what its popover hands focus back to.
+fn focus_stand_in(vcx: &mut gpui::VisualTestContext) -> gpui::FocusHandle {
+    vcx.update(|window, cx| {
+        let f = cx.focus_handle();
+        f.focus(window, cx);
+        f
+    })
+}
+
+#[gpui::test]
+fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(2), "the cursor's slot");
+    let (picker, featured) = h.colour_pick(&vcx);
+    assert!(picker.read_with(&vcx, |s, _| s.is_open()));
+    assert_eq!(
+        picker.read_with(&vcx, |s, _| s.value()),
+        Some(h.tile.read_with(&vcx, |t, _| t.header().chips[1].swatch)),
+        "seeded with the slot's colour as painted"
+    );
+    assert_eq!(
+        featured.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
+        vec![
+            Colour::Palette(0),
+            Colour::Palette(1),
+            Colour::Palette(2),
+            Colour::Palette(3),
+            Colour::Palette(4),
+            Colour::Named("spx".into()),
+        ]
+    );
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    // The component stands in the target chip, in place of its swatch.
+    let picker_sel: &'static str =
+        Box::leak(format!("timeseries-colour-picker-{TILE}-2").into_boxed_str());
+    let swatch_sel: &'static str =
+        Box::leak(format!("timeseries-swatch-{TILE}-2").into_boxed_str());
+    assert!(vcx.debug_bounds(picker_sel).is_some());
+    assert!(vcx.debug_bounds(swatch_sel).is_none());
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(h.popup_is_none(&vcx));
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()), "told closed");
+    // By pointer: a right-click on s1's chip opens the menu on it, and
+    // a click on the row opens the picker there.
+    h.right_click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
+    let row = h.menu_row_index(&vcx, "Colour…");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
+    h.draw(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(1));
+    // The same picker entity is reused, not rebuilt.
+    assert_eq!(h.colour_pick(&vcx).0, picker);
+    assert!(picker.read_with(&vcx, |s, _| s.is_open()));
+}
+
+#[gpui::test]
+fn a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, featured) = h.colour_pick(&vcx);
+    h.select_colour(&mut vcx, featured[5].0);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+    assert!(h.popup_is_none(&vcx), "a swatch commit closes the picker");
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (_, featured) = h.colour_pick(&vcx);
+    h.select_colour(&mut vcx, featured[3].0);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(3));
+    // Off the featured row: absolute, and the chart paints exactly it.
+    h.pick_colour_row_by_keys(&mut vcx);
+    let before = h.chart(&vcx).slots[0].colour;
+    let green = crate::core::Rgb8([0x00, 0xcc, 0x44]);
+    h.select_colour(&mut vcx, green.to_hsla());
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Custom(green));
+    let after = h.chart(&vcx).slots[0].colour;
+    assert_ne!(before, after);
+    assert_eq!(after, green.to_hsla(), "no floor, no theme");
+    assert_eq!(h.swatch(&vcx), green.to_hsla());
+    // And the session carries it as `#rrggbb`.
+    assert!(
+        toml::to_string(&h.tile.read_with(&vcx, |t, _| t.serialize()))
+            .unwrap()
+            .contains("colour = \"#00cc44\"")
+    );
+}
+
+#[gpui::test]
+fn a_pick_lands_on_the_target_slot_even_after_the_cursor_moves(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    // The cursor moves under the open picker (the chip door), and a
+    // delivery rebuilds the chrome: neither retargets it.
+    vcx.update(|_, cx| h.tile.update(cx, |t, cx| t.chip_clicked(0, cx)));
+    h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+    assert_eq!(h.model(&vcx).cursor(), Some(0));
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    let blue = crate::core::Rgb8([0x11, 0x22, 0xee]);
+    h.select_colour(&mut vcx, blue.to_hsla());
+    let m = h.model(&vcx);
+    assert_eq!(m.slots()[1].colour, Colour::Custom(blue), "the target");
+    assert_eq!(m.slots()[0].colour, Colour::Palette(0), "not the cursor");
+}
+
+#[gpui::test]
+fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    // The popover holds the keyboard, and the tile says so: the shell's
+    // insert branch then keeps bare keys (typing in the hex field) away
+    // from the tile's verbs.
+    assert!(h.holds_focus(&mut vcx), "the picker holds the keyboard");
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    let colour = h.model(&vcx).slots()[0].colour.clone();
+    vcx.simulate_keystrokes("escape");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx), "escape closes");
+    assert_eq!(h.model(&vcx).slots()[0].colour, colour, "unchanged");
+    assert!(
+        vcx.update(|window, _| root.is_focused(window)),
+        "focus is back where it was"
+    );
+    assert!(!h.holds_focus(&mut vcx));
+    assert_eq!(h.key_context_mode(&mut vcx), "normal");
+    // The tile's own keys drive it again.
+    h.dispatch(&mut vcx, "colour", None);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+}
+
+/// The component writes its hex field by TRUNCATING each channel, so
+/// the seeded text can sit one step below the colour the slot paints.
+/// `enter` on that untouched text must not turn a theme-following
+/// colour into an absolute one a shade off.
+#[gpui::test]
+fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+}
+
+/// A pick that is (to a step) the colour the slot already paints
+/// changes nothing — even where a featured entry also matches it. Here
+/// the slot names a colour since deleted from `[colours]`, so it paints
+/// palette colour 1; `enter` on the untouched field keeps the name
+/// rather than rewriting it as `Palette(0)`.
+#[gpui::test]
+fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.factory.set_colours(NamedColours::default());
+    h.draw(&mut vcx);
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+}
+
+#[gpui::test]
+fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    // The hex field, as a click on it would leave it: focused, emptied.
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.update(cx, |s, cx| s.set_value("", window, cx));
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    assert!(h.holds_focus(&mut vcx), "the hex field is the picker's");
+    // Typing edits the field and commits nothing until `enter`. (That a
+    // typed `c` is not the tile's `Cycle colour` is the shell's insert
+    // branch's doing, which routes on `holds_focus` + `insert`, both
+    // asserted above; this harness has no shell matcher.)
+    vcx.simulate_input("#ffcc00");
+    vcx.simulate_keystrokes("backspace backspace backspace backspace 8 8 0 0");
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+    // `enter` commits AND closes the popover in one keystroke; the
+    // commit's `Change` lands after the close and still counts.
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.model(&vcx).slots()[0].colour,
+        Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
+    );
+    assert!(h.popup_is_none(&vcx));
+    // That close was the popover's own: it handed focus back.
+    assert!(vcx.update(|window, _| root.is_focused(window)));
+}
+
+/// A swatch commit closes the state without the popover ever seeing a
+/// close, so nothing hands focus back: the tile's closer blurs the
+/// picker's focused surface before dropping it — checked before the
+/// next frame, which would collect the popover's handle either way —
+/// leaving the window unfocused for the shell's focus net.
+#[gpui::test]
+fn a_swatch_commit_blurs_the_picker_before_dropping_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert!(h.holds_focus(&mut vcx));
+    let (picker, featured) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        picker.update(cx, |s, cx| s.select_color(featured[1].0, window, cx));
+    });
+    // A second update, no draw between: the first one's effects (the
+    // tile's close) have flushed, the popover's element state has not
+    // yet been collected.
+    let focused_after = vcx.update(|window, cx| window.focused(cx));
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(focused_after, None, "blurred before the drop");
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+}
+
+#[gpui::test]
+fn removing_the_target_slot_closes_the_picker(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    // Another slot going leaves it up.
+    h.command(&mut vcx, "remove s1").unwrap();
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    h.command(&mut vcx, "remove s2").unwrap();
+    assert!(h.popup_is_none(&vcx), "its target is gone");
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
+}
+
+#[gpui::test]
+fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    assert!(!h.dispatch_handled(&mut vcx, "pick_colour", None));
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
 }

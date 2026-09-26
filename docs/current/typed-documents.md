@@ -11,7 +11,8 @@ reload acceptance gate, which does not run every typed reader.
 ## Dataset families and validation
 
 [`SchemaSpec::from_doc`](../../crates/geode-core/src/schema/mod.rs) reads
-`datasets.toml`. An omitted family defaults to `measures`.
+`datasets.toml`. Its reserved `config_version` entry is skipped rather than
+parsed as a dataset. An omitted family defaults to `measures`.
 
 | Family | Shape and validation |
 |---|---|
@@ -181,7 +182,9 @@ grammar. Quoted strings escape internal quotes by doubling them.
 [`NamedColours`](../../crates/geode-core/src/colour/mod.rs) reads a hue or a
 semantic theme token per name. Supplying both or neither, an invalid name,
 an invalid hue, or an unknown token drops the definition with an error.
-`none` and `sign` are reserved for column colour modes. Hue values range
+`none` and `sign` are reserved for column colour modes, and a name starting
+with `#` is reserved because `#rrggbb` spells an absolute colour where a name
+is also accepted (a timeseries slot's colour). Hue values range
 from 0 through 360, with 360 normalized to zero. Invalid string tones warn
 and fall back to normal; a tone beside a token warns and is ignored.
 Malformed `tint_sign` warns and becomes false.

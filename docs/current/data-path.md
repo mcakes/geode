@@ -52,7 +52,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
-| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; a refused upload answers `Err("queue full")` at once. |
+| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
 
 For queued files, resubmission can promote priority without adding another
@@ -136,6 +136,32 @@ schema; production migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
 [`geode-data README`](../../crates/geode-data/README.md).
 
+## Document validation and storage
+
+Document kinds expose a column vocabulary and parse/write functions through
+[`DocumentKind`](../../crates/geode-core/src/document.rs). Source startup
+checks that kind and dataset have the same column names and types in both
+directions. That check does not compare order or validate payload values.
+The [document kinds](../../crates/geode-documents/README.md) apply their own
+wire-format rules, including required fields and finite numeric values.
+
+Before staging, `DocumentRows::validate` checks key arity and the reserved key
+separator, nonempty rows, axis order and types, unique axis tuples, required
+values and attributes, and equal column lengths. Values and attributes match
+by name. This shared validator does not reject duplicate value or attribute
+names or enforce each kind's numeric rules. A parser or caller remains
+responsible for producing an unambiguous document. Empty documents are
+refused: replacing a live document with no payload rows would leave its new
+generation indistinguishable from a missing document.
+
+[`publish_document`](../../crates/geode-data/src/store/document.rs) stages in
+the dataset's column order, repeating keys and document-level attributes on
+each row. Key parts join with a reserved separator to form the batch; book is
+NULL. The single ingest writer owns the shared staging table. Publication
+commits rows, categorical dictionaries, and provenance together, using the
+same backfill and source-time rules as file publication. Explicit appender
+flush errors abort publication rather than silently storing a shorter document.
+
 ## Source discovery and adapters
 
 Directory discovery reads metadata and the JSON sentinel at
@@ -195,46 +221,54 @@ callbacks must return promptly without panicking. See
 
 ## Egress and uploads
 
-An upload writes a document back out through a configured target's adapter —
-the mirror of a subscribed source's inbound path. `egress.toml` (see
-[configuration](configuration.md#egress-configuration)) resolves at startup
-against the adapter registry; `DataService::open` then spawns one worker
-thread per surviving target (`geode-egress-<name>`), each owning that
-adapter's own `Egress` handle. `Adapter::egress()` returns a fresh handle on
-every call: `egress::resolve` calls it once just to probe availability at
-startup, and spawning the worker calls it again to build the handle the
-worker keeps, so an adapter whose transport is not safely shared across
-owners (`ChannelAdapter` upgrades its own weak reference into a fresh handle
-holding a strong sender clone) never has to serve two callers from one
-instance.
+An upload serializes a whole document and sends it through a configured
+adapter. Targets resolve at startup from
+[`egress.toml`](configuration.md#egress-configuration). Each usable target has
+one worker thread and its own `Egress` handle. Adapter resolution probes
+`Adapter::egress()` once, then worker creation obtains another handle;
+adapters must support repeated capability requests. A worker-start failure
+leaves the target unavailable and later requests receive a named refusal.
 
-A worker drains its target's queue strictly in submission order, one upload
-at a time: a slow or stuck transport blocks only that target's own uploads,
-never the request loop or another target's worker. The queue holds up to
-`EGRESS_QUEUE_BOUND` (8) jobs waiting behind the one in flight; past that a
-submission answers `Err("egress '<target>': queue full")` at once rather
-than waiting.
+There are two admission boundaries. `DataHandle::upload` uses the bounded
+service channel: `false` means nothing was admitted and no outcome is owed.
+Once dispatched, the service validates the target and accepted document name,
+looks up its `DocumentKind`, and calls `write` before submitting bytes to the
+target worker. Serialization runs on the service thread and can delay other
+requests. Transport calls run separately, one at a time in each target's FIFO
+queue, with up to eight waiting jobs behind the running call. A full or stopped
+worker queue is refused without waiting for transport capacity.
 
-Every submitted upload answers exactly one `DataEvent::Upload(UploadOutcome)`,
-echoing the requester's key and tag. A refusal decided on the service thread
-— an unknown target, a target whose `documents` does not accept the
-requested document, an unregistered document kind, a `DocumentKind::write`
-failure, or a full or stopped queue — answers synchronously, before anything
-reaches a worker thread. An accepted job answers from its target's worker
-once the transport call returns. Every `Err` is prefixed `egress
-'<target>': ` and names the specific reason, so the requesting tile can
-report a failure without knowing the target's configuration.
+Ordinary refusal paths and completed transport calls each emit one
+`DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
+the target, including unknown targets, unsupported documents, missing writers,
+write errors, unavailable workers, queue refusal, and transport errors.
+A transport panic becomes `egress '<target>': transport panicked: …`; the
+worker then continues with the next queued job using the same transport handle.
 
-The document's key selects the write address: `EgressSpec::address`
-substitutes the document key's parts, joined by `/`, for `{key}` in the
-target's configured template; a template with no `{key}` is one fixed
-address for every key of that document.
+Completion still has limits: service startup can fail after channel admission,
+serialization has no panic boundary, and serializer or transport calls can
+block indefinitely. Event-sink refusal has no retry. Uploads have no timeout,
+automatic retry, or keyed cancellation.
 
-Shutdown closes every target's queue, refusing further submissions, then
-joins every worker thread — jobs already queued still run and answer before
-their worker exits, so shutdown can wait on a slow or stuck transport; run
-it off the UI thread, as every other `DataService` shutdown. See
-[`egress.rs`](../../crates/geode-data/src/egress.rs).
+A successful outcome means the adapter's `upload` call returned successfully;
+the adapter defines what that acknowledges. It does not establish that a
+subscriber received, parsed, or stored the document. `ChannelAdapter`, for
+example, acknowledges admission to its bus queue; downstream subscription
+queues can still refuse delivery. Market-data panels compare later document
+generations separately to confirm a sent draft. The app mailbox retains upload
+outcomes by `(tile key, upload tag)`, so different uploads do not supersede
+one another before UI delivery.
+
+`EgressSpec::address` substitutes key parts joined by `/` for every `{key}` in
+the configured address. It performs literal replacement, without escaping key
+parts. A template with no `{key}` sends all keys of that document to one address.
+
+Shutdown closes every target queue and joins its worker, allowing already
+queued jobs to finish if the transport returns normally. Egress stops before
+subscription workers, but this does not guarantee that an echoed document
+reaches storage: subscriptions and ingest do not flush all pending work.
+Joining can wait indefinitely on transport I/O and belongs off the UI thread.
+See [`egress.rs`](../../crates/geode-data/src/egress.rs).
 
 ## Queries and time travel
 

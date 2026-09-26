@@ -76,10 +76,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::menu_close", "Menu: close"),
 ];
 
-/// An action's palette title: the one name a command has, so the action
-/// menu and the palette can never disagree. Every id asked for is a
-/// literal from this crate; an unknown one answers its own id, which
-/// `every_menu_action_is_titled_as_in_the_palette` would catch.
+/// Action title shared by palette registration and menu rows. Unknown IDs fall back to
+/// their own text; the menu-title test checks all literal menu actions.
 pub(crate) fn action_title(id: &'static str) -> &'static str {
     ACTIONS
         .iter()

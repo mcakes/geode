@@ -164,8 +164,9 @@ impl DataHandle {
     }
 
     /// Queue an upload. False means no request was admitted and no outcome is
-    /// owed; the caller reports the refusal. An admitted upload answers exactly
-    /// one `DataEvent::Upload`.
+    /// owed; the caller reports the refusal. Serviced uploads normally emit one
+    /// `DataEvent::Upload`; startup, worker, and event-delivery failures can
+    /// prevent that outcome. Admission does not acknowledge transport success.
     pub fn upload(&self, params: UploadParams) -> bool {
         self.send(Request::Upload(params))
     }

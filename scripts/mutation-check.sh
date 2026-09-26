@@ -1,98 +1,46 @@
 #!/bin/zsh
 #
-# Mutation check for the query path (spec §6).
-#
-# Each entry breaks one load-bearing behaviour and runs the suite. A
-# mutation that SURVIVES is a branch no test can see — the suite is green
-# whether that code is right or wrong.
-#
-# This exists because five rounds of code review found silent defects the
-# suite could not see, and the fixture was the reason every time: reviews
-# find what the fixture makes reachable. Reading the tests never revealed
-# that; twenty minutes of mutation did. Run it after touching the
-# compiler, the scope lowering, as-of routing, publish, the grain
-# vocabulary, the document family, the adapter tier, the coalescer, the
-# receiver pipeline, or the panel's matrix model and draft, and treat a
-# SURVIVED line as a missing test rather than a curiosity.
-#
-# The two source-time tie-break entries were described as "caught
-# probabilistically, because the tests loop twenty times". Measured, that
-# reasoning was wrong: the query plan is deterministic within a process,
-# so twenty iterations sample one answer twenty times rather than twenty
-# times independently. The as-of entry survived two runs in three.
-#
-# What fixes it is the fixture, not the loop. Eight tied generations
-# instead of two, with the winner inserted first, makes an unordered pick
-# land on the wrong row every time rather than half the time: 4/4 caught
-# after, 1/3 before. The retention entry measured 3/3 as it stood and was
-# left alone. Neither is probabilistic now — treat a SURVIVED on either as
-# a real finding.
-#
-# This script edits tracked source files in place and restores them
-# afterwards, so it takes three precautions.
-#
-#   * The backup path is unique per run. A single shared /tmp path let two
-#     concurrent runs restore each other's backup over the wrong file, and
-#     one checkout ended up with the contents of scope_sql.rs inside
-#     compile.rs.
-#   * A lock directory serialises runs against the same checkout, because
-#     two runs mutating the same files cannot both be meaningful anyway.
-#   * A trap restores the file in flight however the script exits, so an
-#     interrupt or a stale anchor cannot leave a mutation in the tree. An
-#     earlier abort did exactly that, and the mutation was found committed
-#     to a working tree days later.
+# Mutation checks: replace one source anchor and run the tests expected to
+# detect the broken behavior. A surviving mutation identifies a behavior the
+# selected package's tests did not distinguish from the original code.
 #
 # Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
-#   (from the repo root)
 #
-# --anchors-only runs no cargo at all: it checks every selected entry's
-# anchor against its file and reports the ones that no longer match
-# (ANCHOR) or match more than once (AMBIG), then a one-line summary.
-# Under a second over the whole file (one python pass, each source file
-# read once). Exits non-zero on any finding, so it can gate a merge; a
-# selection that matches nothing says so rather than passing. Run it
-# before every merge and after
-# any edit near an anchored line — a normal run reports these two only
-# for the entries it happens to select, and an ambiguous anchor is the
-# quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
-# anchor is duplicated by a later verbatim reuse (the final review of the
-# health follow-ups found exactly that — a seed loop copied the ingest
-# sink's emit closure, and the entry guarding the sink mutated the seed
-# instead) keeps printing "caught" while defending nothing. A normal run
-# now prints AMBIG for the entries it does select, and still mutates the
-# first match.
+# --anchors-only runs no Cargo commands and changes no source files. It checks
+# every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
+# exits nonzero for either finding or an empty selection. Run the unfiltered
+# anchor check before merging and after editing an anchored source block.
+# Nonempty test filters are checked against test-attributed function names under
+# the selected package's src directory. FILTER means no match; FILTERx means
+# several matches without an exact function name and is also an error. FILTER?
+# means an exact name plus other substring matches and is a warning. This is a
+# source scan, not Cargo test discovery: it does not evaluate cfg attributes,
+# expand macros, or distinguish identical function names in different modules.
+# DUP and SHADOW report shared or overlapping anchors as warnings. They do not
+# by themselves establish that the mutations test the same behavior.
 #
-# With a substring, only entries whose name contains it are run — for
-# iterating on the entries you just added. Always finish with an unfiltered
-# run; a filtered one proves nothing about the rest. The unfiltered run is
-# what CI and a merge gate should use; --changed is the everyday form
-# while a change is in flight.
+# --changed defaults to main. It selects files changed versus REF, changed in
+# the working tree, or untracked. The set is captured before mutation so the
+# script cannot select files because of its own edits. A substring narrows the
+# selection by entry name; both filters can be combined. Use targeted entries
+# or --changed during development; a full mutation run is a broader audit.
 #
-# --changed (default REF: main) skips any entry whose `file` is not among
-# the files changed versus REF, changed in the working tree, or untracked.
-# The changed set is computed once, before the first mutation — this
-# script edits tracked files in place, so computing it later would see
-# its own mutations. A run prints "skipped N entries whose files are
-# unchanged since REF" at the end. --changed and a substring compose:
-# `--changed "pool:"` runs only entries matching both filters.
+# Mutation runs edit tracked source in place. Preserve work before running
+# them. A per-checkout lock serializes runs; unique temporary files isolate
+# backups and logs. Exit and signal traps restore the file in flight, though
+# forced termination can bypass cleanup. Concurrent external edits to that
+# file can be overwritten by restoration.
 #
-# Cost note (measured on this checkout, warm cache): a geode-data entry
-# with a covering test filter ("pool: the tag is echoed, not
-# regenerated", filtered to the one test) took ~3s; the same entry with
-# no filter, running the whole geode-data --lib suite, took ~36s — the
-# filter is why every entry now names one. The last 79 that did not were
-# filled in by probing each mutation against the full suite and reading
-# back which test failed; a `--changed` run over service.rs and catalog.rs
-# had been taking over an hour on those alone. An entry added from here on
-# names its test too: without one, "caught" says nothing about WHICH test
-# saw the mutation, which is the "two defences overlapping" lie the header
-# above warns about. `.cargo/config.toml`
-# pinning `profile.dev.split-debuginfo = "unpacked"` was also tried, to
-# skip dsymutil packing on macOS: measured with `time` across two warm
-# runs of a single entry, before (~3.1-3.4s) and after (~3.0-3.1s) adding
-# the file — no measurable difference on this toolchain (cargo's macOS
-# default is already "unpacked"), so the file was dropped rather than
-# kept for a change that does nothing here.
+# Each entry names the package containing its detecting test and a test-name
+# filter. The filtered test runs first; if it passes or matches nothing, the
+# full package suite runs. caught* means another test failed, while FILTER
+# means the declared filter matched no tests. Correct either mismatch before
+# relying on the entry as evidence for its named test.
+#
+# A failed Cargo command is reported as caught; this script does not distinguish
+# compilation failure from a failing assertion. Inspect the failure when
+# validating an entry. Repeating a deterministic fixture does not add coverage;
+# the fixture must exercise the behavior the mutation changes.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -107,8 +55,8 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
-# --anchors-only collects (name, file, anchor) NUL-separated here and
-# checks them all in one pass at the end.
+# --anchors-only collects (name, file, anchor, package, filter) NUL-separated
+# here and checks them all in one pass at the end.
 anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
@@ -156,7 +104,7 @@ trap 'cleanup; exit 143' TERM
 #                                           matches no test", then falls
 #                                           back to the full suite for a
 #                                           plain caught/SURVIVED verdict
-# Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+# Omitting `test_filter` runs the full crate suite.
 anchors_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
@@ -211,7 +159,9 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    printf '%s\0%s\0%s\0' "$name" "$file" "$from" >> "$anchors"
+    # Retain the package and test filter alongside the source anchor so the
+    # final source scan can validate both locations and intended tests.
+    printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
@@ -228,7 +178,7 @@ run_mutation() {
   local hits
   hits=$(python3 - "$file" "$from" <<'PY'
 import sys, pathlib
-print(pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2]))
+print(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").count(sys.argv[2]))
 PY
   ) || hits=-1
   if (( hits < 0 )); then
@@ -249,7 +199,7 @@ PY
   in_flight="$file"
   python3 - "$file" "$from" "$to" <<'PY'
 import sys, pathlib
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
+p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
   if [[ -n "$filter" ]]; then
@@ -1431,10 +1381,30 @@ run_mutation "egress: a write error answers Err" \
 
 run_mutation "egress: an adapter error answers Err naming the target" \
   crates/geode-data/src/egress.rs \
-  '            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
-  '            .map_err(|e| e.to_string());' \
+  '            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
+  '            Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
+
+# A transport panic must fail its own upload, not the worker. Mutated, it
+# unwinds past `answer`, so the job is never answered and the dropped
+# receiver strands every queued upload.
+run_mutation "egress: a panicking transport is contained" \
+  crates/geode-data/src/egress.rs \
+  '        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };' \
+  '        let result = egress
+            .upload(&job.address, job.bytes)
+            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  geode-data \
+  a_panicking_transport_answers_the_upload_and_keeps_the_worker
 
 run_mutation "egress: queue full answers Err" \
   crates/geode-data/src/egress.rs \
@@ -2702,7 +2672,7 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
             }
 ' \
   geode-shell \
-  emits_config_reloaded_before_the_frame_notifies
+  a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
@@ -9395,6 +9365,15 @@ run_mutation "schema: a document value may be a date or text" \
   '                    ColumnType::F64 | ColumnType::I64' \
   geode-core a_document_value_may_be_a_date_or_text
 
+# A version stamp is a document header. Mutated, it becomes a familyless
+# dataset that reaches apply_schema and every dataset pick list.
+run_mutation "schema: a config_version stamp is not a dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if ds_name == "config_version" {' \
+  '            if false {' \
+  geode-core \
+  a_datasets_config_version_header_is_not_a_spurious_diagnostic
+
 # Minor 7: a declared-but-absent axis column is a message, not a panic --
 # and not a silently skipped check either. `continue` would let a document
 # whose axis the dataset does not declare pass validation and reach the
@@ -10812,8 +10791,8 @@ run_mutation "colours: to_table omits the hue under a token" \
 # 2c §6.1: reserved names are taken on Colours alone.
 run_mutation "objectdialog: reserved colour names are taken" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.reserved_names().contains(&name) {' \
-  '        if false && self.reserved_names().contains(&name) {' \
+  '        self.reserved_names().contains(&name)' \
+  '        false' \
   geode-shell \
   reserved_names_are_taken
 
@@ -13079,18 +13058,12 @@ run_mutation "mdcursor: j from the strip returns to the remembered column" \
 run_mutation "mdattr: a refused attribute value stays in insert mode" \
   crates/geode-marketdata/src/tile.rs \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.notice = Some(e.into());
                     return true;
                 }' \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.close_editor(window, cx);
                     self.notice = Some(e.into());
                     return true;
@@ -13608,9 +13581,9 @@ run_mutation "mddate: insert_up steps a date field" \
 # — the trader sees the edit land with the day they typed gone.
 run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
   crates/geode-marketdata/src/tile.rs \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
 
@@ -13619,9 +13592,9 @@ run_mutation "mddate: enter completes an unambiguous pending digit, never commit
 # `commit` on `ex` writes the 18th the cell had, marked edited.
 run_mutation "mddate: a date cell's enter completes a pending digit too" \
   crates/geode-marketdata/src/tile.rs \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata a_date_cell_commits_and_cancels_through_the_fragments_verbs
 
@@ -14294,19 +14267,15 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
 
-# ---- Popup hover (user report 2026-09-17) ------------------------------
+# ---- Popup hover and occlusion ---------------------------------------
 #
-# The popup must OCCLUDE: without `occlude()` gpui keeps hit-testing the
-# grid beneath it, so a hover over a menu row lit up the table row under
-# the pointer. Mutated out, every keyboard test passes — only the test
-# Host's hover-gated move counter (the grid's stand-in) sees the leak.
+# Popup occlusion prevents pointer events from reaching the grid underneath.
+# The host's hover-gated counter detects the leak; keyboard tests do not
+# exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
   crates/geode-marketdata/src/popup.rs \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
-        // keeps hit-testing the grid painted beneath it, so hovering a
-        // menu row lit up the table row under the pointer instead. The
-        // shell'"'"'s own modal (`dialog.rs`) makes the same call.
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()' \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
   geode-marketdata \
@@ -17518,16 +17487,73 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
   geode-timeseries \
   x_opens_the_expression_field_and_enter_adds_or_reports_inline
 
-# In the range popup a bare `1`..`7` is a PRESET until the trader starts
-# editing a date (§9.8, Task 10 ruling). Without the preset arm the digit
-# types itself into the day segment and the popup stays open — the
-# keyboard path to `3m` is gone.
-run_mutation "timeseries: a digit in the range popup commits a preset" \
+# In the range popup a preset is typed as its chip reads (`3` `m`) until
+# the trader starts editing a date. Each rule of the typed label:
+# the digit waits as a prefix, the unit writes the preset, and only an
+# unedited popup reads a digit as a label.
+run_mutation "timeseries: a digit in the range popup starts a preset label" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    && Preset::digit(d).is_some() =>' \
-  '                    && false =>' \
+  '                r.prefix = Some(d);' \
+  '                r.prefix = None;' \
   geode-timeseries \
-  r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+run_mutation "timeseries: the unit completes a typed preset label" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                    if !self.write_range(Range::Relative(preset), window, cx)' \
+  '                    if !{ let _ = preset; false }' \
+  geode-timeseries \
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+run_mutation "timeseries: an edited range popup types digits into the date" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            && r.digit_is_preset()' \
+  '            && true' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+
+# A digit no label starts is refused, not held as a prefix nothing can
+# complete.
+run_mutation "timeseries: a digit no preset starts is refused" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if Preset::any_starts_with(d) {' \
+  '            if true {' \
+  geode-timeseries \
+  a_typed_label_refuses_what_is_no_preset
+
+# enter under a pending label would otherwise commit the two dates the
+# trader was not typing.
+run_mutation "timeseries: enter under a pending preset label is refused" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            (_, "enter") => {' \
+  '            (_, "never-enter") => {' \
+  geode-timeseries \
+  a_typed_label_refuses_what_is_no_preset
+
+# The first escape drops a pending label; only the second closes.
+run_mutation "timeseries: escape drops a pending preset label first" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            (_, "backspace" | "escape") => {' \
+  '            (_, "backspace") => {' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+
+# Only the presets a pending digit could still become are lit.
+run_mutation "timeseries: a pending label lights only its own presets" \
+  crates/geode-timeseries/src/popup.rs \
+  '        self.prefix.is_some_and(|d| preset.starts_with(d))' \
+  '        self.prefix.is_some()' \
+  geode-timeseries \
+  a_digit_lights_its_presets_and_the_unit_commits_the_label
+
+# A segment click is the mouse's field key and drops a pending label.
+run_mutation "timeseries: a segment click drops a pending preset label" \
+  crates/geode-timeseries/src/popup.rs \
+  '        self.edited = true;
+        self.prefix = None;' \
+  '        self.edited = true;' \
+  geode-timeseries \
+  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
 
 # …and the other half of the same rule: only a key that MOVED something
 # counts as an edit. `right` on the last segment, or a `tab`, changes
@@ -17538,7 +17564,7 @@ run_mutation "timeseries: a no-op key is not an edit" \
   '        self.edited |= moved;' \
   '        self.edited = true;' \
   geode-timeseries \
-  a_key_that_moves_nothing_leaves_the_preset_digits_live
+  a_key_that_moves_nothing_leaves_the_typed_presets_live
 
 # An `Absolute` range seeds the popup from the dates it STORES; only a
 # relative one resolves against now/as-of (Task 10 ruling). Resolved, a
@@ -18335,7 +18361,7 @@ run_mutation "panel: an outcome for a key no longer shown is a notice" \
   '        if let Some(flight) = flight.filter(|f| self.key.as_deref() != Some(f.key.as_slice())) {' \
   '        if let Some(flight) = flight.filter(|_| false) {' \
   geode-marketdata \
-  outcome_after_a_key_switch_is_a_notice_naming_the_key
+  an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key
 
 # Switching away gives up the outgoing draft's echo check. Mutated to keep
 # `sent` and `submitted`, the kept rows outlive the switch.
@@ -18343,12 +18369,10 @@ run_mutation "panel: a key switch drops the upload's sent rows" \
   crates/geode-marketdata/src/tile.rs \
   '        self.sent = None;
         self.submitted = None;
-        self.upload_error = None;
-        // Park the outgoing draft' \
-  '        self.upload_error = None;
-        // Park the outgoing draft' \
+        self.upload_error = None;' \
+  '        self.upload_error = None;' \
   geode-marketdata \
-  outcome_after_a_key_switch_is_a_notice_naming_the_key
+  an_ok_outcome_after_a_key_switch_is_a_notice_naming_the_key
 
 # The confirm names every kind of edit it sends. Mutated to omit a single
 # attribute, an attribute-only upload reads "0 cells".
@@ -18468,9 +18492,18 @@ run_mutation "egress: an unknown target answers Err" \
 run_mutation "egress: uploads to one target run in submission order" \
   crates/geode-data/src/egress.rs \
   '    while let Ok(job) = jobs.recv() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        // Convert transport panics into this upload'"'"'s error and keep servicing the
+        // queue. Mark the catch boundary so the app logs a contained panic without
+        // creating a crash report.
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,
@@ -18489,9 +18522,15 @@ run_mutation "egress: uploads to one target run in submission order" \
             batch.push(more);
         }
         for job in batch.into_iter().rev() {
-        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
+        })) {
+            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+            Err(payload) => Err(format!(
+                "egress '"'"'{name}'"'"': transport panicked: {}",
+                crate::ingest::runner::panic_payload_message(&*payload)
+            )),
+        };
         answer(
             &sink,
             &name,
@@ -18575,11 +18614,16 @@ run_mutation "pricer tile: the cell editor is dropped unblurred" \
   '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
   geode-pricer the_editor_gives_up_focus_before_it_is_dropped
 
+# No test covers this contract today: the mutation makes a commit whose
+# line moved fall back to row 0, so it lands on a different line than the
+# one edited, and the named test exercises the editor closing when its row
+# vanishes rather than a commit arriving afterwards. SURVIVED here is the
+# honest verdict, not a stale filter.
 run_mutation "pricer tile: a commit ignores that its line went away" \
   crates/geode-pricer/src/tile.rs \
   '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
   '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
-  geode-pricer a_commit_whose_line_went_away_is_refused
+  geode-pricer an_editor_whose_line_went_away_closes_with_moved
 
 run_mutation "pricer tile: a refused save is silent" \
   crates/geode-pricer/src/tile.rs \
@@ -19030,10 +19074,20 @@ run_mutation "timeseries mouse: the actions button toggles in capture" \
 # first and the click meant to close reopens on a fresh seed.
 run_mutation "timeseries mouse: the readout toggles in capture" \
   crates/geode-timeseries/src/header.rs \
-  '            // would reopen on a fresh seed instead.
+  '            // this press. Propagation still lets the shell focus the tile.
             .capture_any_mouse_down({' \
-  '            // would reopen on a fresh seed instead.
+  '            // this press. Propagation still lets the shell focus the tile.
             .on_any_mouse_down({' \
+  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+
+# The readout's press prevents default: the shell root is track_focus'ed,
+# and without it gpui focuses the root in the press's bubble phase, so
+# the range popup it just opened loses left/right to the root.
+run_mutation "timeseries mouse: the readout press keeps the popup's focus" \
+  crates/geode-timeseries/src/header.rs \
+  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                    window.prevent_default();' \
+  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));' \
   geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
 
 # A right press focuses the tile it lands on (review M1: a context menu
@@ -19660,28 +19714,266 @@ run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   '            if false {
                 return self.switch_sheet(name, true, cx);' \
   geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
+# A date cell's field paints unframed. Mutated to the strip's frame, a
+# second rounded border sits inside the cursor's and the padding pushes
+# the day off the cell's right edge.
+run_mutation "mdedit: a date cell's field paints without the strip's frame" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                            self.tile_id,
+                            false,' \
+  '                            self.tile_id,
+                            true,' \
+  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# ...and with flush segments. Mutated to padded ones, the digits spread
+# apart and the field outgrows the plain date, clipping the year.
+run_mutation "mdedit: a date cell's segments paint flush" \
+  crates/geode-marketdata/src/header.rs \
+  '        flush: !framed,' \
+  '        flush: false,' \
+  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# ---- Market-data line numbers (2026-09-26): `[ui] line_numbers` ----
+
+# The tile observes the shell's `UiSettings` global. Mutated to ignore
+# it, a settings-row step never reaches an open panel.
+run_mutation "mdlines: the panel observes UiSettings" \
+  crates/geode-marketdata/src/tile.rs \
+  '        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))' \
+  '        cx.observe_global::<UiSettings>(|_, _| {})' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# A mode change refreshes the table, whose column widths are cached.
+# Mutated to skip it, the gutter paints inside the old width and eats
+# the label's room.
+run_mutation "mdlines: a mode change refreshes the table" \
+  crates/geode-marketdata/src/tile.rs \
+  '                d.line_numbers = mode;
+                t.refresh(cx);' \
+  '                d.line_numbers = mode;' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# The label column widens by the gutter.
+run_mutation "mdlines: the label column widens by the gutter" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                width: px(LABEL_WIDTH + self.gutter_px()),' \
+  '                width: px(LABEL_WIDTH),' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# Under a hidden label the first value column widens instead.
+run_mutation "mdlines: a hidden label's first value column widens" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                + if col_ix == PINNED_COL {' \
+  '                + if false {' \
+  geode-marketdata a_hidden_label_panel_paints_its_gutter_beside_the_first_value
+
+# With the cursor in the header strip `rel` numbers absolutely. Mutated
+# to keep `rel`, every row shows its distance from a row that is not there.
+run_mutation "mdlines: rel without a grid cursor numbers absolutely" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            (LineNumbers::Relative, None) => LineNumbers::On,' \
+  '            (LineNumbers::Relative, None) => LineNumbers::Relative,' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# ---- timeseries colour picker: absolute colours and the component bridge ----
+
+# `#rrggbb` is an absolute colour wherever a colour name is accepted, so a
+# `[colours]` name may never start with `#`.
+run_mutation "colours: a name starting with '#' is reserved" \
+  crates/geode-core/src/colour/mod.rs \
+  '                || name.starts_with(RESERVED_PREFIX)' \
+  '                || false' \
+  geode-core a_name_starting_with_a_hash_is_reserved
+
+# A featured swatch maps back to the theme-following colour it was built
+# from; mutated, every pick is absolute and stops following the theme.
+run_mutation "timeseries colour picker: a featured match keeps its palette or named colour" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        .filter(|(f, _)| within_a_step(*f, picked))' \
+  '        .filter(|_| false)' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# Anything off the featured row is absolute, not the nearest featured one.
+run_mutation "timeseries colour picker: a non-featured pick is Custom" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        None => Colour::Custom(picked),' \
+  '        None => Colour::Palette(0),' \
+  geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
+
+# The component's hex field truncates: a featured colour read back one
+# step low on a channel is still that colour. Exact matching turns it
+# absolute and a shade off.
+run_mutation "timeseries colour picker: a featured match tolerates one step" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) <= 1)' \
+  '    a.0.iter().zip(b.0).all(|(x, y)| x.abs_diff(y) == 0)' \
+  geode-timeseries a_pick_one_step_off_a_featured_colour_is_that_colour
+
+# Two featured colours in reach: the nearer wins, the first on a tie.
+run_mutation "timeseries colour picker: the nearest featured colour wins" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        .min_by_key(|(f, _)| distance(*f, picked));' \
+  '        .max_by_key(|(f, _)| distance(*f, picked));' \
+  geode-timeseries the_nearest_featured_colour_wins_then_the_first
+
+# A pick of what the target already paints changes nothing: `enter` on
+# the untouched hex field must not rewrite a named colour.
+run_mutation "timeseries colour picker: a pick of the painted colour is a no-op" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if within_a_step(Rgb8::from_hsla(h), Rgb8::from_hsla(painted)) {' \
+  '        if false {' \
+  geode-timeseries a_pick_of_the_colour_already_painted_is_a_no_op
+
+# The pick context outlives the popup: the hex field's `enter` closes the
+# popover before its commit arrives.
+run_mutation "timeseries colour picker: the pick context survives the close" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx));' \
+  '            c.picker.update(cx, |state, cx| state.set_open(false, cx)); self.pick_context = None;' \
+  geode-timeseries a_typed_hex_commits_an_absolute_colour_and_hands_focus_back
+
+# The Colours dialog refuses a `#` name up front...
+run_mutation "colours dialog: a name starting with '#' is reserved" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || false' \
+  geode-shell reserved_names_are_taken
+
+# ...and only the Colours dialog.
+run_mutation "colours dialog: the '#' reservation is the colours domain's alone" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (true && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  geode-shell reserved_names_are_taken
+
+# `#rrggbb` is exactly six digits: short, long and alpha forms are refused.
+run_mutation "timeseries colour picker: hex parse refuses the wrong length" \
+  crates/geode-timeseries/src/core/rgb.rs \
+  '        if digits.len() != 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  '        if digits.len() < 6 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {' \
+  geode-timeseries malformed_hex_is_refused
+
+# A session `#…` string is an absolute colour, never read as a name.
+run_mutation "timeseries colour picker: a session #rrggbb reads back as Custom" \
+  crates/geode-timeseries/src/core/session.rs \
+  '        Some(Value::String(n)) if n.starts_with(geode_core::colour::RESERVED_PREFIX) => {' \
+  '        Some(Value::String(n)) if false => {' \
+  geode-timeseries a_custom_colour_round_trips_as_hex
+
+# `:colour s1 #…` is parsed as hex before any name lookup, and a malformed
+# one names the form.
+run_mutation "timeseries colour picker: :colour reads a # word as hex" \
+  crates/geode-timeseries/src/commands.rs \
+  '    if word.starts_with(geode_core::colour::RESERVED_PREFIX) {' \
+  '    if false {' \
+  geode-timeseries a_colour_word_is_an_index_a_hex_or_a_known_name
+
+# An absolute colour paints as itself — no theme, no floor.
+run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        Colour::Custom(c) => c.to_hsla(),' \
+  '        Colour::Custom(_) => palette.colour(0),' \
+  geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
+
+# The Colour… row's verb opens the picker.
+run_mutation "timeseries colour picker: the menu row opens the picker" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            "pick_colour" => self.open_colour_picker(window, cx),' \
+  '            "pick_colour" => false,' \
+  geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
+
+# A pick lands on the slot the picker was opened for, not the cursor.
+run_mutation "timeseries colour picker: a Change applies to the target slot" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if let Ok(changed) = self.model.set_colour(pick.target, colour) {' \
+  '        if let Ok(changed) = self.model.set_colour(self.model.cursor_slot().map_or(0, |s| s.number), colour) {' \
+  geode-timeseries a_pick_lands_on_the_target_slot_even_after_the_cursor_moves
+
+# A close the component makes itself (escape, click-out, a commit) closes
+# the tile's popup and its insert mode.
+run_mutation "timeseries colour picker: the component's close closes the popup" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {' \
+  '            if false {' \
+  geode-timeseries escape_closes_the_picker_unchanged_and_gives_the_keyboard_back
+
+# The picker's popover and hex field count as the tile's own keyboard
+# holders, which is what keeps typed keys off the tile's verbs and what
+# the closer's blur is gated on.
+run_mutation "timeseries colour picker: the popover's focus is the tile's" \
+  crates/geode-timeseries/src/popup.rs \
+  '                .contains_focused(window, cx),' \
+  '                .contains_focused(window, cx) && false,' \
+  geode-timeseries a_swatch_commit_blurs_the_picker_before_dropping_it
+
+# A `:remove` of the picker's target closes it.
+run_mutation "timeseries colour picker: removing the target closes the picker" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        self.close_orphaned_colour_picker(window, cx);' \
+  '' \
+  geode-timeseries removing_the_target_slot_closes_the_picker
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
 if (( anchors_only )); then
-  # One pass: each file read once, every selected entry's anchor counted.
-  # Non-zero on any finding so this can gate a merge (MIN-2 of its own
-  # review); "nothing selected" is reported as such, never as a pass.
+  # Check anchors and test-name filters in one pass with per-file caches.
+  # Missing/ambiguous anchors, invalid filters, and an empty selection fail;
+  # loose filters and overlapping anchors remain warnings.
   python3 - "$anchors" <<'PY' || exit 1
-import sys, pathlib
+import collections, pathlib, re, sys
+
 raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
 fields = raw.split(b"\0")[:-1] if raw else []
-entries = [tuple(f.decode() for f in fields[i:i + 3]) for i in range(0, len(fields), 3)]
+entries = [tuple(f.decode() for f in fields[i:i + 5]) for i in range(0, len(fields), 5)]
 if not entries:
     print("checked 0 anchors (nothing selected)")
     sys.exit(1)
+
+FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
+TEST_ATTR = re.compile(r"^#\[(?:\w+::)*test(\]|\()")
+
+_fn_cache = {}
+
+
+def test_fns(pkg):
+    """Names of test-attributed functions in a package.
+
+    A filter is what cargo is handed, and cargo matches a substring against
+    the test's path. Matching against every `fn` would let a filter naming a
+    plain helper pass, so only functions carrying a `test` attribute count.
+    """
+    if pkg in _fn_cache:
+        return _fn_cache[pkg]
+    names = set()
+    for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        saw_test_attr = False
+        for line in lines:
+            stripped = line.strip()
+            declared = FN_DECL.match(stripped)
+            if declared:
+                if saw_test_attr:
+                    names.add(declared.group(1))
+                saw_test_attr = False
+            elif stripped.startswith("#["):
+                if TEST_ATTR.match(stripped):
+                    saw_test_attr = True
+            elif stripped and not stripped.startswith("//"):
+                saw_test_attr = False
+    _fn_cache[pkg] = names
+    return names
+
+
 texts = {}
-stale = ambiguous = 0
-for name, file, anchor in entries:
+stale = ambiguous = bad_filters = loose = 0
+for name, file, anchor, pkg, filt in entries:
     if file not in texts:
         try:
-            texts[file] = pathlib.Path(file).read_text()
+            texts[file] = pathlib.Path(file).read_text(encoding="utf-8")
         except OSError:
             texts[file] = None
     text = texts[file]
@@ -19696,7 +19988,64 @@ for name, file, anchor in entries:
     elif hits > 1:
         ambiguous += 1
         print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
-print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous")
-sys.exit(1 if stale or ambiguous else 0)
+    if not filt:
+        continue
+    matched = sorted(n for n in test_fns(pkg) if filt in n)
+    if not matched:
+        bad_filters += 1
+        print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
+    elif len(matched) > 1 and filt not in matched:
+        # Several function names match the substring but none is the exact
+        # requested name; require an unambiguous detecting-test declaration.
+        bad_filters += 1
+        print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
+    elif len(matched) > 1:
+        # The named test does run; the siblings only make the entry slower and
+        # make "which test caught it" unanswerable.
+        loose += 1
+        print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
+
+# Shared source anchors may carry different replacements. Report the overlap
+# for review without treating it as proof that the mutations are redundant.
+by_anchor = collections.defaultdict(list)
+for name, file, anchor, _pkg, _filt in entries:
+    by_anchor[(file, anchor)].append(name)
+dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
+dup_entries = sum(len(v) for v in dup_groups.values())
+for (file, _anchor), names in sorted(dup_groups.items()):
+    for shadowed_name in names[1:]:
+        print(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
+
+# An anchor that occurs once but sits inside a longer anchor another entry
+# uses. AMBIG counts occurrences of one anchor and cannot see this.
+anchors_by_file = collections.defaultdict(set)
+for _name, file, anchor, _pkg, _filt in entries:
+    anchors_by_file[file].add(anchor)
+shadowed_anchors = sorted(
+    (file, anchor)
+    for file, anchors in anchors_by_file.items()
+    for anchor in anchors
+    if any(other != anchor and anchor in other for other in anchors)
+)
+example_of = {}
+for name, file, anchor, _pkg, _filt in entries:
+    example_of.setdefault((file, anchor), name)
+for file, anchor in shadowed_anchors:
+    print(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
+
+print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
+warnings = []
+if loose:
+    warnings.append(f"{loose} loose filters")
+if dup_entries:
+    warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
+if shadowed_anchors:
+    warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
+if warnings:
+    print(f"  {', '.join(warnings)}")
+    print("  (warnings; see the anchor-uniqueness follow-up)")
+# Shared and overlapping anchors are advisory; only stale/ambiguous locations
+# and invalid test filters fail this check.
+sys.exit(1 if stale or ambiguous or bad_filters else 0)
 PY
 fi

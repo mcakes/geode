@@ -22,8 +22,7 @@ use gpui_component::{Theme, h_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
-/// The muted labels ahead of the header's two values (`view vanilla`,
-/// `pricer mock`), the market-data header's label/value pairs.
+/// Labels preceding the active view and pricer names in the header.
 pub(crate) const VIEW_LABEL: &str = "view";
 pub(crate) const PRICER_LABEL: &str = "pricer";
 
@@ -155,8 +154,7 @@ impl HeaderModel {
     }
 }
 
-/// A muted label and its value, parts of one reading (`view vanilla`,
-/// the market-data header's label/value pairs).
+/// Render a muted label beside its value, such as the active view name.
 fn pair(label: &'static str, value: SharedString, muted: Hsla, text: Hsla) -> impl IntoElement {
     h_flex()
         .gap_1()
@@ -286,24 +284,12 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
             },
             |el, t| el.child(div().when(stale, |el| el.text_color(warn)).child(t)),
         )
-        // `⋯` — the pointer's door onto the action menu, the click's own
-        // form of `.` (market-data's trigger, copied): a persistent fill
-        // while the menu is open, bare control states while closed.
+        // Toggle the action menu during capture, before its outside-click closer. A
+        // bubble-phase toggle would see the menu already closed and reopen it on the
+        // second click. Keep propagation so the shell's click-to-focus still runs.
         //
-        // On the CAPTURE phase, and it does NOT stop propagation: the
-        // menu's own `on_mouse_down_out` is a capture listener too and
-        // would close an open menu before a bubble handler here could
-        // ask whether one was open, so a second click would reopen it.
-        // Capturing first lets this toggle decide; the shell's bubble
-        // phase (click-to-focus) still runs, so a click on an unfocused
-        // tile focuses it and `mode == menu` reaches the right tile.
-        //
-        // It enters through `dispatch`, exactly as `.` does, so with an
-        // entry field or cell editor open it first closes them (blurring
-        // before the drop, without committing) and the closers may re-sync
-        // the cursor. That is benign and intended: the menu acts on the
-        // cursor row, and a click here must not leave a live field under
-        // an open menu any more than the key would.
+        // Use the same dispatch route as the menu key: cancel and blur any open field
+        // before opening the menu on the current cursor row.
         .child(
             div()
                 .id(ElementId::NamedInteger(
@@ -346,10 +332,8 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
         )
 }
 
-/// Always laid out, text or not, so the table's height never changes
-/// (spec §8.3). Every footer line is a user error or a failure, so it
-/// paints in danger text, at the status-line size the blotter's footer
-/// and the timeseries notice line use.
+/// Reserve footer height even without text so the table does not resize. Errors and
+/// line failures use danger text at the status-line font size.
 pub(crate) fn render_footer(text: Option<&SharedString>, theme: &Theme) -> impl IntoElement {
     h_flex()
         .w_full()

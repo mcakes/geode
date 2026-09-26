@@ -131,6 +131,22 @@ pub fn gutter_digits(len: usize) -> usize {
     digits.max(2)
 }
 
+/// Fixed width of a gutter digit cell in pixels, shared by grids alongside their
+/// fixed-pixel column widths. This estimate is based on the mono face at the default UI
+/// size.
+pub const GUTTER_DIGIT_PX: f32 = 8.0;
+/// The gap between a gutter's last digit and the cell text after it.
+pub const GUTTER_GAP_PX: f32 = 6.0;
+
+/// A gutter's width in px over `len` visible rows — `0` when off — so
+/// every grid that paints one sizes it by the same rule.
+pub fn gutter_px(mode: LineNumbers, len: usize) -> f32 {
+    match mode {
+        LineNumbers::Off => 0.0,
+        _ => gutter_digits(len) as f32 * GUTTER_DIGIT_PX + GUTTER_GAP_PX,
+    }
+}
+
 /// Write `[ui] line_numbers` into `<user_dir>/app.toml`, preserving every
 /// other table, key and comment — `config_write::edit`'s contract, the
 /// same door `vimfind`/`fontsize`/`tileadd` persist through.

@@ -1,22 +1,8 @@
-//! The bottom status bar: pending keystroke display, the
-//! config-reload indicator, and the active theme name. `status_bar` is a
-//! pure function of its arguments — no stored state, no I/O — so
-//! `ShellView` (or its tests) can call it with whatever matcher/theme
-//! snapshot they have on hand.
-//!
-//! Workspace indicators belong to the sidebar; this bar does not know the
-//! active workspace or which ones are non-empty. It has no shell-wide mode to
-//! report.
-//!
-//! **Inventory decision:** migrated onto gpui-component's `StatusBar`
-//! (pinned release: `gpui-component-0.6.2/src/status_bar.rs`) rather
-//! than a hand-rolled `h_flex` — its `left`/`right`/center-`child`
-//! regions are exactly this bar's shape (pending+reload on the left,
-//! theme name on the right,
-//! nothing in the center), and it pulls in the dedicated `status_bar`/
-//! `status_bar_border` theme tokens (confirmed present in the pinned
-//! `theme_color.rs`) instead of this bar's previous `sidebar`-token
-//! workaround, which predated those tokens' use here.
+//! Bottom status bar prepared from arguments and the active theme, with no retained
+//! state or I/O. Count, pending keys, configuration messages, diagnostics, ingestion,
+//! and historical-time indicators occupy the left region; the active theme name
+//! occupies the right. Workspace indicators belong to the sidebar. StatusBar supplies
+//! the status_bar and status_bar_border theme tokens.
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
@@ -41,47 +27,14 @@ pub fn height(window: &Window) -> f32 {
     scale::design_px(HEIGHT, window.rem_size())
 }
 
-/// Build the status bar: left — the count prefix (§3.3, in the mono face)
-/// when one is in flight, then the pending keystrokes as space-separated
-/// text, then the reload indicator when `reload_message` is `Some` (Task
-/// 1c-1: a danger-toned `config: N error(s) — keeping last good` marker,
-/// `None` when config is healthy), then the write-failure indicator when
-/// `write_error_message` is `Some` (Phase 4c §7.1: a config write the
-/// dialogs applied in memory and could not persist, rolled back — shown
-/// here rather than only in the dialog, because the write outlives the
-/// dialog that started it), then the restart indicator when
-/// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
-/// reload the frame cannot pick up live, so this asks for a restart in the
-/// same `warning` token the readout's AS OF badge uses), then the
-/// diagnostics summary when `diagnostics_summary` is `Some` (Phase 4b
-/// §4.4: `Diagnostics::summary()` — source health, config errors and
-/// dropped events, in one terse line — same `warning` token, same
-/// reasoning); a click on that segment calls `on_diagnostics_click`
-/// (Phase 4b Task 5 — `render.rs`'s call site opens the tile via
-/// `ShellView::open_module("diagnostics", ..)` directly — this is the
-/// one focus-or-add door left since `diagnostics::open` was retired
-/// (user ruling 2026-09-09; the palette's `Diagnostics: Split` rows
-/// always add or fill instead) — not by dispatching an action, so the
-/// click is not recorded in the crash file's action tail — MIN-9, final
-/// review — though `open_module` does mark the session dirty on its
-/// own).
-/// Then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
-/// is scoped to a past instant — an unmissable `AS OF {t} · Return to
-/// live in the palette` segment in the same warning tokens the toolbar's
-/// own AS OF badge uses, since spec §4.5 says nothing on screen may look
-/// live when it is not); right — the active theme name in
-/// `muted_foreground`. All
-/// colors come from `cx.theme()`; no other input is read, so the same
-/// call always renders the same tree for the same arguments.
-///
-/// Eleven plain, independently-`Option`al inputs rather than a bundling
-/// struct (clippy's `too_many_arguments`, `-D warnings`-enforced):
-/// `render.rs`'s one call site already has each of these as its own
-/// separate local (`self.matcher.pending()`, `self.last_reload.
-/// status_message()`, ...) — wrapping them in a struct just to satisfy
-/// the lint would move that assembly cost into `render.rs` for no
-/// reader benefit, since this function's own body treats every field
-/// independently anyway.
+/// Render optional status segments in order: count, nonempty pending keys, reload
+/// failure, write failure, restart requirement, shell notice, diagnostics summary,
+/// ingestion activity, and historical time. Configuration errors use danger, restart
+/// and diagnostics use warning, and ordinary notices are muted. Diagnostics clicks
+/// invoke the supplied callback. The historical badge requires both the shortened and
+/// full timestamps; its tooltip shows the full timestamp. Theme name appears on the
+/// right. Inputs remain separate because callers already hold these values
+/// independently.
 #[allow(clippy::too_many_arguments)]
 pub fn status_bar(
     pending: &[Keystroke],
@@ -89,32 +42,21 @@ pub fn status_bar(
     reload_message: Option<&str>,
     write_error_message: Option<&str>,
     restart_message: Option<&str>,
-    // A stack verb's one-line refusal (tile-stacks spec §4), cleared by
-    // the next dispatch.
+    // Shell action refusal, cleared by the next dispatch.
     notice: Option<&str>,
     diagnostics_summary: Option<&str>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
-    // What the ingest runner is loading right now, or `None` while idle
-    // (spec 2026-09-19 §5.3) — paints a 2px loading strip on the bar's
-    // top edge plus a `loading <source> · <n> queued` segment, both only
-    // while `Some`.
+    // Current ingestion activity, shown as a loading label and a two-pixel strip along
+    // the bar's top edge. None hides both.
     ingest: Option<&IngestActivity>,
     as_of: Option<&str>,
-    // The as-of instant's full resolved timestamp (`ScopeBarModel::
-    // as_of_full`), `Some` exactly when `as_of` is — the segment's
-    // tooltip TITLE (final review, spec §5.1), with the painted `as_of`
-    // text moving to the detail line.
+    // Full resolved historical timestamp for the badge tooltip. Supply alongside as_of,
+    // whose shortened text is painted and repeated in the tooltip detail.
     as_of_full: Option<&SharedString>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-
-    let pending_text = pending
-        .iter()
-        .map(format_keystroke)
-        .collect::<Vec<_>>()
-        .join(" ");
 
     // `h_full`, not a height of its own: the wrapper below is the one
     // owner of the bar's height (the design guide's "fix the common
@@ -129,12 +71,21 @@ pub fn status_bar(
                 .child(format!("{count}")),
         );
     }
-    bar = bar.left(
-        div()
-            .font_family(fonts::MONO)
-            .text_color(theme.muted_foreground)
-            .child(pending_text),
-    );
+    // Format pending keys only when nonempty, avoiding an empty status element and
+    // unnecessary formatting work on idle paints.
+    if !pending.is_empty() {
+        let pending_text = pending
+            .iter()
+            .map(format_keystroke)
+            .collect::<Vec<_>>()
+            .join(" ");
+        bar = bar.left(
+            div()
+                .font_family(fonts::MONO)
+                .text_color(theme.muted_foreground)
+                .child(pending_text),
+        );
+    }
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
     }
@@ -159,8 +110,7 @@ pub fn status_bar(
         );
     }
     if let Some(message) = notice {
-        // A verb's one-line refusal (tile stacks spec §4): muted, cleared
-        // by the next dispatch.
+        // Shell action refusals stay muted and clear on the next dispatch.
         bar = bar.left(
             div()
                 .text_color(theme.muted_foreground)
@@ -206,16 +156,9 @@ pub fn status_bar(
         );
     }
     if let Some((t, full)) = as_of.zip(as_of_full) {
-        // The same warning-toned badge treatment the toolbar's own AS OF
-        // readout uses (`shell::toolbar`'s "scope-asof" child) — an
-        // unmissable second reminder in the one place a maximised tile
-        // cannot hide (spec §3.6/§4.5). `as_of_text` is built once and
-        // reused for both the painted child and the tooltip's detail
-        // line (a clone of the same `SharedString` — no second
-        // `format!`); the tooltip's TITLE is `full`, the as-of instant's
-        // whole resolved timestamp (final review, spec §5.1) — a trader
-        // hovering to see exactly when must not get the same elided text
-        // the segment already shows.
+        // Keep historical time visible even when a tile is maximised. Reuse the
+        // prepared badge text in the tooltip detail and show the full resolved
+        // timestamp as its title.
         let as_of_text: SharedString = format!("AS OF {t} · Return to live in the palette").into();
         // Through the chip door (`shell::chip`): `warning_foreground` over
         // the tint is the background family on a barely-tinted background

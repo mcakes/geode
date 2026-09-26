@@ -1,15 +1,13 @@
-//! The unsent work (market-data spec §8.4).
+//! Edits over a delivered document, with labels for restoring and rebasing.
 //!
-//! A draft is edits over the generation that was painted when they were
-//! made. It is keyed by grid cell, because that is what a cursor points
-//! at, and it records each cell's row and column *label* beside the
-//! value, because that is the only identity that survives a new document:
-//! a term can move index, and a node the desk stopped publishing takes
-//! its column with it. `base` is the document's own source time (never a
-//! `gen_id` — a live query's provenance carries the dataset-wide latest
-//! generation while its `as_of` is per document, Part 1 §4.5), so a
-//! delivery whose `as_of` differs from `base` is a newer generation and
-//! the draft goes `Behind` rather than being clobbered (roadmap ruling 9).
+//! Cell indices address the base document's grid; row and column labels
+//! identify edits when another document changes those positions. Inserted
+//! rows and attributes are keyed by label or column name directly.
+//!
+//! `base` identifies the document by its per-document source time, not an
+//! immutable generation ID. A different timestamp can mean a newer or a
+//! historical document. Republishes sharing a timestamp are indistinguishable
+//! here, even if their grid positions change.
 
 use crate::core::matrix::{MatrixModel, RowState};
 use crate::core::spec::{Columns, PanelSpec};
@@ -28,23 +26,22 @@ pub enum DraftState {
     Editing,
     /// Edits present and a DIFFERENT generation has been delivered —
     /// usually a newer one, but an as-of step back delivers an older one
-    /// and is the same situation. The panel keeps painting the base
-    /// generation under the edits; `:rebase` moves them onto the
+    /// and is the same situation. When available, the panel keeps painting
+    /// the base generation under the edits; `:rebase` moves them onto the
     /// delivered one and `:revert` drops them. The edits' own base
     /// generation coming back (an as-of round trip) returns the draft to
     /// `Editing` — see [`Draft::on_delivered`].
     Behind { newer: String },
-    /// An upload succeeded; the edits are kept and painted as sent until
-    /// the echo clears them (§9.4, Part 4). `at` is the upload's own RFC
-    /// 3339 time — the header's `sent HH:MM` (Part 4) names WHEN it went,
-    /// the same shape `Behind`'s `newer` already carries.
+    /// The transport accepted the upload. Edits remain painted as sent
+    /// while the tile checks subsequent deliveries for an echo; acceptance
+    /// alone does not confirm upstream publication. `at` is the send time
+    /// in RFC 3339, displayed as `sent HH:MM`.
     Sent { at: String },
 }
 
-/// What the header says about the draft at a glance (spec 2026-09-14 §4):
-/// a dot for `Dirty`, `update HH:MM` for `Behind`, `sent HH:MM` for `Sent`
-/// (Part 4), nothing for `Clean`. Counts live in `count_phrase`, for the
-/// places a number matters.
+/// Header state: a dot for `Dirty`, `update HH:MM` for `Behind`,
+/// `sent HH:MM` for `Sent`, and nothing for `Clean`. Edit counts are
+/// reported separately by [`Draft::count_phrase`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftBadge {
     Clean,
@@ -53,17 +50,15 @@ pub enum DraftBadge {
     Sent { at: String },
 }
 
-/// What a panel does when a DIFFERENT generation is delivered while its
-/// draft has edits — a per-tile choice (user ruling 2026-09-19), applied
-/// by the tile at the one point today's code enters `Behind`
-/// ([`Draft::on_delivered`] IS the `hold` decision and reads no policy;
-/// the tile branches after it). A clean panel follows every document
-/// regardless, and the edits' own base coming back (an as-of round trip)
-/// is not a different document, so neither is touched by this.
+/// Per-tile handling of a different document delivered over edits.
+/// [`Draft::on_delivered`] enters `Behind` without reading this policy;
+/// the tile then holds, rebases, or replaces the draft. Clean drafts and
+/// a return to the edits' own base bypass that choice. `Sent` drafts are
+/// handled by the tile's echo comparison instead.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum UpdatePolicy {
-    /// Today's behaviour: the draft goes `Behind`, the base generation
-    /// stays painted, `:rebase`/`:revert` are the ways out.
+    /// Keep the available base document painted under the edits in `Behind`;
+    /// `:rebase` and `:revert` resolve the pending delivery.
     #[default]
     Hold,
     /// Re-place the edits onto the new document at once, by label —
@@ -100,25 +95,20 @@ impl UpdatePolicy {
     }
 }
 
-/// One row-level edit (spec §5.1): `Inserted` is a whole new row, its own
-/// cells keyed by COLUMN LABEL rather than grid index — an inserted row's
-/// index is the model's business, not the draft's — and `Deleted` marks a
-/// document row for removal without saying anything about its cells,
-/// which still paint from the document until the row is actually gone.
+/// A row insertion or deletion keyed by row label. Inserted cells use
+/// column labels because their grid positions depend on model placement.
+/// A deletion preserves the document row in the painted model as a marker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RowEdit {
-    /// `after` is the label of the document row this one sits under,
-    /// `None` meaning the top. `cells` are the values typed into it so
-    /// far, keyed by the column's own label — the same identity a cell
-    /// edit's `labels` side map already uses, so a row that moves
-    /// columns (a reordered ladder) is not a row that loses its edits.
+    /// `after` names a document or inserted row; `None` means the top.
+    /// Cells are keyed by column label so column reordering does not move
+    /// an inserted value onto a different column.
     Inserted {
         after: Option<String>,
         cells: BTreeMap<String, Value>,
     },
-    /// A document row marked for removal. The row itself is not gone
-    /// from `rows` — the model still lays it out, struck through
-    /// (§5.2) — until upload or a rebase drops it outright.
+    /// A document row marked for removal. The model retains it with a
+    /// deleted marker; upload assembly excludes it from the sent document.
     Deleted,
 }
 
@@ -133,32 +123,18 @@ pub enum RowDelete {
     Already,
 }
 
-/// Edits keyed by grid cell, with the labels that make them portable, plus
-/// document-level attribute edits keyed by column name.
+/// Document-cell edits keyed by base-grid position, with labels for rebase;
+/// attribute edits keyed by column name; row edits keyed by row label.
 ///
-/// **The invariant this leans on:** a [`MatrixModel`]'s row labels are
-/// unique and so are its column labels. A label is how an edit is
-/// identified across generations, so a repeated one would make two
-/// different rows a single target — and [`MatrixModel::build`] refuses
-/// every way that could happen (a repeated pivot pair, a repeated flat row
-/// label, a blank axis cell). That one defence at the model boundary is
-/// why [`Draft::rebase`] indexes labels without a collision check of its
-/// own: a second check here would be a defence the first one hides, and
-/// neither would then be isolated enough for the mutation harness to say
-/// which is load-bearing.
-///
-/// A header attribute needs no such indexing — its column NAME is its
-/// identity, the same name every generation of one document carries it
-/// under — so `attrs` is keyed directly, with no `labels`-style side map.
-///
-/// A row-level edit ([`RowEdit`], §5.1) is a third kind of unsent work,
-/// keyed by the row's own label directly — a row has no grid index of its
-/// own to key by until a model places it, unlike a cell edit, which is
-/// always made against a row that already has one.
+/// Rebase requires unique model row and column labels: duplicate labels
+/// would merge distinct edit targets. The model rejects duplicate document
+/// row identities, pivot pairs, and axis/slice label collisions. Compiled
+/// panel specs must also supply distinct flat-column and slice labels.
+/// Header attributes and inserted cells already carry their named identities.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Draft {
-    /// The source time of the generation every edit was made against,
-    /// RFC 3339. `None` exactly when there are no edits.
+    /// The base document's source time in RFC 3339. Edit operations set it
+    /// when the draft is empty or has no base; restoration can omit it.
     pub base: Option<String>,
     pub edits: BTreeMap<(usize, usize), Value>,
     /// Document-level attribute edits, keyed by column name. Part of the
@@ -169,18 +145,14 @@ pub struct Draft {
     /// `edits`/`attrs` for the same reason: one base, one state, one
     /// `len()`, one `revert`.
     pub rows: BTreeMap<String, RowEdit>,
-    /// The same-ex-date GROUP each edited label belonged to, and how many
-    /// rows that group held, in the base document (market-data spec §2's
-    /// rebase guard, amendment 4). A minted id like `2026-09-18#2` is an
-    /// ORDINAL among same-date rows, so an edit keyed by it is only safe
-    /// to carry across a rebase while that date's row count is unchanged
-    /// — a different count means the ordinals shifted and `#2` may now
-    /// name a different dividend. Captured by [`Draft::capture_groups`],
-    /// never by [`Draft::set`] (which has no model to read a count from),
-    /// at every point the tile has a model of the draft's own base in
-    /// hand; empty on a draft restored from a session that predates this
-    /// guard, which is exactly "apply no guard" (there is nothing to
-    /// compare a rebase's new count against).
+    /// Captured row counts for groups containing edited or deleted labels.
+    /// Minted IDs such as `2026-09-18#2` are ordinals within a date: a changed
+    /// nonzero count can redirect an edit to another dividend, so rebase drops
+    /// that group's edits. Equal counts do not detect same-size reordering.
+    ///
+    /// [`Draft::capture_groups`] reads a clean base model supplied by the
+    /// caller; [`Draft::set`] has no model from which to obtain the counts.
+    /// An absent group count disables that group's guard.
     pub groups: BTreeMap<String, usize>,
     pub state: DraftState,
     /// (row label, column label) per edited cell. Private because it must
@@ -188,17 +160,10 @@ pub struct Draft {
     labels: BTreeMap<(usize, usize), (String, String)>,
 }
 
-/// The column index a restored edit is parked at until a model resolves
-/// it by label.
-///
-/// A session stores edits as label pairs, not indices (spec §8.5), so a
-/// restored draft has no real grid position for anything. Parking them
-/// out of every possible grid's range means an unresolved edit paints
-/// NOWHERE rather than in some arbitrary cell: an edit a trader cannot
-/// see is recoverable (`rebase` puts it back), while an edit painted
-/// against the wrong cell is a wrong number on a screen, which is the one
-/// failure this codebase refuses to risk. The row index stays the file's
-/// own order so the round trip is stable.
+/// Provisional column for restored label-based edits until rebase resolves
+/// them against a model. Keeping them outside the grid prevents an unresolved
+/// edit from painting on an arbitrary cell. The provisional row follows file
+/// order to preserve serialization order.
 const UNRESOLVED_COLUMN: usize = usize::MAX;
 
 impl Draft {
@@ -254,16 +219,10 @@ impl Draft {
         }
     }
 
-    /// A cell edit's numeric reading — `F64`/`I64` widened to `f64`,
-    /// `None` for a `Date`/`Utf8` edit or no edit at all. `:bump`'s own
-    /// door onto an EXISTING edit — `MarketDataTile::bump`'s
-    /// `numeric_value` reads a cell's current value through here first,
-    /// falling back to the model's own painted one when there is no edit
-    /// yet — so a second bump composes with the first rather than reading
-    /// through to the document underneath it. Which COLUMNS are ever
-    /// bumped at all is `CellKind::Number`'s decision, made by the
-    /// caller (this crate has no `MatrixModel` to consult here); this is
-    /// only the "what number is already there" half of that.
+    /// Read an existing numeric edit as `f64`; absent, date, and text edits
+    /// return `None`. Callers use this before the painted document value so
+    /// successive bumps compose. The caller also filters eligible numeric
+    /// columns; this method only reads the stored value.
     pub fn numeric_edit(&self, cell: (usize, usize)) -> Option<f64> {
         match self.edits.get(&cell)? {
             Value::F64(v) => Some(*v),
@@ -283,11 +242,9 @@ impl Draft {
         }
     }
 
-    /// Insert a new row, empty of cells, sitting under `after` (`None` =
-    /// top) — the same base rule as `set`. `label` is the row's own
-    /// identity; a caller inserting on a `Minted` axis mints one first
-    /// through [`Self::mint_label`], while a `Typed` axis's row-label
-    /// editor supplies one directly (spec §5.3).
+    /// Insert an empty row under `after` (`None` means the top), using the
+    /// same base rule as [`Self::set`]. The caller supplies the identity,
+    /// minting a temporary label or committing a typed row label.
     pub fn insert_row(&mut self, label: String, after: Option<String>, base: &str) {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
@@ -304,18 +261,10 @@ impl Draft {
         }
     }
 
-    /// Delete a row by label — the same base rule as `set`. An `Inserted`
-    /// row is dropped outright (there was never anything to send), a
-    /// document row not already marked becomes `Deleted`, and a row
-    /// already `Deleted` answers `Already` rather than being marked
-    /// twice (marking it again would not be wrong, but the caller's
-    /// notice needs to say which happened).
-    ///
-    /// Dropping an inserted row hands every row anchored on it to ITS
-    /// anchor ([`Self::rehang_followers`], spec §5.3): `d d` on the
-    /// middle of a chain `D1 → new-2 → new-1` leaves `new-1` under `D1`,
-    /// where the trader put the chain, rather than at the top where a
-    /// vanished anchor lands.
+    /// Delete by label, using the same base rule as [`Self::set`]. An inserted
+    /// row is removed; a document row is marked `Deleted`; an existing deletion
+    /// returns `Already`. Removing an inserted row reanchors its followers to
+    /// its own anchor, preserving the chain's position.
     pub fn delete_row(&mut self, label: &str, base: &str) -> RowDelete {
         if self.is_empty() || self.base.is_none() {
             self.base = Some(base.to_string());
@@ -336,17 +285,9 @@ impl Draft {
                 RowDelete::Marked
             }
         };
-        // Dropping the draft's only `Inserted` row (insert, then delete
-        // the same row right back, nothing else pending) can leave every
-        // map empty again — the invariant `revert` and `rebase`'s own
-        // tail both keep, `base` is `None` exactly when there is no
-        // unsent work, is not automatic here the way it is there: the
-        // base/state bump above runs unconditionally, ahead of knowing
-        // whether this call will end up removing the draft's only
-        // content. Left unchecked, an insert-then-undo leaves `state`
-        // `Editing` and `base` `Some` over an empty draft — `badge()`
-        // would say `Dirty` and a later `on_delivered` would push a
-        // draft with nothing in it into `Behind`.
+        // Deleting the only inserted row can empty the draft after the base
+        // and state were set above. Clear both so an insert followed by delete
+        // does not leave a dirty badge or become `Behind` on delivery.
         if self.is_empty() {
             self.base = None;
             self.state = DraftState::Clean;
@@ -377,19 +318,10 @@ impl Draft {
         }
     }
 
-    /// Move an `Inserted` row to a new label — the row-label editor
-    /// committing a typed label onto a minted or blank one (spec §5.3).
-    /// Answers `false` when `from` is not an `Inserted` row (a document
-    /// row's label is not the draft's to rename) or `to` already names a
-    /// row in this draft, so a caller never silently overwrites one edit
-    /// with another.
-    ///
-    /// The row's followers move with it ([`Self::rehang_followers`],
-    /// final review's Critical): the tile anchors a chain on the MINTED
-    /// label before the rename lands, so a follower left saying
-    /// `after: new-2` would name a label no row holds — unresolvable by
-    /// the splice, painted at the top, and written to the session as a
-    /// dangling anchor.
+    /// Rename an inserted row and move its followers to the new label.
+    /// Return `false` if `from` is not inserted or `to` already names a draft
+    /// row. Moving followers prevents a renamed temporary label from leaving
+    /// dangling anchors that would place those rows at the top.
     pub fn rename_row(&mut self, from: &str, to: &str) -> bool {
         if !matches!(self.rows.get(from), Some(RowEdit::Inserted { .. })) {
             return false;
@@ -403,12 +335,9 @@ impl Draft {
         true
     }
 
-    /// Move an `Inserted` row under a different anchor — `shift+o` on an
-    /// inserted row (spec §5.3, controller ruling 2026-09-19): the new
-    /// row takes this one's anchor and this one is re-anchored onto the
-    /// new row, so the pair paints new-above-old under the same document
-    /// row. Answers `false` for anything but an `Inserted` row — a
-    /// document row's place is the document's, not the draft's to move.
+    /// Change an inserted row's anchor; return `false` for other rows.
+    /// The tile uses this for insertion above an inserted row: the new row
+    /// takes the old anchor and the old row follows the new one.
     pub fn reanchor_row(&mut self, label: &str, after: Option<String>) -> bool {
         match self.rows.get_mut(label) {
             Some(RowEdit::Inserted { after: anchor, .. }) => {
@@ -419,16 +348,10 @@ impl Draft {
         }
     }
 
-    /// Move every `Inserted` row anchored on `from` onto `to` — the one
-    /// spelling of a follower move (review of Task 8): `o` on a row that
-    /// already has a follower hangs that follower off the NEW row, so the
-    /// new row sits immediately below the cursor row rather than beside
-    /// its earlier sibling in label order (which would re-sort the pair
-    /// on a later rename); and dropping an inserted row hands its
-    /// followers to its own anchor. With both moves through here every
-    /// anchor has at most one direct follower by construction — a
-    /// rebase's vanished-anchor → `None` is the one remaining source of
-    /// siblings.
+    /// Move every inserted row anchored on `from` onto `to`. Inserting into
+    /// a chain puts existing followers under the new row; deleting a chain
+    /// member hands its followers to its anchor. Normal insertion uses chains,
+    /// while restored drafts and rebases can also contain sibling followers.
     pub fn rehang_followers(&mut self, from: Option<&str>, to: Option<String>) {
         for edit in self.rows.values_mut() {
             if let RowEdit::Inserted { after, .. } = edit
@@ -460,16 +383,11 @@ impl Draft {
             .count()
     }
 
-    /// How many inserted rows still lack a required cell (spec §5.2) —
-    /// the header's `N rows incomplete`, and what Part 4's upload will
-    /// refuse on. Under `Columns::Values` a cell is required when its
-    /// [`ValueColumn::required`](crate::core::spec::ValueColumn) says so;
-    /// under `Columns::Axis` EVERY column is — the ladder and the slice
-    /// values alike, since a term with a node missing is not a term the
-    /// desk can price. `columns` is the model's own column labels, the
-    /// ladder being the document's and not the spec's to know; a flat
-    /// spec's required labels are checked against it too, so a column
-    /// the spec requires but the model does not carry never counts.
+    /// Count inserted rows missing a required cell among the model's columns.
+    /// Flat columns use [`ValueColumn::required`](crate::core::spec::ValueColumn);
+    /// every pivot column is required, including slice values. This counts
+    /// presence only, without type validation. Upload assembly separately
+    /// requires every value it serializes, including optional flat columns.
     pub fn incomplete_rows(&self, spec: &PanelSpec, columns: &[SharedString]) -> usize {
         let required = |label: &str| match &spec.columns {
             Columns::Axis(_) => true,
@@ -520,37 +438,21 @@ impl Draft {
         n
     }
 
-    /// Add `delta` to each given cell's current value, answering how many
-    /// cells were written — or the first typing refusal, with NOTHING
-    /// written (spec 2026-09-23 amendment): `:bump 0.5` across a ladder
-    /// that mixes an `F64` node with an `I64` one must not land the F64
-    /// cells and then stop, since that is a partial bump the trader never
-    /// asked for and cannot see as partial from the header alone.
+    /// Add `delta` to the supplied current values, returning the number of
+    /// writes. Validate all results before changing the draft so a fractional
+    /// bump refused by an integer column cannot leave a partially bumped row.
     ///
-    /// The caller passes each cell's *current* value — what the model is
-    /// painting, which is the draft's own value where one exists — so that
-    /// `:bump` composes with an edit already made rather than reading
-    /// through to the document underneath it.
-    ///
-    /// **Number cells only, by construction of the caller, not this
-    /// function**: `:bump` is a per-cell arithmetic op, so a caller (the
-    /// tile) reads each candidate cell's [`CellKind`] through
-    /// [`MatrixModel::kind_of`] and passes only the `Number` ones —
-    /// exactly the same door `f64_at`-vs-`display_at` reading in
-    /// `matrix::cell_of` decides by. Each cell also carries its own
-    /// declared [`ColumnType`], read by the caller off the spec (or the
-    /// model's `value_type`), and [`bumped`] is the one rule for what
-    /// TYPE the result lands as.
+    /// The caller supplies numeric candidates and their declared types, with
+    /// existing edits already included in each current value. [`bumped`] chooses
+    /// the result's type and refuses fractional deltas for integer columns.
     pub fn bump(
         &mut self,
         cells: impl Iterator<Item = ((usize, usize), (String, String), f64, ColumnType)>,
         delta: f64,
         base: &str,
     ) -> Result<usize, String> {
-        // Every cell's result is computed before anything is written —
-        // the collect below is the boundary between "checking" and
-        // "writing" — so a refusal partway through leaves the draft
-        // exactly as it was.
+        // Compute every result before writing any edit: a typing refusal
+        // partway through must leave the whole draft unchanged.
         let mut writes = Vec::new();
         for (cell, labels, current, ty) in cells {
             let value = bumped(current, delta, ty, &labels.1)?;
@@ -563,25 +465,15 @@ impl Draft {
         Ok(n)
     }
 
-    /// A generation was delivered. Answers whether the state changed, so
-    /// the caller knows whether anything needs repainting.
+    /// Process a delivered source time and report whether state changed.
+    /// An editing draft becomes `Behind` when the timestamp differs; a behind
+    /// draft returns to `Editing` when its base timestamp is delivered again.
+    /// Clean and sent drafts are unchanged; the tile checks sent echoes.
     ///
-    /// **A generation's identity here is its source time alone** (M-3,
-    /// final whole-branch review): a republish that keeps its source
-    /// time — `source_time = "document"` stamping every republish of one
-    /// date at that date's midnight, or a corrected file republish,
-    /// which ties its predecessor's `source_time` — reads as the same
-    /// generation and swaps the grid under index-keyed edits. Harmless
-    /// while the row/column set is unchanged (CVI's ladder is fixed per
-    /// date) and not reachable under `--demo` (`source_time = "receive"`);
-    /// a `gen_id` in the provenance is the fix, when Part 4 touches
-    /// `compile_document`.
-    ///
-    /// Only a draft with edits can go `Behind`, and only when the
-    /// delivered source time differs from the one the edits were made
-    /// against — the same document redelivered (a requery on any
-    /// publish of any dataset bumps the frame's `data` version, so this
-    /// happens routinely) must not read as a newer one.
+    /// Identity is source time alone. A corrected republish with the same time
+    /// is treated as the same document and can replace the grid under indexed
+    /// edits. If row or column positions change, those edits can target the
+    /// wrong cells; this method cannot detect that collision.
     pub fn on_delivered(&mut self, as_of: &str) -> bool {
         match &self.state {
             DraftState::Editing if self.base.as_deref() != Some(as_of) => {
@@ -590,22 +482,14 @@ impl Draft {
                 };
                 true
             }
-            // I-4 (final whole-branch review): the edits' OWN generation
-            // came back — an as-of step back and `:asof undo` is an
-            // ordinary round trip, and the panel is now painting exactly
-            // what the edits were made on. Nothing is behind anything, so
-            // the draft is `Editing` again with every edit untouched
-            // (they are index-keyed against this very generation) and
-            // `edit`/`:bump` open again. Placed ABOVE the "a further
-            // generation arrived" arm, whose guard would otherwise fall
-            // through to `_ => false` and leave the header claiming a
-            // document had been received that the panel is not showing.
+            // Returning to the base timestamp restores editing without moving
+            // edits. Check this before updating the pending delivery timestamp.
             DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
                 self.state = DraftState::Editing;
                 true
             }
-            // Already behind, and a *further* generation arrived: the
-            // header must name the newest one, not the first one missed.
+            // Keep the badge on the latest delivered timestamp, which may be
+            // historical when the user changes as-of.
             DraftState::Behind { newer } if newer != as_of => {
                 self.state = DraftState::Behind {
                     newer: as_of.to_string(),
@@ -616,21 +500,10 @@ impl Draft {
         }
     }
 
-    /// Snapshot the same-date group sizes a rebase will need to guard
-    /// (spec §2's rebase guard, amendment 4): `base` must be a CLEAN model
-    /// (`Draft::default()`) of the document this draft's edits are
-    /// currently painted against — the tile calls this wherever the
-    /// painted model IS the draft's base, which `capture_groups`' own
-    /// caller decides, never this method.
-    ///
-    /// Restricted to the groups that hold a touched label — a cell edit's
-    /// row (via `labels`) or a `Deleted` mark's row — because an untouched
-    /// group's size is nobody's business here: only a touched label's
-    /// ordinal can land on the wrong row. Recomputing this way, rather
-    /// than merging into whatever `groups` already held, is what keeps a
-    /// second edit added to an already-guarded group from leaving a STALE
-    /// count behind for the first one's group after `rebase` calls this
-    /// again on the newer document (see `rebase`'s own tail).
+    /// Capture counts for groups touched by cell edits or deleted rows.
+    /// `base` must be a clean model of the document these edits refer to;
+    /// that association is the caller's responsibility. Replace the counts
+    /// rather than merging them so rebase cannot retain stale base counts.
     pub fn capture_groups(&mut self, base: &MatrixModel) {
         let now = group_sizes(base);
         let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -648,22 +521,13 @@ impl Draft {
             .collect();
     }
 
-    /// Re-apply the edits onto a newer generation's model, by label.
+    /// Reapply edits to a delivered document by label, returning the number
+    /// kept and descriptions of dropped edits or changed anchors. Matching
+    /// labels moves an edit with its row or column when grid positions change.
     ///
-    /// Answers how many were kept and the labels of those dropped —
-    /// a row or column the new document no longer has. Matching by label
-    /// rather than by index is the whole point: a term that moved from row
-    /// 3 to row 2 is the same term, and an edit left at index 3 would be
-    /// silently reassigned to a different expiry.
-    ///
-    /// `model_of_newer` must be the DOCUMENT's own grid — built with
-    /// `Draft::default()`, never with this draft. A model built with the
-    /// draft carries its inserted rows spliced in (§5.2), so every one of
-    /// them would read here as a row the document now carries and be
-    /// dropped as a conflict, and a document row below an insert would
-    /// resolve to its painted position rather than the document position
-    /// `edits` is keyed by. Every caller in the tile builds a clean model
-    /// for this.
+    /// `model_of_newer` must be built with [`Draft::default()`]. A model with
+    /// this draft would mistake inserted rows for upstream conflicts and would
+    /// resolve document cells to painted positions shifted by inserts.
     pub fn rebase(&mut self, model_of_newer: &MatrixModel) -> (usize, Vec<(String, String)>) {
         // The two axes are indexed separately — O(R + C), not the R × C
         // every cell pair would cost, which at a 10,000-row schedule is
@@ -684,13 +548,9 @@ impl Draft {
             .map(|(ci, column)| (column.as_ref(), ci))
             .collect();
 
-        // Same-date group sizes in the NEWER document, read once — the
-        // rebase guard (spec §2, amendment 4) checks every touched
-        // label's group against this before resolving that label's own
-        // edit or `Deleted` mark, never after: a label whose group
-        // changed size is refused outright, with no fallback to "the row
-        // still resolves by name" (it might resolve, onto the wrong
-        // dividend).
+        // Compare captured group counts before resolving labels. A surviving
+        // group with a different size may assign the same ordinal to a different
+        // dividend even when the edited label still exists.
         let now = group_sizes(model_of_newer);
 
         let mut edits = BTreeMap::new();
@@ -763,21 +623,11 @@ impl Draft {
         }
         self.attrs = attrs;
 
-        // A row edit's identity is its own label — the same `rows` index
-        // built above for cell edits, since a row that exists in the
-        // newer model is exactly a label that index carries (§5.1).
-        //
-        // An anchor can be a document row OR one of this draft's own
-        // inserted rows (`shift+o` on an inserted row chains the new row
-        // on it), and `model_of_newer` is the document's grid alone, so
-        // the second kind is never in `rows`. The inserted labels that
-        // SURVIVE this rebase are precomputed here rather than read off
-        // `rows_out` as it fills: label order visits `new-1` before the
-        // `new-2` it hangs off, so an as-you-go check would flatten every
-        // chain whose anchor sorts later. An anchor on an inserted row
-        // that this very rebase drops (upstream now carries its label) is
-        // a vanished anchor like a document row's.
-        // Owned labels, since the loop below takes `self.rows` by value.
+        // Resolve row edits against document labels and surviving inserts.
+        // Precompute the latter because a chain's anchor may sort after its
+        // follower. If an insert conflicts with an upstream row, followers can
+        // still anchor on that label through the real document row. Own these
+        // labels because the loop consumes `self.rows`.
         let surviving: std::collections::HashSet<String> = self
             .rows
             .iter()
@@ -860,10 +710,8 @@ impl Draft {
         (self.len(), dropped)
     }
 
-    /// The header's badge, at a glance (Task 4 paints it): [`DraftBadge`]
-    /// carries no count, since a badge is a shape and a count is a
-    /// sentence — [`Draft::count_phrase`] is where the count lives, for
-    /// the notices and confirms that need one.
+    /// The header state without counts. [`Self::count_phrase`] supplies the
+    /// edit summary used by notices and confirmations.
     pub fn badge(&self) -> DraftBadge {
         match &self.state {
             DraftState::Clean => DraftBadge::Clean,
@@ -901,9 +749,9 @@ impl Draft {
         parts.join(", ")
     }
 
-    /// The session form (spec §8.5): the base and the edits as label
-    /// pairs, never indices — a restart onto a newer generation must land
-    /// in `Behind`, not against misaligned cells.
+    /// Serialize the base, edits, rows, and group guards. Cell positions are
+    /// label pairs, never grid indices; restoration resolves them by rebase.
+    /// Draft state and transport/echo status are not serialized.
     pub fn to_toml(&self) -> toml::Table {
         let mut table = toml::Table::new();
         if let Some(base) = &self.base {
@@ -970,21 +818,15 @@ impl Draft {
         table
     }
 
-    /// Read a session's draft back. Every edit lands at
-    /// [`UNRESOLVED_COLUMN`] until [`Draft::rebase`] against the first
-    /// model resolves it by label; a malformed entry is skipped rather
-    /// than taking the whole draft with it (unsent work is worth more than
-    /// tidiness).
+    /// Restore a session draft, skipping malformed entries individually.
+    /// Cell edits wait at [`UNRESOLVED_COLUMN`] until rebase resolves their
+    /// labels. Restored content determines `Clean` versus `Editing`; sent
+    /// status is not restored.
     ///
-    /// A cell edit's value is read through [`value_from_toml`] — a bare
-    /// number or a tagged date/text, never a guess. An attribute's
-    /// `String` is read back as a [`Value::Date`] when it parses
-    /// `%Y-%m-%d` and a [`Value::Utf8`] otherwise: a date string is
-    /// unambiguous (`to_toml` writes no other string in that exact shape),
-    /// and a free-text attribute never happens to look like one — so the
-    /// direction of the guess costs nothing either way. The two spellings
-    /// differ on purpose (§4.3's ruling): `attrs` predates typed cells and
-    /// nothing forces its shape to change to match.
+    /// Cell dates and text use explicit tags. Attribute strings instead parse
+    /// as dates when they match `%Y-%m-%d`, and as text otherwise. This is
+    /// ambiguous for a text attribute containing a date-shaped string: it
+    /// restores as [`Value::Date`], regardless of its original type.
     pub fn from_toml(t: &toml::Table) -> Draft {
         let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);
         let mut edits = BTreeMap::new();
@@ -1032,8 +874,7 @@ impl Draft {
                 attrs.insert(column.clone(), value);
             }
         }
-        // Named `row_edits`, not `rows` — this function's `rows` above is
-        // already the (oddly named) top-level `edits` array.
+        // Row edits are separate from the top-level cell-edit array.
         let mut row_edits = BTreeMap::new();
         if let Some(toml::Value::Table(rows_table)) = t.get("rows") {
             for (label, entry) in rows_table {
@@ -1061,11 +902,8 @@ impl Draft {
                 row_edits.insert(label.clone(), RowEdit::Inserted { after, cells });
             }
         }
-        // Absent (a session written before this guard existed, or one
-        // with no groups worth recording) reads back empty, which is
-        // exactly the "apply no guard" behaviour amendment 4 asks for —
-        // no special-casing needed here beyond the ordinary absent-table
-        // default every other optional section already follows.
+        // An absent group table restores no guards; rebase then has no base
+        // count against which to check a label's group.
         let mut groups = BTreeMap::new();
         if let Some(toml::Value::Table(groups_table)) = t.get("groups") {
             for (group, size) in groups_table {
@@ -1141,10 +979,8 @@ fn value_from_toml(value: &toml::Value) -> Option<Value> {
     }
 }
 
-/// On the trader's configured clock, like every other displayed time in
-/// this codebase (Phase 4a's ruling; as-of dialog spec §6.1 for the
-/// clock itself) — `pub(crate)` because Task 4's header paints
-/// `DraftBadge`'s `Behind`/`Sent` times through it directly.
+/// Display an RFC 3339 time on the configured clock. Preserve unreadable
+/// input verbatim so an invalid timestamp is visible in the badge.
 pub(crate) fn local_hhmm(rfc3339: &str, clock: geode_core::clock::Clock) -> String {
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
         Ok(t) => clock.hm(t.to_utc()),
@@ -1167,11 +1003,9 @@ pub fn bumped(current: f64, delta: f64, ty: ColumnType, column: &str) -> Result<
     }
 }
 
-/// The same-ex-date group a minted row label belongs to (spec §2's rebase
-/// guard): the label up to its first `#`, or the whole label when it
-/// carries no ordinal at all — a group of one, the common case. `#` never
-/// appears in a date itself, so this is unambiguous for every id
-/// `mint_ids` produces (`<date>`, `<date>#2`, `<date>#3`, …).
+/// The group prefix before the first `#`, or the full label without one.
+/// For minted dividend IDs (`<date>`, `<date>#2`, ...), this is the ex-date;
+/// the function itself does not validate date syntax.
 pub fn group_of(label: &str) -> &str {
     match label.split_once('#') {
         Some((group, _)) => group,
@@ -1179,14 +1013,9 @@ pub fn group_of(label: &str) -> &str {
     }
 }
 
-/// How many rows each same-date group holds in `model`, counting a row
-/// exactly once whether the document carries it as-is
-/// ([`RowState::Document`]) or a draft has marked it deleted
-/// ([`RowState::Deleted`], still laid out until a rebase or an upload
-/// drops it) — both are rows upstream's own generation still accounts
-/// for. An [`RowState::Inserted`] row has no upstream ordinal to guard
-/// and is never counted; the guard's caller passes a CLEAN model
-/// (`Draft::default()`) precisely so none exists here regardless.
+/// Count document and deleted rows per label group. A deleted row still
+/// belongs to the upstream document; an inserted row has no upstream
+/// ordinal. Guard capture normally supplies a clean model.
 pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
     let mut sizes = BTreeMap::new();
     for row in &model.rows {
@@ -1197,18 +1026,10 @@ pub fn group_sizes(model: &MatrixModel) -> BTreeMap<String, usize> {
     sizes
 }
 
-/// Parse a typed NUMERIC cell to the number a document holds.
-///
-/// This is the `CellKind::Number` parser alone: every caller dispatches
-/// on the cell's kind first (`commit_cell_edit`, and [`parse_attr`]'s
-/// numeric arms), and a `Text`, `Choice` or `Date` cell commits through
-/// its own arm there (dividend spec §3.3) rather than through this
-/// function. The non-numeric `ColumnType` arm below is therefore a belt
-/// behind that dispatch, not a rule about which cells are editable —
-/// refused by type rather than coerced, so a caller that forgets the
-/// dispatch gets a notice and not a number. Every message names the
-/// text it refused, because the inline notice appears beside a field
-/// the trader can no longer see the whole of.
+/// Parse a numeric cell according to its declared type, refusing nonnumeric
+/// types and nonfinite floating values. Integer text must parse as `i64`,
+/// then is widened to this function's `f64` result. Callers dispatch text,
+/// choice, and date cells separately. Errors retain the refused input.
 pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     let trimmed = text.trim();
     match ty {
@@ -1231,13 +1052,8 @@ pub fn parse_cell(text: &str, ty: ColumnType) -> Result<f64, String> {
     }
 }
 
-/// Parse a typed header attribute to the value a document holds.
-///
-/// A wider vocabulary than [`parse_cell`]'s: a header attribute can be a
-/// date or free text as well as a number (spec 2026-09-14 §4), each
-/// parsed per its own declared [`ColumnType`] rather than coerced —
-/// `Bool`/`Timestamp` fall to the catch-all, since neither header
-/// attribute type this slice ships is either.
+/// Parse an attribute at its declared type: finite number, integer, date,
+/// or text. Bool and timestamp attributes are unsupported and refused.
 pub fn parse_attr(text: &str, ty: ColumnType) -> Result<Value, String> {
     let trimmed = text.trim();
     match ty {
@@ -1245,10 +1061,9 @@ pub fn parse_attr(text: &str, ty: ColumnType) -> Result<Value, String> {
             .map(Value::Date)
             .map_err(|_| format!("'{text}' is not a date (YYYY-MM-DD)")),
         ColumnType::F64 => parse_cell(text, ColumnType::F64).map(Value::F64),
-        // Parsed as `i64` DIRECTLY, never through `parse_cell`'s `f64`
-        // (final review, A4): a round trip through a double loses every
-        // integer above 2^53, silently. Same error text as `parse_cell`'s
-        // own whole-number refusal, so `:set` and a cell read alike.
+        // Parse directly as `i64`: passing through `f64` would lose precision
+        // for integers above 2^53. Keep the same whole-number error wording as
+        // numeric cell parsing.
         ColumnType::I64 => trimmed
             .parse::<i64>()
             .map(Value::I64)
@@ -1417,12 +1232,8 @@ mod tests {
         );
     }
 
-    /// I-4 (final whole-branch review): an as-of round trip — step back
-    /// to a historical generation and then return to live — redelivers
-    /// the very generation the edits were made on, and the draft must
-    /// come back to `Editing`. Without the arm the header kept claiming
-    /// a different document had been received and `edit`/`:bump` stayed
-    /// refused while the panel was painting the edits' own base.
+    /// An as-of round trip back to the base timestamp restores `Editing`
+    /// without moving or dropping edits.
     #[test]
     fn the_base_generation_redelivered_brings_a_behind_draft_back_to_editing() {
         let mut draft = Draft::default();
@@ -1451,10 +1262,9 @@ mod tests {
         );
     }
 
-    /// A `Sent` draft is compared against its echo by the tile (egress
-    /// spec §7), never moved to `Behind` here: a newer generation leaves it
-    /// `Sent`, so the update policy — which acts on `Behind` alone — never
-    /// sees it. `rebase` from `Sent` yields `Editing` like any other.
+    /// Delivery leaves a sent draft in `Sent` for the tile's echo comparison;
+    /// the update policy acts only on `Behind`. Explicit rebase returns it
+    /// to `Editing` when edits survive.
     #[test]
     fn a_sent_draft_stays_sent_on_delivery_and_rebases_to_editing() {
         let mut draft = Draft::default();
@@ -1552,13 +1362,8 @@ mod tests {
         assert_eq!(draft.edits.len(), 1, "the 2026-12-18 edit survives");
     }
 
-    /// The `Deleted` half of the same guard (draft.rs's `RowEdit::Deleted`
-    /// arm, review finding 2): a row marked deleted inside a captured
-    /// same-day group is refused the same way a cell edit in that group
-    /// is — the mark is dropped with the same-day reason rather than
-    /// carried onto whichever row the shifted ordinal now names, and the
-    /// row simply disappears from `rows` (nothing left to mark deleted
-    /// once its own identity is gone).
+    /// A changed same-day group count drops a deletion just as it drops a
+    /// cell edit: the old ordinal must not delete a different dividend.
     #[test]
     fn rebase_refuses_a_deleted_row_in_a_same_day_group_that_changed_size() {
         let base =
@@ -1866,11 +1671,8 @@ mod tests {
         assert_eq!(draft.edits.values().next(), Some(&Value::I64(3)));
     }
 
-    /// §4.3: a date or text cell edit is spelled `{ type, value }` on the
-    /// wire, never a bare string — the same tag `to_toml` writes and the
-    /// only shape `from_toml` accepts for either, so a stray untagged
-    /// string (however it got into the file) is refused like any other
-    /// malformed entry rather than guessed at.
+    /// Date and text cell edits require explicit tags in the session.
+    /// Untagged strings are skipped rather than guessed as either type.
     #[test]
     fn typed_edits_round_trip_through_toml_with_a_type_tag() {
         let mut draft = Draft::default();
@@ -2120,13 +1922,8 @@ mod tests {
         assert!(d.rows.is_empty());
     }
 
-    /// The review finding: `delete_row`'s base/state bump runs
-    /// unconditionally, ahead of the match, so dropping the draft's ONLY
-    /// `Inserted` row (insert, then delete it right back, nothing else
-    /// pending) must not leave `base`/`state` claiming unsent work that
-    /// no longer exists — the same invariant `revert` and `rebase`'s own
-    /// tail keep. Reachable in exactly two calls, with nothing else in
-    /// the draft.
+    /// Inserting and then deleting the only pending row leaves a clean draft
+    /// with no base timestamp, so later deliveries cannot mark it behind.
     #[test]
     fn dropping_the_only_inserted_row_leaves_a_clean_draft() {
         let mut d = Draft::default();
@@ -2165,13 +1962,8 @@ mod tests {
         assert!(!d.rename_row("D1", "x"), "only an inserted row renames");
     }
 
-    /// A rename carries the row's followers with it (final review,
-    /// Critical): the tile anchors a chain on the MINTED label — `o` on a
-    /// row re-hangs its follower onto `new-2` before `commit_row_label`
-    /// renames `new-2 → 2027-02-15` — so a follower still saying
-    /// `after: new-2` names a label no row holds, `splice_rows` cannot
-    /// resolve it, and the row lands at the top with a dangling anchor
-    /// written to the session.
+    /// Renaming an inserted chain member moves its followers to the new
+    /// label, preserving their placement and persisted anchors.
     #[test]
     fn rename_row_rehangs_its_followers() {
         let mut d = Draft::default();
@@ -2273,9 +2065,9 @@ mod tests {
         assert!(!d.reanchor_row("D3", None), "a deleted row has no anchor");
     }
 
-    /// §5.1: rebase carries rows by label — a deleted row whose label vanished is dropped and named,
-    /// an inserted row whose label the newer document now carries is dropped and named, a vanished
-    /// anchor re-anchors to the top and is named.
+    /// Rebase drops and names vanished deletions and inserts that now collide
+    /// with document rows. A vanished anchor moves its insert to the top
+    /// and is reported without dropping the inserted row.
     #[test]
     fn rebase_carries_rows_by_label() {
         let mut d = Draft::default();

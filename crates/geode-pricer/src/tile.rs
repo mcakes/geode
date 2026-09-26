@@ -1,11 +1,9 @@
-//! The line-pricer tile (spec §8): one `Sheet`, an `Rc<GridModel>`
-//! installed into a `DataTable`, a header and a footer.
+//! Line-pricer tile state and prepared rendering models.
 //!
-//! **One door per kind of change.** A request-changing edit goes through
-//! `apply_edit` (or `apply_edits`), which records its undo; a delivery through
-//! `deliver`; a tick through `tick`. Each ends at `rebuild`, which builds
-//! the grid model (never in `render`), installs it, re-prepares the
-//! header and notifies.
+//! The tile owns one Sheet, an Rc<GridModel> installed into a DataTable, and prepared
+//! header/footer state. Request-changing edits use apply_edit or apply_edits to record
+//! undo; deliveries use deliver and refresh ticks use tick. These paths rebuild and
+//! install the model on change, outside rendering.
 
 use crate::content::{PricerSettings, Shared};
 use crate::core::cell::{self, CellEditor};
@@ -57,11 +55,10 @@ use std::time::{Duration, Instant};
 
 pub(crate) const LOADING: &str = "loading…";
 
-/// The wait before a refused submission asks again (planning decision
-/// 5): nothing else would ever resubmit with the refresh timer off.
+/// Initial retry delay after a refused pricing submission. Retries run even when
+/// periodic refresh is disabled.
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(1);
-/// The longest wait between retries: a data service that is gone for good
-/// is asked twice a minute, not every second forever.
+/// Maximum delay between retries in a consecutive refusal streak.
 pub(crate) const RETRY_CAP: Duration = Duration::from_secs(30);
 
 /// The wait after the `refusals`th consecutive refusal: `RETRY_AFTER`,
@@ -236,10 +233,9 @@ pub struct PricerTile {
     held_expanded: Option<Vec<LineId>>,
     /// Transient header notice (an absent document, loading).
     pub(crate) notice: Option<SharedString>,
-    /// Consecutive refused submissions (0: none standing). While non-zero
-    /// the header shows `REFUSED` over `notice` without touching it, so
-    /// the notice it covered returns when the streak ends — an admitted
-    /// submission, or one with nothing left to ask for.
+    /// Consecutive pricing refusals. While nonzero, REFUSED overlays the header notice
+    /// without replacing it. Admission, or a submit with no further work needed, ends
+    /// the streak and reveals the underlying notice.
     refusals: u32,
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
@@ -312,10 +308,9 @@ pub struct PricerTile {
     /// WHETHER to submit, never what — a batch always carries every stale
     /// line.
     in_flight: HashMap<LineId, u64>,
-    /// Every inverse is recorded against the rows its edit left, so an
-    /// edit reaches the sheet only through `apply_edit`/`apply_edits`
-    /// (which record) and `history_step` (which replays); any other edit
-    /// would leave an entry pointing at rows that moved.
+    /// Undo records depend on the rows left by their edits. New recorded edits use
+    /// apply_edit/apply_edits; history_step replays their inverses. Other structural
+    /// mutation would invalidate that history.
     pub(crate) undo: UndoStack,
     refresh_task: Option<Task<()>>,
     retry_task: Option<Task<()>>,
@@ -523,8 +518,8 @@ impl PricerTile {
             this.rebuild(cx);
         })
         .detach();
-        // A closed tile flushes its sheet, cancels its pricing and gives
-        // its name back (spec §7.4's open set).
+        // Release flushes a dirty sheet once, cancels pricing, and releases its name
+        // for another tile to open.
         cx.on_release(|this: &mut PricerTile, _cx| {
             // Spec §7.3: the sheet is not lost until the tile is — a save
             // still waiting on its idle timer, or one the store refused,
@@ -772,8 +767,7 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// The one edit door (global constraints): apply, record the undo,
-    /// then everything an edit implies.
+    /// Apply one edit, record its inverse, then rebuild, reprice, and schedule saving.
     pub(crate) fn apply_edit(
         &mut self,
         edit: Edit,
@@ -785,9 +779,9 @@ impl PricerTile {
         Ok(())
     }
 
-    /// Several edits as ONE undo entry (`:spot clear`). On a
-    /// refusal the ones already applied are taken back and nothing is
-    /// recorded.
+    /// Apply several edits as one undo entry. On refusal, replay prior inverses in
+    /// reverse order without recording the batch. A refused rollback clears history and
+    /// leaves the partially rolled-back sheet for after_edit to rebuild.
     pub(crate) fn apply_edits(
         &mut self,
         edits: Vec<Edit>,
@@ -799,11 +793,9 @@ impl PricerTile {
                 Ok(u) => undos.push(u),
                 Err(err) => {
                     for u in undos.iter().rev() {
-                        // Each inverse was recorded against the rows its
-                        // edit left, so a refusal here means the sheet is
-                        // partly rolled back and the history may point at
-                        // rows that moved: drop it (`UndoStack`'s own rule
-                        // for a refused inverse) and stop unwinding.
+                        // A refused inverse can leave a partially rolled-back sheet.
+                        // Clear history because its remaining inverses depend on the
+                        // previous row layout.
                         if let Err(back) = self.sheet.undo(u) {
                             tracing::error!(
                                 target: "geode::pricing",
@@ -1130,13 +1122,9 @@ impl PricerTile {
         }
     }
 
-    /// A hover over painted typeahead row `row` — the pointer's form of
-    /// `up`/`down` for the highlight (market-data's `choice_hover`), with
-    /// the same change-only rule as `menu_hover`. It does NOT set `moved`:
-    /// in a free list an untouched highlight is a guess, and a pointer
-    /// that merely crossed the list while the trader typed must not turn
-    /// `enter` into a commit of the row under it (`HSI` → `HSCEI`); a
-    /// click, or `up`/`down`, still does.
+    /// Move the typeahead highlight on pointer hover, notifying only on change. Do not
+    /// set moved: hovering alone must not make Enter choose a free-list guess instead
+    /// of the typed text. Keyboard navigation and explicit clicks do.
     pub(crate) fn choice_hover(&mut self, row: usize, cx: &mut Context<Self>) {
         let changed = match &mut self.editor {
             Some(Editor::Choice { list, .. }) => {
@@ -1239,11 +1227,9 @@ impl PricerTile {
         });
     }
 
-    /// What every edit, undo and redo implies: rebuild, reprice what
-    /// changed, arm the write-behind save. The open set is left whole (a
-    /// removed package's id stays, so an undo reinstates it open). The
-    /// refresh timer is not touched: it runs whenever the tile is visible
-    /// with an interval set, and `tick` skips an empty sheet.
+    /// Rebuild after edits and history replay, submit stale pricing work, and arm
+    /// write-behind saving. Keep expansion IDs so undo can restore an open package.
+    /// Periodic refresh keeps its own timer and skips empty sheets.
     pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
         self.rebuild(cx);
         self.submit(cx);
@@ -1375,9 +1361,8 @@ impl PricerTile {
             .iter()
             .any(|r| self.in_flight.get(&self.sheet.id(*r)) != Some(&self.sheet.revision(*r)));
         if !needed {
-            // A standing refusal with nothing left to ask for (its lines
-            // were answered, deleted or hidden away) would otherwise say
-            // "retrying" with no retry that could ever succeed.
+            // End a refusal streak when no additional submission is needed, including
+            // when its stale lines have been removed.
             if self.refusals > 0 {
                 self.end_refusals();
                 self.rebuild_chrome();
@@ -1409,8 +1394,8 @@ impl PricerTile {
             self.in_flight = flight;
             self.end_refusals();
         } else {
-            // Planning decision 5: nothing else would ever resubmit. One
-            // log line per streak: a closed channel refuses every retry.
+            // Retry independently of periodic refresh. Log once per streak so a closed
+            // channel does not produce a warning on every attempt.
             if self.refusals == 0 {
                 tracing::warn!(
                     target: "geode::pricing",
@@ -1426,15 +1411,15 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// The streak is over: no notice over `notice`, no retry pending, and
-    /// the next refusal starts again at `RETRY_AFTER` with a log line.
+    /// Clear the refusal overlay and pending retry. The next refusal starts at
+    /// RETRY_AFTER and logs a new streak.
     fn end_refusals(&mut self) {
         self.refusals = 0;
         self.retry_task = None;
     }
 
-    /// One retry at a time; an edit refused while one is pending waits on
-    /// it rather than re-arming a shorter one.
+    /// Keep at most one retry task. A further refusal while it is pending increments
+    /// the streak without replacing that task's scheduled delay.
     fn arm_retry(&mut self, cx: &mut Context<Self>) {
         if self.retry_task.is_some() {
             return;
@@ -1918,9 +1903,9 @@ impl PricerTile {
     /// `u` / `ctrl+r`. A refused inverse clears the whole history
     /// (`UndoStack`'s rule) and says so.
     fn history_step(&mut self, redo: bool, cx: &mut Context<Self>) -> Result<(), String> {
-        // A step that reinstates rows (a `Restore`: `d d` undone) puts the
-        // cursor on the first of them; otherwise the cursor, keyed by id,
-        // stayed on the row that had followed them.
+        // Select the first row reinstated by a Restore inverse. Other history steps
+        // keep the cursor's existing LineId, subject to the rebuild's cursor
+        // resolution.
         let restored = self.undo.peek(redo).and_then(|u| {
             u.inverse.iter().find_map(|e| match e {
                 Edit::Restore { rows, .. } => rows.first().map(|r| r.id),
@@ -1935,8 +1920,7 @@ impl PricerTile {
         match stepped {
             Ok(true) => {
                 if let Some(id) = restored {
-                    // A leg restored under a closed package opens it, or
-                    // the cursor would sit on a hidden row.
+                    // Open a restored leg's parent so the selected row is visible.
                     if let Some(p) = self.sheet.index_of(id).and_then(|r| self.sheet.parent(r)) {
                         self.expansion.set(self.sheet.id(p), true);
                     }
@@ -2082,11 +2066,9 @@ impl PricerTile {
         }
     }
 
-    /// The action menu's rows, in the market-data list's shape: the
-    /// sheet-wide verb, the package verbs, history, the destructive verb
-    /// set apart, then the `View` section. Each action's title is the
-    /// palette's own (`content::ACTIONS`), and its trailing lane the
-    /// default key — or, disabled, the reason.
+    /// Prepare action groups followed by the available Views. Command titles come from
+    /// content::ACTIONS. Enabled actions show default keys in the trailing lane;
+    /// disabled actions show their refusal reason there.
     fn menu_items(&self) -> Vec<MenuItem> {
         let row = self.cursor_sheet_row();
         let root_line =
@@ -2169,10 +2151,8 @@ impl PricerTile {
         cx.notify();
     }
 
-    /// A hover over menu row `index` — the mouse form of `j`/`k`
-    /// (market-data's `menu_hover`). `on_mouse_move` fires on every
-    /// pointer move over the row, so only a CHANGE notifies; a separator
-    /// or section never takes the highlight.
+    /// Move the menu highlight on pointer hover, notifying only on change. Action and
+    /// View rows qualify, including disabled actions; separators and headings do not.
     pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(m) = self.menu.as_mut() else {
             return;
@@ -2734,21 +2714,16 @@ impl PricerTile {
             t.delegate_mut().loading = loading;
             t.refresh(cx);
         });
-        // A rebuild moves grid rows, and a new plan moves columns: the
-        // editor follows its line and its column kind (the cursor with
-        // it), or closes. Before `sync_cursor`, so the cursor lands on the
-        // editor's column.
+        // Resolve the editor by LineId and ColumnKind before cursor synchronization, so
+        // a moved column keeps the editor and cursor aligned.
         self.follow_editor(cx);
         self.sync_cursor(cx);
         self.sync_editor(cx);
     }
 
-    /// A rebuild can move the plan (a view reload, `:view`) or the grid
-    /// (an edit, a load) under an open editor. It follows its column KIND
-    /// to that column's new index, and the cursor column goes with it so
-    /// the field and the cursor highlight agree; when the kind left the plan or the
-    /// line left the grid it closes with `MOVED` — it would otherwise
-    /// paint over a different column, or stay focused painting nowhere.
+    /// Keep an open editor attached to its LineId and ColumnKind across rebuilds.
+    /// Update its plan index and the cursor column together. If either target leaves
+    /// the visible grid or plan, close the editor and show MOVED.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
@@ -2764,12 +2739,9 @@ impl PricerTile {
         }
     }
 
-    /// `close_editor` for a rebuild with no `Window` (a reload, a load, a
-    /// delivery): the field leaves the tile at once, and its blur runs at
-    /// the end of this effect cycle — when no window is mid-update —
-    /// through the window it opened in. The deferred closure holds the
-    /// field's last handle, so it is still blurred before it drops, and
-    /// only while it holds focus (a newer field is left alone).
+    /// Remove an editor whose target disappeared during a rebuild without a Window.
+    /// Retain its Input handle until deferred access to the opening window can blur it.
+    /// Check that it still owns focus so a newer field is not blurred.
     fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
@@ -2811,11 +2783,9 @@ impl PricerTile {
                 _ => None,
             }
         });
-        // An open menu's rows are prepared state like the header: a load
-        // answer, a reload or a delivery can change what they would say
-        // without a verb closing the menu, so they are re-checked here
-        // rather than trusted from when it opened. The highlight keeps its
-        // index, clamped to the new list and snapped onto a pickable row.
+        // Recompute an open menu after load, reload, or delivery changes its contents.
+        // Preserve its index when possible, otherwise clamp and snap to an Action or
+        // View row; snapping includes disabled actions.
         if self.menu.is_some() {
             let items = self.menu_items();
             if let Some(m) = self.menu.as_mut() {
@@ -2885,17 +2855,14 @@ impl PricerTile {
         });
     }
 
-    /// The line painted at grid row `row` — `None` on the entry
-    /// placeholder. Read BEFORE any field closes: the placeholder is a
-    /// grid row, so once `close_entry` rebuilds the model every row below
-    /// it names the line one lower.
+    /// Resolve a painted grid row to its LineId before closing fields. The entry
+    /// placeholder resolves to None; removing it shifts every following grid index.
     fn line_at(&self, row: usize) -> Option<LineId> {
         self.model.rows.get(row).and_then(|r| r.id)
     }
 
-    /// The chevron at grid row `row` (spec §8.2: its click is `space`).
-    /// A click is a click: it cancels an open entry or editor first,
-    /// never commits it; a click on the placeholder only closes it.
+    /// Chevron activation cancels open fields, then toggles the package resolved before
+    /// the close. A click on the entry placeholder only closes that field.
     fn chevron_clicked(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let line = self.line_at(row);
         self.close_entry(window, cx);
@@ -2916,13 +2883,10 @@ impl PricerTile {
                 // inside `open_entry`'s and `begin_edit`'s own rebuilds),
                 // so only a real cell click — `SelectCell` — closes a field.
                 let line = self.line_at(*row);
-                // A double-click's second press carries its first press's
-                // row index. When the first press closed the entry, the
-                // rows below the placeholder moved up under the pointer,
-                // so that index now names the next line: the first press's
-                // line is handed to the NEXT press only, and only for its
-                // `DoubleClickedCell` (a lone click there still selects
-                // what is painted under it).
+                // Entry closure shifts grid indices between the two presses of a
+                // double-click. Carry the first press's resolved target to the next
+                // press at that index for DoubleClickedCell only. A single click still
+                // selects the currently painted row.
                 self.pressed = self.click_anchor.take().filter(|(r, _)| r == row);
                 if self.entry.is_some() {
                     self.click_anchor = Some((*row, line));
@@ -2939,9 +2903,9 @@ impl PricerTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
-            // The mouse form of `i` (spec §8.4). The press's own
-            // `SelectCell` (emitted first) already cancelled whatever was
-            // open; the tree column and the placeholder open nothing.
+            // Double-click uses the same edit route as i. SelectCell has already
+            // cancelled the previous field; the tree column and entry placeholder open
+            // no editor.
             TableEvent::DoubleClickedCell(row, col) => {
                 // A handed-on line wins, placeholder (`None`) included:
                 // the row now painted under the pointer slid up there.
@@ -4766,10 +4730,8 @@ pub(crate) mod tests {
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
     }
 
-    /// A load answer under an open menu (the menu opens while the
-    /// sheet is loading) re-checks its rows: `Delete row`, disabled on
-    /// the empty fallback, is enabled once the rows arrive, and picking
-    /// it deletes.
+    /// A load answer refreshes an open menu's availability. Delete becomes enabled when
+    /// a row arrives, and selecting it uses the ordinary delete route.
     #[gpui::test]
     fn a_load_answer_under_an_open_menu_rechecks_its_rows(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
@@ -5354,8 +5316,7 @@ pub(crate) mod tests {
 
     // ---- undo keeps what the trader had open ----
 
-    /// Deleting an open package and undoing brings it back open, with the
-    /// cursor on it — not closed, with the cursor on the row after it.
+    /// Undo restores a deleted package's open state and selects the restored package.
     #[gpui::test]
     fn dd_then_u_on_an_open_package_restores_it_open_under_the_cursor(
         cx: &mut gpui::TestAppContext,
@@ -5377,8 +5338,7 @@ pub(crate) mod tests {
         assert_eq!(h.tree(&vcx).len(), 5, "and again after a redo");
     }
 
-    /// A leg restored under a package closed since opens it, so the
-    /// cursor it lands on is a painted row.
+    /// Restoring a leg opens its parent so the restored cursor target is visible.
     #[gpui::test]
     fn undo_of_a_leg_delete_opens_its_package_and_lands_on_the_leg(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -5422,9 +5382,8 @@ pub(crate) mod tests {
         assert_eq!(h.notice(&vcx), None);
     }
 
-    /// A refusal whose lines then stop being stale (deleted) has nothing
-    /// to retry: the next submit clears the notice rather than leaving
-    /// "retrying" standing with no retry pending.
+    /// Removing the refused request's stale lines ends the retry streak on the next
+    /// submit, instead of leaving a retry notice with no work to send.
     #[gpui::test]
     fn a_refusal_with_nothing_left_to_price_clears(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
@@ -5490,9 +5449,8 @@ pub(crate) mod tests {
 
     // ---- the repricing rules ----
 
-    /// Planning decision 4: `in_flight` decides WHETHER to submit. Every
-    /// line in flight at its current revision asks for nothing more; an
-    /// edit to one line sends a batch of every stale line.
+    /// Current-revision in-flight entries suppress redundant submissions. Changing one
+    /// line's revision submits a new batch containing every stale line.
     #[gpui::test]
     fn price_submits_nothing_while_every_line_is_in_flight(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -5672,7 +5630,7 @@ pub(crate) mod tests {
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some("3000"), "C's strike");
     }
 
-    // ---- visual polish: empty state, labels, menu, trigger ----
+    // Empty state, labels, action menu, and pointer trigger.
 
     fn empty_text(h: &Harness, vcx: &VisualTestContext) -> &'static str {
         h.tile
@@ -5686,10 +5644,9 @@ pub(crate) mod tests {
         vcx.debug_bounds(selector).is_some()
     }
 
-    /// The empty table says what to do next, not a faded icon — and,
-    /// while the sheet is loading, that it is loading (an `o` there is
-    /// refused). The delegate's mirror follows `loaded`; the text is
-    /// painted, and the entry placeholder (a row) replaces it.
+    /// Empty-table text distinguishes a pending load from a sheet ready for entry.
+    /// Installing a model mirrors loading state; an entry placeholder replaces the
+    /// empty state because it occupies a table row.
     #[gpui::test]
     fn an_empty_table_names_the_next_action_or_that_it_is_loading(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -5755,11 +5712,9 @@ pub(crate) mod tests {
         })
     }
 
-    /// The menu's shape (market-data's list): one name per command (the
-    /// palette's), the key in the trailing lane or the reason on a
-    /// disabled row, separators, `Delete row` alone, a `View` section
-    /// with the tick in a leading slot. The highlight never lands on
-    /// structure.
+    /// Menu actions share palette titles, with default keys or disabled reasons in the
+    /// trailing lane. Separators and the View heading are skipped by selection; current
+    /// views show a leading tick.
     #[gpui::test]
     fn the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled(
         cx: &mut gpui::TestAppContext,
@@ -5872,10 +5827,8 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "normal", "a second click closes it");
     }
 
-    /// A disabled row answers the pointer with no fill (the guide's "no
-    /// misleading hover response", market-data's rule): the pointer's
-    /// highlight lands on it (the keyboard's never does), its paint has no fill, and a pick there still refuses
-    /// with the reason and keeps the menu open.
+    /// A pointer-highlighted disabled action paints no fill. Picking it reports its
+    /// reason and keeps the menu open; keyboard stepping skips disabled actions.
     #[gpui::test]
     fn a_pointer_over_a_disabled_menu_row_lands_without_a_fill(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);

@@ -1,24 +1,12 @@
-//! The dividend-schedule kind (design spec §6.2): `marketData/underlying`,
-//! `dividends/currency`, `dividends/scheduleDate` and one
-//! `dividends/dividend` per scheduled dividend, each carrying `exDate`,
-//! `announcedDate`, `payDate`, `amount` and `status`. The wire carries no
-//! row id: Geode mints the `dividend_id` axis itself from `exDate` with
-//! `mint_ids`, once every row of a document has parsed — an inbound
-//! `<id>` is simply an unrecognised element (design spec §5.3 amendment).
+//! Dividend-schedule XML parsing and writing. `marketData/underlying` identifies
+//! the document; `dividends` contains currency, schedule date, and rows with
+//! `exDate`, `announcedDate`, `payDate`, `amount`, and `status`.
 //!
-//! Hand-written as a `quick_xml::Reader` event walk rather than a serde
-//! derive, for the same three reasons `cvi.rs`'s module doc gives: the
-//! unknown-element rule ("skipped and logged once per (source, path)")
-//! needs the *path* of the element that was skipped, which a
-//! deserializer's `deny_unknown_fields` does not hand back and its
-//! default silence hides; the closed `status` vocabulary is a
-//! cross-element invariant serde has no place to state; and the whole
-//! point of the parse is to land in struct-of-arrays (`DocumentRows`)
-//! with nothing allocated per row beyond the columns themselves
-//! (PHILOSOPHY §6), where a derive would build a `Vec<Dividend>` of row
-//! objects first. **The wire tag names (`TAGS` below) are an assumption
-//! until the desk's XSD arrives** — one table to change, in the mould of
-//! CVI's `SLICE_VALUES`.
+//! The event reader fills columnar `DocumentRows`, validates the closed status
+//! vocabulary, and records paths of skipped unknown elements. Row ids are minted
+//! from ex date and same-date ordinal after parsing. An inbound `<id>` is an
+//! unknown element; the writer emits no id. Wire tag names remain unverified
+//! against the desk's XSD.
 
 use chrono::NaiveDate;
 use geode_core::document::{
@@ -29,12 +17,10 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use std::collections::HashMap;
 
-/// The dataset name this kind feeds, and the name a `[sources.<name>]`
-/// spells as its `kind` (spec §6.4 of the market-data documents design).
+/// Built-in dataset name and source configuration `kind` value.
 pub const NAME: &str = "dividend_schedule";
 
-/// The date form on the wire, both directions — see `cvi.rs`'s identical
-/// constant for why one shared spelling matters.
+/// Wire date format shared by the parser and writer.
 const DATE_FORMAT: &str = "%Y-%m-%d";
 
 /// The nine columns of this document, in `document_columns()` order (key,
@@ -55,21 +41,14 @@ const AXES: [&str; 1] = ["dividend_id"];
 const VALUES: [&str; 5] = ["ex_date", "announced_date", "pay_date", "amount", "status"];
 const ATTRIBUTES: [&str; 2] = ["currency", "schedule_date"];
 
-/// The dividend status vocabulary (design spec §6.1): the ONE declaration
-/// of the closed set. A later task copies it verbatim into
-/// `geode-marketdata`'s panel spec (a `choices` list the picker offers)
-/// and a `geode-app` test asserts the two agree — nothing here needs to
-/// know that; this is simply where the truth lives.
+/// Closed status vocabulary accepted by the parser and writer. The market-data
+/// panel declares matching choices without depending on this crate; an app
+/// composition test checks that the two declarations agree.
 pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
 
-/// The five children of one `<dividend>`, wire tag paired with the column
-/// it lands in — one table for both directions, in the mould of CVI's
-/// `SLICE_VALUES`, so the parser's recognised set and the writer's
-/// emission cannot drift apart. **The tag names are an assumption until
-/// the desk's XSD arrives.** The wire carries no `id`: Geode mints the
-/// `dividend_id` axis itself, from `exDate`, with `mint_ids` below — an
-/// inbound `<id>` is simply unrecognised and reported like any other
-/// unknown element.
+/// Wire tags and column names shared by parser and writer. The names remain
+/// unverified against the desk's XSD. Row identity is minted separately by
+/// `mint_ids`; an inbound `<id>` is reported as an unknown element.
 const TAGS: [(&str, &str); 5] = [
     ("exDate", "ex_date"),
     ("announcedDate", "announced_date"),
@@ -108,10 +87,8 @@ fn parse_err(message: impl Into<String>) -> ParseError {
     }
 }
 
-/// The refusal every at-most-once element shares (`<underlying>`,
-/// `<dividends>`, `<currency>`, `<scheduleDate>`, and each of a single
-/// `<dividend>`'s six children) — see `cvi.rs`'s identical helper for why
-/// this is refused rather than merged or last-wins.
+/// Reject repeated singleton fields and containers rather than combining
+/// multiple values or silently retaining the last one.
 fn already_filled(element: &str) -> ParseError {
     parse_err(format!(
         "'{element}' is already filled; it may appear only once"
@@ -144,7 +121,7 @@ enum Leaf {
     Underlying,
     Currency,
     ScheduleDate,
-    /// One of [`TAGS`], by index — one of `<dividend>`'s six children.
+    /// One of the five dividend fields in [`TAGS`], by index.
     Field(usize),
 }
 
@@ -196,9 +173,8 @@ fn date(what: &str, text: &str) -> Result<NaiveDate, ParseError> {
         .map_err(|_| parse_err(format!("{what} '{text}' is not a date (YYYY-MM-DD)")))
 }
 
-/// The open element path — `cvi.rs`'s identical `PathStack`, reused
-/// buffers so a `<dividend>` element (which *is* a row) costs no
-/// allocation per element name on the receiver thread (PHILOSOPHY §6).
+/// Open-element path with reusable name buffers. Sibling dividend rows reuse
+/// capacity rather than allocating a name for each element.
 #[derive(Default)]
 struct PathStack {
     names: Vec<String>,
@@ -792,9 +768,8 @@ mod tests {
         );
     }
 
-    /// The §6.4 load-time contract, against the dataset the design
-    /// actually declares (§6.1) rather than only against a hand-written
-    /// column list.
+    /// The kind's columns must match a parsed dividend dataset in both directions,
+    /// exercising source-startup validation as well as the kind's own column list.
     #[test]
     fn the_kind_matches_the_dividend_dataset_it_feeds() {
         use geode_core::config::{LayerDoc, merge_docs};

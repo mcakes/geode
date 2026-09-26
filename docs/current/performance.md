@@ -98,8 +98,12 @@ changes still rebuild.
 - Density bars are uncached but capped at 2,000 quads per frame.
 - A pricer grid model is rebuilt on edit, delivery, expansion, view, clock or
   entry change, never in render; paints are a per-theme memo.
-- Config dialogs derive small row sets on change. Large module tables use
-  virtualization or prepared visible rows.
+- Config dialogs derive rows at each render, key-handling, and click-resolution
+  call site; they do not retain a row cache. Small row sets have measured costs
+  in the tens of microseconds. Keybinding resolution repeatedly scans bindings
+  for actions and candidates, so its cost grows with the action registry and
+  user overrides. See the [measurement log](../perf.md).
+- Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
 
