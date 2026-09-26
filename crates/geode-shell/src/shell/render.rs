@@ -1115,7 +1115,7 @@ impl Render for ShellView {
         let term_open_entity = cx.entity();
         let on_term_open = move |i: usize, window: &mut Window, cx: &mut App| {
             term_open_entity.update(cx, |view, cx| {
-                scope_expr_view::open(view, scope_expr_view::Mode::Term(i), window, cx);
+                scope_expr_view::open_term(view, i, window, cx);
             });
         };
         let term_close_entity = cx.entity();
@@ -1594,6 +1594,8 @@ impl Render for ShellView {
             // its rows are hit first. `occlude` is what keeps the press
             // from also reaching the element beneath, the `+` included —
             // otherwise a click on the `+` would close and reopen the menu.
+            // It also blocks the wheel for the tiles beneath while the menu
+            // is open, which is accepted for a two-row transient menu.
             .when(self.add_filter_menu.is_some(), |el| {
                 el.child(
                     div()
@@ -1605,10 +1607,11 @@ impl Render for ShellView {
                         .h(px(viewport_height))
                         .debug_selector(|| "scope-add-menu-click-catcher".to_string())
                         .occlude()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|view, _event, _window, cx| view.close_add_filter_menu(cx)),
-                        ),
+                        // Every button: the catcher swallows every press, so a
+                        // right or middle press must close the menu too.
+                        .on_any_mouse_down(cx.listener(|view, _event, window, cx| {
+                            view.dismiss_add_filter_menu(window, cx)
+                        })),
                 )
             })
             // The palette overlay paints above the tiles/status bar (later

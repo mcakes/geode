@@ -90,11 +90,16 @@ pub struct AddFilterMenu {
     pub rows: Vec<Row>,
     /// The row `enter` commits; opens on the first.
     pub highlighted: usize,
+    /// Whether the scope bar's text field held focus when the menu
+    /// opened. Opening takes the shell root's focus, so this is the only
+    /// record of where focus goes back to: the menu's own close returns it
+    /// there, and a row commit hands it to the dialog the row opens.
+    pub return_to_filter: bool,
 }
 
 impl AddFilterMenu {
     /// Prepare the rows against `bindings` (the live keymap).
-    pub fn new(bindings: &[Binding]) -> Self {
+    pub fn new(bindings: &[Binding], return_to_filter: bool) -> Self {
         Self {
             rows: Entry::ALL
                 .iter()
@@ -104,6 +109,7 @@ impl AddFilterMenu {
                 })
                 .collect(),
             highlighted: 0,
+            return_to_filter,
         }
     }
 
@@ -217,7 +223,13 @@ impl super::ShellView {
         self.leave_command_line(window, cx);
         self.close_stack_list(cx);
         self.matcher.cancel();
-        self.add_filter_menu = Some(AddFilterMenu::new(self.services.keymap.bindings()));
+        // Recorded before the root takes focus, as the dialog door records
+        // it before its field does.
+        let return_to_filter = self.filter_field_focused(window, cx);
+        self.add_filter_menu = Some(AddFilterMenu::new(
+            self.services.keymap.bindings(),
+            return_to_filter,
+        ));
         if !window
             .focused(cx)
             .is_some_and(|focused| focused == self.focus_handle)
@@ -228,28 +240,62 @@ impl super::ShellView {
         cx.notify();
     }
 
-    /// Close the menu, if open (`escape`, a click outside it).
+    /// Close the menu, if open, leaving focus to the caller (the palette
+    /// opening over it).
     pub(super) fn close_add_filter_menu(&mut self, cx: &mut gpui::Context<Self>) {
         if self.add_filter_menu.take().is_some() {
             cx.notify();
         }
     }
 
+    /// The menu closes itself (`escape`, a press outside it): cancel any
+    /// chord prefix typed while it was open, so a half-typed sequence
+    /// cannot complete after it, and hand focus back to the text field if
+    /// the field held it when the menu opened.
+    pub(super) fn dismiss_add_filter_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let Some(menu) = self.add_filter_menu.take() else {
+            return;
+        };
+        self.matcher.cancel();
+        self.overlay_return_to_filter = menu.return_to_filter;
+        self.return_focus_from_overlay(window, cx);
+        cx.notify();
+    }
+
     /// Commit `entry`: dispatch its action, which also closes the menu —
-    /// the same door the palette and a user binding reach.
+    /// the same door the palette and a user binding reach. The dialog the
+    /// action opens recorded the shell root as its focus origin (the menu
+    /// holds it), so the menu's own record replaces that one: closing the
+    /// dialog returns to the text field when the menu was opened from it.
     pub(super) fn commit_add_filter(
         &mut self,
         entry: Entry,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        self.add_filter_menu = None;
+        let return_to_filter = self
+            .add_filter_menu
+            .take()
+            .is_some_and(|m| m.return_to_filter);
         self.dispatch(
             &crate::actions::ActionId(entry.action().to_string()),
             None,
             window,
             cx,
         );
+        if return_to_filter {
+            if self.modal.is_some() {
+                self.overlay_return_to_filter = true;
+            } else {
+                // Nothing opened (the action refused): back to the field now.
+                self.overlay_return_to_filter = true;
+                self.return_focus_from_overlay(window, cx);
+            }
+        }
         cx.notify();
     }
 
@@ -282,9 +328,7 @@ impl super::ShellView {
             return false;
         }
         match key {
-            "escape" => {
-                self.add_filter_menu = None;
-            }
+            "escape" => self.dismiss_add_filter_menu(window, cx),
             "j" | "down" => step(menu, 1),
             "k" | "up" => step(menu, -1),
             "enter" => {
@@ -319,7 +363,7 @@ mod tests {
 
     #[test]
     fn rows_carry_each_actions_live_binding() {
-        let menu = AddFilterMenu::new(&[binding("ctrl+p", "frame::pick")]);
+        let menu = AddFilterMenu::new(&[binding("ctrl+p", "frame::pick")], false);
         assert_eq!(
             menu.rows.iter().map(|r| r.entry).collect::<Vec<_>>(),
             Entry::ALL
@@ -329,7 +373,7 @@ mod tests {
             Some(parse_binding("ctrl+p", Modifiers::NONE).unwrap())
         );
         assert_eq!(menu.rows[1].keys, None, "an unbound action shows no key");
-        let menu = AddFilterMenu::new(&[binding("ctrl+e", "frame::add_expression")]);
+        let menu = AddFilterMenu::new(&[binding("ctrl+e", "frame::add_expression")], false);
         assert_eq!(menu.rows[0].keys, None);
         assert!(
             menu.rows[1].keys.is_some(),
@@ -339,7 +383,7 @@ mod tests {
 
     #[test]
     fn step_wraps_and_selected_follows() {
-        let mut m = AddFilterMenu::new(&[]);
+        let mut m = AddFilterMenu::new(&[], false);
         assert_eq!(m.selected(), Some(Entry::Dimension));
         step(&mut m, 1);
         assert_eq!(m.selected(), Some(Entry::Expression));

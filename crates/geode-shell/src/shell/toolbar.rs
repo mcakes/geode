@@ -123,7 +123,7 @@ fn verb(
     fg: Hsla,
     radius: Pixels,
     states: ControlPaint,
-    open: bool,
+    open: Option<&'static str>,
     selector: impl Fn() -> String + 'static,
 ) -> Stateful<Div> {
     div()
@@ -134,14 +134,18 @@ fn verb(
         .size(scale::design(GLYPH_BOX))
         .rounded(radius)
         .text_color(fg)
-        .child(icon.small())
         .debug_selector(selector)
-        .map(|el| {
-            if open {
-                el.bg(states.pressed).text_color(states.pressed_text)
-            } else {
-                el.pointer_states(states)
-            }
+        .map(|el| match open {
+            // `open` is the pressed state's own debug selector, on the
+            // glyph painted inside the pressed fill (the grouping
+            // readout's `scope-grouping-open` chevron is the same guard).
+            Some(open_selector) => el.bg(states.pressed).text_color(states.pressed_text).child(
+                div()
+                    .flex()
+                    .debug_selector(move || open_selector.to_string())
+                    .child(icon.small()),
+            ),
+            None => el.pointer_states(states).child(icon.small()),
         })
 }
 
@@ -409,7 +413,7 @@ pub fn toolbar(
                     chip_fg,
                     glyph_radius,
                     glyph_states,
-                    add_open,
+                    add_open.then_some("scope-pick-chip-open"),
                     || "scope-pick-chip".to_string(),
                 )
                 .tooltip(tips::tip("tip-scope-pick-chip", "Add a filter", None, None))
@@ -445,7 +449,7 @@ pub fn toolbar(
                 chip_fg,
                 glyph_radius,
                 glyph_states,
-                false,
+                None,
                 || "scope-save-chip".to_string(),
             )
             .tooltip(tips::tip(

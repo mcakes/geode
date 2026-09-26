@@ -160,7 +160,8 @@ expression dialog on that term; the `×` inside it drops that term alone
 (`Frame::drop_expression_term`). As on a dimension chip, the `×` occludes the
 body's hitbox, which is what keeps its press from also opening the dialog.
 Term chips are addressed by index, which is stable within one scope version;
-a term dialog whose index has gone by commit time refuses inline. Every term
+the term dialog also carries the term it was seeded with and refuses inline
+unless that term is still at its index at commit time. Every term
 edit, append, and clear goes through undoable `set_scope`.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"

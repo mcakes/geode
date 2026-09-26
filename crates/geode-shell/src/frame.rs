@@ -34,10 +34,10 @@ pub const UNDO_DEPTH: usize = 32;
 /// Maximum recent publishes retained, most recently received first.
 pub const RECENT_PUBLISHES: usize = 32;
 
-/// [`Frame::replace_expression_term`]'s refusal: the scope has no term at
-/// that index (it changed since the caller read it).
+/// [`Frame::replace_expression_term`]'s refusal: the scope no longer has
+/// the expected term at that index (it changed since the caller read it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TermOutOfRange;
+pub struct TermGone;
 
 /// Publication metadata for the history and as-of picker, independent of
 /// the data crate's event types.
@@ -328,28 +328,42 @@ impl Frame {
     /// leaves no expression. Out of range (including no expression)
     /// returns false and changes nothing.
     pub fn drop_expression_term(&mut self, i: usize) -> bool {
-        self.replace_expression_term(i, None).unwrap_or(false)
+        self.edit_expression_term(i, None, None).unwrap_or(false)
     }
 
     /// Replace top-level expression term `i` with `term`, or remove it
     /// with `None`, through the undoable `set_scope` path. The other terms
-    /// keep their order. `Err(TermOutOfRange)` when the scope has no term
-    /// `i` — the scope changed since the caller read it — so the caller
-    /// can refuse rather than edit a different term; `Ok(false)` when the
-    /// result equals the current scope.
+    /// keep their order. `expected` is the term the caller read at `i`
+    /// (the dialog's seed); `Err(TermGone)` unless term `i` still equals
+    /// it — the scope changed since the caller read it, and an index alone
+    /// would silently edit whichever term now sits there. `Ok(false)` when
+    /// the result equals the current scope.
     pub fn replace_expression_term(
         &mut self,
         i: usize,
+        expected: &Expr,
         term: Option<Expr>,
-    ) -> Result<bool, TermOutOfRange> {
+    ) -> Result<bool, TermGone> {
+        self.edit_expression_term(i, Some(expected), term)
+    }
+
+    fn edit_expression_term(
+        &mut self,
+        i: usize,
+        expected: Option<&Expr>,
+        term: Option<Expr>,
+    ) -> Result<bool, TermGone> {
         let mut terms: Vec<Expr> = self
             .scope
             .expression
             .as_ref()
             .map(|e| e.conjuncts().into_iter().cloned().collect())
             .unwrap_or_default();
-        if i >= terms.len() {
-            return Err(TermOutOfRange);
+        let Some(current) = terms.get(i) else {
+            return Err(TermGone);
+        };
+        if expected.is_some_and(|e| e != current) {
+            return Err(TermGone);
         }
         match term {
             Some(t) => terms[i] = t,
@@ -1193,16 +1207,34 @@ mod tests {
     fn replace_expression_term_keeps_the_others_and_refuses_out_of_range() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
-        let x = geode_core::scope::parse_expr("x = 9").unwrap();
-        assert_eq!(f.replace_expression_term(1, Some(x.clone())), Ok(true));
+        let p = |t: &str| geode_core::scope::parse_expr(t).unwrap();
+        let x = p("x = 9");
+        assert_eq!(
+            f.replace_expression_term(1, &p("b = 2"), Some(x.clone())),
+            Ok(true)
+        );
         assert_eq!(term_texts(&f), vec!["a = 1", "x = 9", "c = 3"]);
         assert_eq!(
-            f.replace_expression_term(1, Some(x.clone())),
+            f.replace_expression_term(1, &x, Some(x.clone())),
             Ok(false),
             "the same term again is no edit"
         );
-        assert_eq!(f.replace_expression_term(3, Some(x)), Err(TermOutOfRange));
-        assert_eq!(f.replace_expression_term(2, None), Ok(true));
+        assert_eq!(
+            f.replace_expression_term(1, &p("b = 2"), Some(p("y = 1"))),
+            Err(TermGone),
+            "index 1 now holds a different term: refuse rather than edit it"
+        );
+        assert_eq!(
+            f.replace_expression_term(1, &p("b = 2"), None),
+            Err(TermGone),
+            "nor remove it"
+        );
+        assert_eq!(term_texts(&f), vec!["a = 1", "x = 9", "c = 3"]);
+        assert_eq!(
+            f.replace_expression_term(3, &x, Some(x.clone())),
+            Err(TermGone)
+        );
+        assert_eq!(f.replace_expression_term(2, &p("c = 3"), None), Ok(true));
         assert_eq!(term_texts(&f), vec!["a = 1", "x = 9"]);
         assert!(f.undo_scope());
         assert!(f.undo_scope());

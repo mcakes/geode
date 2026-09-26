@@ -294,9 +294,11 @@ opens it. Bare Enter trims and parses the draft in every mode.
 The term and add modes show a muted note under the field saying what the
 commit touches. A successful commit changes only the expression in the frame
 scope, through undoable `set_scope`, then closes. Parse errors remain inline
-in every mode and typing clears the error. A term commit whose term no longer
-exists (the scope changed while the dialog was open) refuses inline rather
-than edit whichever term now has that index. Escape applies nothing.
+in every mode and typing clears the error. The term dialog remembers the term
+it was seeded with; if the scope changed while it was open so that its index
+no longer holds that term (gone, or a different term in its place), an edit
+or an empty (removing) commit refuses inline rather than touch whichever term
+now has that index. Escape applies nothing.
 `frame::clear_expression` drops the whole expression layer without a dialog;
 with no expression it does nothing. Neither new action has a default chord.
 
@@ -305,9 +307,14 @@ The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
 binding through `kbd::menu_binding`. It owns the keyboard while open: `j`/`k`
 or the arrows move with wrap, Enter commits the highlighted row, Escape
 closes, and other bare keys are consumed. A chord passes to the matcher, and
-any dispatch closes the menu. A row click commits; a press anywhere else
-closes the menu and reaches nothing beneath it. A commit is a dispatch of the
-row's action, so the menu opens exactly what the palette row would.
+any dispatch closes the menu. A row click commits; a press of any button
+anywhere else closes the menu and reaches nothing beneath it, and while the
+menu is open the wheel does not reach the tiles beneath it either. Escape and
+an outside press cancel any chord prefix typed while the menu was open. A
+commit is a dispatch of the row's action, so the menu opens exactly what the
+palette row would. Opening the menu takes the shell root's focus; if the
+scope text field held focus, the menu's own close returns it there, and so
+does closing the dialog or picker one of its rows opened.
 
 Validation is syntax-only. The editor has no dataset against which to check
 column names, types, or operator compatibility, so an accepted expression may
