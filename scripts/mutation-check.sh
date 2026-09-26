@@ -3901,16 +3901,16 @@ run_mutation "kbd: the which-key overlay paints each continuation key" \
 # empty workspace's hint without its `ctrl+k` chip.
 run_mutation "kbd: a marked hint line paints its backticked keys" \
   crates/geode-shell/src/shell/kbd.rs \
-  '                    return Some(self::spec(part));' \
-  '                    return None;' \
+  '                return Some(self::spec(part));' \
+  '                return None;' \
   geode-shell an_empty_workspace_hint_paints_its_keys_as_kbd
 
 # A module menu's `:` verb is not a key: parsing `:upload` as one would
 # paint a chip reading `:upload`'s last segment instead of the verb.
 run_mutation "kbd: a command-line verb hint stays text" \
   crates/geode-shell/src/shell/kbd.rs \
-  "    if spec.is_empty() || spec.starts_with(':') {" \
-  '    if spec.is_empty() {' \
+  "    if spec.is_empty() || spec.starts_with(':') || names_mod {" \
+  '    if spec.is_empty() || names_mod {' \
   geode-shell a_spec_names_keys_unless_it_is_a_command_verb
 
 # Recency must be bucketed by age, not flat: reading every record as
