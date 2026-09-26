@@ -246,7 +246,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: The entry bar replaces the placeholder row
 
 **Files:**
-- Modify: `crates/geode-pricer/src/core/entry.rs` (`place_for` loses `below`)
+- Modify: `crates/geode-pricer/src/core/entry.rs` (module doc, test rename)
 - Modify: `crates/geode-pricer/src/content.rs` (actions, keymap)
 - Modify: `crates/geode-pricer/src/tile.rs` (Entry, open/commit/close, render, clicks, tests)
 - Modify: `crates/geode-pricer/src/header.rs` (`render_entry_bar`)
@@ -258,7 +258,6 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `target_label(&Sheet, Place) -> String` (Task 1).
 - Produces:
-  - `pub fn place_for(sheet: &Sheet, row: Option<usize>) -> Place`
   - `GridModel::build(sheet, expansion, plan, clock)` (no `entry`)
   - `number_rows(mode, len, cursor) -> Vec<Option<usize>>`
   - `header::render_entry_bar(input: &Entity<InputState>, label: &SharedString, error: Option<&SharedString>, theme: &Theme) -> impl IntoElement`
@@ -266,55 +265,15 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - test harness: `Harness::entry_label(&self, &VisualTestContext) -> Option<String>`,
     `Harness::entry_error(..) -> Option<String>`, `Harness::entry_text(..) -> Option<String>`
 
-- [ ] **Step 1: `place_for` loses `below`**
+- [ ] **Step 1: `place_for` keeps `below` (put uses it)**
 
-In `core/entry.rs`:
-
-```rust
-/// Where a new row lands: below the cursor row. On a leg, the next leg of
-/// its package; on a package row, its first leg; `None` (no cursor row)
-/// at the end of the sheet.
-pub fn place_for(sheet: &Sheet, row: Option<usize>) -> Place {
-    let Some(row) = row else {
-        return Place::Root { at: sheet.len() };
-    };
-    if let Some(p) = sheet.parent(row) {
-        return Place::Leg {
-            package: p,
-            leg: row - p,
-        };
-    }
-    if sheet.is_package(row) {
-        return Place::Leg {
-            package: row,
-            leg: 0,
-        };
-    }
-    Place::Root { at: row + 1 }
-}
-```
-
-Update the module doc's first line to "where `o` lands". Rename the test
-`o_lands_after_the_cursor_row_and_shift_o_before_it` to
-`o_lands_after_the_cursor_row` and reduce it to:
-
-```rust
-    #[test]
-    fn o_lands_after_the_cursor_row() {
-        let s = sheet();
-        assert_eq!(place_for(&s, Some(0)), Place::Root { at: 1 });
-        assert_eq!(
-            place_for(&s, Some(1)),
-            Place::Leg { package: 1, leg: 0 },
-            "a package row: its first leg"
-        );
-        assert_eq!(place_for(&s, Some(2)), Place::Leg { package: 1, leg: 1 });
-        assert_eq!(place_for(&s, Some(3)), Place::Leg { package: 1, leg: 2 });
-        assert_eq!(place_for(&s, Some(4)), Place::Root { at: 5 });
-    }
-```
-
-and drop the `, true` argument in `with_no_cursor_row_a_line_lands_at_the_end`.
+`core::clip::put_place` (`p` / `shift+p`) calls `place_for(sheet, row, below)`,
+so `place_for` keeps its signature. The bar always calls it with `true`.
+Update only the module doc of `core/entry.rs` to say "where `o` (always
+below) and `p`/`shift+p` land". The mutation entry `pricer entry: o below a
+leg lands before it` and its test `o_lands_after_the_cursor_row_and_shift_o_before_it`
+stay; rename the test to `a_place_lands_after_the_cursor_row_or_before_it`
+and update the entry's filter to match.
 
 - [ ] **Step 2: Remove `shift+o`**
 
@@ -490,7 +449,7 @@ In `tile.rs`:
             return;
         }
         self.close_entry(window, cx);
-        let place = place_for(&self.sheet, self.cursor_sheet_row());
+        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }
@@ -810,10 +769,8 @@ Expected: all pass. Then `cargo test -p geode-app pricer` — all pass.
 In `scripts/mutation-check.sh`:
 - `pricer tile: the entry field is dropped unblurred`: test filter →
   `escape_closes_the_bar_and_the_field_blurs_before_it_drops`.
-- `pricer entry: o below a leg lands before it` → rename
-  `pricer entry: o on a leg lands before it`, anchor
-  `'            leg: row - p,'`, mutation `'            leg: row - p - 1,'`,
-  filter `o_lands_after_the_cursor_row`.
+- `pricer entry: o below a leg lands before it`: filter →
+  `a_place_lands_after_the_cursor_row_or_before_it` (anchor unchanged).
 - Delete these six entries and their comments:
   `a chevron click reads its row after the entry closes`,
   `a cell click reads its row after the entry closes`,
