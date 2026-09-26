@@ -398,15 +398,23 @@ impl PricerTile {
         let record = restored.map(Record::from_table).unwrap_or_default();
         let mut notices: Vec<String> = Vec::new();
         let mut blocked: Option<SharedString> = None;
+        // A name open elsewhere or being removed is refused here as `:e`
+        // refuses it: two tiles never write one sheet, and no tile opens a
+        // document a queued forget is about to delete.
         let name = match record.sheet.as_deref() {
-            Some(n) if !shared.open.borrow().contains(n) => n.to_string(),
-            Some(n) => {
+            Some(n) if shared.open.borrow().contains(n) => {
                 let fresh = untitled(&shared);
                 notices.push(format!(
                     "sheet '{n}' is open in another tile; opened {fresh}"
                 ));
                 fresh
             }
+            Some(n) if shared.refuse_retiring(n).is_err() => {
+                let fresh = untitled(&shared);
+                notices.push(format!("sheet '{n}' is being removed; opened {fresh}"));
+                fresh
+            }
+            Some(n) => n.to_string(),
             None => untitled(&shared),
         };
         shared.open.borrow_mut().insert(name.clone());
@@ -1331,8 +1339,9 @@ impl PricerTile {
                 }
                 if let Some(old) = self.rename_from.take() {
                     if self.shared.open.borrow().contains(&old) {
-                        // A tile holds the old name (a restore may open
-                        // it): forgetting would delete a sheet in use.
+                        // A tile holds the old name: forgetting would
+                        // delete a sheet in use. `:e` and a restore refuse
+                        // a retiring name, so no route reaches this today.
                         self.shared.retiring.borrow_mut().remove(&old);
                     } else if self.shared.store.forget(&old) {
                         // Reserved until the forget is answered.
@@ -1588,6 +1597,13 @@ impl PricerTile {
         let Err(reason) = answer else {
             return;
         };
+        if self.rename_from.as_deref() == Some(sheet) {
+            // `:name` moved this sheet's edits to its new name, whose own
+            // save carries them: a failure here only leaves the old
+            // name's copy stale, and that copy is forgotten once the new
+            // name's save is confirmed.
+            return;
+        }
         let text: SharedString =
             format!("sheet '{sheet}' was not saved: {reason}; its last edits were not stored")
                 .into();
@@ -1663,9 +1679,16 @@ impl PricerTile {
 
     /// A FAILED load (not an absent document): the fallback must never be
     /// published over the real document (see `save_blocked`).
+    /// A standing save notice (a waiting tile told its last edits were
+    /// not stored) is kept after the block: the block says why nothing
+    /// saves now, the older one what was already lost.
     fn block_saves(&mut self, name: &str, why: &str) {
         self.save_blocked = true;
-        self.save_notice = Some(blocked_notice(name, why));
+        let blocked = blocked_notice(name, why);
+        self.save_notice = Some(match self.save_notice.take() {
+            Some(lost) => format!("{blocked}; {lost}").into(),
+            None => blocked,
+        });
     }
 
     /// A reload reached this tile (planning decision 20).
@@ -6181,6 +6204,49 @@ pub(crate) mod tests {
         assert_eq!(h.save_notice(&vcx), blocked);
     }
 
+    /// The tile comes back to `book` while its save is queued, the save
+    /// fails, and the load behind it fails too: the failed load's block
+    /// does not hide that the tile's last edits were never stored.
+    #[gpui::test]
+    fn a_waiting_loads_failure_keeps_the_lost_edits_notice(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        h.store.set_load_refused(true);
+        save_answered(&h, &mut vcx, "book", Err("disk full".into()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.save_blocked), "the premise");
+        let notice = h.save_notice(&vcx).unwrap_or_default();
+        assert!(
+            notice.contains("did not load"),
+            "the block is shown: {notice}"
+        );
+        assert!(
+            notice
+                .contains("sheet 'book' was not saved: disk full; its last edits were not stored"),
+            "the lost edits are still shown: {notice}"
+        );
+    }
+
+    /// `:name fresh` while `book`'s save is still queued: the sheet's
+    /// edits travel under `fresh`, so a failure of `book`'s save only
+    /// means the old name's copy is stale (and about to be forgotten) —
+    /// the tile is not told its edits were lost.
+    #[gpui::test]
+    fn a_failed_save_of_the_renamed_from_name_claims_no_lost_edits(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        vcx.update(|_, cx| h.factory.flush_all(cx));
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        save_answered(&h, &mut vcx, "book", Err("disk full".into()));
+        assert_eq!(h.notice(&vcx), None);
+        assert_eq!(h.save_notice(&vcx), None);
+        save_answered(&h, &mut vcx, "fresh", Ok(()));
+        assert_eq!(h.store.forgets(), vec!["book".to_string()]);
+        let fresh = crate::core::from_rows("fresh", &h.store.get("fresh").expect("stored"));
+        assert_eq!(fresh.unwrap().qty(0), 7);
+    }
+
     /// A confirmed outcome reaches the store's known names; a submission
     /// or a failure never does.
     #[gpui::test]
@@ -6947,21 +7013,52 @@ pub(crate) mod tests {
         assert_eq!(h.command(&mut vcx, "e old"), Ok(()));
     }
 
-    /// A restore is not refused a retiring name; if a tile holds the old
-    /// name when the rename's save is confirmed, the forget is skipped.
+    /// A restore of a retiring name opens a fresh sheet instead, as `:e`
+    /// refuses it: the document is about to be forgotten, and a tile
+    /// holding it would show a removed sheet (and its next save would
+    /// recreate it). The rename's forget still runs.
+    #[gpui::test]
+    fn a_restore_of_a_retiring_name_opens_a_fresh_sheet(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        let loads = loads_of(&h.store, "book");
+        let (restored, _content, vcx2) = restore_tile(&parts(&h), cx, TILE + 3, "book");
+        let (name, notice) = restored.read_with(&vcx2, |t, _| {
+            (
+                t.sheet.name.clone(),
+                t.notice.as_ref().map(|n| n.to_string()),
+            )
+        });
+        assert_eq!(name, "untitled-1");
+        assert_eq!(
+            notice.as_deref(),
+            Some("sheet 'book' is being removed; opened untitled-1")
+        );
+        assert_eq!(loads_of(&h.store, "book"), loads, "book was not read");
+        save_answered(&h, &mut vcx, "fresh", Ok(()));
+        assert_eq!(h.store.forgets(), vec!["book".to_string()]);
+    }
+
+    /// If a tile holds the old name when the rename's save is confirmed,
+    /// the forget is skipped. No route opens a retiring name today (`:e`
+    /// and a restore both refuse it); the guard keeps a future one from
+    /// deleting a sheet in use, so the test opens the name directly.
     #[gpui::test]
     fn a_rename_never_forgets_a_sheet_a_tile_has_open(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
-        let (restored, _content, vcx2) = restore_tile(&parts(&h), cx, TILE + 3, "book");
-        assert_eq!(
-            restored.read_with(&vcx2, |t, _| t.sheet.name.clone()),
-            "book"
-        );
+        h.tile.read_with(&vcx, |t, _| {
+            t.shared.open.borrow_mut().insert("book".into());
+        });
         save_answered(&h, &mut vcx, "fresh", Ok(()));
         assert!(h.store.forgets().is_empty(), "book is open in a tile");
         assert!(h.store.get("book").is_some());
         assert!(h.tile.read_with(&vcx, |t, _| t.rename_from.is_none()));
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| !t.shared.retiring.borrow().contains("book")),
+            "the reservation is released"
+        );
     }
 
     /// Reads and saves run on different lanes: a load of a name whose save
