@@ -24,7 +24,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary: parse and completions. |
-| `storage` | Conversion between sheets and document rows. |
+| `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 
 The tile:
 
@@ -58,6 +58,16 @@ cargo bench -p geode-pricer
 - Shorthand rendering uses a template only while the legs still match it.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
+- The `pricer_sheets` declaration is frozen: tables are created with
+  `CREATE TABLE IF NOT EXISTS` and publishes insert positionally, so once a
+  database holds the dataset its column list and order cannot change without
+  a migration (none exists). `sheet` is `categorical = false`: sheet names are
+  not a scope dimension and an autosave must not rebuild an ENUM.
+- A document answer decodes (`rows_from_snapshot`) against the declaration's
+  column list, not the answer's: a zero-row answer is no document, and a
+  missing, wrong-typed or NULL column, attributes that differ between rows, or
+  a key naming another sheet is an error naming the column, never a partial
+  sheet.
 - A submission carries every stale line; an outcome tagged older than the
   latest submission is dropped whole. A refusal streak is its own state over
   the header notice (never written into it), backs off from one second to a

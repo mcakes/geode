@@ -35,6 +35,8 @@ geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
+# The storage round trip opens a real `DataService` on a temp directory.
+tempfile = "3.27.0"
 
 [[bench]]
 name = "core"

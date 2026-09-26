@@ -16070,6 +16070,35 @@ run_mutation "pricer storage: legs need not follow their package" \
   '            let follows = true;' \
   geode-pricer a_hostile_document_is_refused_with_a_reason
 
+run_mutation "pricer storage: a zero-row answer decodes as a document" \
+  crates/geode-pricer/src/core/storage.rs \
+  '    if snapshot.rows() == 0 {
+        return Ok(None);
+    }
+    let mut out = DocumentRows {' \
+  '    let mut out = DocumentRows {' \
+  geode-pricer a_zero_row_answer_is_no_document
+
+run_mutation "pricer storage: the decoder skips the i64 column-type refusal" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            if snapshot.i64_column(name).is_none() {
+                return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
+  '            if false {
+                return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+run_mutation "pricer storage: the decoder skips the utf8 column-type refusal" \
+  crates/geode-pricer/src/core/storage.rs \
+  '            if snapshot.str_column(name).is_none() && snapshot.dict_column(name).is_none() {' \
+  '            if false {' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
+run_mutation "pricer storage: an answer for another sheet installs under this name" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,' \
+  '                Column::Utf8(_) => continue,' \
+  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
   '                qty: qty
