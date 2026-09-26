@@ -17080,8 +17080,8 @@ run_mutation "timeseries menus: the openers survive an open menu" \
 # rows, so the tick follows the value.
 run_mutation "timeseries menus: a chrome rebuild refreshes the open menu's own rows" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '            let rows = self.menu_rows(m.kind, cx);' \
-  '            let rows = self.menu_rows(MenuKind::Actions, cx);' \
+  '        let rows = self.menu_rows(m.kind, cx);' \
+  '        let rows = self.menu_rows(MenuKind::Actions, cx);' \
   geode-timeseries \
   r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
 
@@ -18669,13 +18669,51 @@ run_mutation "timeseries triggers: the frequency trigger opens the frequency men
   geode-timeseries the_frequency_trigger_toggles_its_menu
 
 # An outside press closes only the popup its listener was painted for:
-# a trigger's capture-phase press runs first and may have swapped another
-# menu in, which the old menu's outside press must not close.
+# a trigger's (or the ⋯ button's) capture-phase press runs first and may
+# have swapped another popup in, which the old popup's outside press must
+# not close. The guard compares the painted kind, a menu's included...
 run_mutation "timeseries menus: an outside press closes only its own menu" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            (Some(Popup::Menu(m)), Some(kind)) => m.kind == kind,' \
-  '            (Some(Popup::Menu(_)), Some(_)) => true,' \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.as_ref().is_some_and(|p| matches!((p.kind(), painted), (PopupKind::Menu(_), PopupKind::Menu(_))) || p.kind() == painted) {' \
   geode-timeseries the_frequency_trigger_toggles_its_menu
+
+run_mutation "timeseries popups: an outside press closes only the popup it painted" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.is_some() {' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# ...and every painted popup goes through it: the series list and the add
+# picker closed unconditionally, so a trigger pressed over either opened
+# its menu and the old listener closed it again.
+run_mutation "timeseries popups: the series list's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Series, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+run_mutation "timeseries popups: the picker's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Picker, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# A frame change refreshes an open menu's rows even where the chrome
+# rebuild does not run (a tile with no series): the frequency menu's cap
+# reasons are resolved under the frame's as-of.
+run_mutation "timeseries frequency menu: an as-of change refreshes the cap reasons" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.refresh_menu_rows(cx) {' \
+  '            if false {' \
+  geode-timeseries an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons
+
+# A capped row's trailing column is short; the full refusal is the notice.
+run_mutation "timeseries frequency menu: a capped row shows a short reason" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            short_reason: Some(SharedString::new_static(OVER_CAP)),' \
+  '            short_reason: None,' \
+  geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
 
 # The range trigger paints its open state while the dates editor, not
 # only the range menu, is up.

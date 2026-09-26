@@ -69,7 +69,8 @@ use crate::core::{
 use crate::header::{self, HeaderModel};
 use crate::popup::{
     ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
-    RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range, render_series_popup,
+    PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
+    render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
 
@@ -272,6 +273,14 @@ impl TimeseriesTile {
             if now.flip != this.last_flip {
                 this.last_flip = now.flip;
                 this.promote(cx);
+            }
+            // An open frequency menu's disabled rows are the point cap
+            // over the range AS RESOLVED under the frame's as-of, so any
+            // frame change may move them — and the chrome rebuild below
+            // runs only for a visible tile holding series. Six cap checks,
+            // and a repaint only when a row actually moved.
+            if this.refresh_menu_rows(cx) {
+                cx.notify();
             }
             if !this.visible {
                 return;
@@ -841,6 +850,24 @@ impl TimeseriesTile {
         Ok(removal.changed)
     }
 
+    /// Rebuild an open menu's rows over the model and the frame as they
+    /// are now, keeping the highlight on its row where that row is still
+    /// an action, else landing on the first enabled one. Answers whether
+    /// the rows moved.
+    fn refresh_menu_rows(&mut self, cx: &App) -> bool {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return false;
+        };
+        let rows = self.menu_rows(m.kind, cx);
+        let Some(Popup::Menu(m)) = &mut self.popup else {
+            return false;
+        };
+        m.highlighted = menu::step(&rows, m.highlighted, 0);
+        let moved = m.rows != rows;
+        m.rows = rows;
+        moved
+    }
+
     /// Re-prepare everything painted from the model: the header and the
     /// title always, the chart model only when [`ChartKey`] says one of
     /// its own inputs moved. The ONE door, so the colour wheel is
@@ -880,13 +907,7 @@ impl TimeseriesTile {
         // under an open menu (the menu context leaves `:` to the tile).
         // The highlight stays on its row where that row is still an
         // action, else lands on the first enabled one.
-        if let Some(Popup::Menu(m)) = &self.popup {
-            let rows = self.menu_rows(m.kind, cx);
-            if let Some(Popup::Menu(m)) = &mut self.popup {
-                m.highlighted = menu::step(&rows, m.highlighted, 0);
-                m.rows = rows;
-            }
-        }
+        self.refresh_menu_rows(cx);
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
             &self.model,

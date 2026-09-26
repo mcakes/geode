@@ -43,9 +43,10 @@ cargo bench -p geode-timeseries
   up), never in `render`; a frequency the point cap refuses is a disabled row
   whose reason is the model's own refusal, so a pickable row never fails.
 - The range and frequency triggers toggle in the capture phase, like the `⋯`
-  button, because an open popup's `on_mouse_down_out` would close it first;
-  they also prevent default, because a press over the focused dates editor
-  must not hand the keyboard to the shell root.
+  button, because an open popup's `on_mouse_down_out` would close it first.
+- Every painted popup's outside press goes through `outside_press`, which
+  closes the popup only if it is still the one up: a trigger's capture-phase
+  press may already have swapped another popup in.
 - `escape` in the custom dates editor returns to the range menu through the
   one closer; only the menu's own `escape` closes.
 - A pointer door dispatches the verb's own action id; it never mutates the

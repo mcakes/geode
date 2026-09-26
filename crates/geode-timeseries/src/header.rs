@@ -229,12 +229,8 @@ pub(crate) struct HeaderPopups {
 /// It toggles in the CAPTURE phase: the open popup's own
 /// `on_mouse_down_out` is a capture listener that would close it before
 /// a bubble handler here could see it open, so the click meant to close
-/// would reopen it instead. And it calls `prevent_default`: the shell
-/// root is `track_focus`ed and gpui focuses it in the press's bubble
-/// phase unless default is prevented, so a press that closes or opens a
-/// focus-owning popup must not hand the keyboard to the root under it.
-/// Propagation still runs, so the tile press in the shell still focuses
-/// the tile.
+/// would reopen it instead. It does not stop propagation, so the
+/// shell's tile press still focuses the tile.
 ///
 /// `popup` hangs off a zero-size point at the trigger's bottom-left, so
 /// the menu opens under the control that owns it.
@@ -276,7 +272,6 @@ fn trigger(
                 return;
             }
             on_press(window, cx);
-            window.prevent_default();
         })
         .when_some(popup, |d, popup| {
             d.child(div().absolute().left_0().top_full().child(popup))

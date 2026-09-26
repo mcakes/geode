@@ -306,7 +306,7 @@ fn open_full(
     cx.update(gpui_component::init);
     // The module's own key reclaim, exactly as `main.rs` will call
     // it: without it `Root`'s window-wide `tab` binding eats the
-    // range popup's field switch before any listener runs.
+    // dates editor's field switch before any listener runs.
     cx.update(crate::init);
     let default_source = default_source.map(str::to_string);
     cx.update(move |cx| {
@@ -613,7 +613,7 @@ impl Harness {
         self.tile
             .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Range(_))))
     }
-    /// Where the range popup's keyboard is: which field, and which
+    /// Where the dates editor's keyboard is: which field, and which
     /// of that field's segments — the popup's own "painted text",
     /// read off the state the painter takes.
     fn range_active_segment(&self, vcx: &gpui::VisualTestContext) -> (Which, Segment) {
@@ -622,9 +622,9 @@ impl Harness {
                 Some(Popup::Range(r)) => Some((r.active, r.active_field().segment())),
                 _ => None,
             })
-            .expect("the range popup is open")
+            .expect("the dates editor is open")
     }
-    /// The two dates the range popup's fields hold right now —
+    /// The two dates the dates editor's fields hold right now —
     /// committed values, so a segment mid-entry is not in them.
     fn range_dates(&self, vcx: &gpui::VisualTestContext) -> (chrono::NaiveDate, chrono::NaiveDate) {
         self.tile
@@ -632,7 +632,7 @@ impl Harness {
                 Some(Popup::Range(r)) => Some((r.from.date(), r.to.date())),
                 _ => None,
             })
-            .expect("the range popup is open")
+            .expect("the dates editor is open")
     }
     /// The dates editor's inline refusal — a backwards range, an
     /// unfinished segment or the point cap.
@@ -2256,7 +2256,17 @@ fn f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason(
         Some(MenuKind::Frequency),
         "the menu stays"
     );
-    let notice = h.notice(&vcx).expect("the reason is the notice");
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| match t.popup() {
+                Some(Popup::Menu(m)) => m.rows[capped].trailing(),
+                _ => None,
+            })
+            .as_deref(),
+        Some("over cap"),
+        "the row itself stays short"
+    );
+    let notice = h.notice(&vcx).expect("the full reason is the notice");
     assert!(
         notice.starts_with("1m over 1y is") && notice.contains("the cap is 500,000"),
         "{notice}"
@@ -3206,4 +3216,77 @@ fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
     assert!(!h.dispatch_handled(&mut vcx, "pick_colour", None));
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
+}
+
+// ---- outside presses and stale cap reasons -----------------------
+
+/// Every popup's outside press closes only the popup it was painted
+/// for: a trigger's (or `⋯`'s) capture-phase press has already swapped
+/// its menu in by the time the old popup's `on_mouse_down_out` runs.
+#[gpui::test]
+fn a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.dispatch(&mut vcx, "list", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Range),
+        "list → range trigger"
+    );
+
+    h.keys(&mut vcx, "escape");
+    h.dispatch(&mut vcx, "add", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Frequency),
+        "picker → frequency trigger"
+    );
+
+    h.keys(&mut vcx, "escape");
+    h.dispatch(&mut vcx, "list", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Actions), "list → ⋯");
+}
+
+/// The frequency menu's cap reasons follow the frame's as-of while the
+/// menu is open — even on a tile with no series, where nothing else
+/// rebuilds the chrome.
+#[gpui::test]
+fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "range 2020-01-01 2026-01-01").unwrap();
+    h.command(&mut vcx, "freq 1h").unwrap();
+    h.keys(&mut vcx, "f");
+    let enabled = |h: &Harness, vcx: &gpui::VisualTestContext, want: &str| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m.rows.iter().any(|r| {
+                matches!(
+                    r,
+                    menu::MenuRow::Action { title, enabled: Ok(()), .. } if title.as_ref() == want
+                )
+            }),
+            _ => false,
+        })
+    };
+    assert!(
+        !enabled(&h, &vcx, "5 minutes"),
+        "six years of 5m is over the cap"
+    );
+    h.frame.update(&mut vcx, |f, cx| {
+        f.set_as_of(AsOf::At(
+            "2020-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        ));
+        cx.notify();
+    });
+    assert!(
+        enabled(&h, &vcx, "5 minutes"),
+        "clipped to five months, 5m fits"
+    );
 }

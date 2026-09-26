@@ -870,24 +870,20 @@ impl TimeseriesTile {
         self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);
     }
 
-    /// A press outside the popup that was painted: `Some(kind)` for a
-    /// menu, `None` for the dates editor. It closes that popup only if
-    /// it is still the one up — the listener belongs to the frame that
-    /// painted it, and a trigger's capture-phase press runs first and may
-    /// already have swapped another popup in (the frequency trigger over
-    /// an open range menu), which this press must leave open.
+    /// A press outside the popup that was painted as `painted` — the
+    /// ONE door every painted popup's `on_mouse_down_out` takes. It
+    /// closes that popup only if it is still the one up: the listener
+    /// belongs to the frame that painted it, and a trigger's or `⋯`'s
+    /// capture-phase press runs first and may already have swapped
+    /// another popup in (a menu over the series list), which this press
+    /// must leave open.
     pub(crate) fn outside_press(
         &mut self,
-        painted: Option<MenuKind>,
+        painted: PopupKind,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let still_up = match (&self.popup, painted) {
-            (Some(Popup::Menu(m)), Some(kind)) => m.kind == kind,
-            (Some(Popup::Range(_)), None) => true,
-            _ => false,
-        };
-        if still_up {
+        if self.popup.as_ref().map(Popup::kind) == Some(painted) {
             self.close_popup_with_window(window, cx);
         }
     }

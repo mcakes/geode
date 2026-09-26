@@ -107,6 +107,20 @@ pub(crate) enum Popup {
     Colour(ColourPick),
 }
 
+/// Which popup is up, without its state: what a painted popup's
+/// `on_mouse_down_out` hands the tile, so the press closes that popup
+/// only if it is STILL the one up. A menu carries its kind — two menus
+/// are different popups.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PopupKind {
+    Series,
+    Picker,
+    Expr,
+    Range,
+    Menu(MenuKind),
+    Colour,
+}
+
 /// The colour picker, open for slot `target` — what the header needs
 /// to draw it: the chip it stands in, the featured row
 /// ([`PickContext::featured`]'s colours, prepared once for
@@ -197,6 +211,19 @@ impl Popup {
             Popup::Series(_) => Some("series"),
             Popup::Menu(_) => Some("menu"),
             Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => None,
+        }
+    }
+
+    /// Which popup this is, for the outside-press guard
+    /// (`TimeseriesTile::outside_press`).
+    pub(crate) fn kind(&self) -> PopupKind {
+        match self {
+            Popup::Series(_) => PopupKind::Series,
+            Popup::Picker(_) => PopupKind::Picker,
+            Popup::Expr(_) => PopupKind::Expr,
+            Popup::Range(_) => PopupKind::Range,
+            Popup::Menu(m) => PopupKind::Menu(m.kind),
+            Popup::Colour(_) => PopupKind::Colour,
         }
     }
 
@@ -602,7 +629,9 @@ pub(crate) fn render_series_popup(
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+            move |_, window, cx| {
+                tile.update(cx, |t, cx| t.outside_press(PopupKind::Series, window, cx))
+            }
         });
     if p.rows.is_empty() {
         // "Asked and answered" rather than a blank rectangle — and it
@@ -748,7 +777,9 @@ pub(crate) fn render_picker(
         .occlude()
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))
+            move |_, window, cx| {
+                tile.update(cx, |t, cx| t.outside_press(PopupKind::Picker, window, cx))
+            }
         })
         .child(
             div()
@@ -939,7 +970,9 @@ pub(crate) fn render_range(
         // runs first (capture phase) and may already have replaced it.
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.outside_press(None, window, cx))
+            move |_, window, cx| {
+                tile.update(cx, |t, cx| t.outside_press(PopupKind::Range, window, cx))
+            }
         })
         .on_key_down({
             let tile = tile.clone();
@@ -999,7 +1032,11 @@ pub(crate) fn render_menu(
         // swapped its own menu in, which this press must not close.
         .on_mouse_down_out({
             let tile = tile.clone();
-            move |_, window, cx| tile.update(cx, |t, cx| t.outside_press(Some(kind), window, cx))
+            move |_, window, cx| {
+                tile.update(cx, |t, cx| {
+                    t.outside_press(PopupKind::Menu(kind), window, cx)
+                })
+            }
         });
     for (i, row) in m.rows.iter().enumerate() {
         list = list.child(match row {
@@ -1020,16 +1057,12 @@ pub(crate) fn render_menu(
                 .into_any_element(),
             MenuRow::Action {
                 title,
-                hint,
                 enabled,
                 checked,
                 ..
             } => {
                 let disabled = enabled.is_err();
-                let trailing: SharedString = match enabled {
-                    Err(r) => r.clone(),
-                    Ok(()) => hint.clone(),
-                };
+                let trailing = row.trailing().unwrap_or_default();
                 let tick: Option<&'static str> = checked.map(|on| if on { "\u{2713}" } else { "" });
                 let lit = i == m.highlighted && !disabled;
                 h_flex()

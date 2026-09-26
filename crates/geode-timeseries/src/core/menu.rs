@@ -69,9 +69,14 @@ pub enum MenuRow {
         /// tile at open; empty when the keymap has none), or a preset's
         /// or a frequency's short label.
         hint: SharedString,
-        /// `Err` names why the row cannot be picked; the painter shows
-        /// it in the trailing column and a pick makes it the notice.
+        /// `Err` names why the row cannot be picked; a pick makes it the
+        /// notice, and the painter shows it in the trailing column unless
+        /// `short_reason` stands in for it there.
         enabled: Result<(), SharedString>,
+        /// A disabled row's trailing text when its full reason is a
+        /// sentence too long for the column (the point cap's): the row
+        /// stays narrow and a pick still gives the whole reason.
+        short_reason: Option<SharedString>,
         /// `None` for a verb; `Some(on)` for a toggle or a choice, which
         /// paints a tick (or a same-width blank) ahead of its title.
         checked: Option<bool>,
@@ -79,6 +84,26 @@ pub enum MenuRow {
     Separator,
     /// A muted heading over the rows that follow.
     Section(SharedString),
+}
+
+impl MenuRow {
+    /// What the trailing column paints: a disabled row's short reason
+    /// (or its reason, when that is short already), else its hint.
+    /// `None` for a separator or a heading.
+    pub fn trailing(&self) -> Option<SharedString> {
+        match self {
+            MenuRow::Action {
+                enabled,
+                hint,
+                short_reason,
+                ..
+            } => Some(match enabled {
+                Err(reason) => short_reason.clone().unwrap_or_else(|| reason.clone()),
+                Ok(()) => hint.clone(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// What a row reads off the tile beyond the model: nothing yet, but
@@ -98,6 +123,7 @@ fn action(
         title: title.into(),
         hint: SharedString::default(),
         enabled: enabled.map_err(SharedString::new_static),
+        short_reason: None,
         checked: None,
     }
 }
@@ -108,6 +134,7 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
         title: SharedString::new_static(title),
         hint: SharedString::default(),
         enabled: Ok(()),
+        short_reason: None,
         checked: Some(on),
     }
 }
@@ -203,6 +230,7 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
             title: SharedString::new_static(p.title()),
             hint: SharedString::new_static(p.as_str()),
             enabled: Ok(()),
+            short_reason: None,
             checked: Some(*current == Range::Relative(p)),
         })
         .collect();
@@ -212,6 +240,7 @@ pub fn range_rows(current: &Range) -> Vec<MenuRow> {
         title: SharedString::new_static("Custom dates…"),
         hint: SharedString::new_static("c"),
         enabled: Ok(()),
+        short_reason: None,
         checked: Some(matches!(current, Range::Absolute { .. })),
     });
     out
@@ -234,10 +263,15 @@ pub fn frequency_rows(
             title: SharedString::new_static(frequency_title(f)),
             hint: SharedString::new_static(f.as_str()),
             enabled: refusal(f).map_err(SharedString::from),
+            short_reason: Some(SharedString::new_static(OVER_CAP)),
             checked: Some(f == current),
         })
         .collect()
 }
+
+/// A capped frequency row's trailing text; picking the row gives the
+/// model's whole refusal as the notice.
+const OVER_CAP: &str = "over cap";
 
 /// A frequency written out, for its menu row.
 fn frequency_title(f: Frequency) -> &'static str {
@@ -594,6 +628,12 @@ mod tests {
             )),
             "a capped frequency is disabled with the cap's own reason"
         );
+        assert_eq!(
+            rows[0].trailing().as_deref(),
+            Some("over cap"),
+            "the trailing column carries a short reason; a pick's notice the full one"
+        );
+        assert_eq!(rows[3].trailing().as_deref(), Some("1h"));
         assert_eq!(checked_of(&rows, 3), Some(true));
         assert_eq!(checked_of(&rows, 4), Some(false));
         assert_eq!(
