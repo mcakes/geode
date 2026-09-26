@@ -64,6 +64,13 @@ pub struct BlotterDelegate {
     pub cursor: Cursor,
     pub mode: Mode,
     pub sort: Option<SortSpec>,
+    /// The column whose sort `apply_snapshot` just dropped because a
+    /// rebuild no longer carries it (a view edit hid it, or a regroup
+    /// folded it into the tree column) — `None` once the tile has read
+    /// and cleared it. The rows reorder to default order either way, so
+    /// this is what lets the tile tell the trader why, rather than
+    /// leaving a bare reorder for them to puzzle out.
+    pub dropped_sort: Option<String>,
     pub cache: FormatCache,
     pub narrowed: Option<Vec<usize>>,
     pub unplaced: usize,
@@ -169,6 +176,7 @@ impl BlotterDelegate {
             cursor: Cursor::default(),
             mode: Mode::Normal,
             sort: None,
+            dropped_sort: None,
             cache: FormatCache::default(),
             narrowed: None,
             unplaced: 0,
@@ -387,17 +395,21 @@ impl BlotterDelegate {
         let keep = self.cursor_path();
         let fresh = ColumnPlan::build(view, grouping, &snapshot);
         let rebuild = self.plan.as_ref() != Some(&fresh);
+        self.dropped_sort = None;
         if rebuild {
             self.plan = Some(fresh);
             // Re-resolved, not bounds-checked: a rebuild that hides a column
             // or folds a dimension into the tree shortens the list, and an
             // in-range index then names a different column than the trader
-            // sorted by.
-            self.sort = self.sort.take().filter(|s| {
-                self.plan
-                    .as_ref()
-                    .is_some_and(|p| p.position_of(&s.column).is_some())
-            });
+            // sorted by. The rows reorder to default order either way, so
+            // the dropped name is kept for the tile to report rather than
+            // discarded here.
+            if let Some(s) = self.sort.take() {
+                match self.plan.as_ref().and_then(|p| p.position_of(&s.column)) {
+                    Some(_) => self.sort = Some(s),
+                    None => self.dropped_sort = Some(s.column),
+                }
+            }
         }
         self.expansion.prune_to(grouping.len());
         self.unplaced = snapshot.tree().unplaced();
@@ -1862,6 +1874,11 @@ mod tests {
             assert_eq!(
                 name_before, name_after,
                 "the cursor rests on the column it rested on, not the position"
+            );
+            assert_eq!(
+                d.cursor.col,
+                from + 1,
+                "the cursor's position moved to the column's new slot"
             );
         });
     }

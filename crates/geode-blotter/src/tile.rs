@@ -693,7 +693,7 @@ impl BlotterTile {
             // paint on the requery every applied reload already triggers
             // (`Frame::note_config_reloaded`), never a frame behind it.
             let colours = Arc::clone(&self.colours.borrow());
-            self.table.update(cx, |t, cx| {
+            let dropped_sort = self.table.update(cx, |t, cx| {
                 t.delegate_mut().set_colours(colours);
                 // `refresh` re-prepares the column groups from `column()` (the
                 // `on_ui_settings` gotcha), so a plan whose labels or widths
@@ -704,7 +704,15 @@ impl BlotterTile {
                 t.refresh(cx);
                 let row = t.delegate().cursor.row;
                 t.set_selected_row(row, cx);
+                // Taken, not read: a rebuild that carried no drop must not
+                // leave a stale name behind for the next one to repeat.
+                t.delegate_mut().dropped_sort.take()
             });
+            if let Some(name) = dropped_sort {
+                self.error = Some(format!(
+                    "sort on '{name}' dropped: the column is no longer in this view"
+                ));
+            }
         }
         self.delivered_at = Some(Instant::now());
     }
@@ -1190,12 +1198,7 @@ impl BlotterTile {
             }
             Command::Sort { column, order } => {
                 let found = self.with_delegate(cx, |d| {
-                    let col = d
-                        .plan
-                        .as_ref()?
-                        .columns
-                        .iter()
-                        .position(|c| c.name == column)?;
+                    let col = d.plan.as_ref()?.position_of(&column)?;
                     // A text column has no magnitude: `abs` on it is its
                     // signed direction, in the state as on the screen.
                     let order = order.on_column(d.is_measure(col));
@@ -2886,6 +2889,60 @@ mod tests {
         h.tile
             .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
         assert_eq!(sort(&mut cx), None);
+    }
+
+    /// A view edit that drops the sorted column reorders the rows to
+    /// default order regardless (the re-resolving filter in
+    /// `apply_snapshot`); the only question is whether the trader is told
+    /// why. `note_config_reloaded` plus a redelivery is the real route a
+    /// Views-dialog edit reaches a tile through — the same one
+    /// `publication_bursts_query_only_base_and_join_consumers` uses to
+    /// force a plan rebuild.
+    #[gpui::test]
+    fn hiding_the_sorted_column_drops_the_sort_and_says_which(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort delta01", cx).unwrap());
+        assert!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_some()),
+            "precondition: the sort is set before the view edit"
+        );
+
+        // A view edit that hides delta01 shortens the plan.
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "delta01");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snapshot()));
+
+        assert!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_none()),
+            "the sorted column is gone, so the sort is gone"
+        );
+        let notice = h
+            .tile
+            .read_with(&cx, |t, _| t.error.clone())
+            .expect("a notice names the dropped sort");
+        assert!(
+            notice.contains("delta01"),
+            "the notice names the column whose sort went: {notice}"
+        );
     }
 
     /// A header click reaches every order a measure can show, desc first
