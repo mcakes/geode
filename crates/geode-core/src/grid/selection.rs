@@ -82,6 +82,111 @@ impl<R, C> Selection<R, C> {
     }
 }
 
+/// The rows of `rows` with no ancestor also in `rows` (spec §1 ruling 2):
+/// a parent row already carries its children's total, so counting both
+/// would double it. Walks each row's ancestor chain against a dense
+/// membership bitmap of size `universe` — independent of display order,
+/// which fzf narrowing does not keep in tree order. Output keeps `rows`'
+/// order.
+pub fn top_most(
+    rows: &[usize],
+    universe: usize,
+    parent: impl Fn(usize) -> Option<usize>,
+) -> Vec<usize> {
+    let mut selected = vec![false; universe];
+    for &r in rows {
+        if let Some(s) = selected.get_mut(r) {
+            *s = true;
+        }
+    }
+    rows.iter()
+        .copied()
+        .filter(|&r| {
+            let mut at = parent(r);
+            while let Some(p) = at {
+                if selected.get(p).copied().unwrap_or(false) {
+                    return false;
+                }
+                at = parent(p);
+            }
+            true
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ColumnAggregate {
+    /// Non-NULL, non-NaN values seen.
+    pub count: usize,
+    /// `None` when `count == 0` or any value was non-additive.
+    pub sum: Option<f64>,
+    pub mean: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    /// Some contributing value must never be totalled
+    /// (`Attribution::DeterminedNonAdditive`).
+    pub non_additive: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Accumulator {
+    count: usize,
+    sum: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    non_additive: bool,
+}
+
+impl Accumulator {
+    pub fn add(&mut self, value: Option<f64>, additive: bool) {
+        let Some(v) = value.filter(|v| !v.is_nan()) else {
+            return;
+        };
+        self.count += 1;
+        self.sum += v;
+        self.min = Some(self.min.map_or(v, |m| m.min(v)));
+        self.max = Some(self.max.map_or(v, |m| m.max(v)));
+        self.non_additive |= !additive;
+    }
+
+    pub fn finish(&self) -> ColumnAggregate {
+        let totals = self.count > 0 && !self.non_additive;
+        ColumnAggregate {
+            count: self.count,
+            sum: totals.then_some(self.sum),
+            mean: totals.then(|| self.sum / self.count as f64),
+            min: self.min,
+            max: self.max,
+            non_additive: self.non_additive,
+        }
+    }
+}
+
+/// The footer text for one column (spec §3.3), formatted with that
+/// column's own `ColumnFormat`. `extremes` adds `min`/`max` (a selection
+/// covering a single numeric column).
+pub fn describe(
+    agg: &ColumnAggregate,
+    format: &crate::view::ColumnFormat,
+    extremes: bool,
+) -> String {
+    use crate::format::format_number;
+    let f = |v: f64| format_number(v, format).text;
+    let mut parts: Vec<String> = Vec::new();
+    if agg.non_additive {
+        parts.push("Σ —†".into());
+    } else if let (Some(s), Some(m)) = (agg.sum, agg.mean) {
+        parts.push(format!("Σ {}", f(s)));
+        parts.push(format!("μ {}", f(m)));
+    }
+    parts.push(format!("n {}", agg.count));
+    if extremes && let (Some(lo), Some(hi)) = (agg.min, agg.max) {
+        parts.push(format!("min {}", f(lo)));
+        parts.push(format!("max {}", f(hi)));
+    }
+    parts.join(" · ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +252,88 @@ mod tests {
         };
         let r = s.resolve_with((3, 0), 5, |r| Some(*r), |_| None).unwrap();
         assert_eq!((r.rows, r.cols), (1..4, 0..5));
+    }
+
+    // Tree: 0 root; 1, 2 children of 0; 3 child of 1; 4 child of 3.
+    fn parent(r: usize) -> Option<usize> {
+        [None, Some(0), Some(0), Some(1), Some(3)][r]
+    }
+
+    #[test]
+    fn a_group_and_its_children_count_once_as_the_group() {
+        assert_eq!(top_most(&[1, 3, 4, 2], 5, parent), vec![1, 2]);
+    }
+
+    #[test]
+    fn some_children_alone_are_summed_themselves() {
+        assert_eq!(top_most(&[3, 2], 5, parent), vec![3, 2]);
+    }
+
+    #[test]
+    fn a_grandparent_hides_a_grandchild_even_without_the_middle_row() {
+        assert_eq!(top_most(&[1, 4], 5, parent), vec![1]);
+    }
+
+    #[test]
+    fn top_most_ignores_display_order() {
+        // fzf narrowing shows rows in score order: child before parent.
+        assert_eq!(top_most(&[4, 2, 1], 5, parent), vec![2, 1]);
+    }
+
+    #[test]
+    fn a_collapsed_group_is_summed_as_itself() {
+        // Row 1 collapsed: 3 and 4 are not displayed, so not in `rows`.
+        assert_eq!(top_most(&[1], 5, parent), vec![1]);
+    }
+
+    #[test]
+    fn nulls_and_nan_are_excluded_from_every_statistic() {
+        let mut a = Accumulator::default();
+        for v in [Some(1.0), None, Some(f64::NAN), Some(3.0)] {
+            a.add(v, true);
+        }
+        let g = a.finish();
+        assert_eq!(g.count, 2);
+        assert_eq!(g.sum, Some(4.0));
+        assert_eq!(g.mean, Some(2.0));
+        assert_eq!((g.min, g.max), (Some(1.0), Some(3.0)));
+    }
+
+    #[test]
+    fn a_non_additive_value_suppresses_sum_and_mean_but_not_extremes() {
+        let mut a = Accumulator::default();
+        a.add(Some(5.0), true);
+        a.add(Some(7.0), false);
+        let g = a.finish();
+        assert!(g.non_additive);
+        assert_eq!((g.sum, g.mean), (None, None));
+        assert_eq!((g.count, g.min, g.max), (2, Some(5.0), Some(7.0)));
+    }
+
+    #[test]
+    fn an_empty_column_has_no_statistics() {
+        let g = Accumulator::default().finish();
+        assert_eq!(g, ColumnAggregate::default());
+    }
+
+    #[test]
+    fn describe_uses_the_column_format_and_marks_non_additive() {
+        use crate::view::ColumnFormat;
+        let mut a = Accumulator::default();
+        a.add(Some(1000.0), true);
+        a.add(Some(2000.0), true);
+        let f = ColumnFormat::MEASURE;
+        assert_eq!(
+            describe(&a.finish(), &f, false),
+            "Σ 3,000.00 · μ 1,500.00 · n 2"
+        );
+        assert_eq!(
+            describe(&a.finish(), &f, true),
+            "Σ 3,000.00 · μ 1,500.00 · n 2 · min 1,000.00 · max 2,000.00"
+        );
+        let mut b = Accumulator::default();
+        b.add(Some(1.0), false);
+        assert_eq!(describe(&b.finish(), &f, false), "Σ —† · n 1");
+        assert_eq!(describe(&Accumulator::default().finish(), &f, false), "n 0");
     }
 }

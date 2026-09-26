@@ -20783,6 +20783,29 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
+# ---- grid selection (grid selection spec) ---------------------------------
+
+run_mutation "grid selection: an ancestor in the selection hides the row" \
+  crates/geode-core/src/grid/selection.rs \
+  '                    return false;' \
+  '                    return true;' \
+  geode-core \
+  a_group_and_its_children_count_once_as_the_group
+
+run_mutation "grid selection: a non-additive value suppresses the sum" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive;' \
+  '        let totals = self.count > 0;' \
+  geode-core \
+  a_non_additive_value_suppresses_sum_and_mean_but_not_extremes
+
+run_mutation "grid selection: a lost anchor row resolves to None" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let row = find_row(&self.anchor_row)?;' \
+  '        let row = find_row(&self.anchor_row).unwrap_or(0);' \
+  geode-core \
+  resolution_goes_through_identity_and_a_lost_anchor_is_none
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
