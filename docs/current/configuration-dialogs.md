@@ -83,11 +83,14 @@ the same draft before validation and persistence. This avoids independent
 copies of an object's nested state. Returning from a Schema column refreshes
 its read-only summaries from configuration with pending edits included.
 
-Edit-stage rows carry a `doc` or `pres` badge naming where the row writes. A
-Column stage's fields all write one overlay, so its rows instead name the
-layer their value comes from (`desk`, `dataset`, or `view`; none for the kind
-default). That badge sits in a slot as wide as the widest layer name, so a
-badge appearing mid-edit does not shift the row's value.
+Rows carry no destination badge: every field of one stage writes the same
+place (the object's document, or a Column stage's one overlay), so the badge
+would read the same on every row. Rows name a layer instead where one
+applies. A Column stage names the layer a value comes from (`desk`,
+`dataset`, or `view`; none for the kind default), and Schema names the layer
+that defined each column or derived dimension. Each badge sits in a
+right-aligned slot as wide as the widest name it can hold, so values stay in
+one column whatever layer each row names and when a badge appears mid-edit.
 
 ## Definitions and presentation
 

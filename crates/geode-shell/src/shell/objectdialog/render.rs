@@ -38,8 +38,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FellTo, Field, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
-    READ_ONLY_NOTICE, RowDrag, RowVocabulary, Stage, Step,
+    EditRow, FellTo, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE,
+    RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -3249,9 +3249,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     });
 
     let domain = state.domain;
-    // Destination badges are relevant only on the stage's writable fields.
     let writable = domain.writable(&state.stage);
-    let dest_badges = writable;
+    // Schema's rows name the layer their value came from. When any row does, every
+    // row reserves the slot, so a row without a layer keeps its value in line.
+    let layer_slots = draft.fields.iter().any(|field| field.layer.is_some());
     // whether any chip may carry a handler this frame. The four inert cases mirror the
     // keys' own: read-only domain, armed confirm, open text field (and per row, a
     // one-option `Choice`).
@@ -3329,11 +3330,6 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             let (selector, label, value) = match edit_row {
                 EditRow::Field(index) => {
                     let field = &draft.fields[index];
-                    let dest_label = match field.dest {
-                        Destination::Doc => "doc",
-                        Destination::Presentation => "pres",
-                        Destination::DatasetPresentation => "dataset",
-                    };
                     // the value is a chip — the mouse form of `space`/`shift+space` —
                     // on exactly the rows the keys step (`vocabulary_of`, the footer's
                     // own answer), and plain text with no handler everywhere else,
@@ -3373,32 +3369,32 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             // overlay, so the layer is the only per-row fact. Schema
                             // fills `layer` below on its own rows, which are not
                             // column-stage rows, so the two never both appear.
-                            .children(
-                                provenance_inputs
-                                    .as_ref()
-                                    .map(|inputs| provenance_slot(inputs, field, theme, cx)),
-                            )
-                            // the layer a schema row's value came from — `None` on
-                            // every writable domain (`Field:: layer`'s own doc has the
-                            // reasoning).
-                            .children(field.layer.map(|layer| {
-                                dialog::badge(
-                                    layer.name(),
-                                    theme.muted_foreground,
-                                    theme.border,
-                                    Some(format!("objectdialog-field-layer-{}", field.key)),
+                            .children(provenance_inputs.as_ref().map(|inputs| {
+                                badge_slot(
+                                    &PROVENANCE_NAMES,
+                                    dataset_columns::provenance_of(inputs, field).map(|p| {
+                                        (
+                                            p.name(),
+                                            format!("objectdialog-field-provenance-{}", field.key),
+                                        )
+                                    }),
+                                    theme,
                                     cx,
                                 )
                             }))
-                            // A `doc`/`pres` badge promises a write this row
-                            // can make — painting it on a read-only domain
-                            // would promise one the scaffold refuses outright.
-                            .children((dest_badges && provenance_inputs.is_none()).then(|| {
-                                dialog::badge(
-                                    dest_label,
-                                    theme.muted_foreground,
-                                    theme.border,
-                                    Some(format!("objectdialog-dest-{}", field.key)),
+                            // the layer a schema row's value came from — `None` on
+                            // every writable domain (`Field:: layer`'s own doc has the
+                            // reasoning).
+                            .children(layer_slots.then(|| {
+                                badge_slot(
+                                    &LAYER_NAMES,
+                                    field.layer.map(|layer| {
+                                        (
+                                            layer.name(),
+                                            format!("objectdialog-field-layer-{}", field.key),
+                                        )
+                                    }),
+                                    theme,
                                     cx,
                                 )
                             }))
@@ -4314,34 +4310,37 @@ fn confirm_row(
         .into_any_element()
 }
 
-/// the chip naming the layer in force on a column-stage field, computed from the
-/// draft's layers at paint so a stepped field reads `view` (or `dataset`, from the
-/// Schema door) on the same frame.
+/// Every name a column-stage row's layer badge can carry.
+const PROVENANCE_NAMES: [&str; 3] = [
+    super::Provenance::Desk.name(),
+    super::Provenance::Dataset.name(),
+    super::Provenance::View.name(),
+];
+
+/// Every name a Schema row's layer badge can carry.
+const LAYER_NAMES: [&str; 3] = [
+    Layer::Builtin.name(),
+    Layer::Desk.name(),
+    Layer::User.name(),
+];
+
+/// A right-aligned badge in a slot as wide as the widest of `names`, laid out by an
+/// invisible badge. A row with no badge, or one whose badge appears or changes
+/// mid-edit, keeps its value in line with every other row's.
 ///
-/// `None` off the column stage, where `Draft::column_ctx` is `None` and
-/// there are no layers to name — which is why `inputs` is an `Option`
-/// the caller builds ONCE before the row loop rather than a value this
-/// function derives per field: both halves of
-/// [`dataset_columns::ProvenanceInputs`] allocate, and seven clones per
-/// painted frame is per-frame heap churn on the render thread.
-fn provenance_slot(
-    inputs: &dataset_columns::ProvenanceInputs<'_>,
-    field: &Field,
+/// The column stage's caller builds its `ProvenanceInputs` once before the row loop:
+/// both halves allocate, and a clone per painted field is per-frame heap churn.
+fn badge_slot(
+    names: &[&'static str],
+    badge: Option<(&'static str, String)>,
     theme: &gpui_component::Theme,
     cx: &App,
 ) -> AnyElement {
-    // The slot is as wide as the widest layer name, laid out by an invisible
-    // badge, so a row whose value follows the kind default (no badge) or whose
-    // badge appears mid-edit keeps its value in line with every other row's.
-    let widest = [
-        super::Provenance::Desk,
-        super::Provenance::Dataset,
-        super::Provenance::View,
-    ]
-    .into_iter()
-    .map(super::Provenance::name)
-    .max_by_key(|name| name.len())
-    .unwrap_or_default();
+    let widest = names
+        .iter()
+        .copied()
+        .max_by_key(|name| name.len())
+        .unwrap_or_default();
     let sizer = div().invisible().child(dialog::badge(
         widest,
         theme.muted_foreground,
@@ -4349,12 +4348,12 @@ fn provenance_slot(
         None,
         cx,
     ));
-    let badge = dataset_columns::provenance_of(inputs, field).map(|provenance| {
+    let badge = badge.map(|(name, selector)| {
         div().absolute().top_0().right_0().child(dialog::badge(
-            provenance.name(),
+            name,
             theme.muted_foreground,
             theme.border,
-            Some(format!("objectdialog-field-provenance-{}", field.key)),
+            Some(selector),
             cx,
         ))
     });

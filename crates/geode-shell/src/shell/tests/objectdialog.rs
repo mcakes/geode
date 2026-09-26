@@ -4589,7 +4589,7 @@ fn pressing_a_member_rows_grip_does_not_open_its_column_stage(cx: &mut gpui::Tes
 // ---------------------------------------------------------------------
 
 #[gpui::test]
-fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
+fn the_edit_stage_paints_section_headers_and_the_crumb_and_no_destination_badge(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -4603,8 +4603,10 @@ fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
             .is_some(),
         "delta01 is available"
     );
-    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_some());
-    assert!(cx.debug_bounds("objectdialog-dest-columns").is_some());
+    // Every field here writes the view document, so a per-row `doc` badge
+    // would say the same thing on every row.
+    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_none());
+    assert!(cx.debug_bounds("objectdialog-dest-columns").is_none());
     assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
 }
 
@@ -5888,6 +5890,64 @@ fn services_with_schema() -> ShellServices {
         user: None,
     });
     services
+}
+
+/// Schema rows name the layer their value came from, and the names differ
+/// in width (`builtin` against `user`). Each badge sits in a slot as wide
+/// as the widest name, so a builtin column's value lines up with a
+/// user-layer derived dimension's.
+#[gpui::test]
+fn schema_values_line_up_whatever_layer_each_row_names(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dimensions.toml"),
+        "[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n",
+    )
+    .unwrap();
+    let mut services = services_with_schema();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-columns.book")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-derived.desk")
+            .is_some()
+    );
+    let column = cx
+        .debug_bounds("objectdialog-value-columns.book")
+        .expect("book paints a value");
+    let derived = cx
+        .debug_bounds("objectdialog-value-derived.desk")
+        .expect("the derived dimension paints a value");
+    assert_eq!(
+        column.right(),
+        derived.right(),
+        "a builtin row's value lines up with a user row's"
+    );
+    let badge = cx
+        .debug_bounds("objectdialog-field-layer-derived.desk")
+        .unwrap();
+    assert!(
+        badge.left() >= derived.right(),
+        "the badge sits in its own slot beside the value, not over it"
+    );
 }
 
 /// §19.4: the inspector lists datasets, opens one to its column rows —
