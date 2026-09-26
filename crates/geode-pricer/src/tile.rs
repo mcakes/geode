@@ -6218,10 +6218,11 @@ pub(crate) mod tests {
             diagnostics
         });
         cx.run_until_parked();
-        cx.update(|cx| {
+        let frame = cx.update(|cx| {
+            cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None))
+        });
+        let window = cx.update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let frame =
-                    cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                 let first = factory.create(
                     TileId(1),
                     None,
@@ -6230,7 +6231,18 @@ pub(crate) mod tests {
                     window,
                     cx,
                 );
-                let _second = factory.create(
+                cx.new(|cx| gpui_component::Root::new(first.view, window, cx))
+            })
+            .unwrap()
+        });
+        cx.run_until_parked();
+        assert!(notified.get() >= 1, "the request was notified");
+        assert_eq!(asked.get(), 1);
+        // A second tile, in its own update once the first request was
+        // taken, still with no catalog held: it asks nothing more.
+        window
+            .update(cx, |_, window, cx| {
+                let _ = factory.create(
                     TileId(2),
                     None,
                     frame.clone(),
@@ -6238,12 +6250,9 @@ pub(crate) mod tests {
                     window,
                     cx,
                 );
-                cx.new(|cx| gpui_component::Root::new(first.view, window, cx))
             })
             .unwrap();
-        });
         cx.run_until_parked();
-        assert!(notified.get() >= 1, "the request was notified");
         assert_eq!(asked.get(), 1, "asked once, not per tile");
     }
 
