@@ -21402,6 +21402,38 @@ run_mutation "expr suggest: operators follow the column type" \
   geode-shell \
   operators_follow_the_column_type
 
+# The input observer is what follows a caret moved without typing.
+run_mutation "expr suggest: the list follows a moved caret" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            expr_suggest::refresh(view, cx)' \
+  '            let _ = (view, cx);' \
+  geode-shell \
+  a_moved_caret_is_followed_before_tab_writes
+
+# Add mode keeps the frame's expression in the values request.
+run_mutation "expr suggest: add mode narrows by the current expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => current.expression.clone(),' \
+  '        Mode::Add => None,' \
+  geode-shell \
+  add_mode_requests_values_under_the_current_expression
+
+# Enter refuses an unknown column once a schema exists.
+run_mutation "expr suggest: enter refuses an unknown column" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Err(w.message);' \
+  '        let _ = w;' \
+  geode-shell \
+  enter_refuses_an_unknown_column
+
+# A row click inserts it.
+run_mutation "expr suggest: a row click inserts" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    on_click(position, window, cx);' \
+  '                    let _ = (position, window, cx);' \
+  geode-shell \
+  clicking_a_row_inserts_it_and_typing_continues
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

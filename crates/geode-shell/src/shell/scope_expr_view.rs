@@ -19,16 +19,21 @@
 //! closes without applying. Each open seeds a fresh draft from the current
 //! frame.
 //!
-//! Validation here is syntax-only: there is no dataset, column, or operator
-//! compatibility check. A parsed expression can still fail a later query.
+//! While typing, `expr_suggest` lists what fits at the caret and warns
+//! about schema problems. Enter refuses a syntax error or an unknown
+//! column (`geode_core::scope::complete::check`). An operator that means
+//! nothing on its column fails at query time, as before.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, SharedString, Window, div};
+use gpui::{AnyElement, App, Context, Entity, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, v_flex};
 
-use geode_core::scope::{Expr, parse_expr};
+use geode_core::scope::complete::ExprVocab;
+use geode_core::scope::{Expr, Scope, parse_expr};
+
+use crate::exprcomplete::ExprCompletion;
 
 use crate::frame::Frame;
 use crate::keymap::{Keystroke, Modifiers};
@@ -103,36 +108,76 @@ impl Mode {
 /// The inline refusal when a term commit finds its term gone or changed.
 pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 
-/// The dialog's state: its mode and the last failed commit's message.
-#[derive(Debug, Clone, PartialEq)]
+/// The dialog's state: its mode, the last failed commit's message, and the
+/// field's suggestions.
+#[derive(Debug)]
 pub struct ScopeExprState {
     pub mode: Mode,
     pub error: Option<String>,
+    pub completion: ExprCompletion,
 }
 
 impl ScopeExprState {
     pub fn new(mode: Mode) -> Self {
-        Self { mode, error: None }
+        Self {
+            mode,
+            error: None,
+            completion: ExprCompletion::default(),
+        }
     }
 }
 
+/// The scope a new expression will be ANDed with, which narrows its value
+/// suggestions. Whole replaces the expression, so it is dropped. Add joins
+/// it, so it is kept. Term keeps the other terms.
+pub fn request_scope(mode: &Mode, current: &Scope) -> Scope {
+    let mut scope = current.clone();
+    scope.expression = match mode {
+        Mode::Whole => None,
+        Mode::Add => current.expression.clone(),
+        Mode::Term { index, .. } => current.expression.as_ref().and_then(|e| {
+            Expr::from_conjuncts(
+                e.conjuncts()
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, _)| i != index)
+                    .map(|(_, t)| t.clone()),
+            )
+        }),
+    };
+    scope
+}
+
 /// Trim and parse the draft, treating an empty value as no expression.
-/// Errors label the parser's one-based byte offset as a column.
-pub fn commit_text(text: &str) -> Result<Option<Expr>, String> {
+/// Errors label the parser's one-based byte offset as a column. A parsed
+/// draft that names a column the schema does not know is refused with the
+/// first schema warning; an empty `vocab` (no schema loaded) checks nothing.
+pub fn commit_text(text: &str, vocab: &ExprVocab) -> Result<Option<Expr>, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
     }
-    parse_expr(text)
-        .map(Some)
-        .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))
+    let expr = parse_expr(text).map_err(|e| format!("{} at column {}", e.message, e.caret + 1))?;
+    if let Some(w) = geode_core::scope::complete::check(text, vocab, None)
+        .into_iter()
+        .next()
+    {
+        return Err(w.message);
+    }
+    Ok(Some(expr))
 }
 
 /// Apply `text` to `frame` as `mode` says. `Ok(changed)` means the dialog
-/// closes; `Err(message)` stays inline (a parse error, or [`TERM_GONE`]).
-/// Every change goes through `Frame::set_scope`, so undo sees it.
-pub fn apply(frame: &mut Frame, mode: &Mode, text: &str) -> Result<bool, String> {
-    let parsed = commit_text(text)?;
+/// closes; `Err(message)` stays inline (a parse error, an unknown column,
+/// or [`TERM_GONE`]). Every change goes through `Frame::set_scope`, so undo
+/// sees it.
+pub fn apply(
+    frame: &mut Frame,
+    mode: &Mode,
+    text: &str,
+    vocab: &ExprVocab,
+) -> Result<bool, String> {
+    let parsed = commit_text(text, vocab)?;
     match mode {
         Mode::Whole => {
             let mut scope = frame.scope().clone();
@@ -153,6 +198,11 @@ pub fn apply(frame: &mut Frame, mode: &Mode, text: &str) -> Result<bool, String>
 const WIDTH: f32 = 640.0;
 
 const WHOLE_HINTS: &[Hint] = &[
+    Hint::Key("tab"),
+    Hint::Text("insert ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
     Hint::Key("enter"),
     Hint::Text("set · empty clears ·"),
     Hint::Key("escape"),
@@ -160,6 +210,11 @@ const WHOLE_HINTS: &[Hint] = &[
 ];
 
 const TERM_HINTS: &[Hint] = &[
+    Hint::Key("tab"),
+    Hint::Text("insert ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
     Hint::Key("enter"),
     Hint::Text("set · empty removes the term ·"),
     Hint::Key("escape"),
@@ -167,6 +222,11 @@ const TERM_HINTS: &[Hint] = &[
 ];
 
 const ADD_HINTS: &[Hint] = &[
+    Hint::Key("tab"),
+    Hint::Text("insert ·"),
+    Hint::Key("up"),
+    Hint::Key("down"),
+    Hint::Text("move ·"),
     Hint::Key("enter"),
     Hint::Text("add ·"),
     Hint::Key("escape"),
@@ -199,17 +259,21 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
     let seed = mode.seed(view.frame.read(cx).scope().expression.as_ref());
     let title = mode.title();
     view.scope_expr_dialog = Some(ScopeExprState::new(mode));
+    // A row click needs the shell entity to accept through; `build` is
+    // handed only `&ShellView`.
+    let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
         window,
         cx,
         SharedString::new_static(title),
-        build,
+        move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
         true,
     );
     view.dialog_input
         .update(cx, |input, cx| input.set_value(seed, window, cx));
+    super::expr_suggest::refresh(view, cx);
 }
 
 /// Typing clears the last error (the `Change` subscription arm in
@@ -224,6 +288,9 @@ fn handle_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
+    if super::expr_suggest::handle_key(shell, ks, window, cx) {
+        return true;
+    }
     if ks.mods != Modifiers::NONE || ks.key != "enter" {
         return false;
     }
@@ -231,8 +298,9 @@ fn handle_key(
         return false;
     };
     let text = shell.dialog_input.read(cx).value().to_string();
+    let vocab = shell.expr_vocab.clone();
     let outcome = shell.frame.update(cx, |f, cx| {
-        let outcome = apply(f, &mode, &text);
+        let outcome = apply(f, &mode, &text, &vocab);
         if outcome == Ok(true) {
             cx.notify();
         }
@@ -250,7 +318,12 @@ fn handle_key(
     true
 }
 
-fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
+fn build(
+    shell: &ShellView,
+    entity: &Entity<ShellView>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let Some(state) = shell.scope_expr_dialog.as_ref() else {
         return div().into_any_element();
     };
@@ -259,6 +332,17 @@ fn build(shell: &ShellView, _window: &mut Window, cx: &mut App) -> AnyElement {
         .gap_2()
         .w(scale::design(WIDTH))
         .child(dialog::filter_row(&shell.dialog_input, None, cx));
+    let entity = entity.clone();
+    column = column.child(super::expr_suggest::render(
+        &state.completion,
+        &shell.expr_scroll,
+        theme,
+        move |i, window, cx| {
+            entity.update(cx, |shell, cx| {
+                super::expr_suggest::accept(shell, i, window, cx)
+            });
+        },
+    ));
     if let Some(note) = state.mode.note() {
         column = column.child(
             div()
@@ -315,9 +399,13 @@ mod tests {
 
     #[test]
     fn empty_clears_and_a_broken_expression_names_the_column() {
-        assert_eq!(commit_text("   ").unwrap(), None);
-        assert!(commit_text("book = 'BK000'").unwrap().is_some());
-        let err = commit_text("book =").unwrap_err();
+        assert_eq!(commit_text("   ", &ExprVocab::default()).unwrap(), None);
+        assert!(
+            commit_text("book = 'BK000'", &ExprVocab::default())
+                .unwrap()
+                .is_some()
+        );
+        let err = commit_text("book =", &ExprVocab::default()).unwrap_err();
         assert!(err.contains("at column"), "{err}");
     }
 
@@ -343,9 +431,15 @@ mod tests {
     #[test]
     fn whole_mode_replaces_and_empty_clears() {
         let mut f = frame_with(Some("a = 1 and b = 2"));
-        assert_eq!(apply(&mut f, &Mode::Whole, "c = 3"), Ok(true));
+        assert_eq!(
+            apply(&mut f, &Mode::Whole, "c = 3", &ExprVocab::default()),
+            Ok(true)
+        );
         assert_eq!(terms(&f), vec!["c = 3"]);
-        assert_eq!(apply(&mut f, &Mode::Whole, "  "), Ok(true));
+        assert_eq!(
+            apply(&mut f, &Mode::Whole, "  ", &ExprVocab::default()),
+            Ok(true)
+        );
         assert_eq!(f.scope().expression, None);
     }
 
@@ -353,10 +447,13 @@ mod tests {
     fn term_mode_replaces_only_its_term_and_empty_removes_it() {
         let mut f = frame_with(Some("a = 1 and b = 2 and c = 3"));
         let mode = term_mode(&f, 1);
-        assert_eq!(apply(&mut f, &mode, "x = 9"), Ok(true));
+        assert_eq!(
+            apply(&mut f, &mode, "x = 9", &ExprVocab::default()),
+            Ok(true)
+        );
         assert_eq!(terms(&f), vec!["a = 1", "x = 9", "c = 3"]);
         let mode = term_mode(&f, 0);
-        assert_eq!(apply(&mut f, &mode, ""), Ok(true));
+        assert_eq!(apply(&mut f, &mode, "", &ExprVocab::default()), Ok(true));
         assert_eq!(terms(&f), vec!["x = 9", "c = 3"]);
     }
 
@@ -371,14 +468,23 @@ mod tests {
             expression: Some(parse_expr("x = 1 and y = 2").unwrap()),
             ..Scope::default()
         });
-        assert_eq!(apply(&mut f, &mode, "b = 3"), Err(TERM_GONE.to_string()));
-        assert_eq!(apply(&mut f, &mode, ""), Err(TERM_GONE.to_string()));
+        assert_eq!(
+            apply(&mut f, &mode, "b = 3", &ExprVocab::default()),
+            Err(TERM_GONE.to_string())
+        );
+        assert_eq!(
+            apply(&mut f, &mode, "", &ExprVocab::default()),
+            Err(TERM_GONE.to_string())
+        );
         assert_eq!(terms(&f), vec!["x = 1", "y = 2"]);
         f.set_scope(Scope {
             expression: Some(parse_expr("x = 1").unwrap()),
             ..Scope::default()
         });
-        assert_eq!(apply(&mut f, &mode, "b = 3"), Err(TERM_GONE.to_string()));
+        assert_eq!(
+            apply(&mut f, &mode, "b = 3", &ExprVocab::default()),
+            Err(TERM_GONE.to_string())
+        );
         assert_eq!(terms(&f), vec!["x = 1"]);
     }
 
@@ -386,14 +492,20 @@ mod tests {
     fn add_mode_joins_with_and_sets_when_none_and_empty_changes_nothing() {
         let mut f = frame_with(None);
         assert_eq!(
-            apply(&mut f, &Mode::Add, "   "),
+            apply(&mut f, &Mode::Add, "   ", &ExprVocab::default()),
             Ok(false),
             "empty: no change"
         );
         assert_eq!(f.scope().expression, None);
-        assert_eq!(apply(&mut f, &Mode::Add, "a = 1"), Ok(true));
+        assert_eq!(
+            apply(&mut f, &Mode::Add, "a = 1", &ExprVocab::default()),
+            Ok(true)
+        );
         assert_eq!(terms(&f), vec!["a = 1"]);
-        assert_eq!(apply(&mut f, &Mode::Add, "b = 2 or c = 3"), Ok(true));
+        assert_eq!(
+            apply(&mut f, &Mode::Add, "b = 2 or c = 3", &ExprVocab::default()),
+            Ok(true)
+        );
         assert_eq!(
             f.scope()
                 .expression
@@ -410,9 +522,61 @@ mod tests {
         let f0 = frame_with(Some("a = 1"));
         for mode in [Mode::Whole, term_mode(&f0, 0), Mode::Add] {
             let mut f = frame_with(Some("a = 1"));
-            let err = apply(&mut f, &mode, "book =").unwrap_err();
+            let err = apply(&mut f, &mode, "book =", &ExprVocab::default()).unwrap_err();
             assert!(err.contains("at column"), "{mode:?}: {err}");
             assert_eq!(terms(&f), vec!["a = 1"], "{mode:?}");
         }
+    }
+
+    #[test]
+    fn request_scope_narrows_by_what_the_new_text_is_anded_with() {
+        use geode_core::scope::{DimensionSelection, Scope};
+        let current = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["A".into()],
+            }],
+            expression: Some(parse_expr("x = 'a' and y = 'b'").unwrap()),
+            ..Scope::default()
+        };
+        assert_eq!(request_scope(&Mode::Whole, &current).expression, None);
+        assert_eq!(
+            request_scope(&Mode::Whole, &current).dimensions,
+            current.dimensions
+        );
+        assert_eq!(
+            request_scope(&Mode::Add, &current).expression,
+            current.expression
+        );
+        let term = Mode::term(0, current.expression.as_ref()).unwrap();
+        assert_eq!(
+            request_scope(&term, &current)
+                .expression
+                .map(|e| e.to_string()),
+            Some("y = 'b'".to_string())
+        );
+    }
+
+    #[test]
+    fn commit_refuses_an_unknown_column_when_a_schema_exists() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::dimensions::DerivedDimensions;
+        use geode_core::schema::SchemaSpec;
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        )
+        .unwrap();
+        let (schema, _) = SchemaSpec::from_doc(&merge_docs("datasets", &[datasets]));
+        let vocab = ExprVocab::new(&schema, &DerivedDimensions::default());
+        assert_eq!(
+            commit_text("bokk = 'A'", &vocab),
+            Err("unknown column 'bokk'; did you mean 'book'?".to_string())
+        );
+        assert!(commit_text("book = 'A'", &vocab).is_ok());
+        assert!(
+            commit_text("bokk = 'A'", &ExprVocab::default()).is_ok(),
+            "no schema, no check"
+        );
     }
 }
