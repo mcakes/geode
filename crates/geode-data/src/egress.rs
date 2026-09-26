@@ -691,6 +691,10 @@ mod tests {
             message.contains(UPLOAD_PANIC),
             "the answer carries the panic payload: {message}"
         );
+        assert!(
+            message.contains(&format!("egress '{TARGET}'")),
+            "the answer names its target: {message}"
+        );
         assert_silent(&rx);
 
         workers.upload(params(2, TARGET, DIVIDEND, "K1"), &documents);
