@@ -371,7 +371,12 @@ not. See the [measurement log](../perf.md) for conditions and timings.
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
 allowing the market-data panel, pricer expiry editor, timeseries date editor,
-and as-of dialog to share behavior without depending on each other.
+and as-of dialog to share behavior without depending on each other. Hosts own
+commit, cancellation, focus, and timezone conversion. A valid stored date can
+still have incomplete pending digits: hosts call `complete_pending` before
+committing and report its segment error. Segment display text is allocated by
+`segments()` and cached by the host for painting. See the
+[widget integration contract](../../crates/geode-widgets/README.md#host-integration).
 
 ## Diagnostics
 
