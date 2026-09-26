@@ -557,3 +557,51 @@ fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
         vec![("ingest".to_string(), geode_core::log::Level::DEBUG)]
     );
 }
+
+/// The log-level dialog's Back button returns the level step to the targets, as
+/// `escape` does, and paints only on the level step. Typing afterwards lands in the
+/// focused field and picks a target again.
+#[gpui::test]
+fn the_back_button_returns_log_levels_to_targets(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "log::level");
+    assert!(
+        vcx.debug_bounds("shell-modal-back").is_none(),
+        "the target step is the first screen"
+    );
+    vcx.simulate_input("ingest");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("loglevel-choice-debug").is_some());
+
+    let back = vcx
+        .debug_bounds("shell-modal-back")
+        .expect("the level step paints a Back button");
+    vcx.simulate_click(back.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "still open"
+    );
+    assert!(vcx.debug_bounds("loglevel-choice-ingest · info").is_some());
+    assert!(vcx.debug_bounds("shell-modal-back").is_none());
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        ""
+    );
+
+    vcx.simulate_input("ingest");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("loglevel-choice-debug").is_some(),
+        "the field still hears the keyboard"
+    );
+}
+
+/// Choice dialogs with one step never paint a Back button.
+#[gpui::test]
+fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "frame::grouping");
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(vcx.debug_bounds("shell-modal-back").is_none());
+}
