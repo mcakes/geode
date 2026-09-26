@@ -125,6 +125,20 @@ sequence and then the last equal-length entry, suppressing a winning `none`.
 Hints for longer continuations do not guarantee the eventual dispatch;
 the matcher still decides after each key and context change.
 
+### Displaying keys
+
+Every key painted on its own — dialog footer hints, keybinding rows,
+tooltips, palette binding badges, which-key continuations, the status bar's
+pending keys, and module menus and footers — is gpui-component's `Kbd`,
+reached through [`shell::kbd`](../../crates/geode-shell/src/shell/kbd.rs).
+`Kbd` owns the label and look: platform glyphs on macOS (`⌃⇧P`, `⎋`), and
+`Ctrl+Shift+P` elsewhere, with the key capitalised, so `g` reads `G` and
+`shift+g` reads `⇧G`. A module menu hint stored as a keymap spec goes through
+`kbd::spec`, which keeps a `:` command-line verb as text because it is not a
+key. A key named inside a sentence (a notice, a confirmation, help copy) keeps
+the keymap's lowercase spelling from `palette::render_binding`, since that is
+what a user types into a keymap file.
+
 ## Per-tile command and find lines
 
 [`commandline`](../../crates/geode-shell/src/commandline.rs) tracks the prompt
