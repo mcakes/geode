@@ -2593,9 +2593,14 @@ mod tests {
         let mut d = summary_fixture(text, NamedColours::default());
         // Distinct poles: the default theme's bullish and bearish can
         // coincide, which would let a crossed pair pass.
-        let mut theme = Theme::default();
-        theme.chart_bullish = gpui::green();
-        theme.chart_bearish = gpui::red();
+        let theme = Theme {
+            colors: gpui_component::ThemeColor {
+                chart_bullish: gpui::green(),
+                chart_bearish: gpui::red(),
+                ..Theme::default().colors
+            },
+            ..Theme::default()
+        };
         d.ensure_summary_paint(&theme);
         let paint = d.summary_paint[0];
         assert_eq!(paint.label, None);
