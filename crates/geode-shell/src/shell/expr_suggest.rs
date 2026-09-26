@@ -43,6 +43,11 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
 /// open, after an accept and before a claimed key. It never runs in
 /// render.
 pub(crate) fn refresh(view: &mut ShellView, cx: &mut Context<ShellView>) {
+    // The observer fires for every dialog sharing the input (and every
+    // cursor blink); with no expression field open, copy nothing.
+    if completion_mut(view).is_none() {
+        return;
+    }
     let (text, caret) = {
         let input = view.dialog_input.read(cx);
         (input.value().to_string(), input.cursor())
