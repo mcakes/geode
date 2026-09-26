@@ -64,6 +64,13 @@ pub struct BlotterDelegate {
     pub cursor: Cursor,
     pub mode: Mode,
     pub sort: Option<SortSpec>,
+    /// The column whose sort `apply_snapshot` just dropped because a
+    /// rebuild no longer carries it (a view edit hid it, or a regroup
+    /// folded it into the tree column) — `None` once the tile has read
+    /// and cleared it. The rows reorder to default order either way, so
+    /// this is what lets the tile tell the trader why, rather than
+    /// leaving a bare reorder for them to puzzle out.
+    pub dropped_sort: Option<String>,
     pub cache: FormatCache,
     pub narrowed: Option<Vec<usize>>,
     pub unplaced: usize,
@@ -169,6 +176,7 @@ impl BlotterDelegate {
             cursor: Cursor::default(),
             mode: Mode::Normal,
             sort: None,
+            dropped_sort: None,
             cache: FormatCache::default(),
             narrowed: None,
             unplaced: 0,
@@ -385,13 +393,48 @@ impl BlotterDelegate {
         grouping: &[String],
     ) -> bool {
         let keep = self.cursor_path();
+        // Captured before the reorder for the same reason `move_column`
+        // captures it: the cursor is a screen position into
+        // `plan.columns`, not a name, and a rebuild that hides a column
+        // shifts every later index down. A bare `clamp` afterwards only
+        // catches an index that runs off the end — one that stays in
+        // range but now names a different column slides the cursor onto
+        // it silently, and the next sort orders by whatever the cursor
+        // lands on, not what the trader was looking at.
+        let under_cursor = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(self.cursor.col))
+            .map(|c| c.name.clone());
         let fresh = ColumnPlan::build(view, grouping, &snapshot);
         let rebuild = self.plan.as_ref() != Some(&fresh);
+        self.dropped_sort = None;
         if rebuild {
             self.plan = Some(fresh);
-            self.sort = self
-                .sort
-                .filter(|s| s.column < self.plan.as_ref().unwrap().columns.len());
+            // Re-resolved, not bounds-checked: a rebuild that hides a column
+            // or folds a dimension into the tree shortens the list, and an
+            // in-range index then names a different column than the trader
+            // sorted by. The rows reorder to default order either way, so
+            // the dropped name is kept for the tile to report rather than
+            // discarded here.
+            if let Some(s) = self.sort.take() {
+                match self.plan.as_ref().and_then(|p| p.position_of(&s.column)) {
+                    Some(_) => self.sort = Some(s),
+                    None => self.dropped_sort = Some(s.column),
+                }
+            }
+            // Same re-resolution as the sort above, and for the same
+            // reason: a column hidden to the left of the cursor shifts
+            // every later index down, so the old index now names a
+            // different column even though it is still in range. A
+            // cursor whose own column was the one hidden finds no match
+            // here and falls through to the ordinary clamp below, same
+            // as `move_column` does.
+            if let Some(name) = under_cursor
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
         }
         self.expansion.prune_to(grouping.len());
         self.unplaced = snapshot.tree().unplaced();
@@ -742,7 +785,7 @@ impl TableDelegate for BlotterDelegate {
         let Some(c) = self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) else {
             return Column::default();
         };
-        let own_sort = self.sort.filter(|s| s.column == col_ix);
+        let own_sort = self.sort.as_ref().filter(|s| s.column == c.name);
         let sort = match own_sort {
             Some(s) if s.order.descending() => Some(ColumnSort::Descending),
             Some(_) => Some(ColumnSort::Ascending),
@@ -830,10 +873,18 @@ impl TableDelegate for BlotterDelegate {
         // repaint; it does not notify itself. The row highlight follows
         // the cursor the way `sync_cursor` does after a keyboard sort:
         // `reflatten` keeps the cursor by path, so its row index moves.
-        let current = self.sort.filter(|s| s.column == col_ix).map(|s| s.order);
+        let name = match self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) {
+            Some(c) => c.name.clone(),
+            None => return,
+        };
+        let current = self
+            .sort
+            .as_ref()
+            .filter(|s| s.column == name)
+            .map(|s| s.order);
         let next = SortOrder::click_cycle(current, self.is_measure(col_ix));
         self.sort = next.map(|order| SortSpec {
-            column: col_ix,
+            column: name,
             order,
         });
         self.reflatten();
@@ -852,8 +903,23 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        // Captured before the reorder: the sort already names its column
+        // rather than a position, so it needs no remap here, but the
+        // cursor is a screen position and would otherwise land on
+        // whatever slid into its old slot, making the next `s` cycle the
+        // sort of a column the trader was not looking at.
+        let under_cursor = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(self.cursor.col))
+            .map(|c| c.name.clone());
         if let Some(p) = self.plan.as_mut() {
             p.move_column(col_ix, to_ix);
+        }
+        if let Some(name) = under_cursor
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
         }
         // `TableState::move_column` (gpui-component) calls this directly
         // and never fires `visible_rows_changed`, so this needs its own
@@ -1787,6 +1853,61 @@ mod tests {
             );
         });
     }
+
+    /// A drag reorders `ColumnPlan::columns`; `Cursor.col` stays a
+    /// position (it drives the on-screen highlight), so the hook has to
+    /// re-derive it by name across the move or the highlight lands on
+    /// whatever slid into the old slot, and the next `s` would cycle the
+    /// sort of a column the trader was not looking at.
+    #[gpui::test]
+    fn the_cursor_follows_its_column_across_a_move(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+             [[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"gamma01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("delta01"), TestColumn::F64(vec![Some(9.0), Some(5.0)])),
+                (dim("gamma01"), TestColumn::F64(vec![Some(1.0), Some(2.0)])),
+            ],
+            1,
+        ));
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| TableState::new(BlotterDelegate::new(), window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let table = window.root(&mut vcx).unwrap();
+
+        table.update_in(&mut vcx, |t, window, cx| {
+            let d = t.delegate_mut();
+            d.apply_snapshot(snap, &view, &["lhu".to_string()]);
+            let from = d.plan.as_ref().unwrap().position_of("delta01").unwrap();
+            d.cursor.col = from;
+            let name_before = d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone();
+
+            d.move_column(from, from + 1, window, cx);
+
+            let name_after = d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone();
+            assert_eq!(
+                name_before, name_after,
+                "the cursor rests on the column it rested on, not the position"
+            );
+            assert_eq!(
+                d.cursor.col,
+                from + 1,
+                "the cursor's position moved to the column's new slot"
+            );
+        });
+    }
+
     /// §6.3: a column naming a colour paints that colour, resolved
     /// against the theme's own anchors/tokens; `none`, `sign` and a name
     /// `colours.toml` does not define all resolve to nothing, which the

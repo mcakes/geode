@@ -3014,6 +3014,82 @@ run_mutation "delegate: the header marks an absolute sort" \
   geode-blotter \
   s_and_shift_s_cycle_signed_and_absolute_sorts
 
+# A sort that names a position is re-pointed by any reorder: the rows then
+# order by a column the trader never chose and the header agrees with it.
+run_mutation "flatten: a sort resolves its column by name, not by an index into the plan" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    let Some(column) = plan
+        .position_of(&spec.column)
+        .and_then(|i| plan.columns.get(i))
+    else {' \
+  '    let Some(column) = plan.columns.get(1) else {' \
+  geode-blotter \
+  a_sort_survives_a_column_move_because_it_names_the_column
+
+# A rebuild that only bounds-checks leaves an in-range index naming a
+# different column, and the siblings reorder by it in the same frame.
+run_mutation "delegate: a plan rebuild re-resolves a sort's column, not just its index" \
+  crates/geode-blotter/src/delegate.rs \
+  '                match self.plan.as_ref().and_then(|p| p.position_of(&s.column)) {' \
+  '                match Some(0usize) {' \
+  geode-blotter \
+  hiding_the_sorted_column_drops_the_sort_and_says_which
+
+# The notice is the whole remedy a trader gets when a sort is dropped;
+# losing the column's name here leaves the harness silent about it.
+run_mutation "delegate: a dropped sort keeps the column's name for the tile to report" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    None => self.dropped_sort = Some(s.column),' \
+  '                    None => self.dropped_sort = None,' \
+  geode-blotter \
+  hiding_the_sorted_column_drops_the_sort_and_says_which
+
+# The cursor is a screen position, so a reorder leaves it on a different
+# column and the next sort cycles something else. Anchored past the
+# `if let` itself and through the `move_column`-only trailing comment: a
+# plan rebuild re-resolves the cursor the same way, so the bare `if let`
+# line alone now matches twice in this file.
+run_mutation "delegate: the cursor is re-derived by column name across a move" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if let Some(name) = under_cursor
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
+  '        if let Some(name) = None::<String>
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
+        // `TableState::move_column` (gpui-component) calls this directly' \
+  geode-blotter \
+  the_cursor_follows_its_column_across_a_move
+
+# The same re-derivation runs again in `apply_snapshot`, on a plan rebuild
+# rather than a drag — nearly identical to the `move_column` copy above,
+# so the anchor closes over the `if rebuild` block's own brace and the
+# line after it, both unique to this site, rather than the bare `if let`
+# the two copies share.
+run_mutation "delegate: a plan rebuild re-derives the cursor by column name" \
+  crates/geode-blotter/src/delegate.rs \
+  '            if let Some(name) = under_cursor
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  '            if let Some(name) = None::<String>
+                && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+            {
+                self.cursor.col = i;
+            }
+        }
+        self.expansion.prune_to(grouping.len());' \
+  geode-blotter \
+  hiding_a_column_left_of_the_cursor_carries_it_by_name
+
 run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
   crates/geode-blotter/src/core/commands.rs \
   '    while !line.is_char_boundary(cursor) {' \
@@ -3203,8 +3279,8 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some(e);' \
-  '                self.error = Some(e);
+  '                self.error = Some((e, Tone::DangerText));' \
+  '                self.error = Some((e, Tone::DangerText));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \

@@ -149,6 +149,12 @@ impl ColumnPlan {
             .unwrap_or(Attribution::Additive)
     }
 
+    /// The position a named column currently occupies, or `None` when the
+    /// plan no longer has it. First match, as `:sort` resolves a name.
+    pub fn position_of(&self, name: &str) -> Option<usize> {
+        self.columns.iter().position(|c| c.name == name)
+    }
+
     /// Reorder a column; the tree column stays first whatever is asked.
     pub fn move_column(&mut self, from: usize, to: usize) {
         if from == 0 || to == 0 || from >= self.columns.len() || to >= self.columns.len() {
