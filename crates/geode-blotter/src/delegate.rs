@@ -866,11 +866,24 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        // Captured before the reorder: the sort already names its column
+        // rather than a position, so it needs no remap here, but the
+        // cursor is a screen position and would otherwise land on
+        // whatever slid into its old slot, making the next `s` cycle the
+        // sort of a column the trader was not looking at.
+        let under_cursor = self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(self.cursor.col))
+            .map(|c| c.name.clone());
         if let Some(p) = self.plan.as_mut() {
             p.move_column(col_ix, to_ix);
         }
-        // No sort remap here: the sort names its column, not a position,
-        // so reordering the plan cannot re-point it.
+        if let Some(name) = under_cursor
+            && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
+        {
+            self.cursor.col = i;
+        }
         // `TableState::move_column` (gpui-component) calls this directly
         // and never fires `visible_rows_changed`, so this needs its own
         // immediate refill rather than waiting for the next scroll —
@@ -1803,6 +1816,56 @@ mod tests {
             );
         });
     }
+
+    /// A drag reorders `ColumnPlan::columns`; `Cursor.col` stays a
+    /// position (it drives the on-screen highlight), so the hook has to
+    /// re-derive it by name across the move or the highlight lands on
+    /// whatever slid into the old slot, and the next `s` would cycle the
+    /// sort of a column the trader was not looking at.
+    #[gpui::test]
+    fn the_cursor_follows_its_column_across_a_move(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+             [[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"gamma01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("delta01"), TestColumn::F64(vec![Some(9.0), Some(5.0)])),
+                (dim("gamma01"), TestColumn::F64(vec![Some(1.0), Some(2.0)])),
+            ],
+            1,
+        ));
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| TableState::new(BlotterDelegate::new(), window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let table = window.root(&mut vcx).unwrap();
+
+        table.update_in(&mut vcx, |t, window, cx| {
+            let d = t.delegate_mut();
+            d.apply_snapshot(snap, &view, &["lhu".to_string()]);
+            let from = d.plan.as_ref().unwrap().position_of("delta01").unwrap();
+            d.cursor.col = from;
+            let name_before = d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone();
+
+            d.move_column(from, from + 1, window, cx);
+
+            let name_after = d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone();
+            assert_eq!(
+                name_before, name_after,
+                "the cursor rests on the column it rested on, not the position"
+            );
+        });
+    }
+
     /// §6.3: a column naming a colour paints that colour, resolved
     /// against the theme's own anchors/tokens; `none`, `sign` and a name
     /// `colours.toml` does not define all resolve to nothing, which the
