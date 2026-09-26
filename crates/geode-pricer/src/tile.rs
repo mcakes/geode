@@ -6673,8 +6673,12 @@ pub(crate) mod tests {
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
         );
+        // Hidden, so the new sheet submits nothing of its own that would
+        // retire the old batch's tag by itself.
+        h.visible(&mut vcx, false);
         assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
         assert_eq!(h.sheet_len(&vcx), 1);
+        assert!(h.prices().is_empty(), "the premise: nothing newer asked");
         h.answer(&mut vcx, &batch, 42.0);
         let priced = h.tile.read_with(&vcx, |t, _| t.sheet.priced_at(0));
         assert_eq!(priced, None, "the old batch's answer is not this sheet's");
