@@ -26,7 +26,16 @@ pub struct Freshness {
     pub dataset: String,
     /// RFC 3339, or `None` when the dataset has never loaded.
     pub as_of: Option<String>,
-    pub generation: i64,
+    /// The store generation this answer was read from, or `None` when no
+    /// single generation names the read: a dataset that has never loaded, or
+    /// a historical view read, whose era resolves one generation *per
+    /// partition* and so has no scalar identity.
+    ///
+    /// Source time is not an identity on its own — a corrected republish
+    /// keeps its source time and takes a new generation ID — so a reader
+    /// deciding whether the data under it moved must compare this too.
+    /// `None` is not evidence that it did not; it means unknown.
+    pub generation: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -711,8 +720,14 @@ impl Snapshot {
     }
 
     /// Build a snapshot with caller-supplied provenance. Document-panel fixtures
-    /// use `Provenance.datasets[0].as_of` to exercise freshness and draft-base
-    /// comparisons; the ordinary builder supplies empty provenance.
+    /// use `Provenance.datasets[0]`'s source time and generation to exercise
+    /// freshness and draft-base comparisons; the ordinary builder supplies empty
+    /// provenance.
+    ///
+    /// A `None` generation says the read did not learn one, never that the data
+    /// is unchanged. A fixture omitting what a real read would have named
+    /// therefore exercises the source-time fallback, not the path it was
+    /// written for.
     pub fn for_tests_with_provenance(
         columns: Vec<(ColumnMeta, TestColumn)>,
         grouping_len: usize,
@@ -1150,12 +1165,12 @@ mod tests {
         p.datasets.push(Freshness {
             dataset: "risk_snapshot".into(),
             as_of: Some("2026-08-30T14:32:00Z".into()),
-            generation: 47,
+            generation: Some(47),
         });
         p.datasets.push(Freshness {
             dataset: "implied_vol_summary".into(),
             as_of: Some("2026-08-30T07:00:00Z".into()),
-            generation: 3,
+            generation: Some(3),
         });
         let s = Snapshot::from_batches(batches(), meta(), vec!["book".into()], p).unwrap();
         assert_eq!(

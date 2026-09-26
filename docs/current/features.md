@@ -56,10 +56,10 @@ registers the concrete CVI and dividend kinds.
 delivery or structural edit. Ordinary cell commits patch it when possible;
 editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base identified by the document's source time.
-The default Hold policy retains the base snapshot when available after a
-document with a different source time arrives. `:auto` selects how later
-deliveries resolve such a transition:
+Edits live in a `Draft` over a base identified by the document's source time
+**and the store generation the read named**. The default Hold policy retains
+the base snapshot when available after a document with a different generation
+arrives. `:auto` selects how later deliveries resolve such a transition:
 
 | Policy | Effect on unsent edits |
 |---|---|
@@ -68,7 +68,7 @@ deliveries resolve such a transition:
 | Replace | Discard edits and report how much unsent work was replaced |
 
 Changing policy does not retroactively apply it to a held delivery. Redelivery
-of the same source time does not trigger it, and the first usable delivery
+of the same generation does not trigger it, and the first usable delivery
 after session restoration uses Hold. If the saved base is unavailable, a
 restored Behind draft paints the delivered grid while withholding unresolved
 cell edits. Automatic rebase also holds when the
@@ -76,10 +76,21 @@ incoming document has no rows. Sent drafts follow the separate echo rules
 below. A snapshot that cannot build a valid grid leaves the last usable model
 and draft unchanged and reports the error.
 
-Source time is not an immutable generation id: a historical delivery can also
-put the draft Behind, while different contents republished with the same time
-are indistinguishable to this transition logic. Returning to the base time
-restores Editing. The module supports numeric, date, text, and closed-choice
+A base is a generation, not an instant. A historical delivery puts the draft
+Behind, and so does a corrected republish at the same source time: the
+generation differs even when the time does not. Such a delivery always produces
+a notice naming the republish, because the `update HH:MM` badge and the
+source-time chip both carry the base's own time and would otherwise report
+nothing new — held, the notice offers `:rebase` and `:revert`; automatically
+rebased, it says the edits were moved, since nothing is left pending. A
+disclosure the policy already made, of replaced or dropped work, outranks it.
+Returning to the base generation, or a redelivery of the same one, is not a
+republish and says nothing. A document read names its generation under both
+live and historical as-of, so an open draft normally has one; where nothing
+named it — a session file written before the generation was saved — the
+comparison falls back to source time alone, which cannot see a republish.
+
+The module supports numeric, date, text, and closed-choice
 cells, row insertion/deletion, and kind-specific actions. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts.
@@ -135,9 +146,11 @@ notice naming it and leaves the visible draft alone. Session restoration also
 restores nonempty drafts as Editing; upload status and echo tracking are not
 saved.
 
-A Sent draft compares the next delivered generation with a different source
-time against the submitted document. Comparison ignores row order and minted
-row labels, compares attributes, and allows one ULP for floating-point values.
+A Sent draft compares the next delivered generation against the submitted
+document once that generation differs from the base — a different source time,
+or the same time at a different store generation. Comparison ignores row order
+and minted row labels, compares attributes, and allows one ULP for
+floating-point values.
 Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
 the next edit. This is a content match, without an upstream correlation id.
 

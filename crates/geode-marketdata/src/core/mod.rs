@@ -13,7 +13,9 @@ pub(crate) mod test_fixtures;
 pub mod upload;
 
 pub use cursor::Cursor;
-pub use draft::{Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell};
+pub use draft::{
+    DocumentBase, Draft, DraftBadge, DraftState, UpdatePolicy, attr_text, parse_attr, parse_cell,
+};
 /// Shared numeric text nudging used by market-data and pricing editors.
 pub use geode_core::nudge::nudge_text;
 pub use geode_widgets::datefield::{

@@ -8,7 +8,7 @@
 //! slice columns. `Columns::Values` lays out the declared value columns.
 //! Both expose the same cells to cursor, copy, and edit operations.
 
-use crate::core::draft::{Draft, RowEdit, attr_text};
+use crate::core::draft::{DocumentBase, Draft, RowEdit, attr_text};
 use crate::core::spec::{Columns, PanelSpec, ValueColumn};
 use geode_core::attribution::Attribution;
 use geode_core::document::Value;
@@ -97,9 +97,11 @@ pub struct RowModel {
 pub struct MatrixModel {
     /// The document key, in `document_columns()` order.
     pub key: Vec<String>,
-    /// Per-document source time from the first provenance dataset's `as_of`,
-    /// in RFC 3339. Draft identity compares this timestamp, not `gen_id`.
-    pub source_time: Option<String>,
+    /// The document generation this model was built from, from the first
+    /// provenance dataset. Draft identity compares the whole pair: a
+    /// corrected republish keeps its source time and changes only the
+    /// generation.
+    pub base: Option<DocumentBase>,
     /// Header attributes the spec names, in spec order.
     pub header: Vec<HeaderCell>,
     /// The slice-value labels first (`slice_columns` of them), then the
@@ -165,6 +167,20 @@ impl PivotIndex {
     }
 }
 
+/// A delivered snapshot's document generation, from the first provenance
+/// dataset. `None` when that dataset has never loaded, in which case there
+/// is nothing for a draft to be based on.
+///
+/// The one reader of provenance in this crate: the tile and the model must
+/// never derive a base two different ways.
+pub(crate) fn base_of(snapshot: &Snapshot) -> Option<DocumentBase> {
+    let freshness = snapshot.provenance().datasets.first()?;
+    Some(DocumentBase {
+        as_of: freshness.as_of.clone()?,
+        generation: freshness.generation,
+    })
+}
+
 impl MatrixModel {
     /// The [`CellKind`] a column paints and edits through, if `col` is in
     /// range.
@@ -189,18 +205,14 @@ impl MatrixModel {
         spec: &PanelSpec,
         draft: &Draft,
     ) -> Result<MatrixModel, String> {
-        let source_time = snapshot
-            .provenance()
-            .datasets
-            .first()
-            .and_then(|f| f.as_of.clone());
+        let base = base_of(snapshot);
         // An empty result is not a defect: the key may simply have no
         // document yet, or an as-of before its first publish (the
         // compiler's `and false` arm). The tile paints "no document
         // received for <key>" off `rows.is_empty()`.
         if snapshot.rows() == 0 {
             return Ok(MatrixModel {
-                source_time,
+                base,
                 ..MatrixModel::default()
             });
         }
@@ -232,7 +244,7 @@ impl MatrixModel {
         let rows = splice_rows(rows, draft, &columns, &column_kinds);
         Ok(MatrixModel {
             key,
-            source_time,
+            base,
             header,
             columns,
             column_kinds,
@@ -1076,7 +1088,7 @@ mod tests {
         ValueColumn,
     };
     use crate::core::test_fixtures::{
-        SCHEDULE, date, schedule_snapshot, schedule_snapshot_with_extra_value,
+        SCHEDULE, at, date, schedule_snapshot, schedule_snapshot_with_extra_value,
     };
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::document::Value;
@@ -1104,7 +1116,7 @@ mod tests {
             datasets: vec![Freshness {
                 dataset: "cvi_params".into(),
                 as_of: Some(as_of.into()),
-                generation: 7,
+                generation: Some(7),
             }],
             as_of_request: None,
         }
@@ -1228,7 +1240,13 @@ mod tests {
         let model = MatrixModel::build(&snap, &CVI, &Draft::default()).expect("a complete grid");
 
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
-        assert_eq!(model.source_time.as_deref(), Some(BASE));
+        assert_eq!(
+            model.base,
+            Some(DocumentBase {
+                as_of: BASE.to_string(),
+                generation: Some(7),
+            })
+        );
         assert_eq!(model.rows.len(), 2);
         // The slice values are the FIRST grid columns, ahead of the
         // ladder, each with its own format: a forward at two places, a
@@ -1484,7 +1502,7 @@ mod tests {
             (1, 0),
             ("2026-11-20".into(), "fwd".into()),
             Value::F64(4600.0),
-            BASE,
+            &at(BASE),
         );
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         let cell = &model.rows[1].cells[0];
@@ -1538,7 +1556,7 @@ mod tests {
             (0, 4),
             ("2026-10-16".into(), "-1".into()),
             Value::F64(0.9),
-            "2026-09-12T14:00:00Z",
+            &at("2026-09-12T14:00:00Z"),
         );
         let model = MatrixModel::build(&snap, &CVI, &draft).expect("a complete grid");
 
@@ -1559,7 +1577,7 @@ mod tests {
     fn an_edited_attribute_paints_the_drafts_value_marked_edited() {
         let snapshot = full_grid();
         let mut draft = Draft::default();
-        draft.set_attr("spot_ref", Value::F64(4520.0), "t0");
+        draft.set_attr("spot_ref", Value::F64(4520.0), &at("t0"));
         let model = MatrixModel::build(&snapshot, &CVI, &draft).unwrap();
         let spot = model
             .header
@@ -1582,7 +1600,7 @@ mod tests {
             (1, 3),
             ("2026-11-20".into(), "-20".into()),
             Value::F64(0.5),
-            BASE,
+            &at(BASE),
         );
         draft.state = DraftState::Sent {
             at: "2026-09-12T14:05:00Z".into(),
@@ -1724,7 +1742,7 @@ mod tests {
             (2, 1),
             ("2026-12-18".into(), "net".into()),
             Value::F64(9.0),
-            BASE,
+            &at(BASE),
         );
         let model =
             MatrixModel::build(&flat_snapshot(), &FLAT_SPEC, &draft).expect("a flat document");
@@ -1739,7 +1757,7 @@ mod tests {
         assert!(model.rows.is_empty());
         assert!(model.columns.is_empty());
         assert!(model.header.is_empty());
-        assert_eq!(model.source_time, None);
+        assert_eq!(model.base, None);
         assert_eq!(model.key, vec!["SPX.Z".to_string()]);
     }
 
@@ -1974,13 +1992,13 @@ mod tests {
             (0, 2),
             ("D1".into(), "status".into()),
             Value::Utf8("paid".into()),
-            "t0",
+            &at("t0"),
         );
         draft.set(
             (0, 0),
             ("D1".into(), "ex".into()),
             Value::Date(date(2026, 12, 20)),
-            "t0",
+            &at("t0"),
         );
         let model = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
         assert_eq!(model.rows[0].cells[2].text.as_ref(), "paid");
@@ -2001,7 +2019,7 @@ mod tests {
             (1, 1),
             ("D2".into(), "amount".into()),
             Value::F64(0.75),
-            "t0",
+            &at("t0"),
         );
         assert!(patched.patch_cell(1, 1, &snapshot, &SCHEDULE, &draft));
         let rebuilt = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
@@ -2044,7 +2062,7 @@ mod tests {
             (1, 5),
             ("2026-11-20".into(), "3.5".into()),
             Value::F64(9.0),
-            "t0",
+            &at("t0"),
         );
         // And a slice cell: `fwd` of the first term, read off that
         // slice's first row.
@@ -2052,7 +2070,7 @@ mod tests {
             (0, 0),
             ("2026-10-16".into(), "fwd".into()),
             Value::F64(4600.5),
-            "t0",
+            &at("t0"),
         );
         assert!(patched.patch_cell(1, 5, &snapshot, &CVI, &draft));
         assert!(patched.patch_cell(0, 0, &snapshot, &CVI, &draft));
@@ -2079,10 +2097,10 @@ mod tests {
             ("D3", "2027-06-18", 0.75, "estimated"),
         ]);
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
-        d.insert_row("new-2".into(), None, "t0");
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-2".into(), None, &at("t0"));
         d.set_row_cell("new-1", "amount", Value::F64(2.0));
-        d.delete_row("D3", "t0");
+        d.delete_row("D3", &at("t0"));
         let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
         let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["new-2", "D1", "new-1", "D2", "D3"]);
@@ -2128,10 +2146,10 @@ mod tests {
             ("D2", "2027-03-19", 0.5, "estimated"),
         ]);
         let mut d = Draft::default();
-        d.insert_row("new-3".into(), Some("D1".into()), "t0");
-        d.insert_row("new-1".into(), Some("D1".into()), "t0");
-        d.insert_row("new-2".into(), Some("new-3".into()), "t0");
-        d.insert_row("new-4".into(), Some("gone".into()), "t0");
+        d.insert_row("new-3".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-1".into(), Some("D1".into()), &at("t0"));
+        d.insert_row("new-2".into(), Some("new-3".into()), &at("t0"));
+        d.insert_row("new-4".into(), Some("gone".into()), &at("t0"));
         let m = MatrixModel::build(&snapshot, &SCHEDULE, &d).unwrap();
         let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["new-4", "D1", "new-1", "new-3", "new-2", "D2"]);
@@ -2151,7 +2169,7 @@ mod tests {
     fn a_pivot_inserted_row_is_incomplete_until_every_cell_is_filled() {
         let snapshot = full_grid();
         let mut d = Draft::default();
-        d.insert_row("2027-01-15".into(), Some("2026-11-20".into()), BASE);
+        d.insert_row("2027-01-15".into(), Some("2026-11-20".into()), &at(BASE));
         let m = MatrixModel::build(&snapshot, &CVI, &d).unwrap();
         let labels: Vec<_> = m.rows.iter().map(|r| r.label.to_string()).collect();
         assert_eq!(labels, ["2026-10-16", "2026-11-20", "2027-01-15"]);
@@ -2215,7 +2233,7 @@ mod tests {
         };
         let m = MatrixModel::build(&flat_snapshot(), &spec, &Draft::default()).unwrap();
         let mut d = Draft::default();
-        d.insert_row("new-1".into(), None, BASE);
+        d.insert_row("new-1".into(), None, &at(BASE));
         assert_eq!(d.incomplete_rows(&spec, &m.columns), 1);
         d.set_row_cell("new-1", "gross", Value::F64(1.0));
         assert_eq!(d.incomplete_rows(&spec, &m.columns), 0, "net is optional");
@@ -2235,7 +2253,7 @@ mod tests {
             ("D2", "2027-03-19", 0.5, "estimated"),
         ]);
         let mut draft = Draft::default();
-        draft.insert_row("new-1".into(), None, "t0");
+        draft.insert_row("new-1".into(), None, &at("t0"));
         let mut patched = MatrixModel::build(&snapshot, &SCHEDULE, &draft).unwrap();
         assert_eq!(patched.rows[2].label.as_ref(), "D2");
         // D2 is model row 2 but document row 1 — its cell_ref says so, and
@@ -2246,7 +2264,7 @@ mod tests {
             d2_ref,
             ("D2".into(), "amount".into()),
             Value::F64(0.75),
-            "t0",
+            &at("t0"),
         );
         draft.set_row_cell("new-1", "amount", Value::F64(3.0));
         assert!(patched.patch_cell(2, 1, &snapshot, &SCHEDULE, &draft));
@@ -2262,7 +2280,7 @@ mod tests {
         );
         // An inserted row the draft no longer holds cannot be patched:
         // the caller rebuilds.
-        draft.delete_row("new-1", "t0");
+        draft.delete_row("new-1", &at("t0"));
         assert!(!patched.patch_cell(0, 1, &snapshot, &SCHEDULE, &draft));
     }
 

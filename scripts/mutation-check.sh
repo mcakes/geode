@@ -610,14 +610,42 @@ run_mutation 'provenance: resolved vs requested time' \
   '                        AsOf::At(_) => Freshness {
                             dataset: dataset.clone(),
                             as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
-                            generation: 0,
+                            generation: None,
                         },' \
   '                        AsOf::At(t) => Freshness {
                             dataset: dataset.clone(),
                             as_of: Some(t.to_rfc3339()),
-                            generation: 0,
+                            generation: None,
                         },' \
   geode-data a_historical_result_is_labelled_with_the_data_it_actually_read
+
+# A live document reports the generation of its OWN partition. Mutated to
+# the dataset-wide maximum, every document in a dataset reports the same
+# number, so a panel holding unsent edits on one underlying is told its
+# document moved whenever any OTHER underlying republishes: a spurious
+# `update HH:MM`, edits frozen out of `edit` and `:bump`, and a rebase the
+# trader has no reason to run.
+run_mutation "provenance: a live document reports its partition's generation, not the dataset's" \
+  crates/geode-data/src/query/read.rs \
+  '                        generation: catalog.live_generation(
+                            &params.dataset,
+                            &join_key(&params.document_key),
+                            None,
+                        )?,' \
+  '                        generation: catalog.dataset_generation(&params.dataset)?,' \
+  geode-data a_live_document_request_reports_its_own_documents_freshness
+
+# A historical document read reports the generation its as-of pinned.
+# Mutated to `None`, identity falls back to source time alone for every
+# as-of read: two generations that share a source time read as the same
+# document, so a draft stays `Editing` while the panel installs the
+# republished grid and the position-keyed edits paint onto whatever node
+# now sits where they were made.
+run_mutation "provenance: an as-of document reports the generation it pinned" \
+  crates/geode-data/src/query/read.rs \
+  '                        generation: compiled.resolved_generation,' \
+  '                        generation: None,' \
+  geode-data a_republish_at_the_same_source_time_reports_a_different_generation
 
 run_mutation "provenance: a join is labelled with its own instant" \
   crates/geode-data/src/query/compile.rs \
@@ -861,17 +889,43 @@ run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" 
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (named book)" \
   crates/geode-data/src/store/catalog.rs \
-  'where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
-  'where ? is not null and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where ? is not null and fg.batch = ? and fb.book = ?' \
   geode-data \
   the_backfill_guard_does_not_read_another_datasets_source_times
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
   crates/geode-data/src/store/catalog.rs \
-  'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
-  'where ? is not null and fg.batch = ? and fb.book is null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where ? is not null and fg.batch = ? and fb.book is null' \
   geode-data \
   the_backfill_guard_does_not_read_another_datasets_source_times
+
+# The generation half of the same partition identity: `live_generation`
+# answers for one (dataset, batch, book), where `dataset_generation`
+# answers for the whole dataset. Mutated to stop scoping by batch, a
+# partition that has never loaded borrows a neighbour's generation and
+# every partition sharing a book reports the same one — the reader that
+# decides whether the document under a trader's unsent edits moved can no
+# longer tell one document's correction from another's.
+run_mutation "catalog: a partition's live generation is its own" \
+  crates/geode-data/src/store/catalog.rs \
+  '"select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  '"select max(fg.gen_id) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and ? is not null and fb.book = ?' \
+  geode-data \
+  live_generation_is_the_partitions_newest_and_moves_on_a_same_time_republish
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
@@ -939,8 +993,14 @@ run_mutation "catalog: the bookless partition gets a file_books row" \
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
-  'and fg.batch = ? and fb.book is null' \
-  'and fg.batch = ? and fb.book is not null' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null
+                   and coalesce(fg.archived_only, false) = false",' \
+  '"select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.dataset = ? and fg.batch = ? and fb.book is not null
+                   and coalesce(fg.archived_only, false) = false",' \
   geode-data \
   the_backfill_guard_sees_the_bookless_partition
 
@@ -12052,12 +12112,63 @@ run_mutation "matrix: an edited cell paints the draft's value" \
 # Mutated to always, every routine redelivery (the frame's `data` version
 # bumps on any publish of any dataset) tips a draft into Behind and stops
 # painting the live document.
-run_mutation "draft: on_delivered goes Behind only on a different as_of" \
+run_mutation "draft: on_delivered goes Behind only on a different generation" \
   crates/geode-marketdata/src/core/draft.rs \
-  '            DraftState::Editing if self.base.as_deref() != Some(as_of) => {' \
+  '            DraftState::Editing
+                if self
+                    .base
+                    .as_ref()
+                    .is_none_or(|base| base.differs_from(delivered)) =>
+            {' \
   '            DraftState::Editing => {' \
   geode-marketdata \
   on_delivered_stays_editing_on_the_same_generation_and_goes_behind_on_a_newer_one
+
+# A document generation is the pair (source time, store generation).
+# Mutated back to the source time alone, a corrected republish — same
+# instant, new generation — is invisible: the draft stays `Editing`, the
+# panel installs the republished grid under it, and edits keyed by grid
+# position paint onto whatever node now sits where they were made. A
+# reordered or extended ladder then shows one term's number on another's
+# row, as the trader's own edit, and `:upload` sends it.
+run_mutation "draft: identity is the generation pair, not the source time alone" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '        self.as_of != delivered.as_of
+            || matches!(
+                (self.generation, delivered.generation),
+                (Some(mine), Some(theirs)) if mine != theirs
+            )' \
+  '        self.as_of != delivered.as_of' \
+  geode-marketdata \
+  a_same_time_republish_is_a_different_generation_when_both_ids_are_known
+
+# An unknown generation is not evidence that the document moved. Mutated
+# so a known generation differs from an unknown one, every base missing
+# its generation half — a session file written before the generation was
+# persisted, or any read that names none — puts a restored draft `Behind`
+# on its first delivery, refusing `edit` and `:bump` and demanding a
+# rebase nothing actually moved under.
+run_mutation "draft: an unknown generation is not evidence of movement" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '                (Some(mine), Some(theirs)) if mine != theirs' \
+  '                (mine, theirs) if mine != theirs' \
+  geode-marketdata \
+  a_same_time_republish_is_a_different_generation_when_both_ids_are_known
+
+# The one wire between the generation the store reported and the pair a
+# draft compares. Mutated to drop it, nothing complains: the type checks,
+# provenance still names the right generation, and every generation entry
+# above still reports `caught` — but a corrected republish at the same
+# source time is invisible again. The panel installs the republished grid
+# under the open draft, each edit keyed by grid position lands on whichever
+# node now sits where it was made, and the trader sees another node's
+# number marked as their own edit and uploads it.
+run_mutation "matrix: a model's base carries the generation, not the source time alone" \
+  crates/geode-marketdata/src/core/matrix.rs \
+  '        generation: freshness.generation,' \
+  '        generation: None,' \
+  geode-marketdata \
+  a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it
 
 # A rebase matches by LABEL. Mutated to keep each edit's old index, a term
 # that moved up a row has its edit reassigned to a different expiry, and a
@@ -12078,7 +12189,13 @@ run_mutation "draft: rebase matches a cell by label, not by index" \
 # were not made against, silently.
 run_mutation "draft: from_toml restores the base" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        let base = t.get("base").and_then(|v| v.as_str()).map(str::to_string);' \
+  '        let base = t
+            .get("base")
+            .and_then(|v| v.as_str())
+            .map(|as_of| DocumentBase {
+                as_of: as_of.to_string(),
+                generation: t.get("base_generation").and_then(|v| v.as_integer()),
+            });' \
   '        let base = None;' \
   geode-marketdata \
   to_toml_and_from_toml_round_trip_the_edits_by_label_and_the_base
@@ -12170,7 +12287,7 @@ run_mutation "mdtile: serialize writes the draft" \
 # sizes and the shifted edit is no longer refused.
 run_mutation "mdtile: a capture only counts the draft's true base" \
   crates/geode-marketdata/src/tile.rs \
-  '        if source_time_of(&base) != draft.base {' \
+  '        if base_of(&base) != draft.base {' \
   '        if false {' \
   geode-marketdata \
   rebase_still_refuses_a_same_day_group_when_the_base_was_never_delivered
@@ -12385,7 +12502,7 @@ run_mutation "mdtile: a delivery under an open barrier is staged" \
 run_mutation "mdedit: a commit parses the typed text before writing it" \
   crates/geode-marketdata/src/tile.rs \
   '                match parse_cell(text, ty) {' \
-  '                match Ok::<f64, String>(0.0) {' \
+  '                match Ok::<Value, String>(Value::F64(0.0)) {' \
   geode-marketdata \
   edit_commit_paints_the_cell_as_edited_and_the_header_counts_it
 
@@ -12690,7 +12807,12 @@ run_mutation "final: a keyboard focus move hands the keyboard back to the shell"
 # not showing and `edit`/`:bump` stay refused with every edit valid.
 run_mutation "final: the base generation redelivered leaves Behind" \
   crates/geode-marketdata/src/core/draft.rs \
-  '            DraftState::Behind { .. } if self.base.as_deref() == Some(as_of) => {
+  '            DraftState::Behind { .. }
+                if self
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| !base.differs_from(delivered)) =>
+            {
                 self.state = DraftState::Editing;
                 true
             }' \
@@ -12708,7 +12830,7 @@ run_mutation "final: only the edits' own base generation is retained" \
   '                None => self
                     .snapshot
                     .clone()
-                    .filter(|s| draft.base.is_some() && source_time_of(s) == draft.base),' \
+                    .filter(|s| draft.base.is_some() && base_of(s) == draft.base),' \
   '                None => self.snapshot.clone(),' \
   geode-marketdata \
   a_restored_behind_draft_keeps_following_the_feed
@@ -13915,17 +14037,22 @@ run_mutation "mdpicker: step is clamped at the last ranked row with the window f
         }' \
   geode-marketdata the_highlight_never_leaves_the_painted_rows
 
-# A4: an I64 attribute parses as `i64` directly. Mutated back to the
-# `parse_cell` → f64 → `as i64` path, 9007199254740993 (2^53 + 1)
-# silently becomes 9007199254740992.
-run_mutation "mdattr: an I64 attribute parses exactly above 2^53" \
+# One parse for cells and attributes, and an integer column parses as
+# `i64` and stays one. Mutated back to the f64 path, 9007199254740993
+# (2^53 + 1) silently becomes ...92 wherever a whole number is typed — a
+# cell, a header attribute, a restored session value — and a fractional
+# entry in an integer column is truncated instead of refused.
+run_mutation "mdnum: an integer cell and attribute both parse exactly above 2^53" \
   crates/geode-marketdata/src/core/draft.rs \
   '        ColumnType::I64 => trimmed
             .parse::<i64>()
-            .map(Value::I64)' \
-  '        ColumnType::I64 => parse_cell(text, ColumnType::I64)
-            .map(|f| Value::I64(f as i64))' \
-  geode-marketdata parse_attr_per_type
+            .map(Value::I64)
+            .map_err(|_| format!("'"'"'{text}'"'"' is not a whole number")),' \
+  '        ColumnType::I64 => trimmed
+            .parse::<f64>()
+            .map(|v| Value::I64(v as i64))
+            .map_err(|_| format!("'"'"'{text}'"'"' is not a whole number")),' \
+  geode-marketdata parse_cell_reads_f64_and_i64_and_names_the_text_it_refused
 
 # A5: `:set <attr> <value...>` joins the tail with single spaces (a
 # Utf8 attribute may carry them). Mutated to join with nothing, `:set
@@ -14978,8 +15105,10 @@ run_mutation "mdauto: a restored draft's first delivery is always hold" \
 run_mutation "mdauto: the policy fires only on a real transition, never a redelivery" \
   crates/geode-marketdata/src/tile.rs \
   '        if moved
-            && draft.is_behind()' \
-  '        if draft.is_behind()' \
+            && draft.is_behind()
+            && self.policy != UpdatePolicy::Hold' \
+  '        if draft.is_behind()
+            && self.policy != UpdatePolicy::Hold' \
   geode-marketdata \
   switching_to_auto_rebase_does_not_rebase_a_draft_already_behind
 
@@ -15432,9 +15561,23 @@ run_mutation "draft: set_row_cell leaves Sent" \
 # type mismatch the first time an integer column is bumped.
 run_mutation "draft: bump lands the declared integer type" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::F64(current + delta)),' \
+  '                .map(Value::I64)
+                .ok_or_else(|| format!("bump: {column} would be too large"))' \
+  '                .map(|v| Value::F64(v as f64))
+                .ok_or_else(|| format!("bump: {column} would be too large"))' \
   geode-marketdata bump_lands_the_declared_type
+
+# The arithmetic itself stays in `i64`. Mutated through an f64, a holding
+# above 2^53 comes back as a quantity nobody typed: 9007199254740993 + 1
+# lands 9007199254740992, one BELOW the value before the bump, painted as
+# the trader's own edit and sent by `:upload`.
+run_mutation "mdnum: a bump of an integer column does integer arithmetic" \
+  crates/geode-marketdata/src/core/draft.rs \
+  '            current
+                .checked_add(delta as i64)' \
+  '            ((current as f64 + delta) as i64)
+                .checked_add(0)' \
+  geode-marketdata a_bump_of_an_integer_column_stays_an_integer_above_2_pow_53
 
 # A same-day group whose size changed has shifted ordinals. Mutated to
 # skip the check, an edit keyed `<date>#2` lands on a different row.
@@ -15473,7 +15616,7 @@ run_mutation "draft: rebase refuses a deleted row in a changed same-day group" \
 run_mutation "mdedit: an inserted-row bump checks every cell before writing any" \
   crates/geode-marketdata/src/tile.rs \
   '        for (labels, value, ty) in &inserted {
-            bumped(*value, delta, *ty, &labels.1)?;
+            bumped(value, delta, *ty, &labels.1)?;
         }' \
   '        for (labels, value, ty) in &inserted {
             let _ = (labels, value, ty);
@@ -18986,7 +19129,11 @@ run_mutation "panel: the tile answers keys after the upload confirm ends" \
 # difference within seconds of every upload on the demo bus.
 run_mutation "panel: a redelivery of the base is not read as the echo" \
   crates/geode-marketdata/src/tile.rs \
-  '        if draft.base.as_deref() == Some(t) {' \
+  '        if draft
+            .base
+            .as_ref()
+            .is_some_and(|b| !b.differs_from(delivered))
+        {' \
   '        if false {' \
   geode-marketdata \
   a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo
@@ -19125,8 +19272,12 @@ run_mutation "panel: an Err outcome shows the inline upload error" \
 # any delta, 3 + 0.5 lands a truncated 3 the trader never asked for.
 run_mutation "draft: bump refuses a fractional delta on an I64 column" \
   crates/geode-marketdata/src/core/draft.rs \
-  '        ColumnType::I64 if delta.fract() == 0.0 => Ok(Value::I64((current + delta) as i64)),' \
-  '        ColumnType::I64 if true => Ok(Value::I64((current + delta) as i64)),' \
+  '        ColumnType::I64 if delta.fract() != 0.0 => {
+            Err(format!("bump: {column} takes whole numbers"))
+        }' \
+  '        ColumnType::I64 if false => {
+            Err(format!("bump: {column} takes whole numbers"))
+        }' \
   geode-marketdata \
   bump_refuses_a_fractional_delta_on_an_integer_column_before_writing
 
