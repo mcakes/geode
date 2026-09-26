@@ -4149,9 +4149,7 @@ run_mutation "picker: the footer hint never paints" \
             "picker-hints",
             WIDTH,
             theme.muted_foreground,
-            theme.muted,
             theme.border,
-            theme.radius,
         ))' \
   '' \
   geode-shell arrowing_to_a_value_and_pressing_enter_commits_it_without_tab
@@ -8403,14 +8401,14 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # review's re-review — so the bare-`div()` text the old anchor matched
 # no longer exists). The three match arms together are still the
 # unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
-# `action_bar(shell, entity, cx)` each occur nowhere else in this file.
+# `action_bar(shell, entity)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        (true, _) => div().min_h_6().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (false, None) => action_bar(shell, entity, cx),' \
+        (false, None) => action_bar(shell, entity),' \
   '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
-        (_, None) => action_bar(shell, entity, cx),' \
+        (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -12550,12 +12548,13 @@ run_mutation "footer: an empty row is dropped from the layout" \
   an_empty_row_is_kept_empty_and_the_order_holds
 
 # And an empty row is as TALL as a full one — the label alone is a
-# `text_xs` line, shorter than a chip, so without the unpainted chip the
+# `text_xs` line, shorter than a hint, so without the unpainted hint the
 # footer still moved by a few pixels between the two kinds of row.
 run_mutation "footer: an empty row is shorter than a full one" \
   crates/geode-shell/src/shell/dialog.rs \
-  '            line = line.child(div().invisible().child(chip("space")));' \
-  '            let _ = &chip;' \
+  '                    .child(chip("space"))
+                    .child(div().child("space")),' \
+  '                    .child(div()),' \
   geode-shell \
   the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit
 
