@@ -111,14 +111,21 @@ clipping of queries.
 The expression field completes loaded series names (`Model::series_names`).
 `core::complete::name_at` finds the name at the caret with the expression
 tokenizer's own character classes (`geode_core::series::expr`), so the word
-boundary cannot drift from what the parser reads; a caret in a number offers
-nothing. The `Completion` list is rebuilt on open and on the input's Change
-event, never in render. Tab and Shift+Tab reach the field's own listener
-because `crate::init` binds them to `NoAction` in `EXPR_CONTEXT`; each write
-goes through `set_value`, which emits no Change, so the cached range moves
-over the written name and repeated Tab cycles the same list. The first Tab
-after a caret move re-ranks at the live caret. Enter expands a unique inexact
-name before resolving. A row press writes the same way, stops propagation,
+boundary cannot drift from what the parser reads; a caret at a name's start
+is in it, and a caret in a number offers nothing. The `Completion` list is
+rebuilt on open, on the input's Change event, after Enter's expansion, and
+on a `SeriesSettings` change, never in render. Tab and Shift+Tab reach the
+field's own listener: the shell root reclaims them in `GeodeShell`, and
+`crate::init` also binds them to `NoAction` in `EXPR_CONTEXT` for hosts
+without that root. Each write is a `Write` applied as one range replace
+(`set_selected_range` then `replace`), so it keeps the input's undo history;
+its Change event is recorded as an echo and skipped, so the cached range
+stays over the written name and repeated Tab cycles the same list. A Tab
+whose caret is not where the last write left it re-ranks at the live caret
+first. A cached range that does not fit the live text (bounds or a char
+boundary at either end) writes nothing rather than panicking. Enter expands a
+unique inexact name, then re-ranks, before resolving. A row press writes the
+same way, stops propagation,
 and the list surface occludes, so the shell root (which focuses only a hovered
 hitbox) never takes the keyboard from the field.
 

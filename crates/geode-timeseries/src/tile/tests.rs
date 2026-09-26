@@ -43,9 +43,12 @@ const TILE: u64 = 7;
 /// this module's fragment spliced in) under the tile's LIVE key context,
 /// and dispatched through the tile's own door. So `simulate_keystrokes`
 /// drives a menu the way a trader's keys do, and a key that reaches no
-/// binding (a removed one, say) reaches nothing. Only while the tile is
-/// in `normal` mode: in `insert` the shell resolves a bare key against
-/// the insert layer alone, and those four keys are the fields' own.
+/// binding (a removed one, say) reaches nothing. In `insert` mode it
+/// follows the shell's insert branch for bare keys: they resolve against
+/// the tile context alone (the one carrying `mode == insert`), so a
+/// field's `enter` and `escape` reach its verbs and typing stays text.
+/// Chords in insert mode, and the shell's root `tab` reclaim
+/// (`GeodeShell`), are not modelled; `crate::init`'s own reclaim stands in.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<TimeseriesTile>,
@@ -61,18 +64,23 @@ impl gpui::Render for ShellStandIn {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let context = this.tile.read(cx).key_context();
-                if context.get("mode") != Some("normal") {
-                    return;
-                }
                 let Some(keystroke) = geode_shell::shell::keys::convert_keystroke(&event.keystroke)
                 else {
                     return;
                 };
-                let stack = [
-                    KeyContext::new("workspace"),
-                    KeyContext::new("tile"),
-                    context,
-                ];
+                let stack = match context.get("mode") {
+                    Some("normal") => vec![
+                        KeyContext::new("workspace"),
+                        KeyContext::new("tile"),
+                        context,
+                    ],
+                    // The shell's insert branch: a bare key resolves only
+                    // against the context carrying `mode == insert`, so
+                    // typing stays text and `enter`/`escape` reach the
+                    // field's verbs. Chords are not modelled here.
+                    Some("insert") if !keystroke.mods.is_chord() => vec![context],
+                    _ => return,
+                };
                 if let MatchResult::Matched { action, count } =
                     this.matcher.press(&this.keymap, keystroke, &stack)
                 {
@@ -2076,6 +2084,136 @@ fn clicking_a_candidate_inserts_it_and_typing_continues(cx: &mut gpui::TestAppCo
     h.draw(&mut vcx);
     vcx.simulate_input("VIX");
     assert_eq!(h.input_text(&vcx), "SPX.close / VIX * 2 / VIX");
+}
+
+/// An `enter` whose expansion is refused keeps the field open with the
+/// expanded text; the list is re-ranked against THAT text, so a click
+/// writes over the expanded name rather than the range typed before it,
+/// and the refusal stays on screen.
+#[gpui::test]
+fn a_refused_enter_expansion_re_ranks_before_the_next_click(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("QQQ / SPX.cl");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.input_text(&vcx), "QQQ / SPX.close");
+    h.draw(&mut vcx);
+    assert!(h.expr_error(&vcx).is_some(), "the refusal stays up");
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close"));
+    assert_eq!(h.input_text(&vcx), "QQQ / SPX.close");
+}
+
+/// The same after an expansion ahead of a multi-byte character: a stale
+/// range would end inside it, and the click must neither panic nor write
+/// anywhere but the name at the caret.
+#[gpui::test]
+fn a_click_after_an_expansion_before_multibyte_text_does_not_panic(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add ABC").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.cl éAB");
+    h.keys(&mut vcx, "home right right right right right right");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.input_text(&vcx), "SPX.close éAB");
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("ts-expr-row-{TILE}-SPX.close"));
+    assert_eq!(h.input_text(&vcx), "SPX.close éAB");
+}
+
+/// A caret moved after a Tab, then another Tab, completes the name at the
+/// live caret rather than rewriting the name the first Tab wrote.
+#[gpui::test]
+fn tab_after_a_completion_and_a_caret_move_completes_at_the_caret(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("S / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "S / VIX");
+    h.keys(&mut vcx, "home right tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+}
+
+/// A caret at a name's START is in that name: Tab completes it rather
+/// than gluing a second name in front of it.
+#[gpui::test]
+fn tab_at_the_start_of_a_name_completes_that_name(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close/VI");
+    h.keys(&mut vcx, "left left tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close/VIX");
+}
+
+/// A completion is one edit in the field's own history: undo takes it
+/// back to what was typed.
+#[gpui::test]
+fn undo_takes_back_a_completion(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / V");
+    h.keys(&mut vcx, "tab");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
+    h.keys(
+        &mut vcx,
+        if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        },
+    );
+    assert_eq!(h.input_text(&vcx), "SPX.close / V");
+}
+
+/// A real `enter` reaches the commit through the insert layer, the way
+/// the shell routes a bare key while a field holds the keyboard, and
+/// expands a unique name on the way.
+#[gpui::test]
+fn a_real_enter_commits_through_the_insert_layer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("SPX.close / VI");
+    h.keys(&mut vcx, "enter");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX")
+    );
+}
+
+/// A default-source change while the field is open relabels the loaded
+/// names, so the list cannot offer a label that no longer resolves.
+#[gpui::test]
+fn a_default_source_change_relabels_the_open_list(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX"]);
+    vcx.update(|_, cx| {
+        cx.set_global(SeriesSettings {
+            default_source: Some("demo_rest".into()),
+            sources: demo_sources(),
+        })
+    });
+    h.draw(&mut vcx);
+    assert_eq!(h.expr_candidates(&vcx), vec!["VIX@demo_kdb"]);
 }
 
 /// The palette can dispatch any action over an open field (`ctrl+k`

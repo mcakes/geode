@@ -414,6 +414,11 @@ pub(crate) struct ExprField {
     /// The loaded-name list under the field, rebuilt on the input's
     /// Change event and on open, never in render.
     pub completion: Completion,
+    /// The text the tile's own last completion write left in the field.
+    /// That write's Change event carries it and is skipped: the write has
+    /// already placed the list, and a refusal shown after an Enter
+    /// expansion must survive its echo.
+    pub echo: Option<String>,
 }
 
 /// Split each option into the two columns a picker row paints. The

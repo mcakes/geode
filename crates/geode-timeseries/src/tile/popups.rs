@@ -399,19 +399,26 @@ impl TimeseriesTile {
             let text = text.clone();
             input.update(cx, |s, cx| s.set_value(text, window, cx));
         }
-        cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
             // A typed character answers the error under the field: it
             // describes text that is no longer what is there. It also
             // re-ranks the completions against the name now at the caret.
-            if let InputEvent::Change = event
-                && matches!(this.popup, Some(Popup::Expr(_)))
-            {
-                if let Some(Popup::Expr(f)) = &mut this.popup {
-                    f.error = None;
-                }
-                this.refresh_expr_completion(cx);
-                cx.notify();
+            // The echo of the tile's own completion write is neither: the
+            // write already placed the list, and an Enter expansion's
+            // refusal must stay up.
+            let InputEvent::Change = event else {
+                return;
+            };
+            let text = input.read(cx).value();
+            let Some(Popup::Expr(f)) = &mut this.popup else {
+                return;
+            };
+            if f.echo.take().is_some_and(|echo| echo == text.as_ref()) {
+                return;
             }
+            f.error = None;
+            this.refresh_expr_completion(cx);
+            cx.notify();
         })
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -420,6 +427,7 @@ impl TimeseriesTile {
             editing: seed.map(|(number, _)| number),
             error: None,
             completion: Default::default(),
+            echo: None,
         }));
         // A seeded `e` edit emits no Change (`set_value`), so the list is
         // ranked here for the text it opens with.
@@ -438,8 +446,14 @@ impl TimeseriesTile {
     }
 
     /// Re-rank the completion list against the field's live text and
-    /// caret. Runs on open and on the input's Change event, never in render.
-    fn refresh_expr_completion(&mut self, cx: &mut Context<Self>) {
+    /// caret. Runs on open, on the input's Change event, after Enter's
+    /// expansion, on a Tab whose caret has moved, and when the desk's
+    /// default source relabels the names; never in render. Does nothing
+    /// without an open expression field.
+    pub(super) fn refresh_expr_completion(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.popup, Some(Popup::Expr(_))) {
+            return;
+        }
         let names = self.expr_names(cx);
         if let Some(Popup::Expr(f)) = &mut self.popup {
             let input = f.input.read(cx);
@@ -448,24 +462,23 @@ impl TimeseriesTile {
         }
     }
 
-    /// Write a completed line into the field with the caret after the
-    /// written name. `set_value` emits no Change, so the completion's own
-    /// cached range (already moved by the write) is what the next `tab`
-    /// replaces; setting the caret also keeps the field focused.
-    fn write_expr_line(
-        &mut self,
-        (line, caret): (String, usize),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(Popup::Expr(f)) = &self.popup else {
+    /// Apply a completion write as one range replace: select the range,
+    /// replace it, caret after the name. Unlike `set_value` this keeps the
+    /// input's undo history, so undo takes the completion back. The
+    /// replace emits a Change; the text it leaves is recorded as that
+    /// Change's echo so the subscriber skips it. Focus returns to the
+    /// field, which a row click must not take away.
+    fn write_expr(&mut self, write: Write, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Expr(f)) = &mut self.popup else {
             return;
         };
-        let column = line[..caret].chars().count() as u32;
-        f.input.update(cx, |s, cx| {
-            s.set_value(line, window, cx);
-            s.set_cursor_position(Position::new(0, column), window, cx);
+        let echo = f.input.update(cx, |s, cx| {
+            s.set_selected_range(write.range.clone(), cx);
+            s.replace(write.name.clone(), window, cx);
+            s.focus(window, cx);
+            s.value().to_string()
         });
+        f.echo = Some(echo);
         cx.notify();
     }
 
@@ -486,21 +499,22 @@ impl TimeseriesTile {
             return false;
         }
         let forward = !m.shift;
-        if !matches!(&self.popup, Some(Popup::Expr(_))) {
+        let Some(Popup::Expr(f)) = &self.popup else {
             return false;
-        }
+        };
         // A caret moved by arrows or a click emits no Change, so a Tab
-        // that starts a cycle ranks at the live caret first; a Tab that
-        // continues one keeps the cached list and range.
-        if !matches!(&self.popup, Some(Popup::Expr(f)) if f.completion.cycling()) {
+        // whose caret is not where the last write left it ranks at the
+        // live caret first; a Tab that continues a cycle keeps the cached
+        // list and range.
+        if f.completion.stale_at(f.input.read(cx).cursor()) {
             self.refresh_expr_completion(cx);
         }
         let Some(Popup::Expr(f)) = &mut self.popup else {
             return false;
         };
         let text = f.input.read(cx).value().to_string();
-        if let Some(written) = f.completion.cycle(&text, forward) {
-            self.write_expr_line(written, window, cx);
+        if let Some(write) = f.completion.cycle(&text, forward) {
+            self.write_expr(write, window, cx);
         }
         true
     }
@@ -512,8 +526,8 @@ impl TimeseriesTile {
             return;
         };
         let text = f.input.read(cx).value().to_string();
-        if let Some(written) = f.completion.pick(&text, index) {
-            self.write_expr_line(written, window, cx);
+        if let Some(write) = f.completion.pick(&text, index) {
+            self.write_expr(write, window, cx);
         }
     }
 
@@ -524,16 +538,24 @@ impl TimeseriesTile {
         let Some(Popup::Expr(f)) = &self.popup else {
             return false;
         };
-        let mut text = f.input.read(cx).value().to_string();
+        let text = f.input.read(cx).value().to_string();
         let caret = f.input.read(cx).cursor();
         let editing = f.editing;
         // The `:` line's rule: a typed name that is not exact but matches
         // exactly one loaded name is written in first, so the field shows
-        // what was committed (or what the refusal below is about).
-        if let Some(expanded) = expand_unique(&text, caret, &self.expr_names(cx)) {
-            text = expanded.0.clone();
-            self.write_expr_line(expanded, window, cx);
-        }
+        // what was committed (or what the refusal below is about). The
+        // list is re-ranked against the written text at once: its Change
+        // is an echo the subscriber skips, and a later click must not
+        // replace the range cached before the expansion.
+        let text = match expand_unique(&text, caret, &self.expr_names(cx)) {
+            Some(write) => {
+                let (expanded, _) = write.apply(&text);
+                self.write_expr(write, window, cx);
+                self.refresh_expr_completion(cx);
+                expanded
+            }
+            None => text,
+        };
         let default_source = cx
             .try_global::<SeriesSettings>()
             .and_then(|s| s.default_source.clone());

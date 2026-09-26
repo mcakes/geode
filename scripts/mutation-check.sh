@@ -20833,11 +20833,21 @@ run_mutation "timeseries completion: a source suffix is part of the name" \
 # for the `2`, and Enter would expand the number into a series.
 run_mutation "timeseries completion: a number takes no name" \
   crates/geode-timeseries/src/core/complete.rs \
-  '            if start < caret && caret <= i {
+  '            if start <= caret && caret <= i {
                 return None;' \
   '            if false {
                 return None;' \
   geode-timeseries the_name_at_the_caret_follows_the_tokenizer
+
+# A caret at a name start is in that name; otherwise Tab glues a second
+# name in front of it (`SPX.close/SPX.closeVIX`).
+run_mutation "timeseries completion: a caret at a name start is in that name" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '            if start <= caret && caret <= i {
+                return Some(start..i);' \
+  '            if start < caret && caret <= i {
+                return Some(start..i);' \
+  geode-timeseries tab_at_the_start_of_a_name_completes_that_name
 
 # The list ranks against the name at the caret, not the whole field.
 run_mutation "timeseries completion: the list ranks the name at the caret" \
@@ -20857,9 +20867,18 @@ run_mutation "timeseries completion: an empty name offers every loaded name" \
 # Typing re-ranks: the input Change event refreshes the list.
 run_mutation "timeseries completion: typing re-ranks the list" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                this.refresh_expr_completion(cx);' \
-  '' \
+  '            f.error = None;
+            this.refresh_expr_completion(cx);' \
+  '            f.error = None;' \
   geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# The echo of a completion write is skipped; treated as typing, it clears
+# the refusal an Enter expansion just put up.
+run_mutation "timeseries completion: a write echo is not typing" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            if f.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if f.echo.take().is_some_and(|_| false) {' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
 
 # A seeded `e` edit emits no Change, so the list ranks at open.
 run_mutation "timeseries completion: the list ranks on open" \
@@ -20868,6 +20887,14 @@ run_mutation "timeseries completion: the list ranks on open" \
         self.refresh_expr_completion(cx);' \
   '        // ranked here for the text it opens with.' \
   geode-timeseries the_expression_field_lists_loaded_names_ranked_at_the_caret
+
+# A default-source change relabels an open list.
+run_mutation "timeseries completion: a default-source change relabels the list" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            // offering a name that no longer resolves.
+            this.refresh_expr_completion(cx);' \
+  '            // offering a name that no longer resolves.' \
+  geode-timeseries a_default_source_change_relabels_the_open_list
 
 # The painted window scrolls with the lit row past the eighth.
 run_mutation "timeseries completion: the painted window follows the lit row" \
@@ -20879,12 +20906,13 @@ run_mutation "timeseries completion: the painted window follows the lit row" \
 # Tab writes the lit candidate through the field listener.
 run_mutation "timeseries completion: tab writes the candidate" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '        if let Some(written) = f.completion.cycle(&text, forward) {' \
-  '        if let Some(written) = f.completion.cycle(&text, forward).filter(|_| false) {' \
+  '        if let Some(write) = f.completion.cycle(&text, forward) {' \
+  '        if let Some(write) = f.completion.cycle(&text, forward).filter(|_| false) {' \
   geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
 
 # gpui-component Root binds tab to focus cycling window-wide; without the
-# EXPR_CONTEXT reclaim the field listener never sees the key.
+# EXPR_CONTEXT reclaim the field listener never sees the key (in a host
+# without the shell root reclaim, as the tile tests are).
 run_mutation "timeseries completion: tab is reclaimed in the expression context" \
   crates/geode-timeseries/src/lib.rs \
   '    for context in [popup::RANGE_CONTEXT, popup::EXPR_CONTEXT] {' \
@@ -20894,14 +20922,14 @@ run_mutation "timeseries completion: tab is reclaimed in the expression context"
 # Repeated Tab replaces the name just written, not the typed prefix.
 run_mutation "timeseries completion: the cached range moves over the written name" \
   crates/geode-timeseries/src/core/complete.rs \
-  '        self.token = Some(token.start..caret);' \
-  '        self.token = Some(token.clone());' \
-  geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
+  '        self.token = Some(write.range.start..write.caret());' \
+  '        self.token = Some(write.range.clone());' \
+  geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
 
 # Repeated Tab cycles the cached list rather than re-ranking the written name.
 run_mutation "timeseries completion: repeated tab cycles without rebuilding" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '        if !matches!(&self.popup, Some(Popup::Expr(f)) if f.completion.cycling()) {' \
+  '        if f.completion.stale_at(f.input.read(cx).cursor()) {' \
   '        if true {' \
   geode-timeseries tab_completes_the_name_at_the_caret_and_cycles
 
@@ -20915,6 +20943,13 @@ run_mutation "timeseries completion: a first tab re-ranks at the live caret" \
         let Some(Popup::Expr(f)) = &mut self.popup else {' \
   geode-timeseries tab_after_a_caret_move_completes_the_name_at_the_caret
 
+# ...and after a write, a moved caret makes the cycle stale too.
+run_mutation "timeseries completion: a moved caret ends the cycle" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        self.written.is_none() || self.caret != Some(caret)' \
+  '        self.written.is_none()' \
+  geode-timeseries tab_after_a_completion_and_a_caret_move_completes_at_the_caret
+
 # Shift+Tab steps back through the cached list.
 run_mutation "timeseries completion: shift-tab steps back" \
   crates/geode-timeseries/src/core/complete.rs \
@@ -20922,18 +20957,41 @@ run_mutation "timeseries completion: shift-tab steps back" \
   '            (Some(w), false) => (w + 1) % n,' \
   geode-timeseries tab_writes_and_cycles_the_cached_list_and_shift_tab_goes_back
 
+# A write is one range replace, kept in the input undo history.
+run_mutation "timeseries completion: a completion is undoable" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            s.replace(write.name.clone(), window, cx);' \
+  '            let line = write.apply(&s.value());
+            s.set_value(line.0, window, cx);' \
+  geode-timeseries undo_takes_back_a_completion
+
+# A cached range must fit the live text at both ends, never panic.
+run_mutation "timeseries completion: a range ending inside a char is refused" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '        && line.is_char_boundary(range.end)' \
+  '' \
+  geode-timeseries a_range_that_does_not_fit_the_line_writes_nothing
+
 # Enter writes in a unique inexact name before resolving.
 run_mutation "timeseries completion: enter expands a unique name" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '        if let Some(expanded) = expand_unique(&text, caret, &self.expr_names(cx)) {' \
-  '        if let Some(expanded) = expand_unique(&text, caret, &self.expr_names(cx)).filter(|_| false) {' \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)) {' \
+  '        let text = match expand_unique(&text, caret, &self.expr_names(cx)).filter(|_| false) {' \
   geode-timeseries enter_expands_a_unique_name_then_commits
+
+# ...and re-ranks against the expanded text before a refusal leaves it open.
+run_mutation "timeseries completion: an expansion re-ranks the list" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                self.write_expr(write, window, cx);
+                self.refresh_expr_completion(cx);' \
+  '                self.write_expr(write, window, cx);' \
+  geode-timeseries a_refused_enter_expansion_re_ranks_before_the_next_click
 
 # ...and only a unique one: several matches commit as typed.
 run_mutation "timeseries completion: enter never picks among several" \
   crates/geode-timeseries/src/core/complete.rs \
-  '        [one] => Some(accept(line, token, &names[one.row])),' \
-  '        [one, ..] => Some(accept(line, token, &names[one.row])),' \
+  '        [one] => Some(Write {' \
+  '        [one, ..] => Some(Write {' \
   geode-timeseries enter_expands_a_unique_inexact_name_only
 
 # A row press writes the candidate at the caret.

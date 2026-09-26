@@ -43,11 +43,11 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
 };
 use gpui_component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
-use gpui_component::input::{InputEvent, InputState, Position};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
-use crate::core::complete::expand_unique;
+use crate::core::complete::{Write, expand_unique};
 use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{
@@ -200,6 +200,10 @@ impl TimeseriesTile {
         // (an `@source` is shown only when it is NOT the default), so a
         // settings change is a chrome change even with no slot touched.
         cx.observe_global::<SeriesSettings>(|this, cx| {
+            // The default source decides which labels are bare, so an open
+            // expression field's list is relabelled rather than left
+            // offering a name that no longer resolves.
+            this.refresh_expr_completion(cx);
             this.rebuild_chrome(cx);
             cx.notify();
         })

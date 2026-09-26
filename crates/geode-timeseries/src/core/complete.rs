@@ -25,10 +25,12 @@ pub const MAX_ROWS: usize = 8;
 /// A name is what the tokenizer reads as one reference: an identity
 /// (`is_ident_start` then `is_ident_char`s) with an optional `@` and
 /// `is_source_char`s, so `SPX.close/VI|` gives `VI` and
-/// `(VIX@demo_re|` gives `VIX@demo_re`. A caret touching a name's end or
-/// inside it gets the whole name; anywhere else (an empty field, after an
-/// operator, a paren or a space, or at a name's very start) the range is
-/// empty at the caret — nothing of a name typed yet.
+/// `(VIX@demo_re|` gives `VIX@demo_re`. A caret anywhere in a name, from
+/// just before its first character to just after its last, gets the whole
+/// name, so a Tab at `SPX.close/|VIX` completes `VIX` rather than gluing a
+/// second name in front of it. Anywhere else (an empty field, after an
+/// operator, a paren or a space) the range is empty at the caret. A caret
+/// touching a number likewise takes no name.
 pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
     let mut caret = caret.min(line.len());
     while !line.is_char_boundary(caret) {
@@ -50,7 +52,7 @@ pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
             if i < bytes.len() && bytes[i] == b'@' {
                 i = run(i + 1, is_source_char);
             }
-            if start < caret && caret <= i {
+            if start <= caret && caret <= i {
                 return Some(start..i);
             }
         } else if c.is_ascii_digit() {
@@ -58,7 +60,7 @@ pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
             if i < bytes.len() && bytes[i] == b'.' {
                 i = run(i + 1, |c| c.is_ascii_digit());
             }
-            if start < caret && caret <= i {
+            if start <= caret && caret <= i {
                 return None;
             }
         } else {
@@ -72,10 +74,12 @@ pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
 /// the candidates ranked against the name at the caret, the lit row, and
 /// the cached range a Tab replaces.
 ///
-/// Rebuilt by [`Self::refresh`] on the input's Change event and on open,
-/// never in render. A Tab, Shift+Tab or click writes through
-/// `set_value`, which emits no Change, so the cached range is moved over
-/// the written name here and a repeated Tab keeps cycling the same list.
+/// Rebuilt by [`Self::refresh`] on the input's Change event, on open and
+/// after Enter's expansion, never in render. A Tab, Shift+Tab or click
+/// moves the cached range over the name it wrote and records the caret
+/// after it, so a repeated Tab keeps cycling the same list; the echo of
+/// that write is not a refresh (the tile skips it), and a caret that has
+/// since moved is (see [`Self::stale_at`]).
 #[derive(Debug, Default)]
 pub struct Completion {
     names: Vec<String>,
@@ -89,6 +93,39 @@ pub struct Completion {
     /// The candidate a Tab, Shift+Tab or click last wrote, which the next
     /// Tab or Shift+Tab steps from.
     written: Option<usize>,
+    /// The caret just after that write.
+    caret: Option<usize>,
+}
+
+/// One completion write: `name` over the byte `range` of the line it was
+/// computed against. The tile applies it as a single range replace, so
+/// it is one step of the input's undo history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Write {
+    pub range: Range<usize>,
+    pub name: String,
+}
+
+impl Write {
+    /// The caret just after the written name.
+    pub fn caret(&self) -> usize {
+        self.range.start + self.name.len()
+    }
+
+    /// The line with the write applied, and the caret after it.
+    pub fn apply(&self, line: &str) -> (String, usize) {
+        accept(line, self.range.clone(), &self.name)
+    }
+}
+
+/// Whether `range` can be sliced out of `line`: in bounds, ordered, and on
+/// character boundaries at both ends. A range cached against other text
+/// fails this rather than panicking the listener that applies it.
+fn fits(line: &str, range: &Range<usize>) -> bool {
+    range.start <= range.end
+        && range.end <= line.len()
+        && line.is_char_boundary(range.start)
+        && line.is_char_boundary(range.end)
 }
 
 impl Completion {
@@ -104,12 +141,15 @@ impl Completion {
         self.names = names;
         self.highlighted = 0;
         self.written = None;
+        self.caret = None;
     }
 
-    /// Whether a Tab, Shift+Tab or click has written a candidate since the
-    /// last refresh — the next Tab continues that cycle.
-    pub fn cycling(&self) -> bool {
-        self.written.is_some()
+    /// Whether a Tab at `caret` must re-rank first: nothing has been
+    /// written since the last refresh, or the caret has moved away from
+    /// the end of the name last written. Otherwise the Tab continues the
+    /// cycle over the cached list and range.
+    pub fn stale_at(&self, caret: usize) -> bool {
+        self.written.is_none() || self.caret != Some(caret)
     }
 
     /// No series is loaded, so nothing can be referenced at all.
@@ -142,11 +182,11 @@ impl Completion {
             .map(|(i, r)| (i, &self.labels[r.row]))
     }
 
-    /// Tab (`forward`) or Shift+Tab: write the next or previous candidate
-    /// over the cached range and return the new line and caret. The first
-    /// Tab writes the lit (first) candidate, the first Shift+Tab the
-    /// last; either wraps. `None` with no candidates.
-    pub fn cycle(&mut self, line: &str, forward: bool) -> Option<(String, usize)> {
+    /// Tab (`forward`) or Shift+Tab: the next or previous candidate over
+    /// the cached range. The first Tab writes the lit (first) candidate,
+    /// the first Shift+Tab the last; either wraps. `None` with no
+    /// candidates, or when the cached range does not fit `line`.
+    pub fn cycle(&mut self, line: &str, forward: bool) -> Option<Write> {
         let n = self.candidates.len();
         if n == 0 {
             return None;
@@ -161,38 +201,44 @@ impl Completion {
     }
 
     /// A click on candidate `i`: the same write a Tab makes.
-    pub fn pick(&mut self, line: &str, i: usize) -> Option<(String, usize)> {
+    pub fn pick(&mut self, line: &str, i: usize) -> Option<Write> {
         (i < self.candidates.len()).then_some(())?;
         self.write(line, i)
     }
 
-    fn write(&mut self, line: &str, i: usize) -> Option<(String, usize)> {
+    fn write(&mut self, line: &str, i: usize) -> Option<Write> {
         let token = self.token.clone()?;
-        if token.end > line.len() || !line.is_char_boundary(token.start) {
+        if !fits(line, &token) {
             return None;
         }
-        let name = &self.names[self.candidates[i].row];
-        let (line, caret) = accept(line, token.clone(), name);
-        self.token = Some(token.start..caret);
+        let write = Write {
+            range: token,
+            name: self.names[self.candidates[i].row].clone(),
+        };
+        self.token = Some(write.range.start..write.caret());
+        self.caret = Some(write.caret());
         self.written = Some(i);
         self.highlighted = i;
-        Some((line, caret))
+        Some(write)
     }
 }
 
 /// Enter's expansion, the `:` line's rule: when the name at `caret` is
 /// typed, is not exactly a loaded name, and exactly one loaded name
-/// matches it, the line with that name written in and the new caret.
-/// `None` means commit the text as typed. Computed from the live text and
-/// caret rather than the cached list, which a caret move does not update.
-pub fn expand_unique(line: &str, caret: usize, names: &[String]) -> Option<(String, usize)> {
+/// matches it, the write that puts that name in. `None` means commit the
+/// text as typed. Computed from the live text and caret rather than the
+/// cached list, which a caret move does not update.
+pub fn expand_unique(line: &str, caret: usize, names: &[String]) -> Option<Write> {
     let token = name_at(line, caret)?;
     let typed = &line[token.clone()];
     if typed.is_empty() || names.iter().any(|n| n == typed) {
         return None;
     }
     match rank_candidates(names, typed).as_slice() {
-        [one] => Some(accept(line, token, &names[one.row])),
+        [one] => Some(Write {
+            range: token,
+            name: names[one.row].clone(),
+        }),
         _ => None,
     }
 }
@@ -203,6 +249,11 @@ mod tests {
 
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A Tab or Shift+Tab applied to `line`, as the tile applies it.
+    fn tab(c: &mut Completion, line: &str, forward: bool) -> Option<(String, usize)> {
+        c.cycle(line, forward).map(|w| w.apply(line))
     }
 
     #[test]
@@ -240,10 +291,16 @@ mod tests {
         );
         assert_eq!(
             name_at("VIX", 0),
-            Some(0..0),
-            "at a name's start: nothing typed"
+            Some(0..3),
+            "at a name's start: that name"
+        );
+        assert_eq!(
+            name_at("SPX.close/VIX", 10),
+            Some(10..13),
+            "at a name's start after an operator: that name, not the one before"
         );
         assert_eq!(name_at("VIX * 2", 7), None, "a number takes no name");
+        assert_eq!(name_at("VIX * 2", 6), None, "nor at its start");
         assert_eq!(name_at("VIX * 2.5", 9), None, "nor a decimal");
         assert_eq!(name_at("2X", 2), Some(1..2), "a digit run then a name");
         assert_eq!(name_at("é+V", 4), Some(3..4), "non-ASCII is skipped whole");
@@ -289,7 +346,7 @@ mod tests {
         assert_eq!(firsts(&c), (0..8).collect::<Vec<_>>());
         let mut line = String::new();
         for _ in 0..10 {
-            line = c.cycle(&line, true).unwrap().0;
+            line = tab(&mut c, &line, true).unwrap().0;
         }
         assert_eq!(c.highlighted(), 9);
         assert_eq!(firsts(&c), (2..10).collect::<Vec<_>>());
@@ -300,43 +357,56 @@ mod tests {
         let all = names(&["SPX.close", "VIX", "VIX@demo_rest"]);
         let mut c = Completion::default();
         c.refresh("SPX.close / V", 13, all);
-        let (line, caret) = c.cycle("SPX.close / V", true).unwrap();
+        let (line, caret) = tab(&mut c, "SPX.close / V", true).unwrap();
         assert_eq!((line.as_str(), caret), ("SPX.close / VIX", 15));
-        let (line, caret) = c.cycle(&line, true).unwrap();
+        let (line, caret) = tab(&mut c, &line, true).unwrap();
         assert_eq!(
             (line.as_str(), caret),
             ("SPX.close / VIX@demo_rest", 25),
             "the next Tab replaces the written name, not the typed V"
         );
-        let (line, _) = c.cycle(&line, true).unwrap();
+        let (line, _) = tab(&mut c, &line, true).unwrap();
         assert_eq!(line, "SPX.close / VIX", "wraps");
-        let (line, _) = c.cycle(&line, false).unwrap();
+        let (line, _) = tab(&mut c, &line, false).unwrap();
         assert_eq!(line, "SPX.close / VIX@demo_rest", "Shift+Tab steps back");
         assert_eq!(c.highlighted(), 1, "the lit row is the written one");
         let mut three = Completion::default();
         three.refresh("V", 1, names(&["VIX", "V2X", "VXN"]));
-        let (line, _) = three.cycle("V", true).unwrap();
-        let (line, _) = three.cycle(&line, true).unwrap();
+        let (line, _) = tab(&mut three, "V", true).unwrap();
+        let (line, _) = tab(&mut three, &line, true).unwrap();
         assert_eq!(line, "V2X");
-        let (line, _) = three.cycle(&line, false).unwrap();
+        let (line, _) = tab(&mut three, &line, false).unwrap();
         assert_eq!(line, "VIX", "Shift+Tab steps back one of three");
         let mut fresh = Completion::default();
         fresh.refresh("(V", 2, names(&["VIX", "V2X"]));
         assert_eq!(
-            fresh.cycle("(V", false).unwrap(),
+            tab(&mut fresh, "(V", false).unwrap(),
             ("(V2X".to_string(), 4),
             "a first Shift+Tab writes the last"
         );
         let mut mid = Completion::default();
         mid.refresh("V / SPX", 1, names(&["VIX"]));
         assert_eq!(
-            mid.cycle("V / SPX", true).unwrap(),
+            tab(&mut mid, "V / SPX", true).unwrap(),
             ("VIX / SPX".to_string(), 3),
             "mid-line: the caret lands after the name"
         );
         let mut none = Completion::default();
         none.refresh("VIX * 2", 7, names(&["VIX"]));
-        assert_eq!(none.cycle("VIX * 2", true), None);
+        assert_eq!(tab(&mut none, "VIX * 2", true), None);
+    }
+
+    /// After a write the cycle continues only while the caret stays where
+    /// that write left it.
+    #[test]
+    fn a_moved_caret_makes_the_cycle_stale() {
+        let mut c = Completion::default();
+        c.refresh("S / V", 5, names(&["SPX.close", "VIX"]));
+        assert!(c.stale_at(5), "nothing written yet");
+        let w = c.cycle("S / V", true).unwrap();
+        assert_eq!(w.caret(), 7);
+        assert!(!c.stale_at(7), "the caret the write left");
+        assert!(c.stale_at(1), "moved away");
     }
 
     #[test]
@@ -344,18 +414,30 @@ mod tests {
         let mut c = Completion::default();
         c.refresh("SPX.close / ", 12, names(&["SPX.close", "VIX"]));
         assert_eq!(
-            c.pick("SPX.close / ", 1).unwrap(),
+            c.pick("SPX.close / ", 1).unwrap().apply("SPX.close / "),
             ("SPX.close / VIX".to_string(), 15)
         );
         assert_eq!(c.highlighted(), 1);
         assert_eq!(c.pick("SPX.close / VIX", 5), None, "out of range");
     }
 
+    /// A range cached against other text is refused, never sliced: its
+    /// end inside a multi-byte character would panic `accept`.
+    #[test]
+    fn a_range_that_does_not_fit_the_line_writes_nothing() {
+        let mut c = Completion::default();
+        c.refresh("xx A", 4, names(&["ABC"]));
+        assert_eq!(c.pick("xx é", 0), None, "the end falls inside é");
+        let mut c = Completion::default();
+        c.refresh("xx AB", 5, names(&["ABC"]));
+        assert_eq!(c.pick("xx", 0), None, "past the end");
+    }
+
     #[test]
     fn enter_expands_a_unique_inexact_name_only() {
         let all = names(&["SPX.close", "VIX", "VIX@demo_rest"]);
         assert_eq!(
-            expand_unique("SPX.cl / VIX", 6, &all),
+            expand_unique("SPX.cl / VIX", 6, &all).map(|w| w.apply("SPX.cl / VIX")),
             Some(("SPX.close / VIX".to_string(), 9)),
             "one match: written in"
         );
