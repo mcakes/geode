@@ -36,6 +36,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -467,7 +468,10 @@ impl PricerTile {
             (e, None)
         };
 
-        let delegate = SheetDelegate::new(cx.theme(), cx.weak_entity());
+        let mut delegate = SheetDelegate::new(cx.theme(), cx.weak_entity());
+        delegate.line_numbers = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
@@ -512,6 +516,10 @@ impl PricerTile {
             });
         })
         .detach();
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global; the module contract forbids reaching into the shell.
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
+            .detach();
         // `priced_at` cells and the header time follow the app clock.
         cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
             this.clock = app_clock(cx);
@@ -2712,6 +2720,8 @@ impl PricerTile {
         self.table.update(cx, |t, cx| {
             t.delegate_mut().model = model;
             t.delegate_mut().loading = loading;
+            // Before `refresh`, which re-reads the tree column's width.
+            t.delegate_mut().refresh_numbers();
             t.refresh(cx);
         });
         // Resolve the editor by LineId and ColumnKind before cursor synchronization, so
@@ -2844,6 +2854,7 @@ impl PricerTile {
         let col = self.cursor.col;
         self.table.update(cx, |t, cx| {
             t.delegate_mut().cursor = row.map(|r| (r, col));
+            t.delegate_mut().refresh_numbers();
             match row {
                 Some(r) => {
                     t.set_selected_col(col + 1, cx);
@@ -2851,6 +2862,24 @@ impl PricerTile {
                     t.scroll_to_row(r, cx);
                 }
                 None => t.clear_selection(cx),
+            }
+        });
+    }
+
+    /// Mirror the line-number setting and refresh the table on a change:
+    /// the tree column's width includes the gutter, and `TableState`
+    /// caches column widths.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            if d.line_numbers != mode {
+                d.line_numbers = mode;
+                d.refresh_numbers();
+                t.refresh(cx);
+                cx.notify();
             }
         });
     }
@@ -3629,6 +3658,121 @@ pub(crate) mod tests {
             h.cursor(&vcx),
             Some((0, 0)),
             "half a page (5) clamps at the top"
+        );
+    }
+
+    /// `[ui] line_numbers` reaches a live sheet through the shell's
+    /// `UiSettings` global. Off paints no gutter; `on` paints one per
+    /// painted row (an expanded package's legs included) beside the tree
+    /// cell, widening the pinned tree column by exactly the gutter, in one
+    /// lane whatever the row's depth. `rel` re-numbers on a cursor move,
+    /// and the cursor row's own number is the one `NG` jumps to. The
+    /// entry placeholder is blank and shifts no number. Off gives the
+    /// width back.
+    #[gpui::test]
+    fn the_line_numbers_global_paints_a_gutter_beside_the_tree_column(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-gutter-0").is_none(),
+            "no gutter while the setting is off (no global set)"
+        );
+        let bounds = |vcx: &mut VisualTestContext, sel: &'static str| {
+            vcx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} painted"))
+        };
+        let tree = bounds(&mut vcx, "pricer-cell-0-0");
+        let value = bounds(&mut vcx, "pricer-cell-0-1");
+        let set = |vcx: &mut VisualTestContext, mode: LineNumbers| {
+            vcx.update(|_, cx| cx.set_global(UiSettings { line_numbers: mode }));
+            h.draw(vcx);
+        };
+        let texts = |vcx: &mut VisualTestContext| -> Vec<String> {
+            h.tile.read_with(vcx, |t, cx| {
+                let d = t.table.read(cx).delegate();
+                (0..t.model.rows.len())
+                    .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
+                    .collect()
+            })
+        };
+
+        set(&mut vcx, LineNumbers::On);
+        let gutter = bounds(&mut vcx, "pricer-gutter-0");
+        let width = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().gutter_px());
+        assert!(width > 0.0, "sanity: a live gutter has width");
+        let tree_on = bounds(&mut vcx, "pricer-cell-0-0");
+        assert!(
+            (f32::from(bounds(&mut vcx, "pricer-cell-0-1").left() - value.left()) - width).abs()
+                < 0.5,
+            "the tree column widened by the gutter ({width}); the observer must \
+             `refresh` the table, which caches `column()`'s width"
+        );
+        assert!(
+            (tree_on.size.width - tree.size.width).abs() < gpui::px(0.5),
+            "the tree cell keeps its own width"
+        );
+        assert!(
+            gutter.right() <= tree_on.left(),
+            "the gutter sits beside the tree cell: {gutter:?} then {tree_on:?}"
+        );
+        assert_eq!(texts(&mut vcx), ["1", "2", "3"]);
+
+        h.dispatch(&mut vcx, "down", None);
+        h.dispatch(&mut vcx, "toggle", None);
+        h.draw(&mut vcx);
+        assert_eq!(
+            texts(&mut vcx),
+            ["1", "2", "3", "4", "5"],
+            "an open package's legs are numbered rows"
+        );
+        assert!(
+            (bounds(&mut vcx, "pricer-gutter-2").left()
+                - bounds(&mut vcx, "pricer-gutter-0").left())
+            .abs()
+                < gpui::px(0.5),
+            "a leg's number sits in the same lane as a root's; the indent starts after it"
+        );
+
+        set(&mut vcx, LineNumbers::Relative);
+        assert_eq!(
+            texts(&mut vcx),
+            ["1", "2", "1", "2", "3"],
+            "cursor on the package (row 2): its own number, then distances"
+        );
+        h.dispatch(&mut vcx, "down", Some(2));
+        assert_eq!(
+            texts(&mut vcx),
+            ["3", "2", "1", "4", "1"],
+            "a move re-numbers"
+        );
+        h.dispatch(&mut vcx, "bottom", Some(2));
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+        assert_eq!(texts(&mut vcx)[1], "2", "`2G` lands on the row numbered 2");
+
+        h.dispatch(&mut vcx, "add_above", None);
+        h.draw(&mut vcx);
+        let entry = h.tile.read_with(&vcx, |t, _| t.model.entry_row());
+        assert_eq!(entry, Some(1), "the placeholder opens above the package");
+        let t = texts(&mut vcx);
+        assert_eq!(t[1], "", "the placeholder is blank");
+        assert_eq!(t.len(), 6);
+        assert_eq!(
+            t[2], "2",
+            "the package keeps its number with the placeholder above it"
+        );
+
+        set(&mut vcx, LineNumbers::Off);
+        assert!(
+            vcx.debug_bounds("pricer-gutter-0").is_none(),
+            "off again on the next draw"
+        );
+        assert!(
+            (bounds(&mut vcx, "pricer-cell-0-1").left() - value.left()).abs() < gpui::px(0.5),
+            "and the tree column gave the width back"
         );
     }
 

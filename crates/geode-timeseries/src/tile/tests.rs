@@ -15,6 +15,7 @@ use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
+use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
 use geode_shell::series::{FetchSource, SeriesSettings};
 use geode_shell::tiling::TileId;
@@ -27,26 +28,81 @@ use std::sync::mpsc::Receiver;
 
 const TILE: u64 = 7;
 
-/// What the shell root is to a tile, for focus: a `track_focus`ed
-/// ancestor. gpui's `div` answers a mouse-down's BUBBLE phase on such
-/// an element by focusing it unless a listener called
-/// `prevent_default`, so a popup a tile opens from a press and focuses
-/// in the same press loses the keyboard to the root a moment later.
-/// Without this ancestor the harness has nothing to steal focus and
-/// cannot see that loss.
+/// What the shell root is to a tile, for focus and for keys.
+///
+/// Focus: a `track_focus`ed ancestor. gpui's `div` answers a
+/// mouse-down's BUBBLE phase on such an element by focusing it unless a
+/// listener called `prevent_default`, so a popup a tile opens from a
+/// press and focuses in the same press loses the keyboard to the root a
+/// moment later. Without this ancestor the harness has nothing to steal
+/// focus and cannot see that loss.
+///
+/// Keys: the shell's normal-mode route — a keystroke that reaches this
+/// element's listener (the tile's own fields stop theirs first) is
+/// converted, matched against the real keymap (the builtin layer with
+/// this module's fragment spliced in) under the tile's LIVE key context,
+/// and dispatched through the tile's own door. So `simulate_keystrokes`
+/// drives a menu the way a trader's keys do, and a key that reaches no
+/// binding (a removed one, say) reaches nothing. Only while the tile is
+/// in `normal` mode: in `insert` the shell resolves a bare key against
+/// the insert layer alone, and those four keys are the fields' own.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<TimeseriesTile>,
+    keymap: Rc<Keymap>,
+    matcher: Matcher,
 }
 
 impl gpui::Render for ShellStandIn {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
         gpui::div()
             .size_full()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let context = this.tile.read(cx).key_context();
+                if context.get("mode") != Some("normal") {
+                    return;
+                }
+                let Some(keystroke) = geode_shell::shell::keys::convert_keystroke(&event.keystroke)
+                else {
+                    return;
+                };
+                let stack = [
+                    KeyContext::new("workspace"),
+                    KeyContext::new("tile"),
+                    context,
+                ];
+                if let MatchResult::Matched { action, count } =
+                    this.matcher.press(&this.keymap, keystroke, &stack)
+                {
+                    this.tile
+                        .update(cx, |t, cx| t.dispatch(&action, count, window, cx));
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.tile.clone())
     }
+}
+
+/// The keymap the running app resolves this tile's keys through: the
+/// builtin layer with this module's fragment spliced in, over the
+/// builtin actions and this module's own.
+fn app_keymap(factory: &Rc<TimeseriesFactory>) -> Keymap {
+    let mut roster = ModuleRoster::new();
+    roster.add(Box::new(Handle(factory.clone())));
+    let (fragments, diags) = roster.keymap_fragments();
+    assert!(diags.is_empty(), "{diags:?}");
+    let builtin =
+        geode_core::config::LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP)
+            .expect("the builtin keymap parses");
+    let docs = geode_shell::keymap::fragments::splice(&[builtin], &fragments);
+    let mut registry = ActionRegistry::default();
+    geode_shell::defaults::register_builtin_actions(&mut registry);
+    factory.register_actions(&mut registry);
+    let (keymap, diags) = build_keymap(&docs, geode_shell::defaults::default_mod(), &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    keymap
 }
 
 /// What the window closure hands back: it can return only one value,
@@ -57,6 +113,7 @@ struct Built {
     tile: Entity<TimeseriesTile>,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
+    shell_focus: gpui::FocusHandle,
 }
 
 struct Harness {
@@ -67,6 +124,9 @@ struct Harness {
     content: Box<dyn TileContent>,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
+    /// The stand-in shell root's handle: focused at open, as the shell
+    /// root is while a tile is focused.
+    shell_focus: gpui::FocusHandle,
     factory: Rc<TimeseriesFactory>,
     /// Every `Request` the tile submitted, in order. Held for the
     /// whole harness's life: dropping the receiver closes the
@@ -246,7 +306,7 @@ fn open_full(
     cx.update(gpui_component::init);
     // The module's own key reclaim, exactly as `main.rs` will call
     // it: without it `Root`'s window-wide `tab` binding eats the
-    // range popup's field switch before any listener runs.
+    // dates editor's field switch before any listener runs.
     cx.update(crate::init);
     let default_source = default_source.map(str::to_string);
     cx.update(move |cx| {
@@ -257,11 +317,13 @@ fn open_full(
     });
     let (data, rx) = DataHandle::for_tests();
     let factory = Rc::new(TimeseriesFactory::new(data, named_colours(0.0)));
+    let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
         .update(|cx| {
             let slot = slot.clone();
             let factory = factory.clone();
+            let keymap = keymap.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
@@ -275,11 +337,13 @@ fn open_full(
                     cx,
                 );
                 let tile = occupant.view.clone().downcast::<TimeseriesTile>().unwrap();
+                let shell_focus = cx.focus_handle();
                 *slot.borrow_mut() = Some(Built {
                     content: occupant.content,
                     tile: tile.clone(),
                     frame,
                     diagnostics,
+                    shell_focus: shell_focus.clone(),
                 });
                 // Wrapped in `Root`, exactly as `main.rs` wraps the
                 // shell: gpui-component registers the focused
@@ -288,9 +352,11 @@ fn open_full(
                 // here as it does in the app. The tile sits under a
                 // focus-tracking stand-in for the shell root, which
                 // takes focus on any press nothing prevented.
-                let host = cx.new(|cx| ShellStandIn {
-                    focus: cx.focus_handle(),
+                let host = cx.new(|_| ShellStandIn {
+                    focus: shell_focus,
                     tile,
+                    keymap,
+                    matcher: Matcher::default(),
                 });
                 cx.new(|cx| gpui_component::Root::new(host, window, cx))
             })
@@ -300,6 +366,7 @@ fn open_full(
     let built = slot.borrow_mut().take().expect("the factory built one");
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
+        built.shell_focus.focus(window, cx);
     });
     (
         Harness {
@@ -307,6 +374,7 @@ fn open_full(
             content: built.content,
             frame: built.frame,
             diagnostics: built.diagnostics,
+            shell_focus: built.shell_focus,
             factory,
             rx: RefCell::new(Some(rx)),
         },
@@ -438,13 +506,13 @@ impl Harness {
         vcx.update(|_, cx| self.content.title(cx))
     }
     /// What the header PAINTS, read off the prepared model rather
-    /// than the pixels: `range · freq`, then every chip's label and
+    /// than the pixels: the two triggers' text, then every chip's label and
     /// axis letter, plus the empty hint while the tile holds no
     /// slot. Painted pixels stay the display check's.
     fn painted_text(&self, vcx: &mut gpui::VisualTestContext) -> String {
         self.tile.read_with(vcx, |t, _| {
             let h = t.header();
-            let mut parts = vec![h.range_freq.to_string()];
+            let mut parts = vec![h.range_label.to_string(), h.freq_label.to_string()];
             for chip in &h.chips {
                 parts.push(chip.label.to_string());
                 parts.push(chip.axis.to_string());
@@ -545,7 +613,7 @@ impl Harness {
         self.tile
             .read_with(vcx, |t, _| matches!(t.popup(), Some(Popup::Range(_))))
     }
-    /// Where the range popup's keyboard is: which field, and which
+    /// Where the dates editor's keyboard is: which field, and which
     /// of that field's segments — the popup's own "painted text",
     /// read off the state the painter takes.
     fn range_active_segment(&self, vcx: &gpui::VisualTestContext) -> (Which, Segment) {
@@ -554,9 +622,9 @@ impl Harness {
                 Some(Popup::Range(r)) => Some((r.active, r.active_field().segment())),
                 _ => None,
             })
-            .expect("the range popup is open")
+            .expect("the dates editor is open")
     }
-    /// The two dates the range popup's fields hold right now —
+    /// The two dates the dates editor's fields hold right now —
     /// committed values, so a segment mid-entry is not in them.
     fn range_dates(&self, vcx: &gpui::VisualTestContext) -> (chrono::NaiveDate, chrono::NaiveDate) {
         self.tile
@@ -564,21 +632,9 @@ impl Harness {
                 Some(Popup::Range(r)) => Some((r.from.date(), r.to.date())),
                 _ => None,
             })
-            .expect("the range popup is open")
+            .expect("the dates editor is open")
     }
-    /// The range popup's chips a pending typed label still lights, in
-    /// chip order — empty when no label is pending.
-    fn range_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<&'static str> {
-        self.tile.read_with(vcx, |t, _| match t.popup() {
-            Some(Popup::Range(r)) => Preset::ALL
-                .into_iter()
-                .filter(|p| r.candidate(*p))
-                .map(Preset::as_str)
-                .collect(),
-            _ => Vec::new(),
-        })
-    }
-    /// The range popup's inline refusal — a backwards range, an
+    /// The dates editor's inline refusal — a backwards range, an
     /// unfinished segment or the point cap.
     fn range_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
@@ -633,6 +689,52 @@ impl Harness {
         let at = centre_of(vcx, selector);
         click_at(vcx, at, 1);
         self.draw(vcx);
+    }
+    /// Real keystrokes, into whatever holds the keyboard: a focused
+    /// field's own listener, else the stand-in shell's keymap route.
+    /// With NOTHING focused — a field just closed through the one
+    /// closer, which blurs — the stand-in's handle takes focus first,
+    /// as the shell's own net does on its next render (a window with
+    /// nothing focused sends keys nowhere).
+    fn keys(&self, vcx: &mut gpui::VisualTestContext, keys: &str) {
+        vcx.update(|window, cx| {
+            if window.focused(cx).is_none() {
+                self.shell_focus.focus(window, cx);
+            }
+        });
+        vcx.simulate_keystrokes(keys);
+        self.draw(vcx);
+    }
+    /// Which menu is open, if one is.
+    fn menu_kind(&self, vcx: &gpui::VisualTestContext) -> Option<MenuKind> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => Some(m.kind),
+            _ => None,
+        })
+    }
+    /// The open menu's ticked row's title — the value in force.
+    fn menu_ticked(&self, vcx: &gpui::VisualTestContext) -> String {
+        self.tile
+            .read_with(vcx, |t, _| match t.popup() {
+                Some(Popup::Menu(m)) => m.rows.iter().find_map(|r| match r {
+                    menu::MenuRow::Action {
+                        title,
+                        checked: Some(true),
+                        ..
+                    } => Some(title.to_string()),
+                    _ => None,
+                }),
+                _ => None,
+            })
+            .expect("a menu row is ticked")
+    }
+    /// The open menu's highlighted row's title.
+    fn menu_lit(&self, vcx: &gpui::VisualTestContext) -> String {
+        self.menu_rows(vcx)
+            .into_iter()
+            .find(|(_, lit)| *lit)
+            .map(|(title, _)| title)
+            .expect("a menu row is lit")
     }
 }
 
@@ -809,9 +911,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     assert_eq!(h.model(&vcx).density(), None);
     h.dispatch(&mut vcx, "percentiles", None);
     assert!(h.model(&vcx).percentiles().is_empty());
-    h.dispatch(&mut vcx, "freq_coarser", None);
-    assert_eq!(h.model(&vcx).frequency(), Frequency::W1);
-    h.dispatch(&mut vcx, "freq_finer", Some(2));
+    h.command(&mut vcx, "freq 1h").unwrap();
     assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
     assert_eq!(
         h.title(&mut vcx).as_ref(),
@@ -825,21 +925,6 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     );
     h.dispatch(&mut vcx, "remove", None);
     assert_eq!(h.model(&vcx).slots().len(), 1);
-}
-
-#[gpui::test]
-fn a_capped_frequency_step_is_refused_with_the_cap_message(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "freq 1h").unwrap();
-    h.dispatch(&mut vcx, "freq_finer", Some(3));
-    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
-    assert!(h.notice(&vcx).unwrap().starts_with("1m over 1y is"));
-    assert!(
-        h.command(&mut vcx, "freq 1m")
-            .unwrap_err()
-            .contains("the cap is 500,000")
-    );
 }
 
 #[gpui::test]
@@ -1817,79 +1902,181 @@ fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::Test
     );
 }
 
-// Range-popup tests.
+// Range-menu, dates-editor and frequency-menu tests.
 
 #[gpui::test]
-fn r_opens_the_range_popup_on_from_day_and_a_typed_label_commits_a_preset(
+fn r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.visible(&mut vcx, true);
     h.requests();
-    h.dispatch(&mut vcx, "range", None);
-    assert_eq!(h.key_context_mode(&mut vcx), "insert");
-    assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
-    // The popup has to be PAINTED before a keystroke can reach its
-    // own listener: gpui dispatches against the LAST frame's focus
-    // path (the picker tests' own rule).
-    h.draw(&mut vcx);
-    // The label typed as the chip reads: `3` waits for its unit.
-    vcx.simulate_keystrokes("3");
-    assert!(h.popup_is_range(&vcx), "a digit alone waits");
-    vcx.simulate_keystrokes("m");
-    assert!(h.popup_is_none(&vcx));
+    h.keys(&mut vcx, "r");
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
+    assert_eq!(
+        h.key_context_mode(&mut vcx),
+        "normal",
+        "a menu holds no field"
+    );
+    assert_eq!(
+        h.key_context_pair(&mut vcx, "menu").as_deref(),
+        Some("range")
+    );
+    assert_eq!(
+        h.menu_lit(&vcx),
+        "1 year",
+        "the highlight starts on the range in force"
+    );
+    assert_eq!(h.menu_ticked(&vcx), "1 year");
+    // A `:` line under the open menu moves the tick with the range.
+    h.command(&mut vcx, "range 6m").unwrap();
+    assert_eq!(h.menu_ticked(&vcx), "6 months");
+    h.command(&mut vcx, "range 1y").unwrap();
+    // Digits do nothing here: a count prefix waits for a verb.
+    h.keys(&mut vcx, "k k enter");
+    assert!(h.popup_is_none(&vcx), "a pick applies and closes");
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
     assert!(
         h.requests().iter().any(|r| matches!(r, Request::Fetch(_))),
-        "a committed range fetches"
+        "a picked range fetches"
     );
+    assert!(
+        h.painted_text(&mut vcx).starts_with("3m 1d"),
+        "the trigger reads it"
+    );
+    // `r` toggles its own menu; `escape` closes it too.
+    h.keys(&mut vcx, "r");
+    assert_eq!(h.menu_lit(&vcx), "3 months");
+    h.keys(&mut vcx, "r");
+    assert!(h.popup_is_none(&vcx), "a second `r` closes");
+    h.keys(&mut vcx, "r escape");
+    assert!(h.popup_is_none(&vcx));
+}
+
+/// The range trigger's click is the mouse door onto the same menu, and
+/// the menu answers the KEYS typed after the click — the press must
+/// leave the keyboard with the tile.
+#[gpui::test]
+fn a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
+    let selector: &'static str = Box::leak(format!("ts-menu-range-{TILE}").into_boxed_str());
+    assert!(vcx.debug_bounds(selector).is_some(), "painted");
+    h.keys(&mut vcx, "j enter");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y2));
+    // A second click on the trigger closes rather than reopening.
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert!(h.popup_is_none(&vcx), "the trigger toggles");
+    // A row click applies at once.
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    let row = h.menu_row_index(&vcx, "6 months");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M6));
+}
+
+/// `c` in the range menu opens the dates editor on `from`'s day, and a
+/// digit is the date's at once — there is no preset mode to leave.
+#[gpui::test]
+fn c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once(
+    cx: &mut gpui::TestAppContext,
+) {
+    use chrono::Datelike as _;
+    let (h, mut vcx) = open(cx);
+    h.keys(&mut vcx, "r c");
+    assert!(h.popup_is_range(&vcx));
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    assert!(vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
+    h.keys(&mut vcx, "1 5");
+    assert_eq!(h.range_dates(&vcx).0.day(), 15, "typed into from's day");
+    h.keys(&mut vcx, "enter");
+    assert!(h.popup_is_none(&vcx));
+    assert!(matches!(h.model(&vcx).range(), Range::Absolute { from, .. } if from.day() == 15));
+    assert!(
+        h.painted_text(&mut vcx).contains(" – "),
+        "the trigger reads the two dates"
+    );
+}
+
+/// The `Custom dates…` row's click opens the editor, and the digits
+/// typed after the click reach it — the row's press must not hand the
+/// keyboard to the shell root under it.
+#[gpui::test]
+fn a_custom_dates_click_opens_the_editor_for_the_digits_after_it(cx: &mut gpui::TestAppContext) {
+    use chrono::Datelike as _;
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    let row = h.menu_row_index(&vcx, "Custom dates…");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
+    assert!(h.popup_is_range(&vcx));
+    h.keys(&mut vcx, "2 7");
+    assert_eq!(h.range_dates(&vcx).0.day(), 27);
+    // The trigger closes the editor it owns.
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert!(h.popup_is_none(&vcx));
 }
 
 #[gpui::test]
 fn tab_moves_between_the_fields_and_enter_commits_an_absolute_range(cx: &mut gpui::TestAppContext) {
     use chrono::Datelike as _;
     let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
+    h.keys(&mut vcx, "r c");
     // `from` opens on today minus the current preset; type a year.
-    vcx.simulate_keystrokes("left left"); // year segment
+    h.keys(&mut vcx, "left left"); // year segment
     assert_eq!(h.range_active_segment(&vcx).1, Segment::Year);
-    vcx.simulate_keystrokes("2 0 2 6");
-    vcx.simulate_keystrokes("tab");
+    h.keys(&mut vcx, "2 0 2 6");
+    h.keys(&mut vcx, "tab");
     assert_eq!(h.range_active_segment(&vcx).0, Which::To);
-    vcx.simulate_keystrokes("shift-tab");
+    h.keys(&mut vcx, "shift-tab");
     assert_eq!(h.range_active_segment(&vcx).0, Which::From);
-    vcx.simulate_keystrokes("enter");
+    h.keys(&mut vcx, "enter");
     assert!(h.popup_is_none(&vcx));
     assert!(matches!(h.model(&vcx).range(), Range::Absolute { from, .. } if from.year() == 2026));
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("escape");
-    assert!(h.popup_is_none(&vcx));
-    assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    // An absolute range opens the range menu on `Custom dates…`.
+    h.keys(&mut vcx, "r");
+    assert_eq!(h.menu_lit(&vcx), "Custom dates…");
 }
 
+/// `escape` in the editor goes back to the range menu, highlight on
+/// `Custom dates…`, with the editor's handle blurred on the way out; a
+/// second `escape` closes the menu. Both doors: the editor's own
+/// listener and the insert layer's `cancel`.
 #[gpui::test]
-fn a_preset_click_commits_at_once_and_a_backwards_range_is_refused_inline(
+fn escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
-    // Not the default preset: a click that did nothing at all would
-    // otherwise leave `1y` standing and pass.
-    h.command(&mut vcx, "range 3m").unwrap();
-    h.dispatch(&mut vcx, "range", None);
-    h.click(&mut vcx, &format!("ts-range-preset-{TILE}-1y"));
-    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
-    assert!(h.popup_is_none(&vcx), "a preset click commits and closes");
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
+    let before = h.model(&vcx).range().clone();
+    h.keys(&mut vcx, "r c");
+    h.keys(&mut vcx, "escape");
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
+    assert_eq!(h.menu_lit(&vcx), "Custom dates…");
+    assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
+    assert_eq!(h.key_context_mode(&mut vcx), "normal");
+    h.keys(&mut vcx, "escape");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).range(), &before, "nothing was written");
+    // The insert layer's door lands in the same place.
+    h.keys(&mut vcx, "r c");
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
+    assert_eq!(h.menu_lit(&vcx), "Custom dates…");
+}
+
+#[gpui::test]
+fn a_backwards_range_is_refused_inline(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.keys(&mut vcx, "r c");
     // Move `to` before `from` and commit.
-    vcx.simulate_keystrokes("tab");
-    vcx.simulate_keystrokes("left left");
-    vcx.simulate_keystrokes("1 9 9 0");
-    vcx.simulate_keystrokes("enter");
+    h.keys(&mut vcx, "tab left left 1 9 9 0 enter");
     assert!(h.popup_is_range(&vcx), "refused: still open");
     assert!(h.range_error(&vcx).unwrap().contains("before"));
     assert_eq!(
@@ -1900,159 +2087,28 @@ fn a_preset_click_commits_at_once_and_a_backwards_range_is_refused_inline(
 }
 
 /// `enter` over a segment still mid-entry that cannot stand alone:
-/// refused inline, naming the field and the segment, with the popup
+/// refused inline, naming the field and the segment, with the editor
 /// still open on the date that caused it.
 #[gpui::test]
-fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
+fn an_unfinished_segment_is_refused_inline_and_r_goes_to_the_range_menu(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    // Off the day and back makes the popup edited, so `0` types — and
-    // a day of `0` waits for a second digit it never gets.
-    vcx.simulate_keystrokes("left right 0");
+    h.keys(&mut vcx, "r c");
+    // A day of `0` waits for a second digit it never gets.
+    h.keys(&mut vcx, "0");
     assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
-    vcx.simulate_keystrokes("enter");
+    h.keys(&mut vcx, "enter");
     assert!(h.popup_is_range(&vcx), "refused: still open");
     let error = h.range_error(&vcx).expect("named");
     assert!(error.contains("day") && error.contains("from"), "{error}");
     // A keystroke answers a refusal about a date that has moved on.
-    vcx.simulate_keystrokes("backspace");
+    h.keys(&mut vcx, "backspace");
     assert_eq!(h.range_error(&vcx), None);
-    // Repeating range dispatch reopens a fresh draft; Escape closes it.
-    vcx.simulate_keystrokes("left");
-    assert_eq!(h.range_active_segment(&vcx).1, Segment::Month);
+    // `r` over the open editor (the palette's path — the editor holds
+    // the keyboard) closes it and opens the range menu.
     h.dispatch(&mut vcx, "range", None);
-    assert_eq!(
-        h.range_active_segment(&vcx),
-        (Which::From, Segment::Day),
-        "reopened on the day of a fresh seed"
-    );
-}
-
-/// Typed presets remain enabled after ineffective movement and field
-/// switching. Neither Right at the last segment nor Tab edits a date.
-#[gpui::test]
-fn a_key_that_moves_nothing_leaves_the_typed_presets_live(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("right");
-    assert_eq!(
-        h.range_active_segment(&vcx),
-        (Which::From, Segment::Day),
-        "`right` on the last segment moves nothing"
-    );
-    vcx.simulate_keystrokes("3 m");
-    assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M3));
-
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("tab");
-    assert_eq!(h.range_active_segment(&vcx).0, Which::To);
-    vcx.simulate_keystrokes("6 m");
-    assert!(h.popup_is_none(&vcx), "`tab` is not an edit either");
-    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::M6));
-}
-
-/// A preset is typed as its chip reads: the digit lights the chips it
-/// could start and waits, and the unit completes the label.
-#[gpui::test]
-fn a_digit_lights_its_presets_and_the_unit_commits_the_label(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    assert!(
-        h.range_candidates(&vcx).is_empty(),
-        "nothing typed, nothing lit"
-    );
-    vcx.simulate_keystrokes("1");
-    assert_eq!(h.range_candidates(&vcx), vec!["1w", "1m", "1y"]);
-    assert!(h.popup_is_range(&vcx));
-    // A second digit replaces the first.
-    vcx.simulate_keystrokes("5");
-    assert_eq!(h.range_candidates(&vcx), vec!["5y"]);
-    // A shifted unit completes it too.
-    vcx.simulate_keystrokes("1 shift-y");
-    assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
-}
-
-/// What a typed label refuses, inline and with the popup still open:
-/// a digit no label starts, a unit that makes no label (the digit
-/// stays), and `enter` before the unit.
-#[gpui::test]
-fn a_typed_label_refuses_what_is_no_preset(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("4");
-    assert!(h.popup_is_range(&vcx));
-    assert!(h.range_candidates(&vcx).is_empty());
-    let error = h.range_error(&vcx).expect("refused");
-    assert!(error.contains("no preset starts with 4"), "{error}");
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
-
-    vcx.simulate_keystrokes("2 m");
-    let error = h.range_error(&vcx).expect("refused");
-    assert!(
-        error.contains("no preset 2m") && error.contains("2y"),
-        "{error}"
-    );
-    assert_eq!(h.range_candidates(&vcx), vec!["2y"], "the digit stays");
-
-    vcx.simulate_keystrokes("enter");
-    assert!(
-        h.popup_is_range(&vcx),
-        "enter commits no dates under a label"
-    );
-    let error = h.range_error(&vcx).expect("refused");
-    assert!(error.contains("finish the preset"), "{error}");
-    vcx.simulate_keystrokes("y");
-    assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y2));
-}
-
-/// Backspace and Escape clear a pending label without closing; a second
-/// Escape closes. Field keys clear the label and route normally; an effective
-/// field change or segment click makes later digits edit the date.
-#[gpui::test]
-fn a_pending_label_is_dropped_by_backspace_escape_and_field_keys(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open(cx);
-    let before = h.model(&vcx).range().clone();
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("1 backspace");
-    assert!(h.range_candidates(&vcx).is_empty());
-    assert!(h.popup_is_range(&vcx));
-    vcx.simulate_keystrokes("1 escape");
-    assert!(h.range_candidates(&vcx).is_empty());
-    assert!(h.popup_is_range(&vcx), "the first escape drops the label");
-    vcx.simulate_keystrokes("escape");
-    assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).range(), &before);
-
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("1 left");
-    assert!(h.range_candidates(&vcx).is_empty());
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
-    vcx.simulate_keystrokes("1");
-    assert!(
-        h.range_candidates(&vcx).is_empty(),
-        "edited: a digit is the date's"
-    );
-    assert!(h.popup_is_range(&vcx));
-
-    // A click on a segment is the mouse's field key: it drops the label.
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("1");
-    assert_eq!(h.range_candidates(&vcx).len(), 3, "fixture check: pending");
-    h.click(&mut vcx, &format!("ts-range-from-{TILE}-0"));
-    assert!(h.range_candidates(&vcx).is_empty());
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Year));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Range));
 }
 
 /// `tab` answers a standing refusal, exactly as every other field key
@@ -2061,12 +2117,10 @@ fn a_pending_label_is_dropped_by_backspace_escape_and_field_keys(cx: &mut gpui::
 #[gpui::test]
 fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
-    h.draw(&mut vcx);
-    vcx.simulate_keystrokes("left right 0"); // edited; a day mid-entry
-    vcx.simulate_keystrokes("enter");
+    h.keys(&mut vcx, "r c");
+    h.keys(&mut vcx, "0 enter"); // a day mid-entry
     assert!(h.range_error(&vcx).is_some(), "fixture check: refused");
-    vcx.simulate_keystrokes("tab");
+    h.keys(&mut vcx, "tab");
     assert_eq!(h.range_error(&vcx), None);
 }
 
@@ -2076,7 +2130,7 @@ fn tab_clears_the_inline_error(cx: &mut gpui::TestAppContext) {
 fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "range 2026-01-05 2026-02-05").unwrap();
-    h.dispatch(&mut vcx, "range", None);
+    h.dispatch(&mut vcx, "range_custom", None);
     let (from, to) = h.range_dates(&vcx);
     assert_eq!(
         (from.to_string(), to.to_string()),
@@ -2092,7 +2146,7 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
         ));
         cx.notify();
     });
-    h.dispatch(&mut vcx, "range", None);
+    h.dispatch(&mut vcx, "range_custom", None);
     let (from, to) = h.range_dates(&vcx);
     assert_eq!(
         (from.to_string(), to.to_string()),
@@ -2108,7 +2162,7 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
 #[gpui::test]
 fn an_arrow_steps_the_active_segment_through_either_door(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
-    h.dispatch(&mut vcx, "range", None);
+    h.dispatch(&mut vcx, "range_custom", None);
     h.draw(&mut vcx);
     let (from, to) = h.range_dates(&vcx);
     h.dispatch(&mut vcx, "insert_up", None);
@@ -2122,6 +2176,135 @@ fn an_arrow_steps_the_active_segment_through_either_door(cx: &mut gpui::TestAppC
         h.range_dates(&vcx),
         (from - chrono::Duration::days(1), to),
         "and the listener's down steps it the same way"
+    );
+}
+
+// ---- the frequency menu ------------------------------------------
+
+/// `f` opens the frequency menu on the frequency in force. A frequency
+/// the point cap refuses over the range is a disabled row carrying the
+/// cap's reason: `j`/`k` step over it, and `enter` with the pointer
+/// resting on it leaves the reason as the notice, the frequency and
+/// the menu unchanged.
+#[gpui::test]
+fn f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.keys(&mut vcx, "f");
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    assert_eq!(h.menu_lit(&vcx), "1 day");
+    // A year of minutes is over the cap: `k` stops at 5 minutes.
+    h.keys(&mut vcx, "k k k k k k");
+    assert_eq!(
+        h.menu_lit(&vcx),
+        "5 minutes",
+        "the capped row is stepped over"
+    );
+    let capped = h.menu_row_index(&vcx, "1 minute");
+    let at = centre_of(&mut vcx, &format!("ts-menu-row-{TILE}-{capped}"));
+    vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(h.menu_lit(&vcx), "1 minute", "the pointer rests on it");
+    h.keys(&mut vcx, "enter");
+    assert_eq!(h.model(&vcx).frequency(), Frequency::D1, "nothing written");
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Frequency),
+        "the menu stays"
+    );
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| match t.popup() {
+                Some(Popup::Menu(m)) => match m.rows[capped].trailing() {
+                    Some(menu::Trailing::Text(text)) => Some(text.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .as_deref(),
+        Some("over cap"),
+        "the row itself stays short"
+    );
+    let notice = h.notice(&vcx).expect("the full reason is the notice");
+    assert!(
+        notice.starts_with("1m over 1y is") && notice.contains("the cap is 500,000"),
+        "{notice}"
+    );
+    // An enabled row applies and closes.
+    h.keys(&mut vcx, "j j j enter");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
+    assert!(
+        h.painted_text(&mut vcx).starts_with("1y 1h"),
+        "the trigger reads it"
+    );
+    // `:freq` refuses on the same cap.
+    assert!(
+        h.command(&mut vcx, "freq 1m")
+            .unwrap_err()
+            .contains("the cap is 500,000")
+    );
+}
+
+#[gpui::test]
+fn the_frequency_trigger_toggles_its_menu(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    let selector: &'static str = Box::leak(format!("ts-menu-frequency-{TILE}").into_boxed_str());
+    assert!(vcx.debug_bounds(selector).is_some(), "painted");
+    h.keys(&mut vcx, "j enter");
+    assert_eq!(h.model(&vcx).frequency(), Frequency::W1);
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    assert_eq!(
+        h.menu_ticked(&vcx),
+        "1 week",
+        "ticked on the frequency in force"
+    );
+    assert_eq!(h.menu_lit(&vcx), "1 week");
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert!(h.popup_is_none(&vcx), "a second click closes");
+    // Over the range menu, the frequency trigger swaps menus — the
+    // range menu's outside-press must not close the one swapped in —
+    // and so does the `⋯` button.
+    h.keys(&mut vcx, "r");
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Actions));
+    // A press outside every popup still closes the one that is up.
+    h.keys(&mut vcx, "escape r");
+    let at = centre_of(&mut vcx, &format!("timeseries-header-{TILE}"));
+    click_at(&mut vcx, at, 1); // the header's empty middle
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx));
+}
+
+/// `F` used to step the frequency coarser; it is unbound now, and `f`
+/// opens the menu rather than stepping.
+#[gpui::test]
+fn shift_f_does_nothing_and_f_no_longer_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.keys(&mut vcx, "shift-f");
+    assert_eq!(h.model(&vcx).frequency(), Frequency::D1);
+    assert!(h.popup_is_none(&vcx));
+    h.keys(&mut vcx, "f");
+    assert_eq!(
+        h.model(&vcx).frequency(),
+        Frequency::D1,
+        "`f` opens, never steps"
+    );
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    let registered = ACTIONS
+        .iter()
+        .any(|(id, _)| *id == "timeseries::freq_coarser" || *id == "timeseries::freq_finer");
+    assert!(
+        !registered,
+        "the step actions are gone from the palette too"
     );
 }
 
@@ -2143,24 +2326,34 @@ fn every_closer_blurs_before_dropping_the_focused_handle(cx: &mut gpui::TestAppC
         vcx.update(|w, cx| w.focused(cx).is_none()),
         "expression field: blurred, then dropped"
     );
-    // The range popup holds a bare handle rather than an
+    // The dates editor holds a bare handle rather than an
     // `InputState`, and the rule is the same: an unblurred dead
     // handle leaves `Window::focused` pointing at nothing and the
-    // shell's own focus-return net never fires (CLAUDE.md).
-    h.dispatch(&mut vcx, "range", None);
+    // shell's own focus-return net never fires (CLAUDE.md). Its
+    // `escape` goes back to the range menu, through the closer.
+    h.dispatch(&mut vcx, "range_custom", None);
     assert!(vcx.update(|w, cx| w.focused(cx).is_some()));
     h.dispatch(&mut vcx, "cancel", None);
     assert!(
         vcx.update(|w, cx| w.focused(cx).is_none()),
-        "range popup: blurred, then dropped"
+        "dates editor: blurred, then dropped"
     );
     // …and through the listener's own `escape`, the other door.
-    h.dispatch(&mut vcx, "range", None);
+    h.dispatch(&mut vcx, "range_custom", None);
     h.draw(&mut vcx);
     vcx.simulate_keystrokes("escape");
     assert!(
         vcx.update(|w, cx| w.focused(cx).is_none()),
-        "range popup: the listener's escape takes the same closer"
+        "dates editor: the listener's escape takes the same closer"
+    );
+    // A pick that writes closes the editor through the same closer.
+    h.dispatch(&mut vcx, "range_custom", None);
+    h.draw(&mut vcx);
+    vcx.simulate_keystrokes("enter");
+    assert!(h.popup_is_none(&vcx));
+    assert!(
+        vcx.update(|w, cx| w.focused(cx).is_none()),
+        "dates editor: a commit blurs before dropping"
     );
 }
 
@@ -2472,8 +2665,32 @@ fn the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains(
     h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
     let range = h.menu_row_index(&vcx, "Range…");
     h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{range}"));
-    assert!(h.popup_is_range(&vcx), "the row opened the range popup");
-    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Range),
+        "the row opened the range menu"
+    );
+    assert_eq!(h.menu_lit(&vcx), "1 year");
+}
+
+/// The action list's `Frequency…` row opens the frequency menu — by
+/// key and by click.
+#[gpui::test]
+fn the_action_list_frequency_row_opens_the_frequency_menu(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.keys(&mut vcx, ".");
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Actions));
+    while h.menu_lit(&vcx) != "Frequency…" {
+        h.keys(&mut vcx, "j");
+    }
+    h.keys(&mut vcx, "enter");
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
+    assert_eq!(h.menu_lit(&vcx), "1 day");
+    h.keys(&mut vcx, "escape");
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    let row = h.menu_row_index(&vcx, "Frequency…");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Frequency));
 }
 
 #[gpui::test]
@@ -2537,9 +2754,7 @@ fn a_right_click_on_a_chip_selects_it_and_opens_the_menu_on_it(cx: &mut gpui::Te
 }
 
 #[gpui::test]
-fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
-    cx: &mut gpui::TestAppContext,
-) {
+fn a_swatch_click_toggles_visibility(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
@@ -2553,22 +2768,43 @@ fn a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup(
     );
     h.click(&mut vcx, &format!("timeseries-swatch-{TILE}-1"));
     assert!(h.model(&vcx).slots()[0].visible, "shown again");
+}
+
+/// The trigger that owns the open popup paints its open state; the
+/// press on a trigger over the open dates editor closes it rather than
+/// reseeding over typed dates.
+#[gpui::test]
+fn a_trigger_is_open_while_its_popup_is_up(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let open_state = |h: &Harness, vcx: &mut gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            let open = t.triggers_open();
+            (open.range, open.frequency)
+        })
+    };
+    h.keys(&mut vcx, "r");
+    assert_eq!(open_state(&h, &mut vcx), (true, false));
+    h.keys(&mut vcx, "c");
+    h.keys(&mut vcx, "3");
+    assert_eq!(
+        open_state(&h, &mut vcx),
+        (true, false),
+        "the editor is the range's"
+    );
     h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
-    assert!(h.popup_is_range(&vcx));
-    // The press that opened the popup must not hand its focus to the
-    // root: `left`/`right` reach the fields only through the popup's
-    // own focused listener (`up`/`down` have a keymap route too, so
-    // they cannot tell).
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Day));
-    vcx.simulate_keystrokes("left");
-    assert_eq!(h.range_active_segment(&vcx), (Which::From, Segment::Month));
-    // A second click closes rather than reseeding over typed dates
-    // (a digit typed into the month — a bare digit on an unedited
-    // popup would be a preset and commit).
-    vcx.simulate_keystrokes("3");
-    assert!(h.popup_is_range(&vcx));
-    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
-    assert!(h.popup_is_none(&vcx), "the readout toggles");
+    assert!(
+        h.popup_is_none(&vcx),
+        "the trigger closes the editor it owns"
+    );
+    h.keys(&mut vcx, "f");
+    assert_eq!(open_state(&h, &mut vcx), (false, true));
+    h.keys(&mut vcx, "escape .");
+    assert_eq!(
+        open_state(&h, &mut vcx),
+        (false, false),
+        "the action list is `⋯`'s"
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.triggers_open().actions));
 }
 
 #[gpui::test]
@@ -2596,29 +2832,6 @@ fn an_outside_click_closes_the_menu_and_the_menu_follows_the_cursor_slot(
     h.draw(&mut vcx);
     assert!(h.popup_is_none(&vcx), "an outside click closes the menu");
     assert_eq!(h.drag(&vcx), None);
-}
-
-#[gpui::test]
-fn a_frequency_chip_writes_at_once_keeps_the_popup_open_and_refuses_inline(
-    cx: &mut gpui::TestAppContext,
-) {
-    let (h, mut vcx) = open(cx);
-    h.command(&mut vcx, "add SPX.close").unwrap();
-    h.dispatch(&mut vcx, "range", None);
-    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1h"));
-    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
-    assert!(h.popup_is_range(&vcx), "a setting, not a commit");
-    assert!(h.painted_text(&mut vcx).contains("1y · 1h"));
-    // A year of minutes is over the point cap: refused inline, the
-    // frequency untouched.
-    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1m"));
-    assert_eq!(h.model(&vcx).frequency(), Frequency::H1);
-    assert!(h.range_error(&vcx).is_some(), "the cap refusal is inline");
-    assert!(h.popup_is_range(&vcx));
-    // A good chip clears it.
-    h.click(&mut vcx, &format!("ts-range-freq-{TILE}-1d"));
-    assert_eq!(h.range_error(&vcx), None);
-    assert_eq!(h.model(&vcx).frequency(), Frequency::D1);
 }
 
 #[gpui::test]
@@ -2962,4 +3175,77 @@ fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
     assert!(!h.dispatch_handled(&mut vcx, "pick_colour", None));
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
+}
+
+// ---- outside presses and stale cap reasons -----------------------
+
+/// Every popup's outside press closes only the popup it was painted
+/// for: a trigger's (or `⋯`'s) capture-phase press has already swapped
+/// its menu in by the time the old popup's `on_mouse_down_out` runs.
+#[gpui::test]
+fn a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.dispatch(&mut vcx, "list", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-range-{TILE}"));
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Range),
+        "list → range trigger"
+    );
+
+    h.keys(&mut vcx, "escape");
+    h.dispatch(&mut vcx, "add", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-freq-{TILE}"));
+    assert_eq!(
+        h.menu_kind(&vcx),
+        Some(MenuKind::Frequency),
+        "picker → frequency trigger"
+    );
+
+    h.keys(&mut vcx, "escape");
+    h.dispatch(&mut vcx, "list", None);
+    h.draw(&mut vcx);
+    h.click(&mut vcx, &format!("timeseries-menu-button-{TILE}"));
+    assert_eq!(h.menu_kind(&vcx), Some(MenuKind::Actions), "list → ⋯");
+}
+
+/// The frequency menu's cap reasons follow the frame's as-of while the
+/// menu is open — even on a tile with no series, where nothing else
+/// rebuilds the chrome.
+#[gpui::test]
+fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "range 2020-01-01 2026-01-01").unwrap();
+    h.command(&mut vcx, "freq 1h").unwrap();
+    h.keys(&mut vcx, "f");
+    let enabled = |h: &Harness, vcx: &gpui::VisualTestContext, want: &str| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m.rows.iter().any(|r| {
+                matches!(
+                    r,
+                    menu::MenuRow::Action { title, enabled: Ok(()), .. } if title.as_ref() == want
+                )
+            }),
+            _ => false,
+        })
+    };
+    assert!(
+        !enabled(&h, &vcx, "5 minutes"),
+        "six years of 5m is over the cap"
+    );
+    h.frame.update(&mut vcx, |f, cx| {
+        f.set_as_of(AsOf::At(
+            "2020-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
+        ));
+        cx.notify();
+    });
+    assert!(
+        enabled(&h, &vcx, "5 minutes"),
+        "clipped to five months, 5m fits"
+    );
 }

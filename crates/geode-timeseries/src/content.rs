@@ -44,8 +44,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::edit", "Edit expression…"),
     ("timeseries::list", "Series…"),
     ("timeseries::range", "Range…"),
-    ("timeseries::freq_finer", "Finer frequency"),
-    ("timeseries::freq_coarser", "Coarser frequency"),
+    ("timeseries::range_custom", "Custom dates…"),
+    ("timeseries::freq", "Frequency…"),
     ("timeseries::density", "Toggle density"),
     ("timeseries::percentiles", "Toggle percentiles"),
     ("timeseries::pan_left", "Pan left"),
@@ -93,8 +93,7 @@ context = "timeseries && mode == normal"
 "e" = "timeseries::edit"
 "shift+l" = "timeseries::list"
 "r" = "timeseries::range"
-"f" = "timeseries::freq_finer"
-"shift+f" = "timeseries::freq_coarser"
+"f" = "timeseries::freq"
 "shift+d" = "timeseries::density"
 "p" = "timeseries::percentiles"
 "h" = "timeseries::pan_left"
@@ -122,9 +121,11 @@ context = "timeseries && mode == normal && popup == series"
 "enter" = "timeseries::list_close"
 "escape" = "timeseries::list_close"
 
-# The action menu holds no field, so it keeps the tile's own keyboard
-# like the series list does; the same `j`/`k` verbs step its rows and
-# `enter` picks the highlighted one.
+# The menus — the action list, the range menu and the frequency menu —
+# hold no field, so they keep the tile's own keyboard like the series
+# list does; the same `j`/`k` verbs step their rows and `enter` picks the
+# highlighted one. `r` and `f` stay the normal layer's: each toggles its
+# own menu shut, or swaps the menu that is up for its own.
 [[bindings]]
 context = "timeseries && mode == normal && popup == menu"
 [bindings.keys]
@@ -133,6 +134,13 @@ context = "timeseries && mode == normal && popup == menu"
 "enter" = "timeseries::menu_pick"
 "escape" = "timeseries::list_close"
 "." = "timeseries::list_close"
+
+# The range menu's `Custom dates…` row. Bindings resolve last-wins, so
+# this layer sits after the normal one, whose `c` cycles a colour.
+[[bindings]]
+context = "timeseries && mode == normal && popup == menu && menu == range"
+[bindings.keys]
+"c" = "timeseries::range_custom"
 
 [[bindings]]
 context = "timeseries && mode == insert"

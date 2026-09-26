@@ -12,14 +12,14 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the action menu's rows, and the absolute `#rrggbb` colour with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency), and the absolute `#rrggbb` colour with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries, delivery filtering, and flip-barrier staging and promotion. |
-| `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component colour picker. |
+| `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for six transient surfaces, including the reusable component colour picker, the menus, and the range and frequency trigger doors. |
 | `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
-| `popup` | State and rendering for the series list, add picker, range editor, and action menu, plus expression-editor state. Series and picker rows share a row shell; menu rows, range fields, and the inline expression editor have separate renderers. The component renders its own colour picker. |
-| `header` | Prepared chips and controls, the action-menu button, inline expression field, colour-picker trigger, and empty state. |
+| `popup` | State and rendering for the series list, add picker, custom dates editor, and the menus (one painter for the action list, range menu and frequency menu), plus expression-editor state. Series and picker rows share a row shell; menu rows, date fields, and the inline expression editor have separate renderers. The component renders its own colour picker. |
+| `header` | Prepared chips, the range and frequency triggers (each hangs its own popup and shows an open state while it is up), the action-menu button, inline expression field, colour-picker trigger, and empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
 ## Commands
@@ -40,12 +40,20 @@ cargo bench -p geode-timeseries
   movement.
 - One closer owns every popup and blurs a focused editor before dropping it.
 - `:` remains local to this tile.
-- Menu picks and empty-state buttons dispatch registered actions. Other pointer
-  controls share model operations and change processing with keyboard commands.
+- A menu's rows are built when it opens, on a chrome rebuild, and on a frame
+  change while it is up, never in `render`; a frequency the point cap refuses
+  is a disabled row whose reason is the model's own refusal, so a pickable row
+  never fails.
+- Menu picks and empty-state buttons dispatch registered actions, or write a
+  range or frequency through the model's own setters. Other pointer controls
+  share model operations and change processing with keyboard commands.
 - Chart presses and ordinary header controls allow shell click-to-focus. The
-  range readout prevents default ancestor focus while preserving propagation,
-  so its newly focused date fields keep the keyboard. Popup rows and the
-  component colour trigger consume their own presses.
+  range and frequency triggers toggle in the capture phase, like the `⋯`
+  button, because an open popup's `on_mouse_down_out` would close it first.
+  Popup rows and the component colour trigger consume their own presses.
+- Every painted popup's outside press goes through `outside_press`, which
+  closes the popup only if it is still the one up: a trigger's capture-phase
+  press may already have swapped another popup in.
 - A pointer gesture ends at the same tail as its key: pan and zoom at
   `view_moved`, a split at `apply_changed`.
 - The colour picker writes to the slot number it was opened for, never to the
@@ -65,21 +73,21 @@ cargo bench -p geode-timeseries
   component makes by itself (a swatch pick) is blurred by the one closer
   before the element is dropped.
 
-## Range editor
+## Range and frequency menus
 
-Type a preset as labelled (`1w`, `1m`, `3m`, `6m`, `1y`, `2y`, `5y`). The
-leading bare digit narrows the chips; a second digit replaces it, and a matching
-unit commits immediately, including with Shift. Invalid digits or units refuse
-inline. While a label is pending, Enter refuses and Escape or Backspace clears
-the label; the next Escape closes the editor. Other non-chord keys clear the
-label before normal date routing.
+`r` (or the range trigger) opens the range menu: the seven presets written out
+with their short labels as text, then `Custom dates…` with `c` painted as a
+key. `f` (or the frequency trigger) opens the frequency menu; a frequency the
+point cap refuses over the range as resolved under the frame's as-of is a
+disabled row reading `over cap`, and choosing it gives the full refusal as the
+notice. Both tick the value in force and open with the highlight on it. There
+is no frequency step key.
 
-A field key that changes state, or a segment click, makes subsequent digits
-edit dates until the popup reopens. Tab and ineffective field keys leave
-keyboard presets available. Preset chips remain clickable in either mode.
-Enter without a pending label commits the fields as an absolute range, even
-if unchanged; validation failures keep the draft open. Relative presets use
-UTC calendar arithmetic and remain relative in sessions. Absolute ranges store
+The custom dates editor opens on From's day segment and digits edit the date
+at once. Tab switches fields; Enter commits the fields as an absolute range,
+even if unchanged, and validation failures keep the draft open. Escape returns
+to the range menu with `Custom dates…` highlighted. Relative presets use UTC
+calendar arithmetic and remain relative in sessions. Absolute ranges store
 inclusive UTC dates; reopening them retains their stored dates despite as-of
 clipping of queries.
 

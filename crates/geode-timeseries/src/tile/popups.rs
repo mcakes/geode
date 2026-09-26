@@ -1,6 +1,8 @@
 //! Lifecycle and routing for the series list, add picker, expression field,
-//! range editor, action menu, and component colour picker. Popup state and custom
-//! painting live in crate::popup; the header hosts expressions and the colour trigger.
+//! custom dates editor, the menus (action list, range, frequency), and component
+//! colour picker. Popup state and custom painting live in crate::popup; the
+//! header hosts expressions, the range and frequency popups, and the colour
+//! trigger.
 
 use super::*;
 
@@ -24,7 +26,8 @@ impl TimeseriesTile {
             }
             // Menu navigation clamps over enabled action rows, skipping disabled rows
             // and headings/separators. Pointer hover may still select a disabled row.
-            // Enter picks; Escape closes. Series uses separate context for these actions.
+            // Enter picks; Escape closes. Every menu kind shares these actions; the
+            // series list uses separate context for them.
             "list_down" | "list_up" if menu_open => {
                 let delta = if verb == "list_down" {
                     n as isize
@@ -83,10 +86,22 @@ impl TimeseriesTile {
                 self.open_expr(None, window, cx);
                 true
             }
-            // Range opens a fresh draft. Dispatch closes an existing insert popup
-            // first, so repeating this action reopens rather than toggling it shut.
+            // `r` and `f` toggle their own menu: a second press closes it, and over
+            // any other popup the press closes that and opens the menu (over the
+            // dates editor dispatch's insert gate has closed it already, so `r`
+            // lands on the range menu).
             "range" => {
-                self.open_range(window, cx);
+                self.toggle_menu_kind(MenuKind::Range, window, cx);
+                true
+            }
+            "freq" => {
+                self.toggle_menu_kind(MenuKind::Frequency, window, cx);
+                true
+            }
+            // `c` in the range menu, its `Custom dates…` row, and the
+            // palette's action: the dates editor, whatever was up.
+            "range_custom" => {
+                self.open_range_editor(window, cx);
                 true
             }
             "edit" => {
@@ -119,6 +134,13 @@ impl TimeseriesTile {
                 Some(Popup::Range(_)) => self.commit_range(window, cx),
                 _ => false,
             },
+            // `escape` in the dates editor goes BACK to the range menu,
+            // highlight on `Custom dates…`, rather than closing: the
+            // editor is one of the menu's rows opened up.
+            "cancel" if matches!(self.popup, Some(Popup::Range(_))) => {
+                self.back_to_range_menu(window, cx);
+                true
+            }
             "cancel" if self.popup.as_ref().is_some_and(Popup::is_insert) => {
                 self.close_popup_with_window(window, cx);
                 true
@@ -439,15 +461,16 @@ impl TimeseriesTile {
         true
     }
 
-    // Range editor.
+    // Custom dates editor.
 
-    /// Open From and To date fields with From's Day segment active.
+    /// Open From and To date fields with From's Day segment active, so the first
+    /// digit typed is the day's.
     /// Absolute ranges use their stored inclusive dates; clipping for a query
     /// must not silently change a saved range when reopened and committed.
     /// Relative ranges resolve against now/as-of, then seed UTC dates from the
     /// start and from one second before the exclusive end (clamped to start).
     /// Committing those fields converts the draft to an absolute date range.
-    pub(super) fn open_range(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_range_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
         }
@@ -483,20 +506,30 @@ impl TimeseriesTile {
             active: Which::From,
             focus,
             error: None,
-            edited: false,
-            prefix: None,
-            frequency: self.model.frequency(),
         }));
         self.notice = None;
         cx.notify();
     }
 
-    /// Handle keys at the focused range container before the shell listener.
+    /// Escape in the dates editor, by either door (its listener and the insert
+    /// layer's cancel): close the editor through the focus-aware closer and open
+    /// the range menu with its highlight on `Custom dates…`, the row the editor
+    /// came from. A second Escape closes the menu.
+    pub(super) fn back_to_range_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_popup_with_window(window, cx);
+        self.open_menu(MenuKind::Range, cx);
+        if let Some(Popup::Menu(m)) = &mut self.popup
+            && let Some(custom) = menu::custom_row(&m.rows)
+        {
+            m.highlighted = custom;
+        }
+    }
+
+    /// Handle keys at the focused dates container before the shell listener.
     /// Returning true stops propagation and prevents duplicate dispatch.
-    /// Typed presets run before Tab and the shared datefield router, so a
-    /// pending label owns Enter and Escape. Chords fall through for shell
-    /// actions. Tab and Shift+Tab switch fields without editing either date.
-    /// Insert-mode actions share the commit, cancel, and step operations.
+    /// Chords fall through for shell actions. Tab and Shift+Tab switch fields;
+    /// digits type into the active segment at once. Insert-mode actions share
+    /// the commit, cancel (back to the range menu), and step operations.
     pub(crate) fn range_key(
         &mut self,
         event: &KeyDownEvent,
@@ -508,9 +541,6 @@ impl TimeseriesTile {
         }
         let modifiers = event.keystroke.modifiers;
         let chord = modifiers.control || modifiers.alt || modifiers.platform;
-        if !chord && self.preset_key(event.keystroke.key.as_str(), modifiers.shift, window, cx) {
-            return true;
-        }
         if !chord && event.keystroke.key.as_str() == "tab" {
             if let Some(Popup::Range(r)) = &mut self.popup {
                 r.switch();
@@ -530,97 +560,8 @@ impl TimeseriesTile {
             FieldKey::Commit => {
                 self.commit_range(window, cx);
             }
-            FieldKey::Cancel => self.close_popup_with_window(window, cx),
+            FieldKey::Cancel => self.back_to_range_menu(window, cx),
             other => self.apply_range_key(other, cx),
-        }
-        true
-    }
-
-    /// Consume a typed preset while keyboard presets are available. A bare
-    /// digit starts or replaces the prefix; a matching w/m/y unit commits it.
-    /// Shifted units also match. Invalid leading digits clear the prefix and
-    /// refuse inline; an invalid w/m/y unit retains the prefix for correction.
-    ///
-    /// Pending Backspace or Escape clears the label without closing. Pending
-    /// Enter refuses inline instead of committing dates. Other non-chord keys
-    /// clear the label and continue through field routing. Chords bypass this
-    /// handler. See `RangePopup::digit_is_preset` for date-editing ownership.
-    fn preset_key(
-        &mut self,
-        key: &str,
-        shift: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(Popup::Range(r)) = &mut self.popup else {
-            return false;
-        };
-        let mut chars = key.chars();
-        // One character, lower-cased: a shifted unit (`M`, or the
-        // macOS form `m` with shift held) still completes the label.
-        let single = match (chars.next(), chars.next()) {
-            (Some(c), None) => Some(c.to_ascii_lowercase()),
-            _ => None,
-        };
-        if !shift
-            && let Some(d) = single.and_then(|c| c.to_digit(10))
-            && r.digit_is_preset()
-        {
-            let d = d as u8;
-            if Preset::any_starts_with(d) {
-                r.prefix = Some(d);
-                r.error = None;
-            } else {
-                r.prefix = None;
-                r.error = Some(format!("no preset starts with {d} — {}", Preset::WORDS).into());
-            }
-            cx.notify();
-            return true;
-        }
-        let Some(d) = r.prefix else {
-            return false;
-        };
-        let candidates = || {
-            Preset::ALL
-                .into_iter()
-                .filter(|p| p.starts_with(d))
-                .map(Preset::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        match (single, key) {
-            (Some(unit @ ('w' | 'm' | 'y')), _) => match Preset::typed(d, unit) {
-                Some(preset) => {
-                    // A refusal (the point cap) keeps the popup open on
-                    // its reason; the label was finished, so it is no
-                    // longer pending.
-                    if !self.write_range(Range::Relative(preset), window, cx)
-                        && let Some(Popup::Range(r)) = &mut self.popup
-                    {
-                        r.prefix = None;
-                    }
-                }
-                None => {
-                    r.error = Some(format!("no preset {d}{unit} — {}", candidates()).into());
-                    cx.notify();
-                }
-            },
-            (_, "backspace" | "escape") => {
-                r.prefix = None;
-                r.error = None;
-                cx.notify();
-            }
-            (_, "enter") => {
-                r.error = Some(format!("finish the preset — {}", candidates()).into());
-                cx.notify();
-            }
-            _ => {
-                // Clear the pending label and its refusal before normal field routing.
-                r.prefix = None;
-                r.error = None;
-                cx.notify();
-                return false;
-            }
         }
         true
     }
@@ -654,16 +595,6 @@ impl TimeseriesTile {
             }
             cx.notify();
         }
-    }
-
-    /// Commit a clicked preset, including after the draft enters date-editing mode.
-    pub(crate) fn range_preset_clicked(
-        &mut self,
-        preset: Preset,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.write_range(Range::Relative(preset), window, cx);
     }
 
     /// Complete pending digits in both fields and commit their dates.
@@ -720,9 +651,8 @@ impl TimeseriesTile {
         }
     }
 
-    /// Validate and apply ranges from date Enter, typed labels, and preset clicks.
-    /// Success closes and applies model flags; a refusal stays inline with the
-    /// editor open.
+    /// Validate and apply the dates editor's range on Enter. Success closes and
+    /// applies model flags; a refusal stays inline with the editor open.
     pub(super) fn write_range(
         &mut self,
         range: Range,
@@ -746,67 +676,142 @@ impl TimeseriesTile {
         }
     }
 
-    // Action-menu lifecycle and pointer controls.
+    // Menu lifecycle and pointer controls.
 
-    /// Toggle the menu, closing any other popup through the focus-aware closer.
-    /// Opening prepares rows from the model and binding hints; subsequent chrome
-    /// rebuilds refresh them while the menu remains open.
+    /// `.` and the `⋯` button: toggle the action list.
     pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.popup, Some(Popup::Menu(_))) {
+        self.toggle_menu_kind(MenuKind::Actions, window, cx);
+    }
+
+    /// Close menu `kind` if it is up, otherwise close whatever is (a
+    /// field blurred first, through the one closer) and open it. The
+    /// rows are built HERE, once per open — the model, the default
+    /// source, the live chords and the frequency rows' cap refusals are
+    /// read then, never in `render`.
+    pub(super) fn toggle_menu_kind(
+        &mut self,
+        kind: MenuKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(&self.popup, Some(Popup::Menu(m)) if m.kind == kind) {
             self.close_popup_with_window(window, cx);
             return;
         }
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
         }
-        self.open_menu(cx);
+        self.open_menu(kind, cx);
     }
 
-    /// Build and install the menu over the current model.
-    pub(super) fn open_menu(&mut self, cx: &mut Context<Self>) {
-        let rows = self.menu_rows(cx);
-        let highlighted = menu::first_enabled(&rows);
-        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+    /// Build and install menu `kind` over the current model, the
+    /// highlight on the value in force (`menu::start`).
+    pub(super) fn open_menu(&mut self, kind: MenuKind, cx: &mut Context<Self>) {
+        let rows = self.menu_rows(kind, cx);
+        let highlighted = menu::start(&rows);
+        self.popup = Some(Popup::Menu(MenuState {
+            kind,
+            rows,
+            highlighted,
+        }));
         self.notice = None;
         cx.notify();
     }
 
-    /// The menu's rows over the model as it is now, every `hint` its
-    /// action's live chord (the footer's own rule). Called at open and
+    /// Menu `kind`'s rows over the model as it is now. Called at open and
     /// from `rebuild_chrome` while the menu is up — a `:` line or a
-    /// delivery can move the cursor slot under an open menu, and a row
-    /// must keep its promise (the heading, Hide/Show, the enablement).
-    pub(super) fn menu_rows(&self, cx: &App) -> Vec<menu::MenuRow> {
-        let default_source = cx
-            .try_global::<SeriesSettings>()
-            .and_then(|s| s.default_source.clone());
-        let mut rows = menu::rows(
-            &menu::MenuInputs { model: &self.model },
-            default_source.as_deref(),
-        );
+    /// delivery can move what a row promises under an open menu (the
+    /// cursor slot, the range, the frequency, the cap).
+    ///
+    /// Every action row's `hint` is its action's live chord (the
+    /// footer's own rule), and so is `Custom dates…`'s when the keymap
+    /// binds one; a preset's and a frequency's is its short label.
+    pub(super) fn menu_rows(&self, kind: MenuKind, cx: &App) -> Vec<menu::MenuRow> {
+        let mut rows = match kind {
+            MenuKind::Actions => {
+                let default_source = cx
+                    .try_global::<SeriesSettings>()
+                    .and_then(|s| s.default_source.clone());
+                menu::rows(
+                    &menu::MenuInputs { model: &self.model },
+                    default_source.as_deref(),
+                )
+            }
+            MenuKind::Range => menu::range_rows(self.model.range()),
+            MenuKind::Frequency => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                menu::frequency_rows(self.model.frequency(), |f| {
+                    self.model.frequency_refusal(f, now, &as_of)
+                })
+            }
+        };
         let empty = Vec::new();
         let bindings = cx
             .try_global::<geode_shell::tips::Chords>()
             .map(|c| c.0.as_slice())
             .unwrap_or(&empty);
+        let chord = |action: &str| geode_shell::tips::chord_for(bindings, action);
         for row in &mut rows {
-            if let menu::MenuRow::Action { id, hint, .. } = row {
-                *hint = geode_shell::tips::chord_for(bindings, &id.0).unwrap_or_default();
+            match row {
+                menu::MenuRow::Action {
+                    pick: menu::Pick::Action(id),
+                    hint,
+                    ..
+                } => *hint = chord(&id.0).unwrap_or_default(),
+                menu::MenuRow::Action {
+                    pick: menu::Pick::CustomRange,
+                    hint,
+                    ..
+                } => {
+                    if let Some(live) = chord(menu::CUSTOM_RANGE_ACTION) {
+                        *hint = live;
+                    }
+                }
+                _ => {}
             }
         }
         rows
     }
 
-    /// A click on the `range · freq` readout: opens the range popup
-    /// through `r`'s own path, or CLOSES it when it is already up — a
-    /// second click that reopened would seed fresh fields over dates
-    /// the trader had started typing.
-    pub(crate) fn readout_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.popup, Some(Popup::Range(_))) {
+    /// A click on the range trigger: opens the range menu through `r`'s
+    /// own path, or CLOSES what the trigger owns when it is up — the
+    /// range menu, or the dates editor opened from it (a second click
+    /// that reopened would throw away dates the trader had started
+    /// typing).
+    pub(crate) fn range_trigger_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let owned = match &self.popup {
+            Some(Popup::Range(_)) => true,
+            Some(Popup::Menu(m)) => m.kind == MenuKind::Range,
+            _ => false,
+        };
+        if owned {
             self.close_popup_with_window(window, cx);
             return;
         }
         self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);
+    }
+
+    /// A press outside the popup that was painted as `painted` — the
+    /// ONE door every painted popup's `on_mouse_down_out` takes. It
+    /// closes that popup only if it is still the one up: the listener
+    /// belongs to the frame that painted it, and a trigger's or `⋯`'s
+    /// capture-phase press runs first and may already have swapped
+    /// another popup in (a menu over the series list), which this press
+    /// must leave open.
+    pub(crate) fn outside_press(
+        &mut self,
+        painted: PopupKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup.as_ref().map(Popup::kind) == Some(painted) {
+            self.close_popup_with_window(window, cx);
+        }
+    }
+
+    /// A click on the frequency trigger: `f`'s own path, which toggles.
+    pub(crate) fn freq_trigger_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.dispatch(&ActionId("timeseries::freq".into()), None, window, cx);
     }
 
     /// A pointer resting on menu row `index`: the mouse form of `j`/`k`.
@@ -824,25 +829,60 @@ impl TimeseriesTile {
     }
 
     /// `enter` on the highlighted row, or a click on any row: a disabled
-    /// row's reason becomes the notice and the menu stays; an enabled
-    /// one closes the menu and re-enters [`Self::dispatch`] on its own
-    /// action id, so a row, a key and the palette take one path.
+    /// row's reason becomes the notice and the menu stays. An enabled
+    /// action row closes the menu and re-enters [`Self::dispatch`] on
+    /// its own action id, so a row, a key and the palette take one path;
+    /// a preset or a frequency is written through the model's own setter
+    /// (`:range`'s and `:freq`'s), and `Custom dates…` opens the editor.
     pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Popup::Menu(m)) = &self.popup else {
             return;
         };
-        let Some(menu::MenuRow::Action { id, enabled, .. }) = m.rows.get(index) else {
+        let Some(menu::MenuRow::Action { pick, enabled, .. }) = m.rows.get(index) else {
             return;
         };
-        match enabled {
-            Err(reason) => {
-                self.notice = Some((*reason).into());
-                cx.notify();
-            }
-            Ok(()) => {
-                let id = id.clone();
+        if let Err(reason) = enabled {
+            self.notice = Some(reason.clone());
+            cx.notify();
+            return;
+        }
+        match pick.clone() {
+            menu::Pick::Action(id) => {
                 self.close_popup_with_window(window, cx);
                 self.dispatch(&id, None, window, cx);
+            }
+            menu::Pick::CustomRange => self.open_range_editor(window, cx),
+            menu::Pick::Range(preset) => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                let written = self.model.set_range(Range::Relative(preset), now, &as_of);
+                self.menu_written(written, window, cx);
+            }
+            menu::Pick::Frequency(f) => {
+                let (now, as_of) = self.now_and_as_of(cx);
+                let written = self.model.set_frequency(f, now, &as_of);
+                self.menu_written(written, window, cx);
+            }
+        }
+    }
+
+    /// A value row's write: on success the menu closes and the change
+    /// takes the usual tail; a refusal (the point cap, for a preset the
+    /// frequency in force cannot cover) becomes the notice and the menu
+    /// stays up on the row that caused it, as a disabled row's does.
+    fn menu_written(
+        &mut self,
+        written: Result<Changed, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match written {
+            Ok(changed) => {
+                self.close_popup_with_window(window, cx);
+                self.apply_changed(changed, cx);
+            }
+            Err(e) => {
+                self.notice = Some(e.into());
+                cx.notify();
             }
         }
     }
@@ -859,7 +899,7 @@ impl TimeseriesTile {
         if self.popup.is_some() {
             self.close_popup_with_window(window, cx);
         }
-        self.open_menu(cx);
+        self.open_menu(MenuKind::Actions, cx);
     }
 
     /// A click on a chip's swatch: the slot becomes the cursor and its
@@ -869,29 +909,6 @@ impl TimeseriesTile {
         let moved = self.model.set_cursor(index);
         let flipped = self.model.toggle_visible();
         self.apply_changed(moved | flipped, cx);
-    }
-
-    /// A click on one of the range popup's frequency chips: the
-    /// frequency is written at once and the popup STAYS open (it is a
-    /// setting the popup shows ticked, not a commit of the popup), with
-    /// the cap refusal inline like a backwards range.
-    pub(crate) fn range_freq_clicked(&mut self, f: Frequency, cx: &mut Context<Self>) {
-        let (now, as_of) = self.now_and_as_of(cx);
-        match self.model.set_frequency(f, now, &as_of) {
-            Ok(changed) => {
-                if let Some(Popup::Range(r)) = &mut self.popup {
-                    r.error = None;
-                    r.frequency = f;
-                }
-                self.apply_changed(changed, cx);
-            }
-            Err(e) => {
-                if let Some(Popup::Range(r)) = &mut self.popup {
-                    r.error = Some(e.into());
-                }
-                cx.notify();
-            }
-        }
     }
 
     // ---- the colour picker -------------------------------------------

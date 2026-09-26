@@ -1,6 +1,6 @@
 //! The tile's chrome (spec §9.3): the header strip — stack marker, kind
-//! badge, `range · freq`, one chip per slot — the notice line and the
-//! footer hint row.
+//! badge, the range and frequency triggers, one chip per slot — the
+//! notice line and the footer hint row.
 //!
 //! [`HeaderModel::prepare`] is the "prepare, never format per frame"
 //! rule this crate shares with the market-data panel: every string the
@@ -28,12 +28,14 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div,
+    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
 
+use crate::core::Range;
 use crate::core::model::{Colour, Model, SlotState};
 use crate::popup::ExprField;
 use crate::tile::TimeseriesTile;
@@ -88,7 +90,11 @@ pub(crate) struct Chip {
 /// Everything the header paints, resolved once per change.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct HeaderModel {
-    pub range_freq: SharedString,
+    /// The range trigger's text: the preset (`1y`), or the two dates
+    /// (`2025-09-26 – 2026-09-26`) while the range is absolute.
+    pub range_label: SharedString,
+    /// The frequency trigger's text (`1d`).
+    pub freq_label: SharedString,
     pub chips: Vec<Chip>,
     pub cursor: Option<usize>,
     pub empty: bool,
@@ -130,8 +136,13 @@ impl HeaderModel {
                 }
             })
             .collect();
+        let range_label = match model.range() {
+            Range::Relative(p) => SharedString::new_static(p.as_str()),
+            Range::Absolute { from, to } => format!("{from} – {to}").into(),
+        };
         HeaderModel {
-            range_freq: model.header_text().into(),
+            range_label,
+            freq_label: SharedString::new_static(model.frequency().as_str()),
             chips,
             cursor,
             empty: model.slots().is_empty(),
@@ -167,7 +178,7 @@ const FOOTER_HINTS: &[(&str, &str, &str)] = &[
     ("timeseries::expr", "x", "expr"),
     ("timeseries::list", "shift+l", "series"),
     ("timeseries::range", "r", "range"),
-    ("timeseries::freq_finer", "f", "freq"),
+    ("timeseries::freq", "f", "freq"),
     ("timeseries::density", "shift+d", "density"),
     ("timeseries::percentiles", "p", "percentiles"),
 ];
@@ -200,17 +211,99 @@ pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
         .collect()
 }
 
+/// What the header draws beside its prepared text: which of its
+/// triggers owns the popup that is up (each paints its open state while
+/// it does) and the popup elements that hang off them.
+pub(crate) struct HeaderPopups {
+    /// The action list is up, under `⋯`.
+    pub menu_open: bool,
+    /// The range menu or the custom dates editor is up.
+    pub range_open: bool,
+    /// The frequency menu is up.
+    pub freq_open: bool,
+    /// The open colour picker: the slot number it targets and the
+    /// component element, which takes that chip's swatch position.
+    pub colour_picker: Option<(u8, AnyElement)>,
+    /// The range menu or the dates editor, hung under the range trigger.
+    pub under_range: Option<AnyElement>,
+    /// The frequency menu, hung under the frequency trigger.
+    pub under_freq: Option<AnyElement>,
+}
+
+/// One bare trigger that owns a popup (the range and the frequency
+/// triggers): its prepared text and a `▾`, the bare-control hover and
+/// press at rest, and while its popup is up the neutral chip's fill as a
+/// persistent open state that answers the pointer with nothing (the
+/// design guide's "Open / pressed" row, and the `⋯` button's own rule).
+///
+/// It toggles in the CAPTURE phase: the open popup's own
+/// `on_mouse_down_out` is a capture listener that would close it before
+/// a bubble handler here could see it open, so the click meant to close
+/// would reopen it instead. It does not stop propagation, so the
+/// shell's tile press still focuses the tile.
+///
+/// `popup` hangs off a zero-size point at the trigger's bottom-left, so
+/// the menu opens under the control that owns it.
+#[allow(clippy::too_many_arguments)]
+fn trigger(
+    theme: &Theme,
+    rest: control::ControlPaint,
+    id: &'static str,
+    selector: impl Fn() -> String + 'static,
+    label: SharedString,
+    open: bool,
+    tip: (&'static str, &'static str, &'static str),
+    on_press: impl Fn(&mut Window, &mut App) + 'static,
+    popup: Option<AnyElement>,
+) -> Stateful<Div> {
+    let open_paint = chip_paint(theme, Tone::Neutral);
+    let (tip_id, tip_text, tip_action) = tip;
+    div()
+        .id(ElementId::Name(SharedString::new_static(id)))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .rounded(theme.radius)
+        .font_family(fonts::MONO)
+        .when(open, |d| {
+            d.text_color(open_paint.text)
+                .when_some(open_paint.fill, |d, fill| d.bg(fill))
+        })
+        .when(!open, |d| d.pointer_states(rest))
+        .child(label)
+        .child(div().text_xs().child("▾"))
+        .debug_selector(selector)
+        .tooltip(tips::tip(tip_id, tip_text, Some(tip_action), None))
+        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            on_press(window, cx);
+        })
+        .when_some(popup, |d, popup| {
+            d.child(div().absolute().left_0().top_full().child(popup))
+        })
+}
+
 pub(crate) fn render_header(
     h: &HeaderModel,
     theme: &Theme,
     tile: &Entity<TimeseriesTile>,
     tile_id: u64,
     stack: Option<&StackHandle>,
-    menu_open: bool,
-    // The open colour picker: the slot number it targets and the
-    // component element, which takes that chip's swatch position.
-    mut colour_picker: Option<(u8, AnyElement)>,
+    popups: HeaderPopups,
 ) -> impl IntoElement {
+    let HeaderPopups {
+        menu_open,
+        range_open,
+        freq_open,
+        mut colour_picker,
+        under_range,
+        under_freq,
+    } = popups;
     let mut row = h_flex()
         .w_full()
         .h(scale::design(HEADER_HEIGHT))
@@ -238,8 +331,9 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // 2. Range/frequency readout: click to toggle the range editor.
-    // Derive shared bare-control pointer states once for this readout, the swatch
+    // 2. Range and frequency triggers, each the mouse door onto its own menu
+    //    (`r` and `f` are the keys), through `dispatch` on the verb's own id.
+    // Derive shared bare-control pointer states once for the triggers, the swatch
     // targets, and the menu button, avoiding repeated contrast calculations.
     let bare_states = control::paint(
         theme,
@@ -247,37 +341,35 @@ pub(crate) fn render_header(
         theme.background,
         theme.muted_foreground,
     );
-    row = row.child(
-        div()
-            .id(ElementId::Name(SharedString::new_static(
-                "ts-range-readout",
-            )))
-            .px_1()
-            .rounded(theme.radius)
-            .font_family(fonts::MONO)
-            .pointer_states(bare_states)
-            .child(h.range_freq.clone())
-            .debug_selector(move || format!("timeseries-range-{tile_id}"))
-            .tooltip(tips::tip(
-                "tip-timeseries-range",
-                "Range and frequency",
-                Some("timeseries::range"),
-                None,
-            ))
-            // Run before the popup's outside-press close so a second press toggles shut.
-            // Prevent default ancestor focus from overriding the range handle focused by
-            // this press. Propagation still lets the shell focus the tile.
-            .capture_any_mouse_down({
+    row = row
+        .child(trigger(
+            theme,
+            bare_states,
+            "ts-range-trigger",
+            move || format!("timeseries-range-{tile_id}"),
+            h.range_label.clone(),
+            range_open,
+            ("tip-timeseries-range", "Range", "timeseries::range"),
+            {
                 let tile = tile.clone();
-                move |event: &MouseDownEvent, window, cx| {
-                    if event.button != MouseButton::Left {
-                        return;
-                    }
-                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
-                    window.prevent_default();
-                }
-            }),
-    );
+                move |window, cx| tile.update(cx, |t, cx| t.range_trigger_clicked(window, cx))
+            },
+            under_range,
+        ))
+        .child(trigger(
+            theme,
+            bare_states,
+            "ts-freq-trigger",
+            move || format!("timeseries-freq-{tile_id}"),
+            h.freq_label.clone(),
+            freq_open,
+            ("tip-timeseries-freq", "Frequency", "timeseries::freq"),
+            {
+                let tile = tile.clone();
+                move |window, cx| tile.update(cx, |t, cx| t.freq_trigger_clicked(window, cx))
+            },
+            under_freq,
+        ));
 
     // 3. One chip per slot.
     for (index, chip) in h.chips.iter().enumerate() {
@@ -559,7 +651,8 @@ mod tests {
     fn a_chip_carries_its_label_axis_and_swatch() {
         let m = two();
         let h = HeaderModel::prepare(&m, Some("demo_kdb"), &stub);
-        assert_eq!(h.range_freq.as_ref(), "1y · 1d");
+        assert_eq!(h.range_label.as_ref(), "1y");
+        assert_eq!(h.freq_label.as_ref(), "1d");
         assert!(!h.empty);
         assert_eq!(h.chips[0].label.as_ref(), "SPX.close");
         assert_eq!(
@@ -591,6 +684,29 @@ mod tests {
         assert!(!h.chips[0].filled, "idle, off the cursor: no fill");
         assert!(h.chips[1].filled, "idle, on the cursor: the neutral pill");
         assert_eq!(h.chips[1].tone, Tone::Neutral);
+    }
+
+    /// An absolute range's trigger reads its two dates; a preset's, its
+    /// short label.
+    #[test]
+    fn the_triggers_read_the_range_and_the_frequency_in_force() {
+        let mut m = two();
+        let now = chrono::Utc::now();
+        m.set_range(
+            Range::parse(&["2025-09-26", "2026-09-26"]).unwrap(),
+            now,
+            &geode_core::query::AsOf::Live,
+        )
+        .unwrap();
+        m.set_frequency(
+            geode_core::series::Frequency::W1,
+            now,
+            &geode_core::query::AsOf::Live,
+        )
+        .unwrap();
+        let h = HeaderModel::prepare(&m, Some("demo_kdb"), &stub);
+        assert_eq!(h.range_label.as_ref(), "2025-09-26 – 2026-09-26");
+        assert_eq!(h.freq_label.as_ref(), "1w");
     }
 
     #[test]

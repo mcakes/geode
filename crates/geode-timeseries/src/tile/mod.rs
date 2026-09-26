@@ -47,14 +47,16 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
+use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Colour, Model, SlotState};
 use crate::core::{
-    Preset, Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
+    Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
 };
 use crate::header::{self, HeaderModel};
 use crate::popup::{
     ColourPick, DateFieldPaint, ExprField, MenuState, PickContext, PickerStage, PickerState, Popup,
-    RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range, render_series_popup,
+    PopupKind, RangePopup, SeriesPopup, Which, render_menu, render_picker, render_range,
+    render_series_popup,
 };
 use crate::tile::pointer::{ChartBounds, Drag};
 
@@ -149,9 +151,10 @@ pub struct TimeseriesTile {
     header: HeaderModel,
     title: SharedString,
     stack: Option<StackHandle>,
-    /// One local popup: series list, add picker, expression editor, or range
-    /// editor. List rows are prepared with chrome; date segments are prepared
-    /// by field transitions rather than formatted during render.
+    /// One local popup: series list, add picker, expression editor, custom
+    /// dates editor, or a menu. List and menu rows are prepared with chrome;
+    /// date segments are prepared by field transitions rather than formatted
+    /// during render.
     popup: Option<Popup>,
     footer: Vec<header::FooterHint>,
     /// The chart surface's last painted bounds (`tile::pointer`).
@@ -220,6 +223,14 @@ impl TimeseriesTile {
             if now.flip != this.last_flip {
                 this.last_flip = now.flip;
                 this.promote(cx);
+            }
+            // An open frequency menu's disabled rows are the point cap
+            // over the range AS RESOLVED under the frame's as-of, so any
+            // frame change may move them — and the chrome rebuild below
+            // runs only for a visible tile holding series. Six cap checks,
+            // and a repaint only when a row actually moved.
+            if this.refresh_menu_rows(cx) {
+                cx.notify();
             }
             if !this.visible {
                 return;
@@ -342,9 +353,10 @@ impl TimeseriesTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// Add, expression, range, and colour editors use insert routing. Fieldless
-    /// series/menu lists keep normal mode with their popup pair. Actual focus
-    /// ownership is checked separately, including colour-picker descendants.
+    /// Add, expression, dates-editor, and colour editors use insert routing.
+    /// Fieldless series/menu lists keep normal mode with their popup pair, and a
+    /// menu adds a `menu` pair naming its kind. Actual focus ownership is checked
+    /// separately, including colour-picker descendants.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
             "insert"
@@ -354,6 +366,9 @@ impl TimeseriesTile {
         let mut ctx = KeyContext::new("timeseries").pair("mode", mode).counts();
         if let Some(pair) = self.popup.as_ref().and_then(Popup::context_pair) {
             ctx = ctx.pair("popup", pair);
+        }
+        if let Some(kind) = self.popup.as_ref().and_then(Popup::menu_pair) {
+            ctx = ctx.pair("menu", kind);
         }
         ctx
     }
@@ -450,12 +465,20 @@ impl TimeseriesTile {
             Some(p) if p.is_insert() => {
                 matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
             }
-            // Keep the menu only for its own navigation, pick, and toggle actions.
-            // A menu pick closes before dispatching its action; other tile actions also
-            // close it before changing the model.
+            // Keep a menu only for its own navigation, pick, and toggle actions,
+            // plus the three openers, so each can toggle its own menu shut or swap
+            // one menu for another. A menu pick closes before dispatching its
+            // action; other tile actions also close it before changing the model.
             Some(Popup::Menu(_)) => matches!(
                 verb,
-                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"
+                "menu"
+                    | "list_down"
+                    | "list_up"
+                    | "list_close"
+                    | "menu_pick"
+                    | "range"
+                    | "freq"
+                    | "range_custom"
             ),
             // The fieldless series list stays open while slot properties change.
             Some(_) => matches!(
@@ -479,7 +502,6 @@ impl TimeseriesTile {
         if !popup_survives {
             self.close_popup_with_window(window, cx);
         }
-        let (now, as_of) = self.now_and_as_of(cx);
         // View movement has a separate path to preserve cached chart geometry.
         let view_move = matches!(
             verb,
@@ -504,14 +526,6 @@ impl TimeseriesTile {
             "remove" => self.remove_at_cursor(),
             "density" => self.model.toggle_density(),
             "percentiles" => self.model.toggle_percentiles(),
-            "freq_finer" => {
-                let r = self.model.step_frequency(true, n, now, &as_of);
-                self.noticed(r)
-            }
-            "freq_coarser" => {
-                let r = self.model.step_frequency(false, n, now, &as_of);
-                self.noticed(r)
-            }
             "pan_left" => self.model.pan(-(n as i32)),
             "pan_right" => self.model.pan(n as i32),
             "zoom_in" => self.model.zoom_in(n),
@@ -520,9 +534,9 @@ impl TimeseriesTile {
             "jump_start" => self.model.jump_start(),
             "jump_end" => self.model.jump_end(),
             // Every popup verb, through the one door (`popups.rs`).
-            "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
-            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick"
-            | "pick_colour" => {
+            "add" | "expr" | "edit" | "list" | "range" | "range_custom" | "freq" | "list_down"
+            | "list_up" | "list_close" | "commit" | "cancel" | "insert_up" | "insert_down"
+            | "menu" | "menu_pick" | "pick_colour" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -722,10 +736,27 @@ impl TimeseriesTile {
         Ok(removal.changed)
     }
 
-    /// Prepare header, title, and open series-list rows. Rebuild the immutable
-    /// chart input only when [`ChartKey`] changes, bumping its version so the
-    /// chart element invalidates geometry derived from that input.
-    /// Resolve one colour mapping for both chip swatches and chart lines.
+    /// Rebuild an open menu's rows over the model and the frame as they are
+    /// now, keeping the highlight on its row where that row is still an action,
+    /// else landing on the first enabled one. Answers whether the rows moved.
+    fn refresh_menu_rows(&mut self, cx: &App) -> bool {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return false;
+        };
+        let rows = self.menu_rows(m.kind, cx);
+        let Some(Popup::Menu(m)) = &mut self.popup else {
+            return false;
+        };
+        m.highlighted = menu::step(&rows, m.highlighted, 0);
+        let moved = m.rows != rows;
+        m.rows = rows;
+        moved
+    }
+
+    /// Prepare header, title, open series-list rows and an open menu's rows.
+    /// Rebuild the immutable chart input only when [`ChartKey`] changes, bumping
+    /// its version so the chart element invalidates geometry derived from that
+    /// input. Resolve one colour mapping for both chip swatches and chart lines.
     fn rebuild_chrome(&mut self, cx: &mut Context<Self>) {
         let default_source = cx
             .try_global::<SeriesSettings>()
@@ -746,17 +777,13 @@ impl TimeseriesTile {
             );
             self.popup = Some(Popup::Series(rows));
         }
-        // The menu's rows read the cursor slot the same way, and a `:`
-        // line runs under an open menu (the menu context leaves `:` to
-        // the tile). The highlight stays on its row where that row is
-        // still an action, else lands on the first enabled one.
-        if matches!(self.popup, Some(Popup::Menu(_))) {
-            let rows = self.menu_rows(cx);
-            if let Some(Popup::Menu(m)) = &mut self.popup {
-                m.highlighted = menu::step(&rows, m.highlighted, 0);
-                m.rows = rows;
-            }
-        }
+        // A menu's rows read the model the same way — the action list
+        // the cursor slot, the range menu the range, the frequency menu
+        // the frequency and the cap over the range — and a `:` line runs
+        // under an open menu (the menu context leaves `:` to the tile).
+        // The highlight stays on its row where that row is still an
+        // action, else lands on the first enabled one.
+        self.refresh_menu_rows(cx);
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
             &self.model,
@@ -829,7 +856,36 @@ impl TimeseriesTile {
     }
 }
 
+/// Which header control owns the popup that is up — each paints its
+/// open state while it does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TriggersOpen {
+    /// `⋯`: the action list.
+    pub actions: bool,
+    /// The range trigger: the range menu, or the dates editor opened
+    /// from it.
+    pub range: bool,
+    /// The frequency trigger: the frequency menu.
+    pub frequency: bool,
+}
+
 impl TimeseriesTile {
+    /// Which trigger owns the open popup (`TriggersOpen`).
+    pub(crate) fn triggers_open(&self) -> TriggersOpen {
+        match &self.popup {
+            Some(Popup::Menu(m)) => TriggersOpen {
+                actions: m.kind == MenuKind::Actions,
+                range: m.kind == MenuKind::Range,
+                frequency: m.kind == MenuKind::Frequency,
+            },
+            Some(Popup::Range(_)) => TriggersOpen {
+                range: true,
+                ..TriggersOpen::default()
+            },
+            _ => TriggersOpen::default(),
+        }
+    }
+
     /// Render the chart, record its bounds during canvas prepaint, and show a
     /// divider cursor where two panes meet. During a drag, an occluding catcher
     /// handles moves and releases over the surface plus releases outside it.
@@ -954,9 +1010,25 @@ impl Render for TimeseriesTile {
             self.render_chart_surface(&tile, tile_id, window)
                 .into_any_element()
         };
-        let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
-        // Anchor the deferred popup at the header's right edge. The relative
-        // wrapper supplies its positioning context; deferral paints over the chart.
+        let open = self.triggers_open();
+        // The range menu and the dates editor hang under the range trigger, the
+        // frequency menu under the frequency trigger; the header places them.
+        let under_range = match self.popup.as_ref() {
+            Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx).into_any_element()),
+            Some(Popup::Menu(m)) if m.kind == MenuKind::Range => {
+                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+            }
+            _ => None,
+        };
+        let under_freq = match self.popup.as_ref() {
+            Some(Popup::Menu(m)) if m.kind == MenuKind::Frequency => {
+                Some(render_menu(m, &tile, tile_id, cx).into_any_element())
+            }
+            _ => None,
+        };
+        // Anchor every other deferred popup at the header's right edge. The
+        // relative wrapper supplies its positioning context; deferral paints over
+        // the chart.
         let popup = match self.popup.as_ref() {
             Some(Popup::Series(s)) => Some(render_series_popup(
                 s,
@@ -966,12 +1038,18 @@ impl Render for TimeseriesTile {
                 cx,
             )),
             Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
-            Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx)),
-            Some(Popup::Menu(m)) => Some(render_menu(m, &tile, tile_id, cx)),
+            Some(Popup::Menu(m)) if m.kind == MenuKind::Actions => {
+                Some(render_menu(m, &tile, tile_id, cx))
+            }
             // The expression field is not an overlay: it is a strip in
             // the body, below; the colour picker is drawn in its target
-            // chip, by the header.
-            Some(Popup::Expr(_)) | Some(Popup::Colour(_)) | None => None,
+            // chip, and the range and frequency popups under their
+            // triggers, by the header.
+            Some(Popup::Range(_))
+            | Some(Popup::Menu(_))
+            | Some(Popup::Expr(_))
+            | Some(Popup::Colour(_))
+            | None => None,
         };
         // Render the component trigger in its target chip only while open. State
         // and subscriptions persist on the tile; the popover element state is transient.
@@ -1008,8 +1086,14 @@ impl Render for TimeseriesTile {
                 &tile,
                 tile_id,
                 self.stack.as_ref(),
-                menu_open,
-                colour_picker,
+                header::HeaderPopups {
+                    menu_open: open.actions,
+                    range_open: open.range,
+                    freq_open: open.frequency,
+                    colour_picker,
+                    under_range,
+                    under_freq,
+                },
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(

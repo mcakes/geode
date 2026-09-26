@@ -188,12 +188,13 @@ frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
 show older data.
 
-The series list, add picker, expression editor, range editor, action menu, and
-colour picker share one `Popup` owner. The list has no text field; input popups
+The series list, add picker, expression editor, custom dates editor, the three
+menus (action list, range, frequency), and colour picker share one `Popup`
+owner. The list has no text field; input popups
 own their fields and key routing. Closing uses one cleanup path and blurs a focused input before
 releasing it. Series and add-picker rows share geometry, theme treatment,
 identity, and pointer handling, while supplying their own labels, controls,
-and activation behavior. The range editor uses separate date-field rows;
+and activation behavior. The dates editor uses separate date-field rows;
 the expression editor renders inline below the header in the tile body.
 
 `geode-chart` is independent of series and shell concepts. Its pure core owns
@@ -203,12 +204,41 @@ gpui-component's plot surface. Paths and chrome are cached by the values that
 affect them; cursor movement does not rebuild the data model.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
-It offers popup openers, actions for the selected slot, frequency steps,
-toggles, and view reset. Keyboard stepping skips disabled rows, separators, and
+It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
+and view reset. Keyboard stepping skips disabled rows, separators, and
 headings. Pointer selection can rest on a disabled row, which has no highlight
 fill; choosing it shows its reason and leaves the menu open. Enabled actions
 close the menu before dispatch. Key hints refresh when the menu opens or its
 chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+
+The header shows the range and the frequency as two triggers, `1y ▾` and
+`1d ▾`; an absolute range shows its dates, `2025-09-26 – 2026-09-26 ▾`. Each
+trigger opens its own menu under it and stays filled while that menu (or, for
+the range, the dates editor) is up; a second click closes it. `r` and the range
+trigger open the range menu: the seven presets written out with their short
+labels, then `Custom dates…` (`c`). `f` and the frequency trigger open the
+frequency menu: the six frequencies with their short labels. Short labels are
+text, not keys; `c` paints as a key. Both menus tick the value in force and
+open with the highlight on it (on `Custom dates…` while the range is absolute).
+`j`/`k` move, Enter or a click applies and closes, and Escape closes; a second
+`r` or `f` closes its own menu. A frequency the 500,000-point cap refuses over
+the current range, as resolved under the frame's as-of, is a disabled row
+reading `over cap`; choosing it shows the full cap message as the notice. The
+rows follow range, frequency, and as-of changes while the menu is open. A
+preset the cap refuses at the current frequency is refused when chosen, with
+the reason as the notice and the menu left open. `:range` and `:freq` remain
+the typed routes; no key steps the frequency.
+
+`Custom dates…` opens a two-field date editor under the range trigger. It
+opens on From's day segment and a digit types into the date at once. Tab
+switches fields; Enter applies both dates, and a backwards range or an
+unfinished segment is refused inline with the editor left open. Escape returns
+to the range menu with the highlight on `Custom dates…`; a second Escape closes
+the menu. The editor holds the keyboard, so the tile reports insert mode while
+it is open.
+
+An outside press closes a popup only if it is still the one up, so pressing a
+trigger or `⋯` over another popup swaps popups rather than closing both.
 
 Pointer controls and keyboard actions use the same model operations and
 change processing:
@@ -217,8 +247,8 @@ change processing:
 |---|---|
 | Click a series chip / its swatch | Select the slot / toggle its visibility |
 | Right-click a series chip | Select the slot and open the action menu |
-| Click the range and frequency readout | Toggle the range editor and keep keyboard focus in its input |
-| Click a frequency chip in the range editor | Apply immediately, leaving draft dates unchanged; cancelling the editor does not undo frequency |
+| Click the range / frequency trigger | Toggle the range menu (or close the dates editor) / toggle the frequency menu |
+| Click a range or frequency menu row | Apply it and close, or show a disabled row's reason |
 | Wheel over a plot | Dominant vertical motion zooms about the pointer; dominant horizontal motion pans; ties zoom |
 | Drag a plot / the band between panes | Pan / adjust the split |
 | Click Add or Compose in an empty tile | Open the corresponding editor |
@@ -228,19 +258,6 @@ move with no button held. Movement outside the chart surface is not tracked.
 Modified presses and subsequent presses in a multi-click do not start chart
 drags, leaving those gestures available to the shell. Right presses focus the
 tile before its context menu handles keys.
-
-An unedited range popup accepts preset labels as printed on its chips:
-`3` then `m` selects `3m`, matching `:range 3m`. A bare digit highlights the
-presets it could start and waits for `w`, `m`, or `y`; shifted units also work.
-An unsupported digit, invalid digit/unit pair, or Enter before the unit shows
-an inline refusal. Backspace or Escape clears a pending digit; another Escape
-closes the popup. Completing a preset applies it and closes the popup unless
-range validation refuses it.
-
-Moving or stepping a date segment, or clicking one, makes later digits edit
-the date. A key that changes nothing does not switch to date entry, and Tab
-alone only switches fields. Closing and reopening with `r` restores preset
-entry. Frequency chips still apply immediately without committing draft dates.
 
 A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolute
 `#rrggbb`. Palette and named colours follow the theme. Absolute colours receive
@@ -358,6 +375,14 @@ row, so roots share one leading edge and legs sit one step in; the entry row
 opens at the depth it will land at. A long tree label or text cell ends in
 `…`; a number never truncates. Cell text is floored to the readable ratio on
 the row's own ground and on the table's hover and selected-row grounds.
+
+`[ui] line_numbers` adds a gutter beside the tree column, before the depth
+indent, so numbers share one lane; the tree column widens by the gutter.
+Lines, packages, and an open package's legs are numbered in painted order —
+the index `NG` jumps to. The entry placeholder is blank and does not shift the
+numbers below it, since no motion lands on it. Relative mode shows distance
+from the cursor row, with its absolute number on that row, and numbers
+absolutely when there is no cursor row.
 
 Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A

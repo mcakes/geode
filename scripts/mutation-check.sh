@@ -17558,7 +17558,7 @@ run_mutation "timeseries: an ambiguous identity is refused" \
   geode-timeseries \
   ambiguity_and_absence_are_named_errors
 
-# `f`/`:freq`/`:range` refuse in place against the same 500,000-point cap
+# The frequency menu, `:freq` and `:range` refuse in place against the same 500,000-point cap
 # the service enforces (controller decision 4), so a step that would
 # overrun it never leaves the tile. Unchecked, the tile sends a request
 # the service refuses and the trader gets an error notice instead of an
@@ -17730,88 +17730,123 @@ run_mutation "timeseries: an expression parse error keeps the field open" \
   geode-timeseries \
   x_opens_the_expression_field_and_enter_adds_or_reports_inline
 
-# In the range popup a preset is typed as its chip reads (`3` `m`) until
-# the trader starts editing a date. Each rule of the typed label:
-# the digit waits as a prefix, the unit writes the preset, and only an
-# unedited popup reads a digit as a label.
-run_mutation "timeseries: a digit in the range popup starts a preset label" \
+# The range menu (`r`): the preset in force is ticked and the highlight
+# starts on it; an absolute range ticks `Custom dates…` instead.
+run_mutation "timeseries range menu: the preset in force is ticked" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            checked: Some(*current == Range::Relative(p)),' \
+  '            checked: Some(false),' \
+  geode-timeseries \
+  the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+run_mutation "timeseries range menu: an absolute range ticks custom dates" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '        checked: Some(matches!(current, Range::Absolute { .. })),' \
+  '        checked: Some(false),' \
+  geode-timeseries \
+  an_absolute_range_ticks_custom_dates_and_starts_there
+
+run_mutation "timeseries menus: the highlight starts on the value in force" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '                    checked: Some(true),
+                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  '                    checked: Some(false),
+                    pick: Pick::Range(_) | Pick::CustomRange | Pick::Frequency(_),' \
+  geode-timeseries \
+  the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+# A preset row writes THAT preset, through the model's own setter.
+run_mutation "timeseries range menu: a preset pick writes the preset" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                r.prefix = Some(d);' \
-  '                r.prefix = None;' \
+  '                let written = self.model.set_range(Range::Relative(preset), now, &as_of);' \
+  '                let written = self.model.set_range(self.model.range().clone(), now, &as_of);' \
   geode-timeseries \
-  a_digit_lights_its_presets_and_the_unit_commits_the_label
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
 
-run_mutation "timeseries: the unit completes a typed preset label" \
+# `r` toggles its own menu: a second `r` closes it rather than reopening.
+run_mutation "timeseries menus: an opener toggles its own menu shut" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    if !self.write_range(Range::Relative(preset), window, cx)' \
-  '                    if !{ let _ = preset; false }' \
+  '        if matches!(&self.popup, Some(Popup::Menu(m)) if m.kind == kind) {' \
+  '        if false {' \
   geode-timeseries \
-  a_digit_lights_its_presets_and_the_unit_commits_the_label
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
 
-run_mutation "timeseries: an edited range popup types digits into the date" \
+# The openers survive an open menu so their arm can toggle it; gated off,
+# the dispatch gate closes the menu first and the arm reopens it.
+run_mutation "timeseries menus: the openers survive an open menu" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '                    | "range"
+                    | "freq"
+                    | "range_custom"
+            ),' \
+  '                    | "range_custom"
+            ),' \
+  geode-timeseries \
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
+
+# A `:` line under an open range or frequency menu rebuilds THAT menu's
+# rows, so the tick follows the value.
+run_mutation "timeseries menus: a chrome rebuild refreshes the open menu's own rows" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '        let rows = self.menu_rows(m.kind, cx);' \
+  '        let rows = self.menu_rows(MenuKind::Actions, cx);' \
+  geode-timeseries \
+  r_opens_the_range_menu_on_the_current_preset_and_k_enter_applies_one
+
+# `c` in the range menu opens the dates editor: the binding (scoped to the
+# range menu, after the normal layer whose `c` cycles a colour) and the arm.
+run_mutation "timeseries range menu: c is bound to custom dates" \
+  crates/geode-timeseries/src/content.rs \
+  '"c" = "timeseries::range_custom"' \
+  '"shift+c" = "timeseries::range_custom"' \
+  geode-timeseries \
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
+
+run_mutation "timeseries range menu: custom dates opens the editor" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            && r.digit_is_preset()' \
-  '            && true' \
+  '            "range_custom" => {
+                self.open_range_editor(window, cx);' \
+  '            "range_custom" => {
+                self.toggle_menu_kind(MenuKind::Range, window, cx);' \
   geode-timeseries \
-  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
 
-# A digit no label starts is refused, not held as a prefix nothing can
-# complete.
-run_mutation "timeseries: a digit no preset starts is refused" \
+# The editor opens on the day of `from`, where the first digit lands.
+run_mutation "timeseries dates editor: it opens on the day segment" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            if Preset::any_starts_with(d) {' \
-  '            if true {' \
+  '                Precision::Date,
+                Segment::Day,' \
+  '                Precision::Date,
+                Segment::Year,' \
   geode-timeseries \
-  a_typed_label_refuses_what_is_no_preset
+  c_opens_the_dates_editor_on_from_day_and_digits_type_into_it_at_once
 
-# enter under a pending label would otherwise commit the two dates the
-# trader was not typing.
-run_mutation "timeseries: enter under a pending preset label is refused" \
+# `escape` in the editor goes back to the range menu (both doors), with
+# the highlight on `Custom dates…`.
+run_mutation "timeseries dates editor: the listener's escape returns to the menu" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            (_, "enter") => {' \
-  '            (_, "never-enter") => {' \
+  '            FieldKey::Cancel => self.back_to_range_menu(window, cx),' \
+  '            FieldKey::Cancel => self.close_popup_with_window(window, cx),' \
   geode-timeseries \
-  a_typed_label_refuses_what_is_no_preset
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
 
-# The first escape drops a pending label; only the second closes.
-run_mutation "timeseries: escape drops a pending preset label first" \
+run_mutation "timeseries dates editor: the insert layer's cancel returns to the menu" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            (_, "backspace" | "escape") => {' \
-  '            (_, "backspace") => {' \
+  '            "cancel" if matches!(self.popup, Some(Popup::Range(_))) => {' \
+  '            "cancel" if false => {' \
   geode-timeseries \
-  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
 
-# Only the presets a pending digit could still become are lit.
-run_mutation "timeseries: a pending label lights only its own presets" \
-  crates/geode-timeseries/src/popup.rs \
-  '        self.prefix.is_some_and(|d| preset.starts_with(d))' \
-  '        self.prefix.is_some()' \
+run_mutation "timeseries dates editor: escape lands the highlight on custom dates" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            m.highlighted = custom;' \
+  '            let _ = custom;' \
   geode-timeseries \
-  a_digit_lights_its_presets_and_the_unit_commits_the_label
+  escape_in_the_editor_returns_to_the_range_menu_and_escape_again_closes
 
-# A segment click is the mouse's field key and drops a pending label.
-run_mutation "timeseries: a segment click drops a pending preset label" \
-  crates/geode-timeseries/src/popup.rs \
-  '        self.edited = true;
-        self.prefix = None;' \
-  '        self.edited = true;' \
-  geode-timeseries \
-  a_pending_label_is_dropped_by_backspace_escape_and_field_keys
-
-# …and the other half of the same rule: only a key that MOVED something
-# counts as an edit. `right` on the last segment, or a `tab`, changes
-# nothing on screen, and a popup that called either an edit would look
-# exactly as it opened while the preset digits had silently gone dead.
-run_mutation "timeseries: a no-op key is not an edit" \
-  crates/geode-timeseries/src/popup.rs \
-  '        self.edited |= moved;' \
-  '        self.edited = true;' \
-  geode-timeseries \
-  a_key_that_moves_nothing_leaves_the_typed_presets_live
-
-# An `Absolute` range seeds the popup from the dates it STORES; only a
-# relative one resolves against now/as-of (Task 10 ruling). Resolved, a
-# trader who opens `r` under a historical as-of and presses `enter` has
+# An `Absolute` range seeds the dates editor from the dates it STORES; only a
+# relative one resolves against now/as-of (a ruling). Resolved, a
+# trader who opens the editor under a historical as-of and presses `enter` has
 # their stored `to` silently rewritten to the as-of day.
 run_mutation "timeseries: an absolute range seeds from its stored dates" \
   crates/geode-timeseries/src/tile/popups.rs \
@@ -19312,26 +19347,95 @@ run_mutation "timeseries mouse: the actions button toggles in capture" \
             .on_any_mouse_down({' \
   geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
 
-# The readout toggles for the same reason, in the same phase: in the
-# bubble phase the open range popup's `on_mouse_down_out` closes it
-# first and the click meant to close reopens on a fresh seed.
-run_mutation "timeseries mouse: the readout toggles in capture" \
+# The range trigger toggles in the CAPTURE phase, the `⋯` button's
+# reason: in the bubble phase the open menu's `on_mouse_down_out` closes
+# it first and the click meant to close reopens it.
+run_mutation "timeseries triggers: a trigger toggles in capture" \
   crates/geode-timeseries/src/header.rs \
-  '            // this press. Propagation still lets the shell focus the tile.
-            .capture_any_mouse_down({' \
-  '            // this press. Propagation still lets the shell focus the tile.
-            .on_any_mouse_down({' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  '        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
+  '        .on_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
+  geode-timeseries a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes
 
-# The readout's press prevents default: the shell root is track_focus'ed,
-# and without it gpui focuses the root in the press's bubble phase, so
-# the range popup it just opened loses left/right to the root.
-run_mutation "timeseries mouse: the readout press keeps the popup's focus" \
-  crates/geode-timeseries/src/header.rs \
-  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
-                    window.prevent_default();' \
-  '                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+# The range trigger owns the dates editor too: its click closes the
+# editor rather than dispatching `r` (which would land on the menu).
+run_mutation "timeseries triggers: the range trigger closes the editor it owns" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            Some(Popup::Range(_)) => true,' \
+  '            Some(Popup::Range(_)) => false,' \
+  geode-timeseries a_custom_dates_click_opens_the_editor_for_the_digits_after_it
+
+# The frequency trigger opens the frequency menu, not another.
+run_mutation "timeseries triggers: the frequency trigger opens the frequency menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        self.dispatch(&ActionId("timeseries::freq".into()), None, window, cx);' \
+  '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+# An outside press closes only the popup its listener was painted for:
+# a trigger's (or the ⋯ button's) capture-phase press runs first and may
+# have swapped another popup in, which the old popup's outside press must
+# not close. The guard compares the painted kind, a menu's included...
+run_mutation "timeseries menus: an outside press closes only its own menu" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.as_ref().is_some_and(|p| matches!((p.kind(), painted), (PopupKind::Menu(_), PopupKind::Menu(_))) || p.kind() == painted) {' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+run_mutation "timeseries popups: an outside press closes only the popup it painted" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '        if self.popup.as_ref().map(Popup::kind) == Some(painted) {' \
+  '        if self.popup.is_some() {' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# ...and every painted popup goes through it: the series list and the add
+# picker closed unconditionally, so a trigger pressed over either opened
+# its menu and the old listener closed it again.
+run_mutation "timeseries popups: the series list's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Series, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+run_mutation "timeseries popups: the picker's outside press is guarded" \
+  crates/geode-timeseries/src/popup.rs \
+  '                tile.update(cx, |t, cx| t.outside_press(PopupKind::Picker, window, cx))' \
+  '                tile.update(cx, |t, cx| t.close_popup_with_window(window, cx))' \
+  geode-timeseries a_trigger_over_the_series_list_or_the_picker_leaves_its_menu_open
+
+# A frame change refreshes an open menu's rows even where the chrome
+# rebuild does not run (a tile with no series): the frequency menu's cap
+# reasons are resolved under the frame's as-of.
+run_mutation "timeseries frequency menu: an as-of change refreshes the cap reasons" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if this.refresh_menu_rows(cx) {' \
+  '            if false {' \
+  geode-timeseries an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons
+
+# A menu's trailing lane paints keys as Kbd and non-key text (a preset's or
+# a frequency's short label) as text: a label routed to the key lane would
+# paint as nothing, or as a key it is not.
+run_mutation "timeseries menus: a short label is text, not a key" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '                (Ok(()), Some(label)) => Trailing::Text(label.clone()),' \
+  '                (Ok(()), Some(_)) => Trailing::Keys(hint),' \
+  geode-timeseries the_range_menu_writes_the_presets_out_ticks_the_current_and_ends_on_custom
+
+# A capped row's trailing column is short; the full refusal is the notice.
+run_mutation "timeseries frequency menu: a capped row shows a short reason" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            short_reason: Some(SharedString::new_static(OVER_CAP)),' \
+  '            short_reason: None,' \
+  geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
+
+# The range trigger paints its open state while the dates editor, not
+# only the range menu, is up.
+run_mutation "timeseries triggers: the editor keeps the range trigger open" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            Some(Popup::Range(_)) => TriggersOpen {
+                range: true,' \
+  '            Some(Popup::Range(_)) => TriggersOpen {
+                range: false,' \
+  geode-timeseries a_trigger_is_open_while_its_popup_is_up
 
 # A right press focuses the tile it lands on (review M1: a context menu
 # opened in an unfocused tile answers to the wrong tile's keys).
@@ -19348,8 +19452,11 @@ run_mutation "shell: a right press focuses the tile" \
 # A verb outside the menu's own closes it first.
 run_mutation "timeseries mouse: a foreign verb closes the menu" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"' \
-  '                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick" | "zoom_in"' \
+  '                    | "menu_pick"
+                    | "range"' \
+  '                    | "menu_pick"
+                    | "zoom_in"
+                    | "range"' \
   geode-timeseries the_menu_keys_step_over_action_rows_pick_and_close
 
 # A swatch click flips visibility through `v`'s own path.
@@ -19357,7 +19464,7 @@ run_mutation "timeseries mouse: the swatch toggles visibility" \
   crates/geode-timeseries/src/tile/popups.rs \
   '        let flipped = self.model.toggle_visible();' \
   '        let flipped = Changed::NONE;' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  geode-timeseries a_swatch_click_toggles_visibility
 
 # A right-click selects the slot under the pointer before opening.
 run_mutation "timeseries mouse: a right-click selects its chip" \
@@ -19370,23 +19477,64 @@ run_mutation "timeseries mouse: a right-click selects its chip" \
         if self.popup.is_some() {' \
   geode-timeseries a_right_click_on_a_chip_selects_it_and_opens_the_menu_on_it
 
-# The readout opens the RANGE popup, not another.
-run_mutation "timeseries mouse: the readout opens the range popup" \
+# The range trigger's click takes `r`'s own path.
+run_mutation "timeseries triggers: the range trigger opens the range menu" \
   crates/geode-timeseries/src/tile/popups.rs \
   '        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);' \
   '        self.dispatch(&ActionId("timeseries::list".into()), None, window, cx);' \
-  geode-timeseries a_swatch_click_toggles_visibility_and_the_readout_opens_the_range_popup
+  geode-timeseries a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes
 
-# A frequency chip's write reaches the chrome (the header readout).
-run_mutation "timeseries mouse: a frequency chip rebuilds the chrome" \
+# The frequency menu: a frequency the cap refuses is a disabled row
+# carrying the model's own reason (pure rows, and the tile's question).
+run_mutation "timeseries frequency menu: a capped row is disabled" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            enabled: refusal(f).map_err(SharedString::from),' \
+  '            enabled: Ok(()),' \
+  geode-timeseries the_frequency_menu_ticks_the_current_and_disables_what_the_cap_refuses
+
+run_mutation "timeseries frequency menu: the tile asks the cap per row" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                    r.frequency = f;
-                }
-                self.apply_changed(changed, cx);' \
-  '                    r.frequency = f;
-                }
-                self.apply_changed(Changed::NONE, cx);' \
-  geode-timeseries a_frequency_chip_writes_at_once_keeps_the_popup_open_and_refuses_inline
+  '                    self.model.frequency_refusal(f, now, &as_of)' \
+  '                    { let _ = (f, now, &as_of); Ok(()) }' \
+  geode-timeseries f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason
+
+run_mutation "timeseries frequency menu: the frequency in force is ticked" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                menu::frequency_rows(self.model.frequency(), |f| {' \
+  '                menu::frequency_rows(Frequency::D1, |f| {' \
+  geode-timeseries the_frequency_trigger_toggles_its_menu
+
+run_mutation "timeseries frequency menu: a pick writes that frequency" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '                let written = self.model.set_frequency(f, now, &as_of);' \
+  '                let written = self.model.set_frequency(self.model.frequency(), now, &as_of);' \
+  geode-timeseries f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason
+
+# A disabled row's pick is the notice and nothing else: mutated, the
+# action list's greyed `Remove` closes the menu and dispatches.
+run_mutation "timeseries menus: a disabled row explains and stays" \
+  crates/geode-timeseries/src/tile/popups.rs \
+  '            self.notice = Some(reason.clone());
+            cx.notify();
+            return;' \
+  '            let _ = reason;' \
+  geode-timeseries the_actions_button_toggles_the_menu_and_a_row_click_dispatches_or_explains
+
+# The action list's `Frequency…` row opens the frequency menu.
+run_mutation "timeseries action list: Frequency opens the frequency menu" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '    out.push(action("timeseries::freq", "Frequency…", Ok(())));' \
+  '    out.push(action("timeseries::range", "Frequency…", Ok(())));' \
+  geode-timeseries the_action_list_frequency_row_opens_the_frequency_menu
+
+# `F` no longer steps the frequency: a binding that came back would
+# reach the menu (or a step) where the trader expects nothing.
+run_mutation "timeseries frequency menu: shift+f stays unbound" \
+  crates/geode-timeseries/src/content.rs \
+  '"f" = "timeseries::freq"' \
+  '"f" = "timeseries::freq"
+"shift+f" = "timeseries::freq"' \
+  geode-timeseries shift_f_does_nothing_and_f_no_longer_steps
 
 # The empty state's first button adds, the second composes.
 run_mutation "timeseries mouse: the empty-state buttons dispatch their own verbs" \
@@ -20155,6 +20303,30 @@ run_mutation "timeseries colour picker: removing the target closes the picker" \
   '        self.close_orphaned_colour_picker(window, cx);' \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
+
+# The pricer's gutter follows `[ui] line_numbers` through the observed
+# `UiSettings` global. Mutated, the mirror never takes the new mode and
+# no gutter paints.
+run_mutation "pricer gutter: the settings observer applies the mode" \
+  crates/geode-pricer/src/tile.rs \
+  '                d.line_numbers = mode;' \
+  '' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# The tree column widens by the gutter, so the tree text keeps its room.
+run_mutation "pricer gutter: the tree column's width includes the gutter" \
+  crates/geode-pricer/src/delegate.rs \
+  '                width: px(TREE_WIDTH + self.gutter_px()),' \
+  '                width: px(TREE_WIDTH),' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# Relative numbers are re-derived when the cursor row moves. Mutated, the
+# stamp ignores the cursor and a move leaves the old distances painted.
+run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
+  crates/geode-pricer/src/delegate.rs \
+  '        let stamp = (len, entry, cursor, mode);' \
+  '        let stamp = (len, entry, None, mode);' \
+  geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
