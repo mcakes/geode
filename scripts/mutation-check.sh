@@ -2709,9 +2709,9 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
 # Ordered persistence: filesystem transactions and accepted UI submissions.
 run_mutation "config ordering: the read begins after the previous commit" \
   crates/geode-shell/src/config_write.rs \
-  '    let mut document = open_at(&path)?;' \
+  '    let mut document = open_at(legacy.as_deref().unwrap_or(&path))?;' \
   '    drop(_guard);
-    let mut document = open_at(&path)?;' \
+    let mut document = open_at(legacy.as_deref().unwrap_or(&path))?;' \
   geode-shell concurrent_edits_read_after_the_previous_commit
 
 run_mutation "config ordering: pending writes run in submission order" \
@@ -10643,7 +10643,7 @@ run_mutation "colour: gamut clip pulls chroma" \
 # 2c §3: an unknown named colour warns with the column's file index.
 run_mutation "load_views: an unknown colour name warns with its path" \
   crates/geode-core/src/config/load.rs \
-  '                && colours.get(name).is_none()' \
+  '                && colors.get(name).is_none()' \
   '                && false' \
   geode-core \
   a_column_naming_an_unknown_colour_warns_with_its_path
@@ -10681,7 +10681,7 @@ run_mutation "load_views: an unknown colour in the overlay warns with its path" 
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
                 };
-                if colours.get(name).is_none() {' \
+                if colors.get(name).is_none() {' \
   '            for (col, cp) in &p.columns {
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
@@ -10854,7 +10854,7 @@ run_mutation "colours: the browse swatch resolves the row's own definition" \
 # 2c §6.2: a colours change reaches the tiles like a views change.
 run_mutation "hot_reload: a colours change fires ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed("colours");' \
+  '                || changed(geode_core::config::COLORS_DOC);' \
   '                || changed("views");' \
   geode-shell \
   a_colours_change_fires_config_reloaded
@@ -20029,14 +20029,14 @@ run_mutation "timeseries colour picker: the pick context survives the close" \
 # The Colours dialog refuses a `#` name up front...
 run_mutation "colours dialog: a name starting with '#' is reserved" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   '            || false' \
   geode-shell reserved_names_are_taken
 
 # ...and only the Colours dialog.
 run_mutation "colours dialog: the '#' reservation is the colours domain's alone" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            || (self == Domain::Colours && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
+  '            || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   '            || (true && name.starts_with(geode_core::colour::RESERVED_PREFIX))' \
   geode-shell reserved_names_are_taken
 
@@ -20072,8 +20072,8 @@ run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            "pick_colour" => self.open_colour_picker(window, cx),' \
-  '            "pick_colour" => false,' \
+  '            "pick_color" => self.open_colour_picker(window, cx),' \
+  '            "pick_color" => false,' \
   geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
@@ -20130,6 +20130,85 @@ run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
   '        let stamp = (len, entry, cursor, mode);' \
   '        let stamp = (len, entry, None, mode);' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
+
+# An old-named colours.toml loads under the current doc name. Mutated, the
+# layer keeps a doc named `colours` that nothing reads, and the colors vanish.
+run_mutation "color rename: an old colours.toml loads as the colors doc" \
+  crates/geode-core/src/config/load.rs \
+  '            docs[i].name = (*new).to_string();' \
+  '            let _ = new;' \
+  geode-core an_old_colours_file_alone_loads_as_colors_with_a_warning
+
+# Both names in one layer: the old file is dropped, never merged.
+run_mutation "color rename: colors.toml wins over colours.toml in one layer" \
+  crates/geode-core/src/config/load.rs \
+  '            let legacy = docs.remove(i);' \
+  '            let legacy = docs[i].clone();' \
+  geode-core colors_wins_over_colours_in_the_same_layer_with_a_warning
+
+# The old `colour` column key is still read when `color` is absent.
+run_mutation "color rename: the old colour key is still read" \
+  crates/geode-core/src/view.rs \
+  '        let color = match (table.get("color"), table.get(LEGACY_COLOR_KEY)) {' \
+  '        let color = match (table.get("color"), None::<&toml::Value>) {' \
+  geode-core the_old_colour_key_is_read_with_a_warning_naming_color
+
+# Beside `color`, the old key loses.
+run_mutation "color rename: color wins over the old colour key" \
+  crates/geode-core/src/view.rs \
+  '            (Some(v), Some(_)) => {' \
+  '            (Some(_), Some(v)) => {' \
+  geode-core color_wins_over_the_old_colour_key
+
+# The first colors edit starts from an old user colours.toml. Mutated, it
+# creates a one-entry colors.toml that hides every old definition.
+run_mutation "color rename: a colors edit carries an old colours.toml across" \
+  crates/geode-shell/src/config_write.rs \
+  '    let legacy = legacy_source(user_dir, doc, &path);' \
+  '    let legacy: Option<PathBuf> = None;' \
+  geode-shell an_edit_to_colors_carries_an_old_colours_file_across
+
+# ...and only when colors.toml is absent: beside it, the old file is stale.
+run_mutation "color rename: an existing colors.toml is edited, not the old file" \
+  crates/geode-shell/src/config_write.rs \
+  '    (!path.exists() && old.exists()).then_some(old)' \
+  '    old.exists().then_some(old)' \
+  geode-shell an_edit_to_colors_ignores_the_old_file_beside_the_current_one
+
+# A keymap binding naming a retired action id binds its successor.
+run_mutation "action rename: the keymap builder follows a rename" \
+  crates/geode-shell/src/keymap/build.rs \
+  '                if let Some(current) = registry.renamed(&action) {' \
+  '                if let Some(current) = None::<&ActionId> {' \
+  geode-shell a_binding_naming_a_renamed_action_binds_the_current_id_with_a_warning
+
+# A rename resolves only to a registered successor.
+run_mutation "action rename: a rename needs a registered successor" \
+  crates/geode-shell/src/actions.rs \
+  '        self.renames.get(old).filter(|new| self.contains(new))' \
+  '        self.renames.get(old)' \
+  geode-shell a_rename_resolves_to_a_registered_successor
+
+# The shell registers config::colours as retired.
+run_mutation "action rename: config::colours still binds config::colors" \
+  crates/geode-shell/src/defaults.rs \
+  '    reg.register_rename("config::colours", "config::colors")' \
+  '    Ok::<(), String>(())' \
+  geode-shell a_user_binding_to_the_old_colours_action_binds_config_colors
+
+# The timeseries factory registers its two retired color ids.
+run_mutation "action rename: timeseries registers its retired color ids" \
+  crates/geode-timeseries/src/content.rs \
+  '            let _ = registry.register_rename(old, new);' \
+  '            let _ = (old, new);' \
+  geode-timeseries a_user_binding_naming_an_old_color_action_binds_the_new_id
+
+# A timeseries session saved under the old `colour` slot key restores.
+run_mutation "color rename: a session slot saved as colour restores" \
+  crates/geode-timeseries/src/core/session.rs \
+  '    match r.get("color").or_else(|| r.get("colour")) {' \
+  '    match r.get("color") {' \
+  geode-timeseries the_old_colour_key_is_read_and_rewritten_as_color
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
