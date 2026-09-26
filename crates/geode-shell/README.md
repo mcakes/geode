@@ -16,10 +16,11 @@ Keyboard ownership, palette, completion, choices, and frame-picker contracts:
 
 ## Layout
 
-The crate is split into pure cores, tested without a window, and the gpui
-surfaces that consume them.
+State and configuration helpers are separated from window integration.
+Many helpers have pure models tested without a window; some also publish
+GPUI globals or provide rendering helpers.
 
-**Pure cores (no gpui)**
+**State, configuration, and shared helpers**
 
 | Module | Holds |
 |---|---|
@@ -36,7 +37,7 @@ surfaces that consume them.
 | `perf` | The always-compiled frame-time histogram. |
 | `defaults` | The builtin action set and keymap, the Builtin config layer. |
 
-**gpui surfaces**
+**Window integration**
 
 | Module | Holds |
 |---|---|
@@ -56,7 +57,7 @@ wide and module visible.
 - `test-support` exposes `module::recording` and a few accessors outside
   `#[cfg(test)]`, so the module crates' tests can host a recorded
   neighbour. CI checks `cargo check -p geode-shell --features test-support
-  --all-targets` because nothing else keeps that configuration building.
+  --all-targets` to cover the public hosting-test configuration.
 - `profiling` turns on gpui's own profiler (frame and input-latency
   histograms, the debug overlay, hang detection) and the two shell actions
   that surface it. Enabled through `geode-app`'s same-named feature.

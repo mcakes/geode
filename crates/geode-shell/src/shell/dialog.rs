@@ -3,7 +3,7 @@
 //! `ShellView` owns one [`ShellModal`] and renders its chrome without animation. Open
 //! through [`open_shell_dialog`] or [`open_shell_dialog_with_key`] so pending key
 //! sequences, competing overlays, the retained input, and focus are reconciled. Dialog
-//! state must be installed before opening; [`sync_dialog_text`] reads that state to
+//! state must be installed before opening; `sync_dialog_text` reads that state to
 //! choose the shared input's text and focus.
 //!
 //! Content and key handlers receive the shell's existing borrow. They must not
@@ -65,7 +65,7 @@ pub struct ShellModal {
     pub on_key: Option<ModalKeyHandler>,
 }
 
-/// Title-row builder with the same render-time borrow contract as [`ModalBuilder`].
+/// Title-row builder with the same render-time borrow contract as `ModalBuilder`.
 pub type TitleExtraBuilder = Rc<dyn Fn(&ShellView, &mut App) -> AnyElement>;
 
 /// Attach title-row content after opening a modal. Does nothing if no modal is open.
@@ -145,7 +145,7 @@ pub fn open_shell_dialog<F>(
 ///
 /// `focus_filter` focuses that input for a surface without a mode. Dialogs with mode
 /// state install it before calling this function and pass `false`, allowing
-/// [`sync_dialog_text`] to choose focus from their state. Callers guard against
+/// `sync_dialog_text` to choose focus from their state. Callers guard against
 /// replacing an already-open modal.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
@@ -269,12 +269,12 @@ pub struct FrozenFilter<'a> {
     /// Whether a bare `/` would enter filter mode from here. `false`
     /// only while the keybinding dialog is capturing a keystroke.
     pub slash_filters: bool,
-    /// Shell handle for the frozen row's mouse-down to call [`enter_filter_by_mouse`].
+    /// Shell handle for the frozen row's mouse-down to call `enter_filter_by_mouse`.
     pub entity: Entity<ShellView>,
 }
 
 /// Enter filter mode from the frozen row's mouse-down. The shared entry helper
-/// snapshots the query exactly as `/` does; [`sync_dialog_text`] reconciles focus
+/// snapshots the query exactly as `/` does; `sync_dialog_text` reconciles focus
 /// after the handler returns.
 ///
 /// Cancel a keybinding capture first so its focus priority cannot keep keys on the
@@ -363,7 +363,7 @@ pub fn filter_row(
 
 /// Labelled shared Input for object naming or value entry. This renderer neither clears
 /// nor focuses it: callers update the dialog's effective query and run
-/// [`sync_dialog_text`]. Input changes flow back to the active dialog state.
+/// `sync_dialog_text`. Input changes flow back to the active dialog state.
 pub fn name_row(input: &Entity<InputState>, label: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
@@ -440,7 +440,8 @@ pub(crate) fn choice_rows(
         let text = &list.options()[ranked.row];
         let selector = format!("{prefix}-choice-{text}");
         let on_click = on_click.clone();
-        let mut row = h_flex()
+        let row = h_flex()
+            .id(("choice-row", ranked.row))
             .w_full()
             .h(scale::design(CHOICE_ROW_HEIGHT))
             // The container is a fixed-height column: without this a
@@ -461,11 +462,7 @@ pub(crate) fn choice_rows(
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 on_click(position, window, cx);
             });
-        if position == list.ranked_highlighted() {
-            row = row.bg(paint.active).text_color(paint.text);
-        } else {
-            row = row.hover(move |s| s.bg(paint.hover));
-        }
+        let row = super::listrow::paint_row(row, paint, position == list.ranked_highlighted());
         rows = rows.child(row);
     }
     rows.into_any_element()

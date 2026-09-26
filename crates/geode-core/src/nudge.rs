@@ -99,7 +99,7 @@ mod tests {
         );
     }
 
-    /// A date is the segmented field's (2026-09-19), never this function's.
+    /// Dates are stepped by the segmented date field, not this numeric helper.
     #[test]
     fn a_date_is_not_nudged_as_text() {
         assert!(nudge_text("2026-09-14", ColumnType::Date, None, 1).is_err());

@@ -120,7 +120,7 @@ pub struct ObjectRow {
     /// layer**. Both halves matter: the edit stage offers `Revert to
     /// desk` on an overridden row, and revert deletes the user's copy —
     /// on a view only the user layer defines, that would delete the view
-    /// outright rather than restore anything. See [`derive_rows`].
+    /// outright rather than restore anything. See `derive_rows`.
     pub overridden: bool,
     /// Whether the inherited definition differs from its recorded value at fork time.
     /// Missing or stale `overrides.toml` entries report no drift. Comparing the user's
@@ -248,7 +248,7 @@ impl Domain {
     /// The text painted before an object's name, if this domain groups its objects.
     /// `None` on every domain but Sources — a source's row leads with the dataset it
     /// feeds (`sources::prefix`), painted dimmed ahead of the name and used as the
-    /// primary sort key in [`derive_rows`]; every other domain's objects are already
+    /// primary sort key in `derive_rows`; every other domain's objects are already
     /// uniquely named with nothing to group them by.
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
@@ -319,7 +319,7 @@ impl Domain {
 }
 
 /// The objects a domain's user-layer presentation overlay names — the
-/// set [`derive_rows`] reads as "personalised without overriding" and
+/// set `derive_rows` reads as "personalised without overriding" and
 /// [`Domain::name_taken`] reads as "a name that is spoken for even
 /// though nothing lists it". One walk, shared, because the two answers
 /// have to agree: a name this set holds and `doc` does not is exactly
@@ -478,7 +478,7 @@ pub fn stale_override_keys(config: &Config) -> Vec<String> {
         .collect()
 }
 
-/// The gate [`derive_rows`] applies to compute [`ObjectRow::drifted`]: drift is
+/// The gate `derive_rows` applies to compute [`ObjectRow::drifted`]: drift is
 /// provable only from the sidecar's recorded text, so no entry means not drifted, never
 /// a guess from the shadow's current copy.
 fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name: &str) -> bool {
@@ -764,7 +764,7 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Provenance::Desk => "desk",
             Provenance::Dataset => "dataset",
@@ -892,17 +892,12 @@ pub struct RowDrag {
     pub name: String,
 }
 
-/// What a keystroke is waiting to have confirmed. Each of the three is
-/// unrecoverable in its own direction — deleting the user's copy of an
-/// object, throwing away a personal override, or forking an object out of
-/// the layer that maintains it — so each takes a second, deliberate
-/// keystroke rather than happening under one letter.
+/// A destructive operation awaiting confirmation: deleting a user object,
+/// reverting a personal override, or replacing a user-owned saved scope.
 ///
-/// There is no `Discard`. It existed to guard the staged-draft model's
-/// unsaved work; now every field edit is recorded the moment it is made,
-/// on a batch that outlives the stage and the dialog and reaches disk on
-/// its own timer, so leaving abandons nothing and a confirm there would
-/// be a question about a state that cannot arise.
+/// Leaving a field or dialog requires no discard confirmation. Completed
+/// field edits enter a pending batch that outlives the dialog and flushes
+/// on its own timer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
     Delete,
@@ -1031,7 +1026,7 @@ pub struct Draft {
     pub dataset_layer: BTreeMap<String, ColumnPresentation>,
 }
 
-/// Which way [`Draft::step_selected`] moves the value under the cursor.
+/// Which way `Draft::step_selected` moves the value under the cursor.
 /// A parameter rather than a second copy of the stepping match, so the
 /// forward and backward paths cannot drift apart from each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1055,7 +1050,7 @@ pub enum Step {
     Changed,
     /// Nothing on this row has a value this key changes.
     Inert,
-    /// Declined, with the reason to show. See [`Draft::step_selected`]'s
+    /// Declined, with the reason to show. See `Draft::step_selected`'s
     /// `Destination::Doc` rule.
     Refused(String),
 }
@@ -1375,7 +1370,7 @@ impl Draft {
     /// invariant should count on no others:
     ///
     /// 1. *within* the keystroke that changed a field, before
-    ///    [`apply::commit_edit`] records it and moves the baseline;
+    ///    `apply::commit_edit` records it and moves the baseline;
     /// 2. indefinitely, for a change `commit_edit` **refused**: an error
     ///    diagnostic (`apply::blocking_diagnostic`) or a shell with no
     ///    writable user directory both return before `mark_saved()`, so
@@ -1385,7 +1380,7 @@ impl Draft {
     ///    dirtiness to decide whether something needs saving.
     ///
     /// `source` is compared too, not just `fields` — see
-    /// [`Draft::baseline_source`]'s own doc for why a fields-only
+    /// `Draft::baseline_source`'s own doc for why a fields-only
     /// comparison is not enough once a verb (Scopes' `o`) can replace
     /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
@@ -1743,7 +1738,7 @@ impl Draft {
     /// The object's own items of the ordered-list field named `key` —
     /// what is written, counted and reorderable.
     ///
-    /// Read through [`Draft::field_by_key`], which falls back to the object's stashed
+    /// Read through `Draft::field_by_key`, which falls back to the object's stashed
     /// fields, and that fallback is load-bearing rather than tidy: the column stage
     /// swaps `fields` out for one column's seven, while the write path still renders
     /// the WHOLE object on every keystroke — `views::presentation_table` and
@@ -1790,7 +1785,7 @@ impl Draft {
 
     /// `shift+space`: change the value under the cursor backward — the
     /// reverse twin of [`Draft::toggle_selected`]. Both share
-    /// [`Draft::step_selected`] rather than carrying two near-identical
+    /// `Draft::step_selected` rather than carrying two near-identical
     /// copies of the same match, which is the failure this codebase keeps
     /// hitting (a fix applied to one copy and not the other).
     pub fn toggle_selected_back(&mut self) -> Step {
@@ -2896,14 +2891,14 @@ pub struct ObjectDialogState {
     ///
     /// One field serves both query slots because a filter session can
     /// never span a stage change: every stage transition sets
-    /// `DialogMode::Normal` explicitly ([`Self::enter_edit`],
+    /// `DialogMode::Normal` explicitly (`Self::enter_edit`,
     /// `render::enter_column_stage`, `render::enter_values_stage`), so
     /// the snapshot is always applied to the slot it was taken from. A
     /// future transition that preserved `Filter` would revert one
     /// stage's query to another stage's text.
     pub filter_entry_query: String,
     /// `Normal` on open — bare letters are verbs, and the shared filter
-    /// input is left blurred so they reach [`render::handle_key`] rather
+    /// input is left blurred so they reach `render::handle_key` rather
     /// than being typed.
     pub mode: DialogMode,
     /// A one-line report about the keystroke just pressed, painted in the
@@ -2951,10 +2946,8 @@ pub struct ObjectDialogState {
 }
 
 impl ObjectDialogState {
-    /// Hand-written rather than `Default`-derived for the reason
-    /// `KeybindingsState`'s own `Default` is: the opening mode is a
-    /// per-surface decision and deserves one explicit, greppable line
-    /// (`DialogMode` has no `Default` on purpose).
+    /// Open in normal mode with empty transient state. Each dialog chooses
+    /// its opening mode explicitly; `DialogMode` has no default.
     pub fn new(domain: Domain) -> Self {
         Self {
             domain,
@@ -5472,17 +5465,10 @@ mod tests {
         );
     }
 
-    /// Review round 1's Important: `query` inside an open plain field is
-    /// the value being typed, not a filter, so [`Draft::visible_rows`]
-    /// must not narrow the rows by it — narrowing would paint an empty
-    /// list the moment a seeded `Number` (`"3"`) matches no row label,
-    /// and would leave `selected` indexing a position the unfiltered
-    /// list disagrees with. A filter applied before `i` is opened is
-    /// lost with it (the seed overwrites `query`), the same rule the
-    /// chain field already has — this test's `draft.query = "interval"`
-    /// beforehand is there to prove exactly that: opening the field on
-    /// the one row that filter left visible must still show every row
-    /// underneath, not the one-row filtered list frozen in place.
+    /// An open plain field uses `query` as its value, so it must not filter
+    /// visible rows. Opening the number field replaces the previous filter
+    /// with its seed and restores the full row list, keeping selection
+    /// indices aligned with the rows beneath the editor.
     #[test]
     fn a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected() {
         let mut draft = Draft::new_object(

@@ -270,8 +270,8 @@ mod tests {
     #[test]
     fn exact_corner_ties_break_in_declaration_order() {
         // Equidistant from left and top (10px each): Left is considered
-        // first and strict `<` means the tie stands — the recorded fixed
-        // priority Left, Right, Top, Bottom.
+        // first and strict `<` preserves the tie priority:
+        // Left, Right, Top, Bottom.
         assert_eq!(
             classify_drop_zone(RECT, 110.0, 210.0),
             DropZone::Edge(Direction::Left)

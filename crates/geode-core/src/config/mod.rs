@@ -51,7 +51,7 @@ pub enum Layer {
 }
 
 impl Layer {
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Layer::Builtin => "builtin",
             Layer::Desk => "desk",

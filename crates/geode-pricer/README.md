@@ -20,7 +20,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `shorthand`, `template` | Parsing and rendering custom lines and package templates. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o`/`shift+o` land, and the entry history. |
+| `entry` | Where `o` lands, the entry bar's label, and the entry history. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary: parse and completions. |
@@ -33,7 +33,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells, tree column, entry row, editor, expiry date field. |
+| `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead and the `.` action menu. |
 | `session` | The tile's session record. |
@@ -63,7 +63,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
-- Shorthand rendering uses a template only while the legs still match it.
+- Shorthand rendering uses a template only while the legs still match it; the
+  grid keeps it as the row's find key and paints only a package's template
+  token.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - The `pricer_sheets` declaration is frozen: tables are created with
@@ -83,9 +85,6 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   notice without replacing it, log once per streak, and schedule retries from
   one second up to a thirty-second cap. Admission or a submit with no further
   work needed ends the streak. Only one retry timer is pending at a time.
-- A click resolves its grid row to a `LineId` before closing any field: the
-  entry placeholder is a grid row, so reading the row after the close names
-  the line below.
 - Package expansion IDs survive edits because IDs are not reused, allowing
   undo to restore an open package. Loading prunes the set; session output
   includes only packages still present. Restoring a leg selects it and opens
@@ -96,6 +95,14 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   and a click in the grid (a chevron included) cancels an open editor without
   committing it. A date segment's mouse-down stops propagation, so a click
   aimed into the field selects a segment rather than cancelling it.
+- A press that closes the entry bar, on a cell or a chevron, hands its
+  resolved line to the next press only: the bar's close moves the table up
+  on screen, so the second press of the same double-click lands on a lower
+  row. A double-click (and its tree-column cursor move) uses the handed-on
+  line.
+- `add_below` with the bar already open (a palette dispatch) refocuses its
+  field: the palette's commit focuses the shell root first, and an open bar
+  without focus reads `insert` while shell bindings take shifted letters.
 - The expiry always edits in `geode_widgets::datefield`'s pure field; the
   tile owns its focus handle (what `holds_focus` and the shell's insert
   predicate read) and routes keys through `datefield::route` in
@@ -127,8 +134,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   accepted save is only queued: `PricerFactory::save_answered` settles it by
   sheet name. The app delivers every outcome, in the writer's order, so the
   last to arrive is the latest queued save's. Only a confirmed
-  outcome reaches the store's known names (`note_saved`/`note_forgotten`,
-  no-ops on `MemorySheetStore`). The save state has its own header slot,
+  outcome updates the production store's known names through
+  `note_saved`/`note_forgotten`. The save state has its own header slot,
   which pricing notices and `escape` never touch.
 - Loads carry the tile's own `load_tag` (separate from the pricing `tag`);
   `Delivery::Query` under any other tag is dropped, and the answer is decoded
@@ -149,7 +156,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirm is market-data's upload confirm: a focused prompt in the
+- The `:rm` confirmation uses a focused prompt in the
   header whose `on_key_down` consumes every key (bare `y` confirms), the
   tile in `insert` mode while armed, cancelled by focus leaving or a pointer
   press, blurred before it drops.
@@ -176,18 +183,18 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as
   moving it, so otherwise `enter` commits the typed text.
-- A row's own ground (package, entry) is painted by `render_tr` on the row,
+- A package row's ground is painted by `render_tr` on the row,
   never per cell, so the table's hover and selected-row fills stay visible.
 - The line-number gutter (`[ui] line_numbers`, read from the `UiSettings`
   global and observed) sits beside the tree cell, outside its depth indent,
   so numbers share one lane at every depth. The tree column widens by the
   gutter; the observer refreshes the table's cached widths. Numbers count
   cursor rows (lines, packages, visible legs) — the index `NG` jumps to and
-  `Nj`/`Nk` count — so the entry placeholder is blank and shifts nothing.
+  `Nj`/`Nk` count.
   Relative mode measures from the cursor row and numbers absolutely with no
   cursor row. `refresh_numbers` prepares the text and width outside render,
-  before every `refresh`, keyed by row count, placeholder, relative cursor
-  row, and mode. Gutter text uses the row's floored muted paint (the row's
+  before every `refresh`, keyed by row count, relative cursor row and
+  mode. Gutter text uses the row's floored muted paint (the row's
   own text paint on the cursor row).
 - `paint` prepares grid-row and action-menu text colors and tests their
   contrast across every bundled theme. Row text is checked against its base,

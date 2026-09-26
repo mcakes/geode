@@ -1,36 +1,11 @@
-//! Profiler support (spec §7.4: "profiler support from day one"), compiled
-//! only with geode-shell's `profiling` feature — which is nothing but
-//! gpui's own `profiler` feature re-exported (`profiling = ["gpui/profiler"]`).
+//! Optional GPUI profiler actions, compiled with the `profiling` feature.
+//! That feature enables `gpui/profiler`; the default build omits this
+//! module and its actions. No Tracy backend is configured here.
 //!
-//! **Findings at the pinned gpui rev (gpui-pre 0.3.5, zed@d89e9c2; first
-//! recorded at zed e3adf43), recorded decision:**
-//! gpui already ships real profiler infrastructure behind its `profiler`
-//! cargo feature — hdrhistogram-backed per-window frame-duration and
-//! input-latency histograms (`Window::frame_duration_snapshot` /
-//! `input_latency_snapshot`), a built-in painted debug frame overlay
-//! (`Window::cycle_debug_frame_overlay_mode` — draws directly into the
-//! scene, bypassing layout/invalidation so it can't feed back into what it
-//! measures), plus hang-detection and task-timing journals. Its only extra
-//! dependency is `hdrhistogram`, pulled in by gpui itself. It does NOT use
-//! a Tracy client: gpui instruments via the backend-less `profiling` facade
-//! crate (`profiling::function` / `finish_frame!`), and selecting a Tracy
-//! backend would mean this workspace adding `tracy-client` — a new
-//! dependency deliberately not taken. So Geode's profiler hook is exactly
-//! gpui's own feature, surfaced through two palette actions here; the
-//! default build is completely unchanged (verified: this module and the
-//! actions it serves are absent without the feature).
-//!
-//! `perf::dump` logs a few summary lines at `info` (target `geode::shell`)
-//! from inside an action dispatch — an explicit user request, not the
-//! render path, so it doesn't bend the no-I/O-in-render rule (same class
-//! as the config-warning `tracing` events elsewhere in this crate,
-//! Phase 4b Task 2). **Recorded deviation:** this is also the one place
-//! left on the UI thread logging below `warn` — the plan's Global
-//! Constraint ("code on the UI thread emits at `warn` or above only")
-//! is deliberately bent here, on the brief's own wording for this site
-//! ("a dump the user asked for"): a user pressing `perf::dump` is a rare,
-//! explicit action, not per-frame churn, so the two `info!` calls below
-//! stay as they are rather than moving to `warn`.
+//! `perf::gpui_overlay` cycles GPUI's painted frame overlay. `perf::dump`
+//! logs the shell's render-interval summary and GPUI's draw, dirty-to-present,
+//! and present-interval histograms at `info` on `geode::shell`. Logging runs
+//! on explicit action dispatch, outside the render path.
 
 use gpui::{Context, Window};
 

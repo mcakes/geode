@@ -1,5 +1,5 @@
-//! Full 1a stack: config directories → layered docs → keymap → matcher.
-//! Mirrors the real wiring Phase 1b will do in the app.
+//! Config directories, layered documents, keymap building, and matcher dispatch
+//! exercised together.
 
 use geode_core::config::{Config, ConfigSources, LayerDoc};
 use geode_shell::actions::{ActionId, ActionRegistry};
@@ -55,8 +55,7 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
         matcher.press(&keymap, ks("mod+f"), &stack),
         MatchResult::NoMatch
     );
-    // Untouched builtin binding still works — focus_down is the direct
-    // mod+j binding (replacing the Phase 1c "ctrl+w j" chord).
+    // The untouched builtin `mod+j` binding still resolves to focus down.
     assert_eq!(
         matcher.press(&keymap, ks("mod+j"), &stack),
         MatchResult::Matched {

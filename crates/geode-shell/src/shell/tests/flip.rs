@@ -1,12 +1,7 @@
-//! The flip barrier (Phase 4 §3.10), shell half: `on_frame_changed`
-//! opens a barrier over exactly the visible tiles' keys on a scope/
-//! grouping/as-of change, and `sweep` releases it at the deadline. The
-//! blotter-side half (staging, promotion, a failure counting as arrival)
-//! is exercised end to end in `geode-blotter`'s own test suite
-//! (`tile::tests::two_tiles_promote_in_the_same_pass_and_a_failure_
-//! releases_the_barrier`) — the recorder module here carries no query of
-//! its own, so it can only stand in for "a tile with an occupant",
-//! nothing about deliver/staging.
+//! Shell integration for the flip barrier: frame changes open a barrier for visible
+//! occupied tiles, and sweeping releases it at the deadline. The recorder submits no
+//! queries; snapshot staging, promotion, and failed-query arrival are covered by
+//! `geode-blotter` tests.
 
 use super::*;
 use geode_core::query::QueryKey;
@@ -122,14 +117,9 @@ fn a_data_bump_opens_no_barrier(cx: &mut gpui::TestAppContext) {
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
 }
 
-/// Phase 4b M7: `on_frame_changed` used to spawn a fresh detached
-/// `cx.spawn` timer per scope/grouping/as-of mutation just to sweep this
-/// same barrier's deadline — a burst of keystrokes spawned a burst of
-/// timers. The existing ~500ms reload-poll loop (`ShellView::new`) now
-/// sweeps on every tick instead, so advancing the test clock past one
-/// tick — comfortably past `FLIP_DEADLINE` (250ms), with nothing else
-/// ever arriving (the recorder submits no query) — must release the
-/// barrier exactly the way the old per-mutation timer used to.
+/// The reload-poll tick sweeps the flip deadline. Advancing the test clock beyond one
+/// tick must release a barrier even if no query arrives; the recorder deliberately
+/// submits none.
 #[gpui::test]
 fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -137,14 +127,9 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
-    // Phase 4b Task 1 fix round 1, MIN-6: `!barrier_open()` and
-    // `versions().flip` bumping both come straight out of `Frame::
-    // release` and hold whether or not the tick's `cx.notify()` actually
-    // runs — deleting that `cx.notify()` call left this test green while
-    // no tile's `on_frame_changed` would ever run, so nothing promotes
-    // its staged snapshot until some unrelated notify happens to come
-    // along. An observer registered on `frame` itself, counted here,
-    // pins the notification actually reaching someone.
+    // Observe the frame itself to prove release notifies its consumers. Barrier closure
+    // and the flip version alone would pass even if staged snapshots could not be
+    // promoted until an unrelated notification.
     let notified = std::rc::Rc::new(std::cell::Cell::new(0u32));
     let n = notified.clone();
     vcx.update(|_, cx| {
@@ -200,11 +185,9 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
     );
 }
 
-/// Phase 4b M8: a placeholder occupant (nothing has opened on that tile
-/// yet) never submits a query and never arrives — a barrier that waited
-/// on it would sit open until `FLIP_DEADLINE` on every single scope
-/// change, for a tile that was never going to answer. `visible_tile_keys`
-/// must skip any occupant whose `kind` is `"placeholder"`.
+/// Placeholder occupants submit no queries and cannot arrive at a flip barrier.
+/// `visible_tile_keys` excludes them rather than delaying every scope change until the
+/// deadline.
 #[gpui::test]
 fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
@@ -246,14 +229,8 @@ fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::T
     );
 }
 
-/// Phase 4b Task 1 fix round 1, MIN-7: `visible_tile_keys` filters the
-/// active *tree* and each visible *dock* with the same `has_real_
-/// occupant` closure — the test above only exercises the tree branch, so
-/// a change that duplicated the filter per call site (rather than
-/// sharing the one closure the way the code does today) and reverted
-/// only the dock branch's copy would survive it. This exercises the dock
-/// branch directly: one real tile in the main tree, one placeholder
-/// parked in the (now-visible) left dock.
+/// Placeholder exclusion also applies to visible docks. Keep a real occupant in the
+/// main tree and a placeholder in the left dock to exercise that branch separately.
 #[gpui::test]
 fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_set(
     cx: &mut gpui::TestAppContext,
@@ -311,22 +288,10 @@ fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_se
     );
 }
 
-/// F2 (final fix wave): the observer-order invariant stated in
-/// `ShellView::new`'s `cx.observe_in` comment, `on_frame_changed`'s
-/// `open_flip` branch, and `Frame::open_flip`'s own doc — the shell's
-/// frame observer is registered before any occupant's, so `open_flip`
-/// always finishes before a single occupant's own `on_frame_changed`
-/// runs for the same notify. That is what lets a non-following tile
-/// self-arrive from its own `on_frame_changed` without ever requerying
-/// (`BlotterTile`'s `barrier_wants`/`arrived` branch, exercised end to
-/// end in `geode-blotter`'s
-/// `a_pinned_tile_arrives_from_on_frame_changed_without_requerying`).
-/// The recorder module here has no frame observer of its own (it cannot
-/// express pinning), so this proves the weaker, sufficient fact
-/// directly instead: after a scope change, the barrier is open
-/// immediately — `run_until_parked` settles with nothing delivered —
-/// so nothing an occupant's own observer could do (deliver, or
-/// self-arrive) races the barrier's opening.
+/// The shell registers its frame observer before occupants so it opens the barrier
+/// before their frame callbacks can deliver or self-arrive. The recorder has no query
+/// observer, so verify the barrier is already open after a settled scope change; module
+/// tests separately cover pinned-tile self-arrival.
 #[gpui::test]
 fn barrier_opens_before_any_occupant_could_deliver(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();

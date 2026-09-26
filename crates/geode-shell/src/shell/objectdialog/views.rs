@@ -797,11 +797,9 @@ pub const COLUMN_KEYS: [&str; 7] = [
     "color",
 ];
 
-/// The value `width` takes when the column has none of its own — a real
-/// value in the field rather than an empty string, because "no width" is
-/// something a trader chooses (the column takes its kind's default
-/// width — `geode-blotter`'s plan, not a measurement) and an empty text
-/// box would read as an unset field they had failed to fill in.
+/// Display value for a column with no explicit width. `auto` selects the
+/// column kind's default width; it does not request measurement of the
+/// contents. A visible choice distinguishes this from an unfilled field.
 pub(super) const AUTO: &str = "auto";
 
 /// The largest width the stage will accept, and the smallest. A column narrower than

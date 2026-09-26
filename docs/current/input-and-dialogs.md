@@ -86,6 +86,17 @@ changing their source identity. An empty or whitespace-only query returns all
 rows in declared order. Consumers keep selection in ranked-row space and
 resolve the source row before acting.
 
+Every fuzzy surface (list filters, choice lists, the palette, command-line
+completion) shares the palette matcher. A single word is a case-insensitive
+subsequence match rewarding prefix, word-start, and consecutive characters. A
+query of several whitespace-separated words matches when every word matches,
+in any order, on characters of its own, so `scope clear` finds "Clear scope"
+and `scope scope` does not. Words in the typed order earn a bonus and rank
+above the same words reversed. When two words' best matches collide, the words
+are placed again one at a time, longest first, on free characters; that
+placement is greedy and can miss a fit another assignment would find.
+Command-line completion ranks a single word, so it never takes this path.
+
 [`ChoiceList`](../../crates/geode-shell/src/choice.rs) owns options, query,
 ranking, and highlight. Re-ranking preserves the highlighted option by its
 text when still present; duplicate labels resolve to the first match. The
@@ -222,7 +233,9 @@ underlying request. Values are displayed in a virtualized list.
 
 Tab toggles the highlighted value. Ctrl+A adds all filtered values without
 clearing ticks outside the filter; Ctrl+X clears every tick. A row click moves
-the highlight, while a tick click toggles that value. Enter applies to the
+the highlight, while a tick click or a row double-click toggles that value, as
+Tab does (the double-click's second press toggles; a third press does not
+toggle back). Enter applies to the
 current frame scope, preserving its other fields:
 
 - Nonempty ticks, including pre-ticks, are authoritative. Moving the highlight

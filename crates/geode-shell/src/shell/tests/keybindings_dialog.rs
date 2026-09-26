@@ -4,7 +4,7 @@
 use super::*;
 use crate::dialogmode::DialogMode;
 
-// --- Part B: the keybinding dialog -----------------------------------
+// Keybinding dialog.
 
 /// `keybindings::open` dispatch paints the modal with one row per
 /// registered action — mirrors `settings_open_opens_the_modal`'s own
@@ -66,10 +66,8 @@ fn keybindings_open_paints_the_modal_with_rows(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Opening the dialog leaves the shared filter BLURRED (it used to be
-/// focused): the dialog opens in normal mode, where a bare letter is a
-/// verb, and a focused `Input` would eat every one of them as text. `/`
-/// is what hands the field focus.
+/// The dialog opens in normal mode with its shared filter blurred, allowing bare-key
+/// commands to reach the handler. `/` enters filter mode and focuses the input.
 #[gpui::test]
 fn opening_the_keybindings_dialog_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -84,9 +82,8 @@ fn opening_the_keybindings_dialog_leaves_the_filter_blurred(cx: &mut gpui::TestA
     );
 }
 
-/// Inside filter mode the retired vim motion is plain text again: `j`
-/// types a `j` and leaves the selection where it was. (Outside it, `j`
-/// moves — `j_and_k_move_in_normal_mode` below.)
+/// In filter mode, `j` types into the query rather than moving selection. Its
+/// normal-mode navigation is covered separately.
 #[gpui::test]
 fn typing_j_in_filter_mode_filters_rather_than_moving_the_selection(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -289,12 +286,8 @@ fn escape_closes_the_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The filter narrows what actually *paints*, and the narrowed list
-/// renders its fuzzy highlights without blowing up — the painted half
-/// of this dialog's conversion, re-expressing what the retired fzf
-/// find test used to prove about its own narrowed list. Row selectors
-/// stay keyed by full-list index, so a surviving row and a hidden one
-/// can be addressed by identity.
+/// Filtering narrows the rendered rows and paints fuzzy highlights. Row selectors
+/// retain full-list indices so assertions can identify both surviving and hidden rows.
 #[gpui::test]
 fn typing_a_query_narrows_the_rows_that_paint(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -445,14 +438,9 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
     assert_eq!(binding.keystrokes[1].mods, Modifiers::NONE);
 }
 
-/// Fix round 1, Finding 2: `dialog::init_reclaimed_keybindings`'s `ctrl-a`
-/// reclaim is scoped to `"GeodeModal > Input"` — every Geode modal's
-/// `Input`, not just the picker's own (that reclaim's doc comment used to
-/// overclaim the opposite). This dialog's shared filter is exactly such
-/// an `Input`, so `ctrl-a` here must be swallowed (never reaching
-/// gpui-component's own `SelectAll`/`MoveHome` binding, which would
-/// otherwise select-all-then-overtype or jump the caret home) while the
-/// filter keeps accepting ordinary typed text around it.
+/// The `ctrl+a` reclaim is scoped to every `GeodeModal > Input`, including the
+/// keybinding filter. It must be swallowed before the component's SelectAll or MoveHome
+/// binding, while ordinary typing continues to reach the field.
 #[gpui::test]
 fn ctrl_a_is_reclaimed_inside_the_filter_but_typing_still_works(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -475,10 +463,7 @@ fn ctrl_a_is_reclaimed_inside_the_filter_but_typing_still_works(cx: &mut gpui::T
     );
 }
 
-/// §17.1 rule 2: a row click does what `enter` would. One click on a row
-/// that is not the selected one both selects it and starts listening —
-/// the second click the old rule required was one step short of
-/// everything a mouse user came for.
+/// One click on a row selects it and starts listening, matching Enter's capture action.
 #[gpui::test]
 fn a_single_click_on_a_row_starts_listening(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -555,8 +540,7 @@ fn a_single_click_on_a_row_starts_listening(cx: &mut gpui::TestAppContext) {
     assert_eq!(listening, Some(Vec::new()));
 }
 
-// --- The two-mode interaction model (spec
-// `2026-09-08-geode-dialog-interaction-model-design.md`) --------------
+// Normal and filter modes.
 
 /// The dialog now opens in normal mode, so a bare letter is a verb
 /// rather than filter text. This is the behaviour change the whole
@@ -611,8 +595,8 @@ fn the_mode_pill_paints_the_mode_it_is_actually_in(cx: &mut gpui::TestAppContext
     );
 }
 
-/// §18.1: the mode pill lives in the modal's title row, not in the
-/// dialog's content, and the frozen empty filter shows a placeholder.
+/// The mode pill appears in the shared title row, and an empty frozen filter displays
+/// its placeholder.
 #[gpui::test]
 fn the_keybinding_dialogs_pill_sits_in_the_title_row(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -637,13 +621,8 @@ fn the_keybinding_dialogs_pill_sits_in_the_title_row(cx: &mut gpui::TestAppConte
     );
 }
 
-/// §18.1's placeholder claims `/` opens the filter. While this dialog is
-/// *listening* for a capture that is false — `press_while_listening`
-/// takes every keystroke, so `/` would become the new binding — and the
-/// footer beside it already reads "Listening — type keys". Two
-/// contradictory claims on one panel is worse than the bare search icon
-/// that state showed before §18.1, so the placeholder goes away for the
-/// length of the capture and comes back when `escape` ends it.
+/// Hide the `/` filter placeholder while listening for a binding: capture consumes `/`
+/// as a key instead of opening the filter. Canceling capture restores the placeholder.
 #[gpui::test]
 fn the_filter_placeholder_is_gone_while_listening_for_a_capture(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -870,11 +849,8 @@ fn cancelling_a_capture_restores_focus_to_the_mode_that_started_it(cx: &mut gpui
     );
 }
 
-/// The same rule for the mouse: since a click always starts listening
-/// (§17.1 rule 2), it blurs the filter unconditionally — normal mode's
-/// own reason to blur it and the capture's reason are now one and the
-/// same, so a click in normal mode leaves the filter exactly as blurred
-/// as it already was.
+/// A row click starts capture and blurs the shared filter, including when that filter
+/// was already blurred in normal mode.
 #[gpui::test]
 fn a_click_in_normal_mode_leaves_the_filter_blurred_because_it_captures(
     cx: &mut gpui::TestAppContext,
@@ -1031,15 +1007,11 @@ fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppC
     );
 }
 
-// --- Task 4: `d` unbinds, `r` resets ---------------------------------
-//
-// The capability the whole modal model exists to prove: before it, the
-// only way to clear a binding was to hand-edit `keymap.toml`.
+// Unbinding and resetting bindings through the dialog.
 
-/// Open the keybinding dialog on an already-open shell and draw, so the
-/// modal's key handler is live. The preamble every Task 4 test below
-/// shares (`dialog_test_shell` can't be used: these need a real
-/// `user_dir`, which only `open_shell_with_user_dir` supplies).
+/// Open the keybinding dialog on an existing shell and draw to install its key handler.
+/// Persistence tests use `open_shell_with_user_dir` for a real user directory rather
+/// than the default dialog fixture.
 fn open_keybindings(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
@@ -1356,12 +1328,11 @@ fn a_notice_clears_on_the_next_normal_mode_keystroke(cx: &mut gpui::TestAppConte
     );
 }
 
-// --- Task 4 fix round 1 ----------------------------------------------
+// Binding persistence, acknowledgements, and selection changes.
 
-/// A user layer that silences BOTH of `palette::toggle`'s builtin keys
-/// with the `"none"` shadow `d` writes — i.e. the exact on-disk state a
-/// user reaches by pressing `d` on that row twice. The row then derives
-/// `current: None`, which is where `r`'s message used to lie.
+/// A user layer silences both builtin palette-toggle keys with `"none"` shadows,
+/// modeling two unbind operations. The resulting row has no current binding and can
+/// still be reset.
 const USER_KEYMAP_SILENCING_THE_PALETTE: &str = "config_version = 1\n\n[[bindings]]\n\n\
      [bindings.keys]\n\"ctrl+k\" = \"none\"\n\"ctrl+shift+p\" = \"none\"\n";
 
@@ -1380,11 +1351,9 @@ fn services_with_the_palette_silenced() -> ShellServices {
     services
 }
 
-/// A row silenced by the user's own `"none"` shadow HAS a user override —
-/// the shadow is one — and `r` lifts it. Before 2026-09-19 the row's
-/// missing key left `r` nothing to name and it could only point at the
-/// recovery; the override set now comes from the whole keymap
-/// (`user_overrides_for`), not the row's displayed binding.
+/// A user `"none"` shadow counts as an override even when the row displays no binding.
+/// Reset finds it through `user_overrides_for` across the keymap and removes the
+/// shadow.
 #[gpui::test]
 fn r_on_a_silenced_row_lifts_the_shadow(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1714,11 +1683,9 @@ fn the_reset_all_button_arms_and_the_yes_button_writes(cx: &mut gpui::TestAppCon
     );
 }
 
-/// Fix round 1, Important 3. `d` is one bare, unmodified key performing
-/// an immediate destructive disk write, and the row does not relabel
-/// until the ~500ms config watcher gets to it — so the acknowledgement
-/// cannot wait on the reload. It names the key that was silenced and how
-/// to bring it back.
+/// After unbinding, acknowledge the affected key and explain how to restore it
+/// immediately. The row label can lag until the config watcher reloads the persisted
+/// change.
 #[gpui::test]
 fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1748,11 +1715,8 @@ fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::Te
     vcx.run_until_parked();
 }
 
-/// Roughly 60 of the ~80 builtin bindings carry a context, and before
-/// 2026-09-19 `d` on one of those could only send the user to
-/// `keymap.toml` (the `enter`-then-retype recovery wrote the no-context
-/// entry). `r` now lifts the shadow from the contexted entry too, so the
-/// acknowledgement names `r` — and neither of the two old doors.
+/// Reset removes a context-specific unbinding shadow from its original context. The
+/// acknowledgement points to `r` as the recovery action.
 #[gpui::test]
 fn d_on_a_contexted_binding_names_r_as_the_way_back(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1855,12 +1819,9 @@ fn d_on_a_user_binding_spelled_with_mod_removes_it_by_the_files_spelling(
     assert!(!text.contains("none"), "and not shadowed: {text}");
 }
 
-/// Whole-branch review, Minor 3. `d`'s acknowledgement was past tense
-/// ("silenced") while the write it describes is still on the background
-/// executor and can come back `removed: false` — a stale row, or a key
-/// the user file spells differently from `render_binding` — in which case
-/// only stderr ever says otherwise. The footer must not assert an outcome
-/// it has not confirmed.
+/// Unbind acknowledgement describes a pending operation rather than confirmed success.
+/// The background write can find no matching entry, so the footer must not promise that
+/// the key has already been removed.
 #[gpui::test]
 fn d_does_not_claim_a_write_it_has_not_confirmed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1881,11 +1842,9 @@ fn d_does_not_claim_a_write_it_has_not_confirmed(cx: &mut gpui::TestAppContext) 
     vcx.run_until_parked();
 }
 
-/// Whole-branch review, Minor 3, the other half: `r`'s success path said
-/// nothing at all, so a reset whose `apply_unbind` came back
-/// `removed: false` looked exactly like one that worked — and even a
-/// reset that DID work is invisible until the ~500ms watcher relabels the
-/// row. It acknowledges, in the same unconfirmed tense `d` uses.
+/// Reset acknowledges the queued operation immediately, without claiming its background
+/// write has succeeded. The acknowledgement remains useful while row labels wait for
+/// reload.
 #[gpui::test]
 fn r_acknowledges_the_write_it_spawned(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1910,9 +1869,8 @@ fn r_acknowledges_the_write_it_spawned(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
 }
 
-/// Fix round 1, Important 2 (path 1 of 2): the `EscapeStep::ClearQuery`
-/// rung resets the selection to row 0, so a notice about the row the
-/// user *was* on becomes a complaint pointing at a different row.
+/// Clearing the query resets selection to row zero and must clear any notice about the
+/// previously selected row.
 #[gpui::test]
 fn clearing_the_query_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1952,9 +1910,8 @@ fn clearing_the_query_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Fix round 1, Important 2 (path 2 of 2): a mouse click is the other
-/// door into this dialog's state, and it changes the selected row
-/// without going through `handle_key` at all.
+/// Mouse selection changes bypass `handle_key`, so the click path must clear a notice
+/// about the previously selected row too.
 #[gpui::test]
 fn clicking_a_row_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2004,25 +1961,10 @@ fn clicking_a_row_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Whole-branch review, Important 1: `tab` must not walk focus off the
-/// shell root while a modal is open in **normal mode**.
-///
-/// The `tab`/`shift+tab` → `NoAction` reclaim
-/// (`dialog::init_reclaimed_keybindings`, bullet 1) was scoped to
-/// `"GeodeModal"`, the context the modal *panel* carries — which is only
-/// on the dispatch stack when something inside that panel holds focus.
-/// Normal mode focuses `shell.focus_handle` (the window root) precisely
-/// so bare letters reach `handle_key` as verbs, so `"GeodeModal"` was
-/// absent from the stack, gpui-component `Root`'s own window-wide `Tab`
-/// binding won, and `window.focus_next` moved focus off the shell root —
-/// onto whatever focusable sits behind the modal, where `Input`-context
-/// bindings go live and the dialog's own vocabulary stops arriving. The
-/// fix is `render`'s `"GeodeModalOpen"` context on the shell root itself
-/// (see `init_reclaimed_keybindings`'s bullet 5).
-///
-/// Asserts the focus state itself, not merely that the modal survived: a
-/// stray `focus_next` leaves the modal untouched, so "still open" is
-/// exactly the assertion that could not see this bug.
+/// Tab and Shift-Tab keep root focus while a modal is in normal mode. The shell root's
+/// `GeodeModalOpen` context reclaims them even though the modal panel itself does not
+/// own focus. Assert focus directly: an unintended focus cycle could leave the dialog
+/// visibly open.
 #[gpui::test]
 fn tab_in_normal_mode_leaves_focus_on_the_shell_root(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -2050,12 +1992,9 @@ fn tab_in_normal_mode_leaves_focus_on_the_shell_root(cx: &mut gpui::TestAppConte
     );
 }
 
-/// §16.1: the sync, not the transition site, owns focus and text. Enter
-/// filter mode, type, leave it, clear the query, start a capture, cancel
-/// it — and after every step the focused surface and the Input's text
-/// are what the pure state says, with no site in `keybindings_view`
-/// touching either directly (Task 2 deletes them all; this test is what
-/// proves the sync reproduces them).
+/// Dialog synchronization owns input text and focus after each transition: entering and
+/// leaving filter mode, clearing a query, starting capture, and canceling it. Assert
+/// that the visible input and focused surface match the state at every step.
 #[gpui::test]
 fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
@@ -2111,11 +2050,10 @@ fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::
     );
 }
 
-// --- Mouse parity (interaction-model spec §17) --------------------------
+// Mouse parity.
 
-/// §17.1 rule 1: the frozen filter row is the mouse form of `/`. The
-/// dialog opens in normal mode with the row frozen; a mouse-down on it
-/// must leave the pill reading `filter` with the shared `Input` focused.
+/// Clicking the frozen filter row enters filter mode and focuses the shared input,
+/// matching `/`.
 #[gpui::test]
 fn clicking_the_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, test_services(), "keybindings::open");
@@ -2184,27 +2122,17 @@ fn clicking_the_frozen_filter_row_while_listening_cancels_the_capture(
 /// Filter down to the recording module's own row and leave filter mode —
 /// the fragment twin of [`select_the_palette_row`].
 fn select_the_module_row(cx: &mut gpui::VisualTestContext) {
-    // `noop`, not `recording`: the fixture factory registers five actions
-    // now (Part 3 Task 4's insert-mode verbs), all titled "Recording …",
-    // and rows sort by category then TITLE — so `recording` selects
-    // "Recording cancel edit", an unbound row, and the assertions below
-    // would be about the wrong action. `no-op` is the only one of the five
-    // whose title fuzzy-matches this query at all (it is the only one with
-    // a `p`).
+    // Use `noop` to select the intended action. Several recorder actions have titles
+    // beginning "Recording", but only the no-op title matches this query, so selection
+    // cannot drift to an unbound editor action.
     cx.simulate_keystrokes("/ n o o p");
     cx.run_until_parked();
     // Keep the filter with Enter, as in select_the_palette_row.
     cx.simulate_keystrokes("enter");
 }
 
-/// A module's fragment binding (market-data documents §8.4) is a builtin
-/// binding to this dialog, so `d` silences it with the documented
-/// user-layer `"none"` shadow — this app only ever writes the user layer,
-/// and a fragment is no more removable than the shell's own defaults.
-/// Before fragments this key came from `BUILTIN_KEYMAP`, so `d` on a
-/// module binding was already covered by the palette row's test; it is
-/// worth its own test now precisely because the binding no longer comes
-/// from a document the shell owns.
+/// Module fragments supply builtin bindings. Unbinding one writes a user-layer `"none"`
+/// shadow, because the dialog cannot remove the compiled-in fragment.
 #[gpui::test]
 fn d_over_a_modules_fragment_binding_writes_a_user_layer_shadow(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2242,11 +2170,8 @@ fn d_over_a_modules_fragment_binding_writes_a_user_layer_shadow(cx: &mut gpui::T
     );
 }
 
-/// The other verb over the same row: `r` removes the trader's own
-/// override so the module's fragment shows through again. The fragment is
-/// what it falls back TO — the thing that used to be a section of
-/// `BUILTIN_KEYMAP` — so this is the test that says a module's defaults
-/// really are the layer beneath a user keymap, not a peer of it.
+/// Reset removes the user's binding override and reveals the module fragment beneath
+/// it, verifying that fragment defaults remain below editable user config.
 #[gpui::test]
 fn r_removes_a_user_override_and_the_modules_fragment_shows_through(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2300,8 +2225,8 @@ fn r_removes_a_user_override_and_the_modules_fragment_shows_through(cx: &mut gpu
     );
 }
 
-/// Spec §20.1: `d` arms a question and writes nothing until `y`; `n`
-/// withdraws it; the confirm row paints and the action bar is gone.
+/// `d` arms confirmation without writing; `y` confirms and `n` cancels. The
+/// confirmation row replaces the action bar while armed.
 #[gpui::test]
 fn d_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2416,9 +2341,8 @@ fn r_asks_before_writing_and_n_withdraws(cx: &mut gpui::TestAppContext) {
     assert_eq!(still_unchanged, USER_KEYMAP_TEXT, "n writes nothing either");
 }
 
-/// A row click while a question stands is claimed and dropped — the
-/// object dialog's tick-click rule (§18.9.2) on this surface — and so is
-/// the frozen filter row's.
+/// While confirmation is armed, row clicks and frozen-filter clicks are claimed without
+/// changing selection or mode.
 #[gpui::test]
 fn a_row_click_while_a_confirm_is_armed_is_dropped(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().expect("tempdir");

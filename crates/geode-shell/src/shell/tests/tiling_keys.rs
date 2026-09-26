@@ -1,11 +1,84 @@
-//! Tiling key bindings end to end: adds, focus motion, resize, swap,
-//! and close, dispatched through the real key pipeline. `ctrl+v` /
-//! `ctrl+h` are the fixture layer's own bindings (`tests::
-//! TEST_ADD_KEYMAP` — `tile::add_rec_horizontal`/`_vertical`), not
-//! shipped keys: the builtin keymap has no create-a-tile chord (spec
-//! 2026-09-08 add-tile §3.1).
+//! Tiling through real key dispatch: add, focus motion, resize, swap, and close. The
+//! fixture layer supplies `ctrl+v` and `ctrl+h` for recorder adds; neither chord
+//! belongs to the builtin keymap.
 
 use super::*;
+
+/// A maximised tile reads differently from a workspace's only tile: the
+/// status bar's fullscreen segment appears on `mod+f` (alt+f here, the
+/// test mod alias) even for a lone tile, its tooltip names the key, and a
+/// click on it restores the layout through the same action.
+#[gpui::test]
+fn the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut cx, shell) = dock_test_shell(cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("status-fullscreen").is_none(),
+        "a lone tile that is not maximised shows no segment"
+    );
+
+    cx.simulate_keystrokes("alt-f");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().tree().fullscreen().is_some()
+    }));
+    let seg = cx
+        .debug_bounds("status-fullscreen")
+        .expect("a maximised lone tile shows the segment");
+    let bar = cx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar painted");
+    assert!(
+        seg.left() > bar.center().x,
+        "the segment sits in the bar's right-hand view-state section"
+    );
+
+    cx.simulate_mouse_move(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("tip-status-fullscreen-chord-alt+f")
+            .is_some(),
+        "the tooltip names the fullscreen key"
+    );
+
+    cx.simulate_mouse_down(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        seg.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .fullscreen()),
+        None,
+        "the click restores the layout"
+    );
+    assert!(cx.debug_bounds("status-fullscreen").is_none());
+}
 
 /// The empty-workspace hint (`"ctrl+k → Add a tile"`) paints
 /// when there are no tiles. gpui's test API (`painted_quads`) has no way
@@ -112,10 +185,8 @@ fn a_test_layer_add_keystroke_creates_the_first_tile(cx: &mut gpui::TestAppConte
          created the first tile on the empty starting workspace"
     );
 
-    // The tile render path (Task 3) paints a background/border quad per
-    // visible tile, not just text; a non-empty scene after the add is
-    // cheap evidence the tiling surface actually drew something (the
-    // geometry itself is tiling::tree's job, already unit-tested there).
+    // A nonempty scene after adding a tile shows that the surface rendered its
+    // background and border. Tree geometry has separate unit tests.
     let quads_after_add = cx.update(|window, _cx| window.painted_quads().len());
     assert!(
         quads_after_add > 0,
@@ -308,16 +379,10 @@ fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// End-to-end (ledgered from 1b-ui T3): a real mouse-down at a
-/// non-focused tile's on-screen coordinates focuses it, exercising the
-/// `on_mouse_down` handler wired up in `Render for ShellView` (not the
-/// keyboard path). Two tiles side by side; `mod+h` first moves focus
-/// off the freshly-split (right) tile so the click has something to
-/// change. The click point is derived from the same layout `render`
-/// itself uses — `Tree::layout` over the tile area, offset by the
-/// sidebar/toolbar chrome (`sidebar::width(window)`, `TITLE_BAR_HEIGHT`; see
-/// CLAUDE.md's chrome-offset note) — rather than a hand-guessed pixel,
-/// so the test tracks the real geometry instead of duplicating it.
+/// A real mouse-down on an unfocused tile focuses it through the render handler. First
+/// move focus away from the right tile, then click coordinates derived from
+/// `Tree::layout` and the sidebar/toolbar offsets so the test follows the actual
+/// geometry.
 #[gpui::test]
 fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -609,9 +674,8 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Spec 2026-09-08 add-tile §3.1: the shipped keymap has no split chord.
-/// This shell is built on `BUILTIN_KEYMAP` alone (no test layer), so
-/// `ctrl+v`/`ctrl+h` reach the matcher and match nothing.
+/// With only `BUILTIN_KEYMAP` loaded, `ctrl+v` and `ctrl+h` match no split action. The
+/// recorder add bindings belong only to the fixture layer.
 #[gpui::test]
 fn the_shipped_keymap_has_no_split_chord(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();

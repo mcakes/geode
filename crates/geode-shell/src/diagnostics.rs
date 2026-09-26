@@ -950,7 +950,7 @@ mod tests {
         assert_eq!(*recent.last().unwrap(), fnv1a("a39"));
     }
 
-    // --- Additional coverage beyond the brief's Step 1 list -----------
+    // --- Log, status, and diagnostic lifecycle coverage ----------------
 
     #[test]
     fn describe_source_always_bumps_and_fills_the_spec() {

@@ -338,6 +338,7 @@ fn worker(
             Ok(r) => r.map_err(|e| e.to_string()),
             Err(payload) => Err(panic_message(&*payload)),
         };
+        release_transaction(&conn);
 
         // The stale check and the send happen under one lock. Releasing it
         // between them let a newer request land in the gap and the older
@@ -387,6 +388,44 @@ fn worker(
 /// sinks own their recovery from refusals. Nothing is retried here. Logged once per worker — `latched` (final
 /// review, MIN-3) — and a free function so a test can reach it without a
 /// pool thread.
+/// How many `ROLLBACK`s a worker tries before it gives up on a transaction.
+/// Each attempt starts a new statement, which clears a pending interrupt, so
+/// a second attempt already outlasts one stray supersession. Defence in
+/// depth: without the retry, an interrupted release is still repaired after
+/// the worker's next run, at the cost of that run's failure reaching its view.
+const ROLLBACK_ATTEMPTS: usize = 3;
+
+/// Leave the connection outside any transaction before the worker's next
+/// request. A read transaction ends in the `ROLLBACK` duckdb-rs issues when
+/// it is dropped, and that error is discarded. A supersession interrupt that
+/// lands on the `ROLLBACK` leaves the connection inside an aborted
+/// transaction, where every later statement fails with "Current transaction
+/// is aborted" — every view this worker serves, for the rest of the session.
+///
+/// duckdb-rs 1.10505's `Connection::is_autocommit` always answers `true`, so
+/// the transaction state is read from the `ROLLBACK` itself: DuckDB refuses
+/// it with [`NO_TRANSACTION`] when the connection is already outside one,
+/// which is the ordinary case after a clean read.
+fn release_transaction(conn: &duckdb::Connection) {
+    for _ in 0..ROLLBACK_ATTEMPTS {
+        match conn.execute_batch("ROLLBACK") {
+            Ok(()) => return,
+            Err(e) if e.to_string().contains(NO_TRANSACTION) => return,
+            Err(_) => {}
+        }
+    }
+    tracing::error!(
+        target: "geode::query",
+        "a query worker could not leave its transaction after {ROLLBACK_ATTEMPTS} \
+         rollbacks; its next queries will fail",
+    );
+}
+
+/// DuckDB's refusal of a `ROLLBACK` outside any transaction. Pinned by
+/// `a_rollback_outside_a_transaction_names_no_transaction`, so a DuckDB bump
+/// that rewords it fails a test instead of logging on every query.
+const NO_TRANSACTION: &str = "no transaction is active";
+
 fn log_refused_result(latched: &AtomicBool, view: &str) {
     if latched.swap(true, Ordering::Relaxed) {
         return;
@@ -893,6 +932,101 @@ mod tests {
         let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(second.view, ViewId("v1".into()));
         assert!(second.id > first_id);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn interrupts_on_the_transaction_statements_do_not_wedge_the_connection() {
+        // A supersession interrupt can land on the read transaction's own
+        // `BEGIN`, `COMMIT` or `ROLLBACK`; DuckDB then leaves the connection
+        // inside an aborted transaction that no guard rolls back, and every
+        // later query failed with "Current transaction is aborted" (seen as
+        // `p` pressed repeatedly on a timeseries tile). A thread interrupting
+        // continuously makes those landings certain.
+        use crate::query::series::{SeriesPlan, Statement, run_series};
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("create table t as select 1::bigint i, 1.0::double v")
+            .unwrap();
+        let statement = |sql: &str| Statement {
+            sql: sql.into(),
+            params: vec![],
+        };
+        let plan = SeriesPlan {
+            slots: vec![1],
+            points: statement("select i, v from t"),
+            fractions: vec![0.5],
+            percentiles: vec![(1, statement("select quantile_cont(v, 0.5) from t"))],
+            bin_count: 1,
+            bins: vec![(1, statement("select v, v+1, 1::bigint, 1::bigint from t"))],
+            coverage: vec![(1, statement("select i, i, i from t"))],
+        };
+        let handle = conn.interrupt_handle();
+        let stop = Arc::new(AtomicBool::new(false));
+        let spamming = Arc::clone(&stop);
+        let spammer = std::thread::spawn(move || {
+            while !spamming.load(Ordering::Relaxed) {
+                handle.interrupt();
+                std::hint::spin_loop();
+            }
+        });
+        for _ in 0..2000 {
+            let _ = run_series(&conn, &plan);
+            release_transaction(&conn);
+        }
+        stop.store(true, Ordering::Relaxed);
+        spammer.join().unwrap();
+        release_transaction(&conn);
+        assert!(
+            run_series(&conn, &plan).is_ok(),
+            "the connection must come out of the interrupts usable"
+        );
+    }
+
+    #[test]
+    fn a_rollback_outside_a_transaction_names_no_transaction() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let e = conn.execute_batch("ROLLBACK").unwrap_err().to_string();
+        assert!(e.contains(NO_TRANSACTION), "{e}");
+    }
+
+    /// Set by the first run of `abort_then_run`, so only that run leaves its
+    /// transaction behind.
+    static LEFT_ABORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[test]
+    fn a_transaction_left_aborted_does_not_wedge_the_worker() {
+        // A read transaction ends in a `ROLLBACK` that duckdb-rs issues on
+        // drop and whose error it discards. A supersession interrupt landing
+        // on that `ROLLBACK` leaves the connection inside an aborted
+        // transaction, and every later query on the worker failed with
+        // "Current transaction is aborted". The first run here leaves the
+        // connection in that state directly.
+        fn abort_then_run(
+            conn: &duckdb::Connection,
+            req: &QueryRequest,
+        ) -> Result<Payload, duckdb::Error> {
+            if !LEFT_ABORTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                conn.execute_batch("BEGIN TRANSACTION")?;
+                conn.execute_batch("select error('injected')")?;
+            }
+            run_one(conn, req)
+        }
+        let (_d, store) = fixture(100);
+        let (pool, rx) = channel_pool_with(&store, abort_then_run);
+
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(
+            snapshot(first).is_err(),
+            "fixture check: the first run fails"
+        );
+
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert!(
+            snapshot(second).is_ok(),
+            "the worker's next query must not inherit the aborted transaction"
+        );
         pool.shutdown();
     }
 

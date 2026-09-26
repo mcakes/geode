@@ -1,36 +1,14 @@
-//! The one door a status chip's colours come through — `pinned`,
-//! `filtered`, `unscoped`, `AS OF`, the scope bar's contradiction chip,
-//! the diagnostics tile's warning rows: any short state painted on a
-//! translucent semantic tint, or in a semantic colour on the surface.
+//! Shared colours for status chips and semantic text.
 //!
-//! It exists because the obvious token pairing is wrong and was wrong at
-//! seven sites at once. `warning_foreground`/`danger_foreground` are the
-//! tokens for text on a SOLID `warning`/`danger` fill, and at the pinned
-//! gpui-component release both fall back to `primary_foreground` — the
-//! background family — so over a 25% tint of their own colour they read
-//! background-on-nearly-background: 1.13:1 on Default Light, 1.14:1 on
-//! Everforest Light, under the 3:1 floor on 30 of 44 bundled themes
-//! (measured 2026-09-19). The market-data panel found the same pairing on
-//! its edited cells and fixed it there (`geode_marketdata::delegate::
-//! cell_paint`); this module is that fix made the rule rather than the
-//! instance. `foreground` is the one colour every theme author made
-//! readable on their own background, and a translucent tint barely moves
-//! that background, so it is the text on every tinted chip.
+//! Warning and danger chips use translucent semantic fills with `foreground`
+//! text. The corresponding `warning_foreground` and `danger_foreground`
+//! tokens are intended for solid fills and can become unreadable over tints.
+//! Neutral chips use the theme's secondary fill and text pair.
 //!
-//! The same token confusion reaches text with no fill: a warning ROW
-//! painted in `warning_foreground` on the tile surface is the background
-//! family on the background. A semantic colour on the surface is the
-//! semantic colour itself (`theme.warning`), which
-//! [`Tone::WarningText`] answers — kept in this door so the sweep test
-//! below covers it on every theme rather than trusting each theme's
-//! `warning` to clear its `background`, which ten bundled themes do not
-//! (nine light themes at 1.77:1 to 2.63:1, plus Solarized Dark at 2.67:1
-//! — measured 2026-09-19); those are floored the way Part
-//! 2c floors a generated hue, lightness moved toward `foreground` with
-//! hue and chroma kept.
-//!
-//! [`every_chip_tone_is_readable_on_every_bundled_theme`] is the test to
-//! keep: a new tone added here without clearing the sweep cannot ship.
+//! Text-only tones use `warning` or `danger`, adjusted toward `foreground`
+//! when needed to meet the readability floor against the background.
+//! Theme sweeps below check every tone's text against its composited fill
+//! or background surface.
 
 use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use gpui::Hsla;
@@ -63,19 +41,10 @@ pub enum Tone {
     /// reporting a failed source, a blotter's query error. `theme.danger`
     /// floored the same way.
     DangerText,
-    /// A state the trader chose and may want reminding of, carrying no
-    /// hazard: a pinned grouping, a tile's own filter. The theme's
-    /// `secondary` surface under `secondary_foreground` — a neutral pill,
-    /// so the warning tone stays scarce enough to mean something (design
-    /// guide: keep most badges neutral; a row of coloured badges is a
-    /// missing hierarchy decision). `secondary`, not the dialogs' own
-    /// `muted` chip pair, by measurement (2026-09-19): the text clears
-    /// 3:1 on all 44 bundled themes over `secondary` and fails on 15 over
-    /// `muted`, and the fill itself is visible (>1.15:1 against the
-    /// background) on 34 themes for `secondary` against 11 for `muted`.
-    /// The ten where `secondary` is faint (Asciinema 1.06:1, Tokyo Storm
-    /// 1.08:1) read the pill as bare text — a theme-authoring matter, not
-    /// worth a border every chip in the strip would have to reserve.
+    /// A user-selected state with no hazard, such as a pinned grouping or a
+    /// tile filter. Uses `secondary_foreground` on `secondary`, reserving
+    /// warning colour for states that need attention. The fill can be faint
+    /// on some themes; text readability is checked by the theme sweep.
     Neutral,
 }
 
@@ -116,9 +85,9 @@ pub fn chip_paint(theme: &Theme, tone: Tone) -> ChipPaint {
     }
 }
 
-/// `colour` as text on the theme's own background: itself where it
-/// already clears the floor, else moved in lightness toward `foreground`
-/// until it does (`geode_core::colour::readable_on`, Part 2c §2.2's rule).
+/// Use `colour` as text on the theme background, adjusting its lightness
+/// toward `foreground` when needed to meet the readability floor. Delegates
+/// to [`geode_core::colour::readable_on`].
 fn floored_text(theme: &Theme, colour: Hsla) -> Hsla {
     to_hsla(readable_on(
         to_rgb(colour),
@@ -158,9 +127,8 @@ mod tests {
         Tone::Neutral,
     ];
 
-    /// Every tone's text must clear the 3:1 floor over its own ground on
-    /// EVERY bundled theme, with no exception list. The pairing this
-    /// module replaced failed on 30 of 44.
+    /// Every tone's text must meet the readability floor against its
+    /// composited ground on every bundled theme.
     #[gpui::test]
     fn every_chip_tone_is_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -193,9 +161,8 @@ mod tests {
         );
     }
 
-    /// The pairing this module exists to retire must still FAIL the same
-    /// sweep — otherwise the floor is not measuring what the module doc
-    /// claims and a regression back to `warning_foreground` would pass.
+    /// Use `warning_foreground` over a translucent warning fill as a negative
+    /// control: the sweep must reject this unreadable pairing.
     #[gpui::test]
     fn the_retired_pairing_still_fails_the_sweep(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);

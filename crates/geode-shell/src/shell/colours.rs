@@ -1,21 +1,9 @@
-//! Bridges gpui-component's `Theme` to the pure
-//! [`geode_core::colour`] resolver (Part 2c spec §6.1) — the one place a
-//! gpui `Hsla` and a `geode_core::colour::Rgb` meet. `geode_core::colour`
-//! itself knows no gpui type (its own module doc says so), so every
-//! caller that has a real theme to resolve against — the Colours dialog's
-//! swatches today, the blotter's cell colouring (Task 6) tomorrow — comes
-//! through here rather than hand-rolling the conversion at its own call
-//! site.
+//! Convert GPUI theme colours for the pure [`geode_core::colour`] resolver.
 //!
-//! `anchors_from_theme`/`tokens_from_theme` read the theme's own colours
-//! once per resolve; nothing here caches them, because a theme swap
-//! (`[theme] name` in `app.toml`) has to be visible on the very next
-//! paint and a cache would need its own invalidation for no real cost —
-//! six-plus-eleven `Hsla` field reads is not a hot path. A caller on a
-//! path where it IS one — the blotter paints `render_td` per visible
-//! cell — memoises the derived pair itself behind [`theme_signature`],
-//! which is the exact input to both derivations and so needs no
-//! invalidation of its own either.
+//! [`anchors_from_theme`] and [`tokens_from_theme`] read the current theme
+//! without caching, so callers see theme changes on the next paint. Callers
+//! resolving colours per cell can cache the pair using [`theme_signature`],
+//! which includes every theme field used by either conversion.
 
 use geode_core::colour::{Anchors, Rgb, Tokens};
 use gpui::Hsla;
@@ -88,13 +76,10 @@ pub fn anchors_from_theme(theme: &Theme) -> Anchors {
     }
 }
 
-/// The theme's semantic tokens, spec §2.3's table: `muted` reads the
-/// theme's `muted_foreground` (there is no bare `muted` colour on
-/// gpui-component's own `Theme` — its `muted` is a background tint, not
-/// a foreground token, and §2.3 names the foreground one). `background`
-/// is not one of §2.3's named tokens — it is the surface
-/// `geode_core::colour::readable_on` measures every generated hue
-/// against (2c §2.2, §7).
+/// Convert the theme's semantic foreground tokens and background surface.
+/// `muted` uses `muted_foreground`; the theme's `muted` field is a background
+/// tint. `background` supplies the surface used for generated-hue readability
+/// checks, rather than a named foreground token.
 pub fn tokens_from_theme(theme: &Theme) -> Tokens {
     Tokens {
         foreground: to_rgb(theme.foreground),
@@ -119,27 +104,13 @@ pub fn tokens_from_theme(theme: &Theme) -> Tokens {
     }
 }
 
-/// Every theme colour [`anchors_from_theme`] and [`tokens_from_theme`]
-/// read, in one array — the exact input to both derivations, so two
-/// signatures comparing equal mean two identical derived pairs (Part 2c
-/// final review, I-1).
+/// All inputs to [`anchors_from_theme`] and [`tokens_from_theme`], in the
+/// same order: twelve anchor colours followed by sixteen token colours.
+/// Equal signatures produce equal derived pairs. Comparing these `Hsla`
+/// values lets callers reuse a cached pair without colour conversions.
 ///
-/// Twelve anchors then sixteen token colours, in each function's own
-/// field order. It is a read of twenty-eight `Hsla` fields and no
-/// arithmetic: `Hsla` is `Copy` with a hand-written `PartialEq`, so a
-/// caller that memoises its derived pair behind this pays 28 copies and
-/// 28 compares on the steady path and **zero** `Hsla -> Rgb`
-/// conversions, which is what spec §6.3's "one comparison a frame" asks
-/// for.
-///
-/// **A colour added to either derivation must be added here too**, or a
-/// theme that moves only that colour compares equal and the memo stays
-/// stale. The whole point of the full signature (over the two-sentinel
-/// sketch the ledger first carried) is that it is exact: a memo behind
-/// `background` + `foreground` alone would keep painting the old colour
-/// through any theme change that leaves those two equal while moving an
-/// anchor, and the blotter's `ColourCache` could never notice, because
-/// the stale derived pair IS its own key.
+/// Add any new derivation input here too. Checking only background and
+/// foreground would miss changes to individual anchors or semantic tokens.
 pub fn theme_signature(theme: &Theme) -> [Hsla; 28] {
     [
         // `anchors_from_theme`: normal then light, `ANCHOR_DEGREES` order.

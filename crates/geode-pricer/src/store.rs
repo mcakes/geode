@@ -33,16 +33,15 @@ pub enum Loaded {
     /// On its way; the tile paints `loading` until `PricerTile::loaded`.
     Pending,
     /// The load was never submitted — a closed or full request channel.
-    /// Nothing is coming: the caller must not wait on it the way it
-    /// waits on `Pending` (spec §7.1's failed-load path applies at
-    /// once, not a `loading` state that never resolves).
+    /// No answer will arrive. The caller must report a failed load and block
+    /// saves so an empty fallback cannot overwrite the stored document.
     Refused,
 }
 
 pub trait SheetStore {
     /// Ask for the document named `name`, addressed by `key`/`tag` so a
     /// DuckDB-backed store's answer can be routed back and matched
-    /// against the caller's latest request (spec §7.1). `key`/`tag` are
+    /// against the caller's latest request. `key`/`tag` are
     /// unused by a store that answers at once.
     fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded;
     /// Publish the whole sheet. `false`: refused, nothing written.
@@ -51,7 +50,7 @@ pub trait SheetStore {
     /// changed.
     fn forget(&self, name: &str) -> bool;
     /// Every name this store currently knows, for the `:e`/`:name`/`:rm`
-    /// vocabulary (spec §7.4) — order is not significant to callers.
+    /// commands. Order is not significant to callers.
     fn names(&self) -> Vec<String>;
     /// Whether a document exists under `name` (the `untitled-N` rule).
     fn contains(&self, name: &str) -> bool;
@@ -217,13 +216,12 @@ impl SheetStore for MemorySheetStore {
 /// by `core::storage::rows_from_snapshot`) or `Refused` when the
 /// request channel itself refuses admission — a load that will never
 /// answer. `save` and `forget` likewise only queue the write; whether it
-/// lands reaches the tile separately, by sheet name, through the bridge
-/// (spec §7.3, planning decision 6). Loads are always `AsOf::Live`: a
-/// sheet does not follow the frame's as-of (planning decision 4).
+/// lands reaches the tile separately, by sheet name, through the bridge.
+/// Loads are always `AsOf::Live`: a sheet does not follow the frame's as-of.
 ///
 /// `known` answers `names`/`contains` without asking the data tier: it
 /// is seeded and refreshed from the diagnostics catalog's `pricer_sheets`
-/// partitions (`set_known`, planning decision 12) and kept current by
+/// partitions (`set_known`) and kept current by
 /// `note_saved`/`note_forgotten`, which the caller invokes once a write's
 /// outcome is confirmed — never on submission, since a refused or still
 /// in-flight write must not appear known.

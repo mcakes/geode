@@ -38,8 +38,8 @@ use super::sources;
 use super::views;
 use super::{
     ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination, Domain, Draft,
-    EditRow, FellTo, Field, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
-    READ_ONLY_NOTICE, RowDrag, RowVocabulary, Stage, Step,
+    EditRow, FellTo, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow, READ_ONLY_NOTICE,
+    RowDrag, RowVocabulary, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::footer::{Hint, HintRow};
@@ -2725,18 +2725,9 @@ fn build(
     // Copied out so the row closures below don't hold the `theme` borrow.
     let row_paint = super::super::listrow::row_paint(theme);
 
-    // the merged `colours.toml` AND the theme's own anchors/tokens, read once for the
-    // whole list rather than once per row — every browse row's swatch resolves its own
-    // saved color against them. `None` for every other domain, so a non-Colors dialog
-    // never even asks `Config` for a doc it will never read the rest of the row loop
-    // for.
-    //
-    // The pair is hoisted with the doc: `resolve_named` (since deleted — this hoist
-    // left it with no caller) read the theme inside itself, so resolving per row cost M
-    // x 28 `Hsla -> Rgb` conversions for a list of M colors. Bounded by color count
-    // in a modal rather than by row count on the paint path, so it is tidiness rather
-    // than budget — but it is the same shape the blotter's I-1 memo answers, and the
-    // list was already hoisting the doc.
+    // Read named colours and theme anchors/tokens once for the whole Colors
+    // list. Swatches share these inputs, avoiding repeated theme conversions
+    // per row. Other domains do not load the colour document.
     let named_colours: Option<(
         geode_core::colour::NamedColours,
         geode_core::colour::Anchors,
@@ -2775,7 +2766,8 @@ fn build(
         // crate keeps that exact shape.
         let (name_ix, summary_ix) = split_label_indices(&m.indices, name_len);
 
-        let mut row_el = h_flex()
+        let row_el = h_flex()
+            .id(("objectdialog-row", m.row))
             .w_full()
             .justify_between()
             .items_center()
@@ -2783,11 +2775,7 @@ fn build(
             .px_2()
             .py_1()
             .rounded(theme.radius);
-        if is_selected {
-            row_el = row_el.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row_el = row_el.hover(|s| s.bg(row_paint.hover));
-        }
+        let row_el = super::super::listrow::paint_row(row_el, row_paint, is_selected);
 
         // a prefixed row paints `<prefix> · ` dimmed and the name after it, as two runs
         // of one highlighted label — the indices are split at the prefix's end so a hit
@@ -3252,9 +3240,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     });
 
     let domain = state.domain;
-    // Destination badges are relevant only on the stage's writable fields.
     let writable = domain.writable(&state.stage);
-    let dest_badges = writable;
+    // Schema's rows name the layer their value came from. When any row does, every
+    // row reserves the slot, so a row without a layer keeps its value in line.
+    let layer_slots = draft.fields.iter().any(|field| field.layer.is_some());
     // whether any chip may carry a handler this frame. The four inert cases mirror the
     // keys' own: read-only domain, armed confirm, open text field (and per row, a
     // one-option `Choice`).
@@ -3272,7 +3261,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // once here keeps the per-row work below to a single `Vec` lookup.
     let flagged = draft.flagged_rows(domain.doc());
     // the column stage's layers, resolved once per render. `None` off the stage — see
-    // `provenance_chip`.
+    // `provenance_slot`.
     let provenance_inputs = draft
         .column_ctx
         .as_ref()
@@ -3314,7 +3303,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             // Every row carries the same 2px top border, transparent unless
             // `drag_over` recolours it — reserving the space up front means a
             // hover only repaints the color, never reflows the rows below it.
-            let mut element = h_flex()
+            let element = h_flex()
+                .id(("objectdialog-field-row", m.row))
                 .w_full()
                 .items_center()
                 .justify_between()
@@ -3324,22 +3314,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 .rounded(theme.radius)
                 .border_t_2()
                 .border_color(gpui::transparent_black());
-            if is_selected {
-                element = element.bg(row_paint.active).text_color(row_paint.text);
-            } else {
-                element = element.hover(|s| s.bg(row_paint.hover));
-            }
+            let element = super::super::listrow::paint_row(element, row_paint, is_selected);
             // Set only for a list row that opens a new block — see this
             // loop's own comment on `last_item_section`.
             let mut section_header: Option<AnyElement> = None;
             let (selector, label, value) = match edit_row {
                 EditRow::Field(index) => {
                     let field = &draft.fields[index];
-                    let dest_label = match field.dest {
-                        Destination::Doc => "doc",
-                        Destination::Presentation => "pres",
-                        Destination::DatasetPresentation => "dataset",
-                    };
                     // the value is a chip — the mouse form of `space`/`shift+space` —
                     // on exactly the rows the keys step (`vocabulary_of`, the footer's
                     // own answer), and plain text with no handler everywhere else,
@@ -3374,37 +3355,37 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             .gap_2()
                             .items_center()
                             .child(value_chip)
-                            // the layer in force on a column-stage field. The same slot
-                            // as the layer badge below, and the two never both appear:
-                            // Schema fills `layer` on its own rows (which are not
-                            // column-stage rows), the column stage fills this.
-                            .children(provenance_chip(
-                                provenance_inputs.as_ref(),
-                                field,
-                                theme,
-                                cx,
-                            ))
-                            // the layer a schema row's value came from — `None` on
-                            // every writable domain (`Field:: layer`'s own doc has the
-                            // reasoning).
-                            .children(field.layer.map(|layer| {
-                                dialog::badge(
-                                    layer.name(),
-                                    theme.muted_foreground,
-                                    theme.border,
-                                    Some(format!("objectdialog-field-layer-{}", field.key)),
+                            // the layer in force on a column-stage field, in place of
+                            // the destination badge: every field there writes the same
+                            // overlay, so the layer is the only per-row fact. Schema
+                            // fills `layer` below on its own rows, which are not
+                            // column-stage rows, so the two never both appear.
+                            .children(provenance_inputs.as_ref().map(|inputs| {
+                                badge_slot(
+                                    &PROVENANCE_NAMES,
+                                    dataset_columns::provenance_of(inputs, field).map(|p| {
+                                        (
+                                            p.name(),
+                                            format!("objectdialog-field-provenance-{}", field.key),
+                                        )
+                                    }),
+                                    theme,
                                     cx,
                                 )
                             }))
-                            // A `doc`/`pres` badge promises a write this row
-                            // can make — painting it on a read-only domain
-                            // would promise one the scaffold refuses outright.
-                            .children(dest_badges.then(|| {
-                                dialog::badge(
-                                    dest_label,
-                                    theme.muted_foreground,
-                                    theme.border,
-                                    Some(format!("objectdialog-dest-{}", field.key)),
+                            // the layer a schema row's value came from — `None` on
+                            // every writable domain (`Field:: layer`'s own doc has the
+                            // reasoning).
+                            .children(layer_slots.then(|| {
+                                badge_slot(
+                                    &LAYER_NAMES,
+                                    field.layer.map(|layer| {
+                                        (
+                                            layer.name(),
+                                            format!("objectdialog-field-layer-{}", field.key),
+                                        )
+                                    }),
+                                    theme,
                                     cx,
                                 )
                             }))
@@ -3469,10 +3450,31 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     let grip_and_tick = if draft.text_entry.is_some() {
                         None
                     } else {
-                        let grip = if own && draggable {
+                        // A member row's grip is its drag handle. The row body opens
+                        // a Views column's stage on mouse-down, which would leave the
+                        // list before a drag could start, so the gesture starts here
+                        // and the grip's press stops before the row's own handler.
+                        // gpui bubbles an element's drag arming before its
+                        // `on_mouse_down`, so stopping propagation there still arms
+                        // the drag.
+                        let payload = draggable.then(|| draft.row_drag(edit_row)).flatten();
+                        let grip = if own && let Some(payload) = payload {
+                            let grip_id = format!("objectdialog-grip-{}", entry.name);
                             div()
+                                .id(gpui::SharedString::from(format!(
+                                    "objectdialog-grip-{}-{}",
+                                    payload.field, payload.name
+                                )))
                                 .text_color(theme.muted_foreground)
                                 .w(scale::design(11.))
+                                .cursor_grab()
+                                .debug_selector(move || grip_id)
+                                .on_drag(payload, |drag: &RowDrag, _offset, _window, cx| {
+                                    DragGhost::build(drag, cx)
+                                })
+                                .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                                    cx.stop_propagation();
+                                })
                                 .child("⋮")
                                 .into_any_element()
                         } else {
@@ -3631,28 +3633,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     // payload that arrives at `on_drop` is the dragged row's
                     // own, built by whichever row started the gesture.
                     let target = payload.clone();
+                    // The id carries everything that identifies the row,
+                    // because gpui keys per-element state (the pending
+                    // mouse-down a drag starts from) on it: the field, so
+                    // two lists in one draft cannot collide; `own`, so a
+                    // name cannot collide with itself across the two
+                    // blocks (a demoted column keeps its name); and the
+                    // name, which is unique within a block.
+                    let row_el = row_el.id(gpui::SharedString::from(format!(
+                        "objectdialog-drag-{}-{}-{}",
+                        payload.field, payload.own, payload.name
+                    )));
+                    // A member row drags from its grip (above); an Available
+                    // row has no grip and opens nothing on a press, so its
+                    // whole body stays the handle.
+                    let row_el = if payload.own {
+                        row_el
+                    } else {
+                        row_el
+                            .cursor_grab()
+                            .on_drag(payload, |drag: &RowDrag, _offset, _window, cx| {
+                                DragGhost::build(drag, cx)
+                            })
+                    };
                     row_el
-                        // The id carries everything that identifies the row,
-                        // because gpui keys per-element state (the pending
-                        // mouse-down a drag starts from) on it: the field, so
-                        // two lists in one draft cannot collide; `own`, so a
-                        // name cannot collide with itself across the two
-                        // blocks (a demoted column keeps its name); and the
-                        // name, which is unique within a block.
-                        .id(gpui::SharedString::from(format!(
-                            "objectdialog-drag-{}-{}-{}",
-                            payload.field, payload.own, payload.name
-                        )))
-                        .cursor_grab()
-                        // The ghost's name comes off the dragged value the
-                        // constructor is handed, not a captured copy: a
-                        // capture would clone a `String` per list row per
-                        // frame for a ghost that exists only once a gesture
-                        // actually starts.
-                        .on_drag(payload, move |drag: &RowDrag, _offset, _window, cx| {
-                            let name = gpui::SharedString::from(drag.name.clone());
-                            cx.new(|_| DragGhost { name })
-                        })
                         // Only this dialog's own payload: a tile drag or any
                         // other dragged value passing over the modal must not
                         // land on a column list.
@@ -4297,30 +4301,65 @@ fn confirm_row(
         .into_any_element()
 }
 
-/// the chip naming the layer in force on a column-stage field, computed from the
-/// draft's layers at paint so a stepped field reads `view` (or `dataset`, from the
-/// Schema door) on the same frame.
+/// Every name a column-stage row's layer badge can carry.
+const PROVENANCE_NAMES: [&str; 3] = [
+    super::Provenance::Desk.name(),
+    super::Provenance::Dataset.name(),
+    super::Provenance::View.name(),
+];
+
+/// Every name a Schema row's layer badge can carry.
+const LAYER_NAMES: [&str; 3] = [
+    Layer::Builtin.name(),
+    Layer::Desk.name(),
+    Layer::User.name(),
+];
+
+/// A right-aligned badge in a slot as wide as the widest of `names`, laid out by an
+/// invisible badge. A row with no badge, or one whose badge appears or changes
+/// mid-edit, keeps its value in line with every other row's.
 ///
-/// `None` off the column stage, where `Draft::column_ctx` is `None` and
-/// there are no layers to name — which is why `inputs` is an `Option`
-/// the caller builds ONCE before the row loop rather than a value this
-/// function derives per field: both halves of
-/// [`dataset_columns::ProvenanceInputs`] allocate, and seven clones per
-/// painted frame is per-frame heap churn on the render thread.
-fn provenance_chip(
-    inputs: Option<&dataset_columns::ProvenanceInputs<'_>>,
-    field: &Field,
+/// The column stage's caller builds its `ProvenanceInputs` once before the row loop:
+/// both halves allocate, and a clone per painted field is per-frame heap churn.
+fn badge_slot(
+    names: &[&'static str],
+    badge: Option<(&'static str, String)>,
     theme: &gpui_component::Theme,
     cx: &App,
-) -> Option<AnyElement> {
-    let provenance = dataset_columns::provenance_of(inputs?, field)?;
-    Some(dialog::badge(
-        provenance.name(),
+) -> AnyElement {
+    let widest = names
+        .iter()
+        .copied()
+        .max_by_key(|name| name.len())
+        .unwrap_or_default();
+    let sizer = div().invisible().child(dialog::badge(
+        widest,
         theme.muted_foreground,
         theme.border,
-        Some(format!("objectdialog-field-provenance-{}", field.key)),
+        None,
         cx,
-    ))
+    ));
+    let badge = badge.map(|(name, selector)| {
+        // Out of flow, the badge would otherwise wrap to the slot's width.
+        div()
+            .absolute()
+            .top_0()
+            .right_0()
+            .whitespace_nowrap()
+            .child(dialog::badge(
+                name,
+                theme.muted_foreground,
+                theme.border,
+                Some(selector),
+                cx,
+            ))
+    });
+    div()
+        .relative()
+        .flex_shrink_0()
+        .child(sizer)
+        .children(badge)
+        .into_any_element()
 }
 
 /// Run the keyboard verb's handler for an action-button click, then synchronize shared
@@ -4597,6 +4636,17 @@ fn on_choice_row_clicked(
 /// underneath a ghost that is already painted.
 struct DragGhost {
     name: gpui::SharedString,
+}
+
+impl DragGhost {
+    /// The ghost's name comes off the dragged value the constructor is
+    /// handed, not a captured copy: a capture would clone a `String` per
+    /// list row per frame for a ghost that exists only once a gesture
+    /// actually starts.
+    fn build(drag: &RowDrag, cx: &mut App) -> Entity<Self> {
+        let name = gpui::SharedString::from(drag.name.clone());
+        cx.new(|_| DragGhost { name })
+    }
 }
 
 impl gpui::Render for DragGhost {

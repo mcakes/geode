@@ -1,14 +1,11 @@
-//! The immutable columnar result handed to the UI (spec §6.6).
+//! Immutable columnar query results shared with the UI through `Arc`.
+//! Cell accessors expose Rust values and slices so feature modules need no Arrow
+//! dependency. Construction and raw array accessors also expose Arrow types for
+//! callers that need them.
 //!
-//! Arrow is an implementation detail: modules see `Snapshot` and typed
-//! accessors returning plain slices, and nothing outside this file names
-//! an Arrow type. Snapshots are `Arc`-shared, so handoff is a pointer
-//! swap (§7.2) and no row objects are materialized anywhere.
-//!
-//! `query_arrow` returns 2048-row batches, so a column-wide slice needs
-//! concatenation. That happens once here, at construction: blotter
-//! results are aggregates — one row per visible group — while the million
-//! rows are scanned inside DuckDB and never cross this boundary.
+//! Construction concatenates query batches once, validates metadata against the
+//! result columns, and builds the tree index on the query worker. Delivery shares
+//! the prepared snapshot without materializing row objects.
 
 use crate::attribution::{Attribution, ScopeSemantics};
 use crate::tree::TreeIndex;
@@ -49,9 +46,9 @@ pub struct Provenance {
 }
 
 impl Provenance {
-    /// The stalest input. A joined view is as stale as this (spec §5.4),
-    /// and a tile mixing cadences shows per-dataset freshness rather than
-    /// one misleading timestamp.
+    /// The earliest known input timestamp. Inputs without a timestamp are skipped;
+    /// `None` means none has one. Joined views can use this for overall freshness
+    /// while retaining each dataset's timestamp for mixed-cadence displays.
     pub fn stalest(&self) -> Option<&Freshness> {
         self.datasets
             .iter()
@@ -60,47 +57,16 @@ impl Provenance {
     }
 }
 
-/// Concatenate batches, keeping a shared dictionary shared.
+/// Concatenate batches while preserving a shared dictionary's codes.
+/// When dictionary contents match across batches, concatenate only the keys and
+/// reuse the dictionary. This preserves one code per value when the input
+/// dictionary is canonical, allowing the tree and renderer to compare codes.
 ///
-/// Every batch of one query carries the same derived ENUM, so its keys can
-/// simply be concatenated against that one dictionary rather than
-/// unified — cheaper, and it keeps the codes stable, which is what §7.2
-/// lets a renderer compare and group on.
-///
-/// **It also guards §7.2's code identity, which the fallback does not.**
-/// This comment has been wrong twice, so the measurements are recorded
-/// rather than the conclusions.
-///
-/// The original claim — that arrow's `concat` appends dictionaries and
-/// overflows the key space — is false at arrow 58.4.0: 40 batches of a
-/// 200-value dictionary concatenate to 200 entries at UInt8, 300 stays
-/// 300 at UInt16, and a union that genuinely cannot fit the key type
-/// (disjoint 200-value dictionaries at UInt8) returns
-/// `Err("Dictionary key bigger than the key type")` rather than
-/// corrupting.
-///
-/// The correction that replaced it — "the fallback is safe; this path
-/// costs speed only" — was measured without nulls, and that is the case
-/// that matters. With a NULL present the fallback emits a *duplicate*
-/// dictionary entry:
-///
-/// ```text
-/// no nulls      dict=["A","B","C"]      codes=[0,1,2,0]
-/// null present  dict=["A","B","C","A"]  codes=[0,1,0,2,3]
-/// ```
-///
-/// `"A"` then has both code 0 and code 3. `dict_value` still returns the
-/// right string, so nothing visibly breaks — but §7.2's whole premise is
-/// that the renderer compares and groups on codes, and after a fallback
-/// concat code equality no longer implies string equality. A renderer
-/// grouping by code would split one book in two. A NULL in a dimension
-/// column is not exotic: it *is* the rolled-up row, present in
-/// essentially every result.
-///
-/// The fast path is unreached in production today (every batch of one
-/// query carries the same derived ENUM), so this is a latent property of
-/// the fallback rather than a live defect. Re-measure before trusting any
-/// of it across an arrow upgrade.
+/// Other arrays use Arrow's `concat`. That fallback can merge dictionaries; this
+/// function does not verify that its output retains one code per value. Duplicate
+/// entries would give equal strings different codes and split code-based groups.
+/// Production ENUM batches share a dictionary and use the preserving path.
+/// Recheck dictionary and NULL behavior when upgrading Arrow.
 fn concat_preserving_dictionaries(
     batches: &[RecordBatch],
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
@@ -116,8 +82,8 @@ fn concat_preserving_dictionaries(
     for (i, field) in schema.fields().iter().enumerate() {
         let slices: Vec<&dyn Array> = batches.iter().map(|b| b.column(i).as_ref()).collect();
 
-        // Both key widths, because the width follows the vocabulary size
-        // rather than the schema — see `dict_column`.
+        // ENUM key width follows vocabulary size; preserve shared dictionaries
+        // for all three supported widths.
         let shared = match field.data_type() {
             DataType::Dictionary(k, _) if **k == DataType::UInt8 => {
                 concat_shared_dictionary::<UInt8Type>(&slices)
@@ -145,7 +111,7 @@ fn concat_preserving_dictionaries(
 ///
 /// `None` when the slices are not all dictionaries of this key width, or
 /// do not share a dictionary — the caller then falls back to Arrow's own
-/// `concat`, which is correct but merges the dictionaries.
+/// `concat`, which can merge dictionaries without preserving canonical codes.
 fn concat_shared_dictionary<K: arrow::datatypes::ArrowDictionaryKeyType>(
     slices: &[&dyn Array],
 ) -> Option<Result<arrow::array::ArrayRef, arrow::error::ArrowError>> {
@@ -204,13 +170,9 @@ impl DictCodes<'_> {
         self.len() == 0
     }
 
-    /// Whether this row has no value — the rolled-up level, not a code.
-    ///
-    /// §7.2 tells the renderer to compare and group on codes, so this has
-    /// to be askable here. Without it a code-based renderer reads the
-    /// arbitrary code sitting under a NULL — in practice 0 — and puts the
-    /// grand-total row under a real book, which is exactly the defect
-    /// [`Snapshot::dict_value`] consults the bitmap to avoid.
+    /// Whether this row has no value, such as a rolled-up dimension cell.
+    /// Raw codes under a NULL are arbitrary and must not be used for grouping.
+    /// Returns true for an out-of-range row or a cleared key validity bit.
     pub fn is_null(&self, row: usize) -> bool {
         let nulls = match self {
             DictCodes::U8(_, n) | DictCodes::U16(_, n) | DictCodes::U32(_, n) => *n,
@@ -256,14 +218,9 @@ fn f64_in(arr: &dyn Array, row: usize) -> Option<f64> {
     if let Some(values) = arr.as_any().downcast_ref::<Float64Array>() {
         return (row < values.len() && !values.is_null(row)).then(|| values.value(row));
     }
-    // A declared `i64` measure does not come back as an integer.
-    // `ColumnType::I64` is BIGINT, the default aggregate is `Sum`, and
-    // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
-    // `Decimal128(38, 0)`. Nothing forbids such a measure, so without
-    // this arm every one of its cells read blank, and under §6.3 a
-    // blank cell is a positive claim: "this number does not belong to
-    // this row". Turning "I cannot read this type" into that claim is
-    // the worst failure available here.
+    // DuckDB exports `sum(BIGINT)` as `Decimal128(38, 0)`. Read decimals
+    // as numeric values so a valid integer aggregate does not display as a
+    // blank cell. Conversion to f64 follows the declared decimal scale.
     use arrow::array::Decimal128Array;
     use arrow::datatypes::DataType;
     if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {
@@ -402,7 +359,7 @@ pub struct Snapshot {
     depth_col: Option<usize>,
     provenance: Provenance,
     /// The parent/child structure, built once at construction on the
-    /// query worker rather than per frame (Phase 3 §5.5).
+    /// query worker rather than per frame.
     tree: TreeIndex,
 }
 
@@ -473,9 +430,8 @@ impl Snapshot {
         self.meta.len()
     }
 
-    /// Resolve a column's index once; the blotter reads by index for the
-    /// rest of the snapshot's life rather than searching by name per cell
-    /// (spec §5.5).
+    /// Resolve a column index once for repeated cell reads. Index accessors
+    /// avoid a name lookup for every cell during the snapshot's lifetime.
     pub fn column_index(&self, name: &str) -> Option<usize> {
         self.meta.iter().position(|m| m.name == name)
     }
@@ -520,22 +476,18 @@ impl Snapshot {
         )
     }
 
-    /// One numeric cell. `None` when the column is absent or not f64, the
-    /// row is past the end, **or the value is NULL**.
-    ///
-    /// NULL and 0.0 are different answers and the difference is the whole
-    /// of §6.3. A measure is blanked outright where it is
-    /// `NonAttributable` — cross gamma at an underlying-level grouping
-    /// belongs to no single underlying — and a renderer that cannot tell
-    /// the two apart prints a confident zero where the honest answer is
-    /// "this number does not belong to this row".
+    /// One numeric cell converted to f64. Supports float, integer, and decimal
+    /// arrays; large integers or decimals can lose precision in the conversion.
+    /// Returns `None` for an absent or unsupported column, an out-of-range row,
+    /// or NULL. NULL must remain distinct from zero: non-attributable measures
+    /// are deliberately blanked at grouping levels they do not belong to.
     pub fn f64_value(&self, name: &str, row: usize) -> Option<f64> {
         f64_in(self.column(name)?, row)
     }
 
     /// The by-index twin of [`Self::f64_value`]. The blotter resolves a
     /// column once via [`Self::column_index`] and reads every subsequent
-    /// row through this, never by name (spec §5.5).
+    /// row through this, without a name lookup.
     pub fn f64_at(&self, idx: usize, row: usize) -> Option<f64> {
         f64_in(self.column_at(idx)?, row)
     }
@@ -556,15 +508,10 @@ impl Snapshot {
         )
     }
 
-    /// One integer cell, at whatever width it arrived in, widened to i64.
-    /// `None` when the column is absent or not an integer, the row is past
-    /// the end, or the value is NULL.
-    ///
-    /// The width is DuckDB's choice, not the schema's: it emits the
-    /// narrowest type that fits, so `row_depth` — a small computed
-    /// integer — comes back `Int32` while a declared `i64` column comes
-    /// back `Int64`. Matching only `Int64` made every real result's depth
-    /// unreadable while every fixture built on `Int64Array` passed.
+    /// One integer cell converted to i64: signed 8/16/32/64-bit and unsigned
+    /// 8/16/32-bit arrays are supported. Returns `None` for other types, an
+    /// absent column, an out-of-range row, or NULL. Computed columns can be narrow:
+    /// `row_depth` arrives as Int32 while a declared i64 column arrives as Int64.
     pub fn i64_value(&self, name: &str, row: usize) -> Option<i64> {
         i64_in(self.column(name)?, row)
     }
@@ -580,21 +527,13 @@ impl Snapshot {
         self.column(name)?.as_any().downcast_ref::<StringArray>()
     }
 
-    /// A dictionary-encoded dimension column: per-row codes plus the
-    /// shared value dictionary. The renderer compares and formats on the
-    /// codes rather than the strings (spec §7.2).
+    /// Dictionary codes and their shared string dictionary. Code comparisons
+    /// are local to this column and require a canonical dictionary; use text
+    /// accessors when comparing across snapshots.
     ///
-    /// The key width is a property of the data, not the schema: DuckDB
-    /// sizes an ENUM's key to its vocabulary. Measured at the boundaries:
-    /// 255 → UInt8, 256 → UInt16, 65535 → UInt16, 65536 → UInt32. All
-    /// three are matched.
-    ///
-    /// An earlier version matched UInt8 only, and every dimension with a
-    /// real underlying list fell through this *and* `str_column` and
-    /// rendered blank. The version after it matched UInt8 and UInt16 and
-    /// called that exhaustive — it was not, and the comment saying so
-    /// would have stopped the next reader re-checking. If a further width
-    /// ever appears, this is the third place to find out about it.
+    /// DuckDB sizes ENUM keys by vocabulary: up to 255 values use UInt8, up to
+    /// 65,535 use UInt16, and larger vocabularies use UInt32. All three widths
+    /// are supported. Check the key null bitmap before reading a raw code.
     pub fn dict_column(&self, name: &str) -> Option<(DictCodes<'_>, &StringArray)> {
         dict_column_in(self.column(name)?)
     }
@@ -607,18 +546,15 @@ impl Snapshot {
         dict_column_in(self.column_at(idx)?)
     }
 
-    /// One string cell, or `None` when the column is absent, the value is
-    /// NULL, or the row is past the end.
-    ///
-    /// A renderer walks rows, and [`Self::str_column`] hands back the Arrow
-    /// array — which would make every caller name an Arrow type and bring
-    /// its traits into scope, exactly what this module exists to prevent.
+    /// One plain-string cell without exposing an Arrow array to the caller.
+    /// Returns `None` for an absent or non-string column, NULL, or an out-of-range
+    /// row. Use `text_value` to accept dictionary encoding too.
     pub fn str_value(&self, name: &str, row: usize) -> Option<&str> {
         str_in(self.column(name)?, row)
     }
 
     /// One dictionary-encoded cell, resolved to its string. The codes are
-    /// what comparisons and grouping should use (spec §7.2); this is for
+    /// available for comparisons and grouping within the column; this is for
     /// display.
     ///
     /// `None` for a NULL cell. The key array's null bitmap is the only
@@ -635,7 +571,7 @@ impl Snapshot {
     /// A column's encoding depends on the *era*, not only on the schema:
     /// the live path interns dimensions as DuckDB ENUMs and gets
     /// dictionary-encoded columns back, while an as-of read skips the
-    /// interning and produces plain strings (§6.5). `ColumnMeta` does not
+    /// interning and produces plain strings. `ColumnMeta` does not
     /// record which, so a caller that picks an accessor by column name
     /// reads a value in one era and `None` in the other, with no signal
     /// that anything changed. Anything rendering a dimension should come
@@ -649,21 +585,11 @@ impl Snapshot {
         text_in(self.column_at(idx)?, row)
     }
 
-    /// One cell as display text, for the types no other accessor reads.
-    ///
-    /// `ColumnType` accepts `date`, `timestamp` and `bool`, and DuckDB
-    /// emits them as `Date32`, `Timestamp(Micros)` and `Boolean` — none of
-    /// which any typed accessor here matched, so a legal declaration
-    /// produced a column of blank cells. Under §6.3 a blank cell asserts
-    /// "this number does not belong to this row", so an unreadable type
-    /// silently became a claim about the data. `business_date` is the
-    /// standing example: `store/ddl.rs` names it as the attribute worth
-    /// displaying, and the sample config declares it `utf8`, which was a
-    /// workaround for this gap rather than a preference.
-    ///
-    /// Returns owned text because a formatted date has nowhere to borrow
-    /// from. Numbers are deliberately not formatted here — precision is
-    /// the renderer's decision, so it should ask `f64_value` first.
+    /// One cell as display text for strings, booleans, dates, and microsecond
+    /// timestamps. Returns `None` for unsupported types, missing columns, NULL,
+    /// or out-of-range rows. Text is owned because formatted dates and times
+    /// cannot borrow from the array. Numeric formatting belongs to the caller;
+    /// use `f64_value` for numbers.
     pub fn display_value(&self, name: &str, row: usize) -> Option<String> {
         display_in(self.column(name)?, row)
     }
@@ -695,7 +621,7 @@ impl Snapshot {
         self.depth_col.is_some()
     }
 
-    /// The parent/child structure, built once here (Phase 3 §5.5).
+    /// The parent/child structure prepared during snapshot construction.
     pub fn tree(&self) -> &TreeIndex {
         &self.tree
     }
@@ -706,23 +632,15 @@ impl Snapshot {
 pub enum TestColumn {
     F64(Vec<Option<f64>>),
     I64(Vec<i64>),
-    /// A narrower integer, as DuckDB actually emits `row_depth`. A
-    /// fixture that only builds `Int64` cannot see the width defect that
-    /// made `depth_of_row` return `None` for every real result.
+    /// Int32, matching the encoding of computed columns such as `row_depth`.
     I32(Vec<i32>),
     Str(Vec<Option<&'static str>>),
-    /// Dictionary-encoded, the shape a live ENUM column arrives in. The
-    /// key width follows DuckDB's own rule — UInt8 up to 255 distinct
-    /// values, UInt16 above — so a fixture that crosses the cliff
-    /// exercises what a real underlying list does.
+    /// Dictionary-encoded, matching live ENUM columns. Keys use UInt8 up to
+    /// 255 distinct values, UInt16 up to 65,535, and UInt32 above that, so
+    /// fixtures can exercise every supported vocabulary width.
     Dict(Vec<Option<String>>),
-    /// A real `Date32` column — DuckDB's own encoding for a `date`
-    /// column (spec §3.6), which `display_in` reads through
-    /// `Date32Array::value_as_date`. Most fixtures spell a date as ISO
-    /// text through `Dict`/`Str` instead, since what a reader gets off an
-    /// axis is its label either way — this variant exists for a fixture
-    /// that must exercise the real column type, such as a typed
-    /// `Value::Date` cell.
+    /// Date32, matching a declared date column. Use this to exercise typed date
+    /// cells; `Dict` and `Str` fixtures exercise date labels stored as text.
     Date(Vec<Option<chrono::NaiveDate>>),
 }
 
@@ -738,10 +656,8 @@ fn dictionary_fixture(
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    // A `Vec::contains`/`position` scan made this O(cells × distinct
-    // values); a benchmark fixture with a large vocabulary made building
-    // the fixture itself the bottleneck rather than the code under test.
-    // The map interns each distinct value once, in first-seen order.
+    // Intern each value once in first-seen order. Hash lookup keeps fixture
+    // construction from scaling with cells times vocabulary size.
     let mut distinct: Vec<&str> = Vec::new();
     let mut seen: HashMap<&str, usize> = HashMap::new();
     for c in cells.iter().flatten() {
@@ -794,10 +710,8 @@ fn dictionary_fixture(
 impl Snapshot {
     /// Build a snapshot from plain Rust values.
     ///
-    /// Downstream crates need `Snapshot` fixtures, and this module's whole
-    /// premise is that nothing outside it names an Arrow type — so the
-    /// fixture builder lives here rather than making every test crate
-    /// reach for `arrow` and pin its version to match duckdb's.
+    /// Downstream tests can build results without an Arrow dependency or
+    /// matching its version to the data layer's DuckDB dependency.
     ///
     /// The first `grouping_len` columns are the grouping columns, which is
     /// the order the compiler emits.
@@ -805,25 +719,15 @@ impl Snapshot {
         Snapshot::for_tests_with_provenance(columns, grouping_len, Provenance::default())
     }
 
-    /// The same builder with a provenance of the caller's choosing.
+    /// Build a snapshot with caller-supplied provenance. Document-panel fixtures
+    /// use `Provenance.datasets[0]`'s source time and generation to exercise
+    /// freshness and draft-base comparisons; the ordinary builder supplies empty
+    /// provenance.
     ///
-    /// `Provenance::default()` carries no datasets, so a `for_tests`
-    /// fixture says nothing about where its rows came from: every reader
-    /// that asks what the read was as of, or which generation answered it,
-    /// gets nothing, and no behaviour that decides anything from either can
-    /// be exercised on such a fixture — it will report "unknown" rather
-    /// than fail, which is the trap.
-    ///
-    /// A fixture that means to exercise those readers supplies one
-    /// [`Freshness`] per dataset the snapshot claims to come from, filled
-    /// as the real read would have filled it. Leaving a field `None` is not
-    /// a shortcut to "unchanged": it says the read did not learn that fact,
-    /// and a consumer is entitled to treat the two differently, so a
-    /// fixture that omits what a real read would have named tests a
-    /// different path than the one it was written for.
-    ///
-    /// `for_tests` keeps its two-argument spelling because most fixtures do
-    /// not care.
+    /// A `None` generation says the read did not learn one, never that the data
+    /// is unchanged. A fixture omitting what a real read would have named
+    /// therefore exercises the source-time fallback, not the path it was
+    /// written for.
     pub fn for_tests_with_provenance(
         columns: Vec<(ColumnMeta, TestColumn)>,
         grouping_len: usize,
@@ -959,10 +863,8 @@ mod tests {
 
     #[test]
     fn a_null_measure_reads_as_none_not_zero() {
-        // The compiler blanks a measure where it is NonAttributable
-        // (§6.3). Arrow stores that as a cleared null bit over an
-        // arbitrary payload, so the distinction lives in the bitmap and
-        // nowhere else.
+        // Non-attributable cells are NULL. Arrow keeps an arbitrary payload under
+        // the cleared null bit, so only the bitmap distinguishes them from values.
         let s = Snapshot::for_tests(
             vec![(
                 ColumnMeta {
@@ -1033,11 +935,8 @@ mod tests {
 
     #[test]
     fn depth_is_read_at_whatever_integer_width_it_arrives_in() {
-        // DuckDB emits the narrowest integer that fits, and `row_depth` is
-        // small, so a real result carries Int32. Every fixture here built
-        // it as Int64, so `depth_of_row` returned None for every row of
-        // every real query and nothing noticed — a renderer treats that as
-        // depth 0 and reads the wrong attribution for the whole tree.
+        // Use Int32 for `row_depth`, matching computed query output. Reading only
+        // Int64 would lose every row's depth and apply the wrong attribution.
         let schema = Arc::new(Schema::new(vec![
             Field::new("row_depth", DataType::Int32, true),
             Field::new("wide", DataType::Int64, true),
@@ -1089,9 +988,8 @@ mod tests {
 
     #[test]
     fn a_dimension_past_the_255_value_cliff_reads_at_either_width() {
-        // Above 255 distinct values the keys widen to UInt16. Matching
-        // only UInt8 made such a column fall through dict_column *and*
-        // str_column and render blank.
+        // A vocabulary above 255 values requires UInt16 keys. Both dictionary
+        // and text cell access must support this width.
         let wide: Vec<Option<String>> = (0..300).map(|i| Some(format!("U{i:04}"))).collect();
         let narrow: Vec<Option<String>> = (0..200).map(|i| Some(format!("U{i:04}"))).collect();
 
@@ -1112,11 +1010,8 @@ mod tests {
 
     #[test]
     fn dimension_codes_report_a_rolled_up_row_as_having_none() {
-        // §7.2 tells the renderer to compare and group on codes, so the
-        // code path has to answer the same question `dict_value` does. It
-        // did not: the arbitrary code under a NULL is 0, so a code-based
-        // renderer put the grand-total row under a real book — the same
-        // defect, reached through the API the spec points at.
+        // Code reads must honor NULL just as text reads do. A raw zero under a
+        // NULL key must not identify the grand total as a real book.
         let s = Snapshot::for_tests(
             vec![(
                 dim("book"),
@@ -1136,10 +1031,8 @@ mod tests {
 
     #[test]
     fn a_dimension_past_the_65535_value_cliff_still_reads() {
-        // DuckDB sizes an ENUM's key to its vocabulary, and the widths do
-        // not stop at UInt16: measured, 255 -> UInt8, 256 -> UInt16,
-        // 65535 -> UInt16, 65536 -> UInt32. Matching only the first two
-        // left the same silent blank one cliff further out.
+        // Vocabulary boundaries require three key widths: 255 -> UInt8,
+        // 256 -> UInt16, 65,535 -> UInt16, and 65,536 -> UInt32.
         let wide: Vec<Option<String>> = (0..65_536).map(|i| Some(format!("U{i:06}"))).collect();
         let s = Snapshot::for_tests(vec![(dim("underlying_ref"), TestColumn::Dict(wide))], 1);
         assert!(matches!(
@@ -1152,12 +1045,8 @@ mod tests {
 
     #[test]
     fn a_summed_integer_measure_is_readable_as_a_number() {
-        // `ColumnType::I64` is BIGINT, the default aggregate is Sum, and
-        // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
-        // `Decimal128(38, 0)`. Nothing forbids declaring such a measure,
-        // and without an arm for it every cell read blank. Under §6.3 a
-        // blank cell is a positive claim about the data, so an unreadable
-        // type silently became "this number does not belong to this row".
+        // An integer sum arrives as Decimal128(38, 0). Verify that numeric access
+        // reads the aggregate and preserves NULL instead of blanking the column.
         use arrow::array::Decimal128Array;
 
         let values = Decimal128Array::from(vec![Some(1_234i128), None, Some(-7i128)])
@@ -1185,10 +1074,8 @@ mod tests {
 
     #[test]
     fn a_date_or_boolean_column_is_displayable() {
-        // `ColumnType` accepts date/timestamp/bool and DuckDB emits
-        // Date32/Timestamp/Boolean, none of which any typed accessor
-        // matched — so a legal declaration produced a column of blank
-        // cells, which §6.3 reads as a claim about the data.
+        // Date, timestamp, and bool declarations produce typed Arrow arrays.
+        // The display accessor must render their values while preserving NULL.
         use arrow::array::{BooleanArray, Date32Array};
 
         let schema = Arc::new(Schema::new(vec![
@@ -1246,8 +1133,8 @@ mod tests {
 
     #[test]
     fn dictionary_batches_concatenate_at_either_key_width() {
-        // The concat path special-cased UInt8. A wide dimension arriving
-        // as several 2048-row batches has to survive it too.
+        // A wide dictionary split across query batches must preserve values and
+        // codes during concatenation.
         for distinct in [200usize, 300] {
             let cells: Vec<Option<String>> =
                 (0..distinct).map(|i| Some(format!("U{i:04}"))).collect();
@@ -1273,7 +1160,7 @@ mod tests {
 
     #[test]
     fn freshness_reports_the_stalest_input() {
-        // A joined view is as stale as its stalest input (spec §5.4).
+        // A joined view reports the earliest known input timestamp.
         let mut p = Provenance::default();
         p.datasets.push(Freshness {
             dataset: "risk_snapshot".into(),
@@ -1308,7 +1195,7 @@ mod tests {
     #[test]
     fn index_accessors_agree_with_their_by_name_twins_under_every_type() {
         // The blotter resolves a column once and reads by index for the
-        // rest of the snapshot's life (§5.5). Every typed accessor here
+        // rest of the snapshot's life. Every typed accessor here
         // must answer exactly what its by-name twin answers, including
         // NULL, past-the-end, and the narrow-integer and dictionary
         // shapes DuckDB actually emits.

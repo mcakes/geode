@@ -66,7 +66,7 @@ fn distance(a: Rgb8, b: Rgb8) -> u32 {
 /// Among featured entries within one byte step on every channel, choose the
 /// smallest summed channel difference, keeping the first on a tie. The component
 /// control used to make the pick does not affect this mapping.
-pub fn colour_from_pick(h: Hsla, featured: &[(Hsla, Color)]) -> Color {
+pub fn color_from_pick(h: Hsla, featured: &[(Hsla, Color)]) -> Color {
     let picked = Rgb8::from_hsla(h);
     let nearest = featured
         .iter()
@@ -127,15 +127,15 @@ mod tests {
         let p0 = gpui::hsla(0.1, 0.8, 0.5, 1.0);
         let spx = gpui::hsla(0.6, 0.7, 0.4, 1.0);
         let featured = vec![(p0, Color::Palette(0)), (spx, Color::Named("spx".into()))];
-        assert_eq!(colour_from_pick(p0, &featured), Color::Palette(0));
-        assert_eq!(colour_from_pick(spx, &featured), Color::Named("spx".into()));
+        assert_eq!(color_from_pick(p0, &featured), Color::Palette(0));
+        assert_eq!(color_from_pick(spx, &featured), Color::Named("spx".into()));
         let other = gpui::hsla(0.3, 0.5, 0.5, 1.0);
         assert_eq!(
-            colour_from_pick(other, &featured),
+            color_from_pick(other, &featured),
             Color::Custom(Rgb8::from_hsla(other))
         );
         assert_eq!(
-            colour_from_pick(p0, &[]),
+            color_from_pick(p0, &[]),
             Color::Custom(Rgb8::from_hsla(p0)),
             "nothing featured: every pick is absolute"
         );
@@ -149,12 +149,12 @@ mod tests {
         let base = Rgb8([0x68, 0x98, 0xce]);
         let featured = vec![(base.to_hsla(), Color::Palette(0))];
         let one_low = Rgb8([0x67, 0x97, 0xcd]).to_hsla();
-        assert_eq!(colour_from_pick(one_low, &featured), Color::Palette(0));
+        assert_eq!(color_from_pick(one_low, &featured), Color::Palette(0));
         let one_high = Rgb8([0x69, 0x98, 0xce]).to_hsla();
-        assert_eq!(colour_from_pick(one_high, &featured), Color::Palette(0));
+        assert_eq!(color_from_pick(one_high, &featured), Color::Palette(0));
         let two_low = Rgb8([0x66, 0x98, 0xce]);
         assert_eq!(
-            colour_from_pick(two_low.to_hsla(), &featured),
+            color_from_pick(two_low.to_hsla(), &featured),
             Color::Custom(two_low)
         );
         assert!(within_a_step(base, Rgb8([0x67, 0x99, 0xce])));
@@ -171,12 +171,12 @@ mod tests {
             (a.to_hsla(), Color::Palette(0)),
             (b.to_hsla(), Color::Palette(1)),
         ];
-        assert_eq!(colour_from_pick(b.to_hsla(), &featured), Color::Palette(1));
-        assert_eq!(colour_from_pick(a.to_hsla(), &featured), Color::Palette(0));
+        assert_eq!(color_from_pick(b.to_hsla(), &featured), Color::Palette(1));
+        assert_eq!(color_from_pick(a.to_hsla(), &featured), Color::Palette(0));
         let tied = vec![
             (b.to_hsla(), Color::Palette(2)),
             (b.to_hsla(), Color::Palette(3)),
         ];
-        assert_eq!(colour_from_pick(b.to_hsla(), &tied), Color::Palette(2));
+        assert_eq!(color_from_pick(b.to_hsla(), &tied), Color::Palette(2));
     }
 }

@@ -1,10 +1,7 @@
-//! The object dialog's browse stage (Phase 4c), through real key
-//! dispatch: `config::views` lists the configured views with their
-//! provenance, `j`/`k` move, `/` filters, and `escape` walks the ladder.
-//!
-//! The pure core's own tests (`shell::objectdialog::tests`) cover the
-//! markers; these cover what only a window can show — which surface owns
-//! the keystrokes, and that the rows actually paint.
+//! Object-dialog integration through real key dispatch: configured objects and
+//! provenance, navigation, filtering, edit stages, and the Escape ladder. Pure adapter
+//! tests cover object markers; these tests cover keyboard ownership, rendered rows, and
+//! persistence through the shell.
 
 use super::*;
 use crate::dialogmode::DialogMode;
@@ -337,12 +334,9 @@ fn services_with_a_desk_view() -> ShellServices {
     desk_view_services(&[])
 }
 
-/// That fixture plus `extra` user-layer documents, keyed by doc name.
-///
-/// Its one caller adds `view_presentation` and nothing else, which is
-/// exactly the state §4.1's split produces and no `views.toml` fixture
-/// can reach: a trader who hid a column has a user-layer file naming the
-/// view while the view itself is still the desk's.
+/// The desk fixture plus user-layer documents keyed by document name. Adding only
+/// `view_presentation` models a hidden column whose view definition still belongs to
+/// the desk.
 fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
     let mut services = test_services();
     let mut layered = desk_view_docs();
@@ -363,16 +357,9 @@ fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
     services
 }
 
-/// The desk-layer documents [`desk_view_services`] is built from: one
-/// dataset and one desk view over it. Factored out so a fixture that
-/// needs the SAME desk with a different `ConfigSources` — a user
-/// directory holding a file that will not parse, say — does not have to
-/// restate the desk and risk it drifting from every other test here.
-///
-/// `delta01` is on the dataset but not on `tree`'s own column list —
-/// deliberately, so the view's edit stage has one column in its
-/// available block (§18.2) without any fixture here having to build a
-/// second dataset just to reach it.
+/// Shared desk documents: one dataset and one view. Reuse them when varying config
+/// sources so tests keep the same desk definition. `delta01` belongs to the dataset but
+/// not the view, providing an available column without another dataset.
 fn desk_view_docs() -> Vec<LayerDoc> {
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -385,10 +372,8 @@ fn desk_view_docs() -> Vec<LayerDoc> {
         layer: Layer::Desk,
         name: "views".to_string(),
         file: "<test:desk>".into(),
-        // `npv` carries a desk `label` — the one column key Part 2c's
-        // column stage can CLEAR (§5.3), and a clear is only meaningful
-        // against a desk that set something. Nothing else here reads it;
-        // it simply gives the stage a key to hand back.
+        // The desk sets `npv`'s label so clearing a column override has an inherited
+        // value to reveal.
         table: "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
                 [[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n"
@@ -462,12 +447,8 @@ fn edit_draft<T>(
     })
 }
 
-/// §18.1: this dialog's mode pill lives in the modal's shared title row,
-/// in BOTH stages. Browse used to paint a pill row of its own above the
-/// filter and the edit stage painted none at all — `build` returns to
-/// `build_edit` before ever reaching that row — so the two stages
-/// disagreed about whether the dialog told you what mode it was in.
-/// `title_extra` is set once in `open`, which is what makes them agree.
+/// The mode pill lives in the shared modal title row and remains visible in browse and
+/// edit stages.
 #[gpui::test]
 fn the_object_dialogs_pill_sits_in_the_title_row_in_both_stages(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -512,7 +493,7 @@ fn enter_opens_the_edit_stage_and_paints_every_column(cx: &mut gpui::TestAppCont
         "objectdialog-field-columns",
         "objectdialog-item-book",
         "objectdialog-item-npv",
-        // The available block (§18.2): on the dataset, not on the view.
+        // An available column: present in the dataset, absent from the view.
         "objectdialog-item-delta01",
     ] {
         assert!(
@@ -635,11 +616,9 @@ fn layered_fingerprint(
     })
 }
 
-/// **The assertion this whole task exists for.** Hiding a column on a
-/// DESK-layer view writes `view_presentation.toml` and leaves no
-/// user-layer `views.toml` at all — because a `views.toml` override would
-/// fork the desk's view, and a forked view is frozen: the desk adds a
-/// column next week and the trader never sees it.
+/// Hiding a desk-view column writes only `view_presentation.toml`. It must not create a
+/// user view definition, which would freeze the desk's column membership instead of
+/// inheriting future changes.
 #[gpui::test]
 fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -673,13 +652,10 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
     assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
 }
 
-/// **The mirror image of the test above.** Hiding a member is
-/// presentation and says nothing; adding an AVAILABLE column changes what
-/// the view IS, so it forks the desk view into the user layer — applied
-/// at once and announced, like any other definitional edit (user ruling
-/// 2026-09-14). `delta01` is on the dataset (`desk_view_docs`) but not
-/// on `tree`'s own columns, so it is the one row in the available block
-/// this fixture's `tree` has.
+/// Adding an available column changes the view definition and copies a desk-owned view
+/// into the user layer. The edit applies immediately and announces the copy. `delta01`
+/// is the fixture's available column; hiding an existing member is covered separately
+/// as presentation only.
 #[gpui::test]
 fn adding_an_available_column_to_a_desk_view_forks_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -710,8 +686,8 @@ fn adding_an_available_column_to_a_desk_view_forks_and_says_so(cx: &mut gpui::Te
     let _ = shell;
 }
 
-/// §19.6: the fork's own batch carries the overrides entry, so it lands
-/// in the same flush; `r` removes it with the user copy.
+/// The new user copy and its overrides entry share a pending batch; reverting removes
+/// both together.
 #[gpui::test]
 fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -770,13 +746,9 @@ fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestApp
     let _ = shell;
 }
 
-/// §19.6, MINOR 10: `commit_edit`'s fork block inserts the stale
-/// removals into the batch BEFORE its own fresh entry, and that order is
-/// load-bearing. At fork time the user layer does not yet own the
-/// object, so `stale_override_keys` reports the very key this fork is
-/// about to write as stale — the ordinary case, not a rare collision.
-/// Both inserts share one `BTreeMap` key, so whichever runs second wins;
-/// this pins the fresh `Some` entry as the one that must.
+/// Queue stale override removals before the new override entry. Before the user copy
+/// exists, stale-key detection can include the same key being created; both use one
+/// `BTreeMap` entry, so the fresh value must be inserted last.
 #[gpui::test]
 fn the_forks_own_entry_wins_over_its_stale_twin(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -835,28 +807,14 @@ fn the_forks_own_entry_wins_over_its_stale_twin(cx: &mut gpui::TestAppContext) {
     let _ = shell;
 }
 
-/// **A draft whose own reader rejects it must not reach the batch.**
+/// A draft with error diagnostics must not enter the pending batch. Otherwise its file
+/// could be written while the merged config is rejected, leaving memory and disk
+/// inconsistent.
 ///
-/// Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
-/// config holding an error diagnostic — so if an error-severity edit
-/// joined the pending batch anyway, the flush's merge would be refused
-/// while the file write still fired, leaving memory and disk disagreeing
-/// (`objectdialog::apply`'s module doc, "the previous config's
-/// diagnostics"). Nothing keyed today can make `Domain::validate` return
-/// `Severity::Error` — `views::validate` only ever emits `Warning` (a
-/// stale dataset name warns, by design, so a desk rename cannot break a
-/// trader's personal file) — so this drives `Draft::diagnostics`
-/// directly, exactly as the task brief allows: the rule still needs
-/// pinning now, for Part 2b's `Text`, which will reach it through real
-/// keys.
-///
-/// `shift+j` (`NormalCommand::MoveItem`) is the vehicle because it is the
-/// one path into `commit_or_confirm` that does not call `revalidate`
-/// first — `Toggle`/`ToggleBack` do, which would recompute the (all-
-/// `Warning`) diagnostics and erase the injected error before the gate
-/// ever saw it. Using it here does not claim `MoveItem` is where a real
-/// error would be produced; it is only how this test reaches the gate
-/// without recomputing over it.
+/// Inject a diagnostic directly because this fixture's view validation emits only
+/// warnings. `shift+j` reaches the commit gate without revalidating first, preserving
+/// the injected error; toggle commands would recompute diagnostics and erase it before
+/// the gate.
 #[gpui::test]
 fn an_edit_the_reader_rejects_does_not_join_the_batch(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -989,18 +947,9 @@ fn an_edit_with_only_warnings_still_joins_the_batch(cx: &mut gpui::TestAppContex
     );
 }
 
-/// **The requirement, in one test.** Changing a config field is INSTANT:
-/// the keystroke changes what the dialog shows, with no save key — and
-/// the config and the file both follow on their own, together, a
-/// debounce later.
-///
-/// "Instant" is the **dialog**, not every downstream consumer. Applying
-/// the merged config per keystroke would emit `ShellEvent::ConfigReloaded`
-/// per keystroke, and the app bridge turns that into new `ViewSpec`s —
-/// so a held key would make every blotter tile requery at the OS
-/// key-repeat rate, against a §7.1 budget of 50 ms at 1M rows. The
-/// dialog's own response is free; the world catching up is not, so the
-/// world catches up on the same timer the file does.
+/// Field edits update the dialog immediately, while merged config and file writes
+/// follow together after the debounce. Deferring `ConfigReloaded` avoids requerying
+/// every blotter tile at keyboard repeat rate.
 #[gpui::test]
 fn a_field_edit_shows_instantly_and_the_config_and_file_follow_together(
     cx: &mut gpui::TestAppContext,
@@ -1378,21 +1327,10 @@ fn a_write_that_fails_after_the_dialog_closed_still_reports_itself(cx: &mut gpui
     );
 }
 
-/// **The empty-table ruling.** A user's `view_presentation.toml` was found
-/// holding a bare `[tree]` — a table that says nothing, which
-/// `ViewPresentationSpec::apply` then warns about as a stale entry.
-///
-/// Under the staged model that took a save whose draft excluded nothing.
-/// Under this one it is one keystroke: `views::presentation_table`
-/// renders EMPTY whenever the trader's presentation matches the view's
-/// own doc, so hiding a column and unhiding it produces exactly that
-/// table — every time, instantly. So an empty rendering is written as an
-/// **absence**: the object is removed from the user's document rather
-/// than written as a table with nothing in it, in memory and on disk
-/// alike — an *overlay* rendering only, which is the whole of
-/// `apply::object_value`'s destination asymmetry: the same emptiness in a
-/// domain's own doc writes nothing at all, because an absence there means
-/// inherit rather than "nothing of mine to record".
+/// An empty presentation overlay removes the object's user entry in memory and on disk.
+/// Hiding and unhiding a column must not leave a bare table that readers diagnose as
+/// stale. This applies to overlay destinations: an empty rendering for a definition
+/// must not remove the object, because absence there means inheritance.
 #[gpui::test]
 fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table(
     cx: &mut gpui::TestAppContext,
@@ -1464,14 +1402,10 @@ fn edits_inside_the_debounce_window_coalesce_into_one_write(cx: &mut gpui::TestA
     );
 }
 
-/// A **definitional** change to an object the user's layer does not own
-/// forks it into the user layer, and a fork freezes: the desk's next
-/// column never reaches this trader (spec §4.1). It applies on the
-/// keystroke like every other edit and is *announced* rather than asked
-/// about (user ruling 2026-09-14: the confirm was "too distracting —
-/// tell the user what is happening but just do it"): the notice names
-/// the copy, the layer it shadows and the `r` that restores it, and the
-/// write is queued before the keystroke returns.
+/// A definitional edit copies a desk-owned object into the user layer, freezing its
+/// definition against later desk changes. Apply the edit immediately and announce the
+/// copy, the shadowed layer, and the revert command; queue the write before returning
+/// from the keystroke.
 #[gpui::test]
 fn a_definitional_change_to_a_desk_view_forks_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1646,18 +1580,8 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
     );
 }
 
-/// An unbound letter in the edit stage explains itself, like every other
-/// key that deliberately does nothing here (`/`, `enter`, `i`, and a
-/// `space` on a row with no value). A letter that is claimed, does
-/// nothing and says nothing is the precise inert keystroke the
-/// interaction model exists to eliminate — and it is worse in this stage
-/// than in browse, because `d`/`r` have taught the user that letters act
-/// here.
-///
-/// `z`, not `x`: §18.2 gave Views its own `x` (removing a member column),
-/// so `x` on this fixture's first item (`book`, a member) now does
-/// something instead of nothing. `z` is still unbound anywhere in this
-/// stage.
+/// An unbound edit-stage letter produces a notice instead of silently doing nothing.
+/// Use `z`: `x` is bound to remove a member column in this Views fixture.
 #[gpui::test]
 fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1679,16 +1603,9 @@ fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAp
     assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
 }
 
-/// **The undo for the commonest edit there is.** A desk view whose only
-/// user-layer trace is a `view_presentation.toml` entry — a trader who
-/// hid a column and nothing else — is overridden, and `r` reverts it.
-///
-/// Spec §5.3 assumed presentation always accompanies a doc override, so
-/// both verbs were gated on markers derived from the `views` doc alone:
-/// `r` answered "tree has no user override to revert" while the file it
-/// would have removed sat on disk. `d` still refuses — the view itself is
-/// the desk's — but it now names the verb that does work instead of
-/// denying the user has anything.
+/// A user presentation entry alone is enough for `r` to revert a desk view's
+/// personalization. `d` still refuses because the definition belongs to the desk, and
+/// its notice points to the available revert action.
 #[gpui::test]
 fn revert_undoes_a_presentation_only_override(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1773,22 +1690,10 @@ fn services_with_a_user_only_view() -> ShellServices {
     services
 }
 
-/// **The requirement this task exists for.** `spawn_removals` wrote the
-/// file and returned with no in-memory merge, so `d` on a user-layer
-/// object left its row painting in the browse list until the 500 ms
-/// watcher noticed the write and reloaded — every other mutation in this
-/// dialog is instant, and a delete was the one exception.
-///
-/// The row must be gone **before the watcher would ever fire**: this
-/// test never advances the clock at all (contrast `flush_config_write`,
-/// which every file-asserting EDIT test above calls), so the only way it
-/// can pass is if confirming the delete applies to memory — and reaches
-/// disk — inside the same `run_until_parked()` that dispatches the `y`.
-/// A version that routes the removal onto the 250 ms edit debounce
-/// instead of an immediate flush would need a clock advance here and
-/// fail exactly this assertion, which is the point: a delete is a single
-/// already-confirmed act, not a keystroke stream to coalesce, so it has
-/// nothing to wait for.
+/// Confirmed removal updates memory and disk immediately, without waiting for either
+/// the watcher or edit debounce. This test advances no clock: after `run_until_parked`,
+/// the row must already be gone. A confirmed delete is a single operation with no
+/// repeated edits to coalesce.
 #[gpui::test]
 fn deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire(
     cx: &mut gpui::TestAppContext,
@@ -1841,16 +1746,9 @@ fn deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_
     assert!(!written.contains("mine"), "{written}");
 }
 
-/// **Hazard from the task brief:** a removal now applies to memory before
-/// its write completes, exactly like an edit — so a removal whose write
-/// fails needs the same revert an edit's failed write already gets
-/// ([`apply::revert_failed_write`]), or the object is gone from memory
-/// and still sitting on disk with nothing having told the trader.
-///
-/// The fixture mirrors `a_failed_write_reverts_the_in_memory_change_and_
-/// says_so`: the file on disk is unparseable, but the config already in
-/// memory never read it back, so the in-memory removal succeeds and only
-/// the write can discover the problem.
+/// A removal whose file write fails restores its in-memory config and reports the
+/// failure. Use an unparseable on-disk file alongside valid loaded config so memory
+/// removal succeeds before the writer discovers the error.
 #[gpui::test]
 fn a_failed_removal_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1884,7 +1782,7 @@ fn a_failed_removal_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::Test
     );
 }
 
-// --- Task 4: `config::groupings` ------------------------------------
+// Grouping configuration.
 
 /// A `datasets` doc with two dimension columns and one key column, plus
 /// a `groupings` doc naming slot 3 as `dims` (in that order) — and,
@@ -1932,9 +1830,9 @@ fn services_with_slot_3(dims: &[&str]) -> ShellServices {
     services
 }
 
-/// §18.4: an unconfigured slot is a row, opening it shows every pickable
-/// dimension unticked, and ticking the first writes the slot to the user
-/// layer with NO fork question — there is no desk copy to fork.
+/// Unconfigured grouping slots appear as rows. Opening one shows unticked dimensions,
+/// and the first selection writes the slot directly into the user layer without copying
+/// a desk definition.
 #[gpui::test]
 fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -1982,9 +1880,9 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
         cx.debug_bounds("objectdialog-confirm").is_none(),
         "nothing to fork"
     );
-    // Since a fork never asks (2026-09-14) the confirm's absence proves
-    // nothing on its own — the fork is announced in the NOTICE now, so
-    // that is where "an unconfigured slot forks nothing" has to be read.
+    // Copying an inherited definition announces itself without confirmation. Check the
+    // notice, not merely the absence of a prompt, to prove an unconfigured slot needs
+    // no copy.
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
     assert!(
         !notice.as_deref().unwrap_or_default().contains("copied"),
@@ -2031,29 +1929,18 @@ fn d_on_an_empty_slot_says_there_is_nothing_to_delete(cx: &mut gpui::TestAppCont
     assert!(notice.contains("empty"), "{notice}");
 }
 
-/// **The point of Task 4.** `config::groupings` lists all nine slots
-/// (§18.4), row 1 selected on open, so this test navigates down to slot
-/// 3 before opening it; reordering its `dimensions` applies through the
-/// whole pipeline — draft, pending batch, debounced flush,
-/// `apply_reload`, `hot_reload::rebuild_slots` — and a later `ctrl+3`
-/// regroups off the NEW order, never the one the slot opened with.
-///
-/// `Frame::active_grouping` is exactly what a following blotter tile
-/// reads to regroup itself on `ctrl+1..9` (spec §4.2,
-/// `geode_blotter::tile`'s own `last_grouping`), so asserting against it
-/// — rather than only against `groupings.toml`'s bytes — is what proves
-/// the edit reached the frame a following tile actually reads, not
-/// merely the file underneath it. A weaker test asserting on the file
-/// alone would still pass if some future refactor broke the flush's
-/// `apply_reload` call without touching `run_writes`.
+/// Reordering a grouping slot reaches the frame through the draft, pending batch,
+/// flush, reload, and slot rebuild. A later `ctrl+3` must regroup using the new
+/// dimension order. Assert `Frame::active_grouping`, the value following tiles consume,
+/// rather than only the persisted file.
 #[gpui::test]
 fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let services = services_with_slot_3(&["book", "lhu"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
-    // Row 1 is selected on open (§18.4 — all nine slots list); navigate
-    // down to slot 3, then into its edit stage.
+    // All nine slots are listed, with the first selected. Move to slot three before
+    // opening it.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -2063,11 +1950,8 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     cx.simulate_keystrokes("shift-j");
     cx.run_until_parked();
 
-    // Every Groupings field is `Destination::Doc` (spec §8.2 — there is
-    // no presentation split the way Views has one), so reordering a
-    // builtin-owned slot is a definitional change to an object the user
-    // layer does not own: it forks, applied at once and announced,
-    // exactly like any other `Doc` edit to a desk/builtin object.
+    // Grouping fields write definitions. Reordering a builtin slot creates and
+    // announces a user-layer copy through the same path as other definitional edits.
     assert!(
         cx.debug_bounds("objectdialog-confirm").is_none(),
         "reordering a builtin slot forks it into the user layer without asking"
@@ -2126,8 +2010,7 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     let services = services_with_slot_3(&["book", "lhu"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
-    // Row 1 is selected on open (§18.4 — all nine slots list); navigate
-    // down to slot 3 first.
+    // The first of nine slots is selected initially; navigate to slot three.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
@@ -2155,22 +2038,10 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     assert!(!written.contains('3'), "{written}");
 }
 
-/// **The whole-branch review's Major.** Unticking a slot's last dimension
-/// asks for "this slot groups by nothing", and the config model has no
-/// such state: `GroupingSlots::set` refuses an empty chain and
-/// `GroupingSlots::from_doc` warns "slot N is empty; ignored". Worse, the
-/// write it used to produce was a *removal* of the user-layer key, and in
-/// a layered doc that means **inherit the layer beneath** — so the slot
-/// silently went back to the desk's chain while the edit stage kept
-/// painting an empty one and `ctrl+3` kept regrouping by the very chain
-/// the trader had just cleared.
-///
-/// So the keystroke is declined (`Draft::step_selected`), and the
-/// assertion is the *agreement* rather than the refusal: what the edit
-/// stage paints is what a following tile groups by. A test that only
-/// checked the notice, or only checked the file, could not see the
-/// divergence — `reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`
-/// is the shape that can, and this is its negative twin.
+/// Refuse to untick a grouping slot's last dimension: empty chains are unsupported, and
+/// removing the user entry would reveal an inherited chain instead of representing no
+/// grouping. Assert agreement between the edit-stage rows and `Frame::active_grouping`,
+/// beyond the refusal notice or file contents alone.
 #[gpui::test]
 fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing(
     cx: &mut gpui::TestAppContext,
@@ -2207,7 +2078,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
         "and it must queue nothing at all"
     );
 
-    // What the edit stage paints, which is the half that used to lie.
+    // Assert the chain displayed by the edit stage.
     let painted: Vec<String> = edit_draft(&shell, &cx, |d| {
         d.list_items("dimensions")
             .unwrap()
@@ -2254,10 +2125,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     );
 }
 
-// ---------------------------------------------------------------------
-// `Domain::Scopes` (Part 2a Task 5): the thinnest adapter, and its one
-// new verb, `o`.
-// ---------------------------------------------------------------------
+// Saved scopes and overwriting from the current frame.
 
 /// A `scopes` doc with one saved scope, `mine`, selecting `book = BK001`
 /// — deliberately different from whatever a test then puts on the
@@ -2338,14 +2206,9 @@ fn saved_scope_books(
     })
 }
 
-/// **The point of Task 5.** `o` overwrites the saved scope under the
-/// cursor with whatever the frame currently holds: the same
-/// `commit_edit` → debounced flush → `apply_reload` → write pipeline
-/// every other field edit goes through (spec §7.1), not a direct
-/// `config_write` call — and the frame's own scope is untouched by it,
-/// because `o` only ever writes config, never frame state (this is the
-/// asymmetry `arm_overwrite`'s doc comment describes: the frame is the
-/// input, the doc is the only thing written).
+/// `o` overwrites the selected saved scope from the current frame through the normal
+/// pending-batch and reload pipeline. The frame supplies the value but remains
+/// unchanged; only configuration is written.
 #[gpui::test]
 fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2474,15 +2337,9 @@ fn services_with_a_user_owned_scope() -> ShellServices {
     services
 }
 
-/// `o` on a scope the user layer does not already own forks it into the
-/// user layer (the same consequence any other definitional edit through
-/// this dialog has) and, by the 2026-09-14 ruling, does so at once and
-/// says so — nothing is lost, the desk's copy is still there and `r`
-/// restores it, so there is nothing to ask. `mine` here is builtin-owned
-/// only (`services_with_a_saved_scope` — no user-layer `scopes` doc at
-/// all), through the real dispatch path (`editing_row`, not a hand-built
-/// `ObjectRow`). Task 5 review round 1's Major was that the fork went
-/// undisclosed; the notice is where it is disclosed now.
+/// Overwriting a builtin saved scope creates a user-layer copy immediately and
+/// announces it. The original remains available through revert. Use the normal
+/// browse-to-edit path so the ownership decision uses the resolved row.
 #[gpui::test]
 fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2625,13 +2482,9 @@ fn services_with_a_scope_the_app_itself_wrote() -> ShellServices {
     services
 }
 
-/// **A confirmed verb may not do visibly nothing.** `o` on a saved scope
-/// that already equals the frame's — the ordinary state straight after
-/// `:scope load mine`, not a corner — used to produce no write, no config
-/// change and no message: the confirm row simply vanished after a
-/// deliberate second keystroke. `commit_edit` answers `None` both for
-/// "queued" and for "nothing changed", so the no-op is identified at the
-/// call site instead.
+/// Overwriting a saved scope already equal to the frame reports that nothing changed.
+/// `commit_edit` returns `None` for both queued edits and no-ops, so the caller must
+/// identify this case to give feedback.
 #[gpui::test]
 fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2715,13 +2568,10 @@ fn commit_create_writes_one_doc_entry_immediately(cx: &mut gpui::TestAppContext)
     assert!(in_config);
 }
 
-// ---------------------------------------------------------------------
-// Task 5: `n` — the naming row, create, and the edit stage on a new
-// object (§18.2).
-// ---------------------------------------------------------------------
+// Naming, creation, and the edit stage for a new object.
 
-/// §18.2, Views: `n` opens the name field; `enter` on a valid name
-/// writes the object, opens its edit stage, and the browse list has it.
+/// `n` opens the name field. Enter on a valid view name creates the object, opens its
+/// edit stage, and adds it to the browse list.
 #[gpui::test]
 fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2762,15 +2612,10 @@ fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppCont
     );
 }
 
-/// Review round 1: `n` after a browse filter must not open the name
-/// field pre-filled with the leftover query. `begin_naming` clears only
-/// `state.query`; the shared `Input` is a second, separate buffer
-/// (`set_value` does not emit the `Change` event that mirroring relies
-/// on), and the natural sequence — filter to check whether a name is
-/// taken, `enter` back to normal mode (which keeps the query applied),
-/// then `n` — used to leave "tr" visibly sitting in a field `state.query`
-/// no longer knew about. Typing `ee` into that stale text used to create
-/// `tree` (an existing desk view, forked) instead of `ee`.
+/// Starting naming after filtering clears both the query state and the shared input.
+/// They are separate buffers, and programmatic input changes do not emit the event used
+/// for mirroring. A retained query must not become an invisible prefix on the new
+/// object's name.
 #[gpui::test]
 fn n_opens_an_empty_name_field_even_after_a_browse_filter(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -2884,9 +2729,8 @@ fn n_refuses_a_name_only_the_presentation_overlay_holds(cx: &mut gpui::TestAppCo
     );
 }
 
-/// `n` creates an EMPTY scope (spec §6) — the frame's scope is no longer
-/// copied — and opens it with the `new` badge; `o` still takes the
-/// frame's.
+/// `n` creates an empty scope and opens it with a new badge. Copying the frame's scope
+/// is the separate overwrite action.
 #[gpui::test]
 fn n_on_scopes_creates_an_empty_scope(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3047,11 +2891,8 @@ fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// ---------------------------------------------------------------------
-// `scope::save_current` (scope-save spec's amendment): the palette
-// action / scope-bar `save`-chip door onto what pre-2026-09-19 `n` used
-// to do — open the naming prompt seeded from the frame's own scope.
-// ---------------------------------------------------------------------
+// Saving the current scope opens naming from the palette action or scope-bar chip,
+// seeded with the frame's scope.
 
 fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, book: &str) {
     shell.update(cx, |s, cx| {
@@ -3067,11 +2908,8 @@ fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestCont
     });
 }
 
-/// `scope::save_current` over a non-empty frame scope opens the naming
-/// prompt seeded `FromFrame`; typing a new name and `enter` writes the
-/// frame's own selection under it and lands in its (new) edit stage —
-/// exactly what pre-2026-09-19 `n` used to do, now reached through the
-/// palette/chip door instead of the browse list's `n`.
+/// `scope::save_current` opens naming with a `FromFrame` seed. Enter on a new name
+/// saves the frame's selection and opens the new scope's edit stage.
 #[gpui::test]
 fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3228,13 +3066,9 @@ fn escape_from_save_current_naming_writes_nothing(cx: &mut gpui::TestAppContext)
     assert!(!dir.path().join("scopes.toml").exists());
 }
 
-/// Review finding: `render::open`'s own guard (`shell.modal.is_some()`)
-/// refuses to open a SECOND modal, but it returns silently — and
-/// `open_save_scope` used to run past that refusal anyway, mutating
-/// whatever `object_dialog` was already there. With a Views dialog open,
-/// `scope::save_current` must leave it exactly as it was: still Views,
-/// still browsing, `naming_seed` still `Empty` (a Scopes-only field on
-/// an unrelated domain's state that must never be touched at all).
+/// Saving the current scope while another modal is open leaves that modal and its
+/// object state untouched. A refused open must not continue by mutating the existing
+/// Views dialog's naming state.
 #[gpui::test]
 fn scope_save_current_does_not_touch_an_already_open_dialog(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3329,13 +3163,9 @@ fn deliver_values_routes_by_key_and_drops_stale_outcomes(cx: &mut gpui::TestAppC
     );
 }
 
-/// Final review Critical 1: `render::build` fell through to the browse
-/// painter for `Stage::Values` (only `Stage::Edit`/`Stage::Column` took
-/// the `build_edit` branch), so a trader watched the object list under
-/// the crumb `mine › book` while every key and tick click silently
-/// mutated a draft nothing on screen showed. This proves the Values
-/// stage now paints its own rows — an item, its section header, and no
-/// browse row underneath.
+/// The Values stage paints value rows and their section header beneath its breadcrumb,
+/// with no browse row underneath. The rendered list must match the draft that keys and
+/// ticks modify.
 #[gpui::test]
 fn the_values_stage_paints_its_rows(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3562,15 +3392,9 @@ fn ctrl_a_and_ctrl_x_tick_and_clear_and_reorder_is_refused(cx: &mut gpui::TestAp
     );
 }
 
-/// Final review Critical 2: `ObjectDialogState::set_query`,
-/// `effective_query` and `effective_selected` matched only
-/// `Stage::Edit`/`Stage::Column`, so a `/` filter typed inside the
-/// Values stage wrote `state.query` (browse's own, unread slot) while
-/// `draft.query` stayed empty forever — the rows never narrowed, and
-/// `ctrl+a` ("ticks every value the filter currently shows") ticked and
-/// wrote every value in the list rather than the filtered ones. This
-/// proves the query lands on the draft, the rows narrow, and `ctrl+a`
-/// only ticks what the filter actually shows.
+/// Filtering Values updates the draft query and narrows its rendered rows. Select-all
+/// then ticks only those filtered values, without modifying the independent browse
+/// query.
 #[gpui::test]
 fn a_query_in_the_values_stage_narrows_the_rows_and_ctrl_a_ticks_only_them(
     cx: &mut gpui::TestAppContext,
@@ -3689,9 +3513,8 @@ fn a_broken_expression_is_refused_and_a_good_one_is_written(cx: &mut gpui::TestA
     assert!(written.contains("expression = \"npv > 0\""), "{written}");
 }
 
-/// `d`, `r` and `o` are none of them verbs while the Values stage is open
-/// (scopes-editing spec §4) — each refuses with the same notice and
-/// leaves the stage, the confirm and the draft untouched.
+/// Delete, revert, and overwrite are unavailable in the Values stage. Each produces the
+/// same notice and preserves the stage, confirmation, and draft.
 #[gpui::test]
 fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3741,9 +3564,8 @@ fn d_r_and_o_refuse_inside_the_values_stage(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// `space` on a SELECTED Scopes dimension row (the edit stage, not the
-/// Values stage) names the door rather than opening it — only `enter`
-/// does that (scopes-editing spec §3) — and asks the data for nothing.
+/// Space on an already-selected scope dimension explains that Enter opens its Values
+/// stage, without issuing a data request.
 #[gpui::test]
 fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3781,11 +3603,9 @@ fn space_on_a_selected_scopes_dimension_names_the_values_door(cx: &mut gpui::Tes
     );
 }
 
-/// `x` on a selected Scopes dimension drops it outright: the saved
-/// selection is removed (never written as `[]`) and the row moves to the
-/// available block with no leftover note (review round 1's Important 1 —
-/// `Draft::remove_selected` used to leave `entry.note` set, so a dropped
-/// dimension's available row kept painting its old values' summary).
+/// Removing a selected scope dimension drops its saved selection entirely, moves the
+/// row to available dimensions, and clears its value-summary note. It must not leave an
+/// empty selection or a stale summary.
 #[gpui::test]
 fn x_on_a_selected_scopes_dimension_removes_it_and_clears_its_note(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3839,9 +3659,8 @@ fn x_on_an_available_scopes_row_is_refused(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Groupings' nine slots are a fixed keyboard (§18.4) — there is nothing
-/// `n` could create that is not already on the list, so it must say why
-/// rather than silently doing nothing.
+/// Grouping slots form a fixed list of nine. `n` explains that no additional slot can
+/// be created.
 #[gpui::test]
 fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -3861,7 +3680,7 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("slots"), "{notice}");
 }
 
-// ---- Groupings: digit jump and chain entry (§18.8) -----------------------
+// Groupings: digit navigation and chain editing.
 
 /// A bare digit in the Groupings browse list opens that slot's edit
 /// stage in one keystroke — the slots are numbered, and the number is
@@ -3967,14 +3786,10 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("already"), "{notice}");
 }
 
-/// The review's Major: a digit jump away from a slot and back inside the
-/// write debounce used to rebuild the slot's draft from `services.config`,
-/// which the flush had not reached yet — the tick just made vanished from
-/// the screen, and the stale draft then outlived the flush, so the NEXT
-/// tick rendered the whole object without it and wrote that. The edit
-/// stage now derives from the config with the pending batch folded in
-/// (`apply::config_with_pending`), at the one door every entry goes
-/// through, so the same holds for `escape` + `enter` re-entry.
+/// Reentering a grouping slot within the write debounce rebuilds its draft from
+/// pending-aware config. A queued tick must survive both digit jumps and
+/// leaving/reentering the edit stage, rather than being erased by a stale draft's next
+/// write.
 #[gpui::test]
 fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4030,12 +3845,9 @@ fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui
     );
 }
 
-/// Opening a slot lands in the chooser (user ruling 2026-09-14,
-/// superseding §18.8's 2026-09-12 chain-field landing): normal mode, no
-/// field open, the action bar up. `i` opens the chain field — seeded,
-/// focused, completions below — and `escape` walks field → chooser →
-/// browse, one visible rung at a time. The same holds by digit, by
-/// `enter` and by a click (`clicking_a_groupings_row_opens_the_chooser`).
+/// Opening a grouping slot by digit, Enter, or click lands in its normal-mode chooser.
+/// `i` opens a seeded chain field with completions; Escape returns through chooser and
+/// browse one step at a time.
 #[gpui::test]
 fn opening_a_slot_lands_in_the_chooser_and_i_opens_the_chain_field(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4128,12 +3940,9 @@ fn dialog_input_text(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) ->
     })
 }
 
-/// The whole chain-field flow on a real window (§18.8): `i` opens the
-/// field seeded with the slot's chain and hands it the keys, the row
-/// list below becomes the completions for the segment being typed,
-/// `tab` accepts the highlighted one, and `enter` makes the typed names
-/// the chain — queued on the same batch a tick would be, reaching the
-/// file behind the same debounce.
+/// The chain field is seeded and focused on `i`; its rows show completions, Tab accepts
+/// one, and Enter applies the typed chain through the same debounced batch as a tick
+/// change.
 #[gpui::test]
 fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4165,9 +3974,8 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
         "the pill says chain"
     );
     assert!(cx.debug_bounds("dialog-mode-pill-filter").is_none());
-    // No mouse verb while the field is open: a clicked `d`/`r` would arm
-    // a confirm over a live, focused value field, which the keyboard can
-    // never do (the review's Minor 3).
+    // Hide destructive mouse actions while a value field is open so a click cannot arm
+    // confirmation over the focused editor.
     assert!(
         cx.debug_bounds("objectdialog-actions").is_none(),
         "the action bar is withdrawn while the chain field is open"
@@ -4288,7 +4096,7 @@ fn i_on_views_still_gives_the_read_only_notice(cx: &mut gpui::TestAppContext) {
     assert!(dialog_state(&shell, &cx, |s| s.notice.is_some()));
 }
 
-// ---- Task 6: filtering the edit stage (§18.3) -------------------------
+// Filtering the edit stage.
 
 /// `/` filters the edit stage's own rows, exactly as it does in browse:
 /// the field labels are ranked against the query, a hidden row's element
@@ -4344,9 +4152,8 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse
     );
-    // The edit stage's own filter must not leak into the browse query:
-    // `state.query` is a separate cursor space (§18.3), and the mirror
-    // that fed `draft.query` while editing must never have touched it.
+    // Edit-stage filtering updates the draft's query without changing the independent
+    // browse query.
     assert!(
         dialog_state(&shell, &cx, |s| s.query.clone()).is_empty(),
         "the browse query must not carry the edit stage's filter"
@@ -4446,10 +4253,8 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
     let row = cx
         .debug_bounds("objectdialog-item-delta01")
         .expect("the catalogue's own row should paint");
-    // Just inside the row's top edge rather than its centre: the
-    // section header rides on the following row's own element (§18.1), so
-    // a row's box can extend past the bottom of the scrolled list
-    // viewport and a centre click would land outside it.
+    // Click near the row's top edge. Its section header shares the row element, so the
+    // box can extend below the visible viewport and its center may be outside the list.
     cx.simulate_click(
         gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(2.0)),
         gpui::Modifiers::default(),
@@ -4491,13 +4296,9 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
     );
 }
 
-/// The final whole-branch review's Minor 6: none of `d`, `r`, `o` is a
-/// verb in a column's stage — all three refuse — so the action bar
-/// advertises none of them there, on EITHER door. `tree` is overridden
-/// in the user layer in this fixture, so both destructive buttons really
-/// do paint one stage out; without the gate they paint here too, naming
-/// the view (or, on the Schema door, the dataset) a keystroke can only
-/// decline to delete.
+/// Column stages offer no Delete, Revert, or overwrite buttons on either the Views or
+/// Schema path. Give the fixture a real user override so the destructive buttons would
+/// otherwise be enabled.
 #[gpui::test]
 fn a_column_stage_offers_no_destructive_action(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -4527,11 +4328,7 @@ fn a_column_stage_offers_no_destructive_action(cx: &mut gpui::TestAppContext) {
     assert!(cx.debug_bounds("objectdialog-action-d").is_some());
 }
 
-/// Dataset-presentation §4.1's mouse-parity half on the VIEWS door: a
-/// click on a member row does what `enter` would and opens that column's
-/// stage. Before this, a member row was the one row in this dialog whose
-/// `enter` did something a click would not (the Part 2c ledger's standing
-/// minor).
+/// Clicking a view member row opens that column's stage, matching Enter.
 #[gpui::test]
 fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4557,13 +4354,36 @@ fn clicking_a_member_row_opens_its_column_stage(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// ---------------------------------------------------------------------
-// Task 8: the object dialog to the mock — crumb, badges, grip and tick,
-// section headers (§18.1).
-// ---------------------------------------------------------------------
+/// The grip is the member row's drag handle: a press on it arms the drag
+/// and nothing else, so a column can be reordered by the mouse without
+/// the press opening that column's stage the way a press on the row's
+/// body does.
+#[gpui::test]
+fn pressing_a_member_rows_grip_does_not_open_its_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let grip = cx
+        .debug_bounds("objectdialog-grip-npv")
+        .expect("npv is one of tree's own columns and paints a grip");
+    cx.simulate_mouse_down(
+        gpui::point(grip.origin.x + gpui::px(3.0), grip.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "a press on the grip leaves the dialog on the view's edit stage"
+    );
+}
+
+// Object-dialog breadcrumbs, badges, row controls, and section headers.
 
 #[gpui::test]
-fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
+fn the_edit_stage_paints_section_headers_and_the_crumb_and_no_destination_badge(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -4577,8 +4397,10 @@ fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
             .is_some(),
         "delta01 is available"
     );
-    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_some());
-    assert!(cx.debug_bounds("objectdialog-dest-columns").is_some());
+    // Every field here writes the view document, so a per-row `doc` badge
+    // would say the same thing on every row.
+    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_none());
+    assert!(cx.debug_bounds("objectdialog-dest-columns").is_none());
     assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
 }
 
@@ -4725,9 +4547,8 @@ fn assert_row_in_view(cx: &mut gpui::VisualTestContext, selector: &'static str, 
     );
 }
 
-/// The name of the list item the edit-stage cursor is on — from either
-/// list, the object's own or its available catalogue (§18.7.1) — or
-/// `None` on a field row.
+/// Name of the edit cursor's list item, whether a member or an available candidate;
+/// field rows return `None`.
 fn cursor_item_name(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
     edit_draft(shell, cx, |draft| match draft.selected_row()? {
         objectdialog::EditRow::Item { field, item } => draft
@@ -4850,14 +4671,9 @@ fn a_filter_keystroke_never_leaves_the_cursor_on_a_header(cx: &mut gpui::TestApp
     );
 }
 
-/// `space` promotes the row under the cursor into the member block and
-/// leaves the cursor on the NEXT available row (user ruling 2026-09-11:
-/// a trader adding several columns wants it there, not on the column
-/// that just left). With the cursor on the last row the viewport shows,
-/// that next row is one row past the viewport's bottom — `shift+j`
-/// already scrolled the cursor back into view after a move, and this
-/// verb moves it too, so without the scroll the cursor silently left
-/// the viewport and the next `j` appeared to jump.
+/// Promoting an available column keeps the cursor on the next available row. If that
+/// row falls below the viewport, scroll it into view so the next navigation command
+/// begins from a visible selection.
 #[gpui::test]
 fn space_scrolls_the_next_row_into_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -4985,13 +4801,9 @@ fn space_on_the_last_available_row_keeps_the_cursor_at_the_bottom(cx: &mut gpui:
     assert_row_in_view(&mut cx, "objectdialog-item-m38", "space");
 }
 
-/// And `x` the other way round: the demoted row travels to the *end* of
-/// the available block, a screenful below, but the cursor does not go
-/// with it (user ruling 2026-09-11) — it stays at the top, on the row
-/// that was next, which was on screen before the keystroke and still is.
-/// That is also why the `x` arm no longer calls `scroll_to_cursor`: with
-/// the cursor holding its own visible index there is nothing to scroll
-/// to, and a call no test could see would be a harness lie.
+/// Removing a member moves it to the end of the available block, while the cursor
+/// remains on the following row at its existing visible index. The viewport must not
+/// follow the removed item.
 #[gpui::test]
 fn x_leaves_the_cursor_on_the_next_row_still_in_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5080,11 +4892,8 @@ fn an_unfiltered_short_list_is_not_clipped_by_the_lists_height(cx: &mut gpui::Te
     );
 }
 
-// ---------------------------------------------------------------------
-// §16.1: the confirm buttons are the fourth way out of a stage, and the
-// only one that reaches `run_confirmed` without passing through the key
-// path — so they carry the sync themselves.
-// ---------------------------------------------------------------------
+// Confirmation buttons call `run_confirmed` without passing through key handling, so
+// they must synchronize text and focus after changing stages.
 
 /// Answering a destructive question **with the mouse** while the edit
 /// stage is filtering has to leave the shared field agreeing with the
@@ -5161,9 +4970,9 @@ fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-// --- Mouse parity (interaction-model spec §17, 4c §18.9) ----------------
+// Mouse interaction parity.
 
-/// §17.1 rule 1 on the object dialog's browse stage.
+/// Clicking the browse stage's frozen filter enters filter mode.
 #[gpui::test]
 fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -5191,7 +5000,7 @@ fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestA
     );
 }
 
-/// And on the edit stage, whose frozen row is the draft's own (§18.3).
+/// The edit stage's frozen filter enters its own draft filter.
 #[gpui::test]
 fn clicking_the_edit_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5211,8 +5020,8 @@ fn clicking_the_edit_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestApp
     assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "n");
 }
 
-/// §17.1 rule 2 on browse: one click opens the row's edit stage through
-/// the one door (`enter_edit_stage`), exactly as `enter` does.
+/// A browse-row click selects and opens that row through `enter_edit_stage`, matching
+/// normal-mode Enter.
 #[gpui::test]
 fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -5235,9 +5044,7 @@ fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// On Groupings a click lands in the chooser like every other door
-/// (user ruling 2026-09-14): the door decides, not the click, and the
-/// door opens no field.
+/// Clicking a grouping row opens its chooser without opening the chain field.
 #[gpui::test]
 fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5268,23 +5075,13 @@ fn clicking_a_groupings_row_opens_the_chooser(cx: &mut gpui::TestAppContext) {
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// While the naming row is open a click only selects: a typed name must
-/// not be discarded by a stray click, and `enter` there creates.
+/// While naming, clicking a browse row selects without discarding the typed name or
+/// opening an edit stage. The list remains ranked by the naming text so near-collisions
+/// stay visible.
 ///
-/// The typed text is `wd`, not `mine` and not `wide` itself. The browse
-/// list underneath is deliberately still ranked by the naming text
-/// (`docs/phase-history.md`, Phase 4c Part 2a — "so a near-collision stays
-/// visible before `enter` refuses it"), and the ranker is a *subsequence*
-/// matcher, so `mine` — no fuzzy match against this fixture's `tree` or
-/// `wide` — would leave no row to click at all, exercising the ranking
-/// rule instead of the click rule this test is about. But `wide` itself
-/// would be just as wrong the other way: it is indistinguishable from
-/// `clicked`, so a slip that let the non-opening branch write
-/// `state.query = name.clone()` instead of leaving it untouched would
-/// still read back `wide` and this test would not catch it. `wd` is a
-/// genuine subsequence of `wide` (keeping the row visible) while
-/// differing from it, so only "the click left the typed text alone"
-/// makes the assertion below pass.
+/// Type `wd`, which matches the fixture's `wide` row but differs from its name. A
+/// nonmatching query would leave nothing to click; typing `wide` itself would fail to
+/// detect a click that overwrote the query with the row name.
 #[gpui::test]
 fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -5312,9 +5109,8 @@ fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext
     );
 }
 
-/// §18.9.2: the tick is the toggle. Clicking a shown column's tick hides
-/// it — a `Presentation` write, no fork question — and leaves the cursor
-/// on that row, as `space` would.
+/// Clicking a shown column's tick hides it through a presentation write and leaves the
+/// cursor on that row, matching Space without copying the view definition.
 #[gpui::test]
 fn clicking_a_tick_hides_the_column_and_parks_the_cursor_there(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5385,15 +5181,9 @@ fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("copied 'tree'"), "{notice}");
 }
 
-/// §17.1 rule 3 / §18.9.2 follow-up: a tick click is claimed and dropped
-/// while a confirm is armed, exactly as a bare letter is on the key path
-/// (`handle_edit_key`'s own `armed` block). `open_tree_edit_stage`'s
-/// fixture cannot arm `Confirm::Delete` — `tree` is desk-owned, so `d`
-/// there sets a notice pointing at `r` instead (see
-/// `arm_delete`'s `Layer::User` gate) — so this reuses
-/// `services_with_a_user_only_view`, the same fixture the neighbouring
-/// `deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire`
-/// test arms `d` against, where the "mine" object IS the user's own.
+/// An armed confirmation consumes tick clicks without changing the draft. Use a
+/// user-owned view so Delete can actually arm; a desk-owned view would only show a
+/// refusal notice.
 #[gpui::test]
 fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5457,29 +5247,17 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
     );
 }
 
-/// §18.9.3 at the shell level: the drop handler reorders, parks the
-/// cursor on the dropped item and queues the presentation write.
-///
-/// This is the lowest rung the gesture can be tested on, and §18.9.5
-/// says why: gpui's own drag machinery does not run under
-/// `TestAppContext`. A `simulate_mouse_down` on a row followed by a move
-/// well past `DRAG_THRESHOLD` never leaves `App::has_active_drag` set —
-/// verified here on 2026-09-12, with and without an intervening
-/// `window.draw`, and with a hover move before the press — so a test of
-/// the full `on_drag` → `on_drop` path would assert nothing about this
-/// dialog and everything about the harness. The wiring above this call
-/// (`row_drag` into `on_drag`, `can_drop`, `drag_over`, `on_drop`) is a
-/// display-check item alongside §18.6's; everything below it is tested
-/// here and in `Draft::drop_row`'s own tests.
+/// The drop handler reorders rows, selects the dropped item, and queues a presentation
+/// write. Call the handler directly: the test harness does not activate GPUI's row-drag
+/// machinery through simulated mouse events. These assertions cover drop handling; they
+/// do not establish the rendered drag-and-drop wiring.
 #[gpui::test]
 fn the_drop_handler_reorders_and_writes(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
-    // The cursor is parked on the TARGET, not the dragged row (`j`
-    // moves it off `book` and onto `npv`), which is what makes this
-    // test able to see §18.9.1's rule at all: a handler that read the
-    // source off the cursor instead of the payload would drop `npv`
-    // onto itself and leave the list exactly as it found it.
+    // Put the cursor on the target, distinct from the dragged row, so the test detects
+    // a handler that incorrectly derives its source from selection instead of the
+    // payload.
     cx.simulate_keystrokes("j");
     cx.run_until_parked();
     let (src, dst) = edit_draft(&shell, &cx, |d| {
@@ -5523,12 +5301,8 @@ fn the_drop_handler_reorders_and_writes(cx: &mut gpui::TestAppContext) {
     assert!(text.contains("order = [\"npv\", \"book\"]"), "{text}");
 }
 
-/// §17.1 rule 3 / §18.9.3: a drop is claimed and dropped while a confirm
-/// is armed, exactly as `on_tick_clicked` is and as a bare letter is on
-/// the key path. The same fixture reasoning as
-/// `a_tick_click_does_nothing_while_a_confirm_is_armed`: only a
-/// user-layer object can arm `Confirm::Delete`, so `tree` (desk-owned)
-/// cannot be used here.
+/// An armed confirmation consumes row drops without editing. Use a user-owned object so
+/// Delete arms a real confirmation.
 #[gpui::test]
 fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5596,9 +5370,8 @@ fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContex
     );
 }
 
-/// §18.9.4: clicking a completion row is the mouse form of `tab` — the
-/// trailing segment is replaced by that row and the next opened with
-/// ` / `; the field stays focused and the pill still reads `chain`.
+/// Clicking a completion replaces the trailing chain segment and appends ` / `,
+/// matching Tab. The field keeps focus and chain mode remains active.
 #[gpui::test]
 fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5639,17 +5412,10 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
     assert!(cx.debug_bounds("dialog-mode-pill-chain").is_some());
 }
 
-/// [`services_with_a_desk_view`]'s desk, with a SECOND measure the view
-/// does not carry, so `tree`'s available block has two rows rather than
-/// one.
-///
-/// A catalogue-to-catalogue drop needs two DISTINCT `Available`
-/// payloads, which the shared fixture (one spare column, `delta01`)
-/// cannot produce: dropping its only available row on itself is a
-/// self-drop, which is silent by ruling and so would test the opposite
-/// of what this arm says. The dataset is restated by name rather than by
-/// index into `desk_view_docs()` so a doc added there cannot silently
-/// make this fixture overwrite the wrong one.
+/// Add a second available measure to the shared desk fixture. A catalogue-to-catalogue
+/// drop needs distinct payloads; dropping the only available row onto itself must stay
+/// silent. Replace the dataset by name so unrelated fixture document additions cannot
+/// change which document is replaced.
 fn services_with_two_available_columns() -> ShellServices {
     let mut services = test_services();
     let mut layered = desk_view_docs();
@@ -5713,17 +5479,9 @@ fn columns_and_available(
     })
 }
 
-/// §18.9.3: a drop from the catalogue onto the catalogue says so — the
-/// catalogue is unordered by construction (§18.7.2), so there is nothing
-/// for the gesture to have done, and a trader who just dragged one
-/// available column onto another would otherwise have no way to tell
-/// that from the app having missed the drop.
-///
-/// The second half is the controller's M5 ruling: the same gesture ONTO
-/// ITSELF is a grab that went nowhere and stays silent, which is also
-/// why it has to be decided before the catalogue arm — two identical
-/// available payloads satisfy that arm's `!src.own && !dst.own` test
-/// too.
+/// Dropping an available row onto another available row explains that the catalogue is
+/// unordered. Dropping onto itself stays silent because nothing moved; check that case
+/// before the general catalogue-to-catalogue branch.
 #[gpui::test]
 fn a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5763,8 +5521,7 @@ fn a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order(cx: &mut gpui::
         "and neither list moved"
     );
 
-    // M5: the same row on itself is silent — and clears the notice the
-    // previous drop left, the way every handler here starts.
+    // A self-drop is silent and clears any notice left by the preceding drop.
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             objectdialog::render::on_row_dropped(shell, &delta, &delta, window, cx);
@@ -5786,15 +5543,9 @@ fn a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order(cx: &mut gpui::
     );
 }
 
-/// §18.9.1: the payload is resolved by name at drop time, so a name that
-/// left the list between the grab and the drop lands on nothing — and
-/// says so, because a drag that visibly ended over a row and changed
-/// nothing is the one inert case a trader would read as a bug rather
-/// than as their own gesture.
-///
-/// The stale payload is hand-built rather than staged through a real
-/// removal: `RowDrag` is what crosses the wire, and a name that no row
-/// carries is exactly what a mid-drag removal leaves in flight.
+/// Resolve dragged names at drop time. If a name has disappeared, leave the list
+/// unchanged and explain that the row is gone. A hand-built stale payload models
+/// removal between grab and drop.
 #[gpui::test]
 fn a_drop_whose_name_has_left_the_list_says_that_row_is_gone(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -5864,19 +5615,73 @@ fn services_with_schema() -> ShellServices {
     services
 }
 
-/// §19.4: the inspector lists datasets, opens one to its column rows —
-/// each with the layer it came from — and refuses every verb with one
-/// notice; `n` is refused in browse and the footer never offers it.
-///
-/// `enter` is NOT in the refused list any more (dataset-presentation spec
-/// §4.1): on a column row it opens that column's stage, which is this
-/// dialog's one writable surface. Spec §1.3's done state names exactly
-/// which verbs still answer the read-only notice on these rows — `d`,
-/// `r`, `n`, ticks and drops — and `enter` is not among them.
-/// `the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay`
-/// is where that door is asserted, and it presses `d` again after
-/// `escape` so this dialog's own rows are still proved read-only once the
-/// stage has been in and out.
+/// Schema rows name the layer their value came from, and the names differ
+/// in width (`builtin` against `user`). Each badge sits in a slot as wide
+/// as the widest name, so a builtin column's value lines up with a
+/// user-layer derived dimension's.
+#[gpui::test]
+fn schema_values_line_up_whatever_layer_each_row_names(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("dimensions.toml"),
+        "[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n",
+    )
+    .unwrap();
+    let mut services = services_with_schema();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-columns.book")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-derived.desk")
+            .is_some()
+    );
+    let column = cx
+        .debug_bounds("objectdialog-value-columns.book")
+        .expect("book paints a value");
+    let derived = cx
+        .debug_bounds("objectdialog-value-derived.desk")
+        .expect("the derived dimension paints a value");
+    assert_eq!(
+        column.right(),
+        derived.right(),
+        "a builtin row's value lines up with a user row's"
+    );
+    // The builtin row carries the widest name, so a slot sized for anything
+    // narrower would spill its badge over its value.
+    for (value, badge) in [
+        (column, "objectdialog-field-layer-columns.book"),
+        (derived, "objectdialog-field-layer-derived.desk"),
+    ] {
+        let badge_bounds = cx.debug_bounds(badge).unwrap();
+        assert!(
+            badge_bounds.left() >= value.right(),
+            "{badge} sits in its own slot beside the value, not over it"
+        );
+    }
+}
+
+/// The Schema inspector lists datasets and provenance, then opens column rows.
+/// Definition-changing actions remain read-only, while Enter opens the writable
+/// column-presentation stage. The separate column-stage test also checks that returning
+/// to Schema preserves its read-only gates.
 #[gpui::test]
 fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
@@ -5931,17 +5736,9 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
     assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
 }
 
-/// Spec §20.3 on the read-only Schema domain: no `n` button on browse
-/// (ruling 6 — a button that only ever refuses teaches a verb with
-/// nothing behind it), and the chip's own door refuses with the read-only
-/// notice and changes nothing.
-///
-/// The chip half is a direct call, not a click: every Schema edit-stage
-/// row is a display-only `Text`, so `vocabulary_of` answers `Inert` and
-/// no Schema row ever paints a chip whatever `chips_live` says — the
-/// render gate is unobservable here by construction. What IS observable
-/// is `on_value_chip_clicked`'s own writable gate, which is the one a
-/// future steppable Schema row (or a test) would reach.
+/// Schema browse offers no create button, and its value-chip handler refuses edits.
+/// Call the handler directly: Schema's display-only Text rows render no chip, so this
+/// checks the writable guard without claiming to test an unrendered click target.
 #[gpui::test]
 fn the_schema_domain_offers_no_n_button_and_the_chip_door_refuses(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
@@ -5993,11 +5790,9 @@ fn open_risk_columns(
     (shell, cx)
 }
 
-/// Dataset-presentation spec §4: `enter` on a schema column row opens
-/// the column stage crumbed `risk › book`; `i` types a width that lands
-/// under `[risk.columns.book]` and NOWHERE else; `d`/`r` are refused
-/// inside the stage; the row shows the summary after; the schema rows'
-/// own verbs still answer read-only.
+/// Opening a schema column shows its dataset/column breadcrumb. Editing width writes
+/// only the dataset-presentation overlay; Delete and Revert are refused, and returning
+/// to the schema rows retains their read-only behavior.
 #[gpui::test]
 fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
     cx: &mut gpui::TestAppContext,
@@ -6015,9 +5810,8 @@ fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
         "risk › book"
     );
     assert!(cx.debug_bounds("objectdialog-field-width").is_some());
-    // §4.6: the two destructive verbs are refused in a column's stage —
-    // through `in_column_stage`, not the read-only gate, so the wording
-    // is the column stage's own and identical to the Views door's.
+    // Delete and Revert are refused by the column-stage gate, with the same wording as
+    // the Views column stage.
     for key in ["d", "r"] {
         cx.simulate_keystrokes(key);
         cx.run_until_parked();
@@ -6045,10 +5839,8 @@ fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
     assert!(written.contains("[risk.columns.book]"), "{written}");
     assert!(written.contains("width = 160"), "{written}");
     assert!(!written.contains("hidden"), "{written}");
-    // §4.5 and `schema::to_table`'s branch: the write is the overlay and
-    // only the overlay — a `dest`-blind `to_table` would have rendered
-    // the whole `datasets` object into it, and a stage that forgot its
-    // destination would have forked the schema into the user layer.
+    // Write only the presentation overlay. Neither a complete datasets document nor a
+    // user-layer schema definition may be produced by this column edit.
     for other in [
         "datasets.toml",
         "views.toml",
@@ -6132,12 +5924,9 @@ fn services_with_two_datasets_and_a_view() -> ShellServices {
     services
 }
 
-/// Final review, Critical 1: the typeahead's `Pick` arm is a second door
-/// onto the `dataset` row's `Choice` (`space`/`shift+space`/`tab` are the
-/// first) and must run [`objectdialog::render::maybe_refresh_available`]
-/// exactly as they do — picking `vol` through `i`, type, `enter` has to
-/// rebuild the `columns` catalogue from the NEW dataset, or a trader
-/// keeps ticking columns the dataset they just picked does not have.
+/// Picking a dataset through typeahead refreshes the available-column catalogue,
+/// matching the stepping path. After selecting `vol`, the rows must come from that
+/// dataset rather than the previous one.
 #[gpui::test]
 fn a_picked_dataset_rebuilds_the_available_catalogue(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6178,14 +5967,9 @@ fn a_picked_dataset_rebuilds_the_available_catalogue(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The final whole-branch review's Minor 4: `maybe_refresh_available`
-/// seeds each catalogue row from `dataset_presentation.toml` (§5.4), so
-/// it must read the config with the PENDING batch folded in. Inside the
-/// 250 ms debounce — a Schema column-stage edit, out of that dialog,
-/// into Views, step the `dataset` row — a plain `services.config` read
-/// is the overlay as it stood before the last keystroke, and a column
-/// promoted off that stale catalogue carries the stale layer into the
-/// writer's comparison.
+/// Available columns inherit dataset presentation from configuration including the
+/// pending batch. Edit a schema column and switch to Views within the debounce to prove
+/// a newly promoted column uses the pending overlay, not stale persisted config.
 #[gpui::test]
 fn a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write(
     cx: &mut gpui::TestAppContext,
@@ -6260,7 +6044,7 @@ fn a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_wri
     );
 }
 
-/// §4.1 mouse parity: a click on a schema column row opens the stage.
+/// Clicking a schema column row opens its column stage.
 #[gpui::test]
 fn a_click_on_a_schema_column_row_opens_the_column_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6282,10 +6066,8 @@ fn a_click_on_a_schema_column_row_opens_the_column_stage(cx: &mut gpui::TestAppC
     ));
 }
 
-/// §4.7: `escape` out of a column stage puts the cursor back on the
-/// column's OWN row, not at the top of a thirty-column list — the Schema
-/// door's mirror of the Views door's `select_item_named`. `position_ref`
-/// is the second row, so a cursor that merely reset to zero fails here.
+/// Leaving a column stage restores the cursor to that column's row. Use the second row
+/// so resetting to index zero cannot satisfy the assertion.
 #[gpui::test]
 fn leaving_a_schema_column_stage_puts_the_cursor_back_on_its_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6301,14 +6083,9 @@ fn leaving_a_schema_column_stage_puts_the_cursor_back_on_its_row(cx: &mut gpui::
     assert_eq!(edit_draft(&shell, &cx, |d| d.selected), 1);
 }
 
-/// Review round 1's Important: `on_tick_clicked` and `on_row_dropped`
-/// are the mouse's own paths to the same writes the keyboard gate above
-/// refuses, and `Domain::writable`'s own doc comment names both as gate
-/// sites — a mouse drop on a read-only row must refuse identically to a
-/// keystroke, not merely fail to find anything to drag. `on_row_dropped`
-/// is `pub(in crate::shell)` precisely so this can drive it directly,
-/// the same door `a_drop_whose_name_has_left_the_list_says_that_row_is_gone`
-/// above uses.
+/// Mouse tick and drop handlers enforce Schema's read-only gate just like keyboard
+/// actions. Call the drop handler directly to verify refusal independently of whether a
+/// read-only row can initiate a drag.
 #[gpui::test]
 fn a_drop_on_the_schema_inspector_is_refused(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
@@ -6336,10 +6113,8 @@ fn a_drop_on_the_schema_inspector_is_refused(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// A two-source `sources.toml` over a two-dataset schema — `vols` feeds
-/// `vol`, `live` feeds `risk` and carries every optional key, so the
-/// window tests below have both the sort order (§19.3: dataset first)
-/// and a full set of fields to exercise `i` against.
+/// Two sources over two datasets provide distinct dataset ordering and a source with
+/// every optional key for text-edit tests.
 fn services_with_sources() -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
@@ -6366,10 +6141,9 @@ fn services_with_sources() -> ShellServices {
     services
 }
 
-/// §19.3: rows read dataset first and sort by it; `i` on a text row
-/// opens the field seeded with the value; a bad duration is refused with
-/// the field open; a good one applies and, on a builtin source, forks it
-/// without asking; the flush writes the spelling the reader reads.
+/// Source rows sort and display by dataset. Text editing seeds the field, rejects a bad
+/// duration without closing it, and applies a valid duration through a user copy and
+/// flush using the reader's supported spelling.
 #[gpui::test]
 fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6436,8 +6210,8 @@ fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppC
     let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
     assert!(written.contains("poll_interval = \"30s\""), "{written}");
     assert!(written.contains("paths = [\"/a/*.csv\"]"), "{written}");
-    // §19.3's delivery path: the in-memory apply ran `apply_reload`, whose
-    // sources-baseline comparison raised the existing stripe.
+    // Applying the changed source through reload marks the difference from the startup
+    // source baseline as restart-required.
     assert!(
         shell
             .read_with(&cx, |s, _| s.restart_required.clone())
@@ -6446,9 +6220,8 @@ fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppC
     );
 }
 
-/// §19.3: `n` seeds the dataset from the cursor row and the name from
-/// it when free; the created source is idle (empty paths, a warning
-/// on the row, never an error).
+/// Creating a source seeds its dataset and an available name from the selected row.
+/// Empty paths leave it idle with a warning, not an error.
 #[gpui::test]
 fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6484,14 +6257,11 @@ fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::Test
     );
 }
 
-// --- Task 4: `Diagnostic.path` lands on its field row (4c §19.5) --------
+// Reader diagnostics mapped to field rows.
 
-/// §19.5: a reader diagnostic that names a column lands on that column's
-/// row as a glyph, and its header line is prefixed with the row's label;
-/// an object-level one — here, a join missing `dataset`, whose path
-/// (`views.tree.joins`) names a key no `Field` owns and so cannot
-/// resolve to any row — stays on the header alone, with no glyph
-/// anywhere and no prefix on its own header line.
+/// A column diagnostic paints a glyph on its field row and prefixes its header message
+/// with that row's label. An object-level diagnostic whose path maps to no field
+/// remains only in the header.
 #[gpui::test]
 fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -6527,15 +6297,9 @@ fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
         cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
             .is_none()
     );
-    // Review round 1's Important-1 finding: the glyph used to be a THIRD
-    // direct child of the row under `justify_between`, which splits the
-    // row's free space into two gaps and floats the label toward the
-    // row's centre — on every row, flagged or not, since neither the
-    // glyph nor the label carries `flex_1()`. Comparing the flagged
-    // row's label origin against the unflagged row's is what would have
-    // caught that: with the bug, delta's label (flagged, three children)
-    // sits at a different x than npv's (unflagged, two children); fixed,
-    // both labels start at the same x regardless of the glyph's content.
+    // Flagged and unflagged rows must align their labels. A diagnostic glyph added as
+    // another `justify_between` child would change spacing, so compare their label
+    // origins directly.
     let delta_row = cx
         .debug_bounds("objectdialog-item-delta")
         .expect("delta's row is painted");
@@ -6617,14 +6381,9 @@ fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Review round 1's Important-2 finding: `views.toml` declares `npv`
-/// first and `delta` second (so the reader's diagnostic index — a
-/// position in THAT order — names `delta` at index 1), but a
-/// `view_presentation.toml` `order` flips them to `delta` first for the
-/// edit stage's `items`. The glyph must still land on `delta` — the
-/// column the diagnostic actually names — not on whatever the raw index
-/// now happens to point at in the reordered `items` (`npv`, the bug this
-/// finding describes).
+/// Map a diagnostic's original column index to the column identity before applying
+/// presentation order. With the two columns reversed for display, the glyph must still
+/// mark `delta` rather than the row now occupying its original index.
 #[gpui::test]
 fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
@@ -6656,10 +6415,8 @@ fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppC
     let (_shell, mut cx) = dialog_test_shell_with(cx, services, "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // `items` is now `[delta, npv]` (the presentation's order), so a
-    // pre-fix raw-index lookup of `columns.1` would have landed on
-    // `npv` — this is the assertion that would have failed before the
-    // fix.
+    // Presentation orders rows as `[delta, npv]`; resolving `columns.1` by the
+    // displayed index would incorrectly mark `npv`.
     assert!(
         cx.debug_bounds("objectdialog-diag-objectdialog-item-delta")
             .is_some(),
@@ -6672,14 +6429,13 @@ fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppC
     );
 }
 
-/// §19.6: a flush whose in-memory merge is refused still writes the file
-/// (disk stays the arbiter), and the status line says both halves.
+/// If a flushed config merge is rejected, the file write still occurs and the status
+/// explains both outcomes: the edit is on disk but not live.
 #[gpui::test]
 fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    // `keymap.mod = "ctrl"` is refused with an ERROR diagnostic at every
-    // reload (Phase 4a Task 4b), so any batch applied over this user
-    // layer is rejected while its own object is fine.
+    // The invalid `ctrl` modifier alias rejects every reload over this user layer while
+    // the edited object itself remains valid.
     std::fs::write(
         dir.path().join("app.toml"),
         "config_version = 1\n[keymap]\nmod = \"ctrl\"\n",
@@ -6725,12 +6481,9 @@ fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppConte
     );
 }
 
-/// The edit footer names `i` on the row that can take it and on no
-/// other (user ruling 2026-09-13, narrowing the 2026-09-12 rule from the
-/// object to the row): Sources' `Paths` is an editable `Text` — `i` alone,
-/// nothing steps — and the `Dataset` row the stage opens on is a
-/// multi-option `Choice`, which both steps and types (spec 2026-09-19
-/// §3.2: `i` opens a typeahead over its options).
+/// The edit footer reflects the selected row: Sources Paths is editable text (`i`
+/// only), while Dataset is a multi-option choice supporting both stepping and
+/// typeahead.
 #[gpui::test]
 fn the_edit_footer_offers_i_only_where_a_row_can_take_it(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell_with(cx, services_with_sources(), "config::sources");
@@ -6767,11 +6520,10 @@ fn the_edit_footer_hides_i_where_it_would_only_refuse(cx: &mut gpui::TestAppCont
     );
 }
 
-// ---- Part 2c Task 4: the column stage (2c §5) -------------------------
+// Column presentation editing.
 
-/// §5: enter on a member opens the column stage; a step there writes
-/// one [view.columns.<col>] key to the overlay and never forks the view;
-/// escape returns to the view's stage with the cursor on the column.
+/// Enter on a view member opens its column stage. Stepping writes a column overlay
+/// without copying the view definition; Escape returns selection to the same column.
 #[gpui::test]
 fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6807,11 +6559,9 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
         "the desk's view is untouched"
     );
 
-    // §5.3's clear verb, end to end: `i` on `Label`, typed empty,
-    // `enter`. An empty label means "stop overriding", never "delete" —
-    // this overlay cannot remove a key `views.toml` sets — so the field
-    // comes back reading the desk's own label, the trader is told why,
-    // and no `label` key reaches the file.
+    // Clearing Label removes the override, reveals the inherited desk label, and
+    // explains why. The overlay cannot delete a key supplied by the view definition,
+    // and no empty label reaches the file.
     cx.simulate_keystrokes("k k"); // scale → width → label
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
@@ -6875,19 +6625,68 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
     );
 }
 
-/// Dataset-presentation spec §5: the Views column stage with a layer
-/// under it. All three layers are filled by the door
-/// (`views::column_layers`), so the label a trader sees is the DATASET's
-/// (which beats the desk's own `NPV`), clearing it says it follows the
-/// dataset rather than the desk, the field re-seeds from that layer, and
-/// no `label` key reaches `view_presentation.toml` — the trader's own
-/// dataset-level opinion is not copied into this one view.
+/// A column-stage row names the layer its value comes from and no
+/// destination: every field there writes the same overlay, so a per-row
+/// `pres` says nothing. The layer badge sits in a slot of one width, so a
+/// row that gains or lacks a badge keeps its value where every other
+/// row's is.
+#[gpui::test]
+fn the_column_stage_badges_the_layer_in_one_aligned_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[(
+        "dataset_presentation",
+        "[risk_snapshot.columns.npv]\nscale = \"k\"\n",
+    )]);
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-scale")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_none()
+    );
+    for selector in [
+        "objectdialog-dest-label",
+        "objectdialog-dest-width",
+        "objectdialog-dest-scale",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector}: the column stage paints no destination badge"
+        );
+    }
+    let scale = cx
+        .debug_bounds("objectdialog-value-scale")
+        .expect("scale paints a value");
+    let width = cx
+        .debug_bounds("objectdialog-value-width")
+        .expect("width paints a value");
+    assert_eq!(
+        scale.right(),
+        width.right(),
+        "a badged row's value lines up with an unbadged row's"
+    );
+    let badge = cx
+        .debug_bounds("objectdialog-field-provenance-scale")
+        .expect("scale names its layer");
+    assert!(
+        badge.left() >= scale.right(),
+        "the badge sits in its own slot beside the value, not over it"
+    );
+}
+
+/// The Views column stage resolves dataset presentation beneath its view overlay.
+/// Clearing a label override reveals the dataset value, reseeds the field from it, and
+/// does not copy that inherited value into the view overlay.
 ///
-/// The provenance chip is asserted by existence (a `debug_bounds` id
-/// carries no text): `scale`, set at the dataset level, paints one;
-/// `width`, set at no layer and never touched, paints none. Which layer
-/// each chip NAMES is the pure half — `dataset_columns::provenance_of`'s
-/// own tests — over the layers this test proves the door fills.
+/// Debug selectors establish whether a provenance chip exists, not its text. The pure
+/// `dataset_columns::provenance_of` tests check which layer is named.
 #[gpui::test]
 fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6906,12 +6705,9 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
         "tree › npv"
     );
 
-    // The door filled both layers below the view overlay, each as the
-    // keys that layer itself sets — the desk's own label is still
-    // nameable underneath the dataset's, which is what lets the fold
-    // notice choose. The view overlay is not captured at all: the chip
-    // asks whether the field differs from these two (the final
-    // whole-branch review's named risk 4).
+    // Capture the desk and dataset layers separately below the view overlay. Their
+    // original keys identify the inherited source for notices, while provenance
+    // compares the current field against those lower layers.
     let layers = edit_draft(&shell, &cx, |d| {
         d.column_ctx.as_ref().map(|c| c.layers.clone())
     })
@@ -6985,14 +6781,9 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
     );
 }
 
-/// §5.2: a failed write rebuilds the draft from the reverted config —
-/// the OBJECT's fields, with no column projection on them — so the stage
-/// has to come back with it rather than leaving the crumb naming a column
-/// whose seven fields are no longer installed.
-///
-/// Same fixture trick `a_failed_removal_reverts_the_in_memory_change_and_
-/// says_so` uses: the file on disk will not parse, but the config in
-/// memory never read it, so only the write can discover the problem.
+/// A failed write rebuilds the object's draft from reverted config and exits the column
+/// stage whose projected fields no longer exist. Make the on-disk file unparseable
+/// while retaining valid in-memory config so only the write discovers the failure.
 #[gpui::test]
 fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7016,20 +6807,9 @@ fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::Test
     );
 }
 
-/// I-2 (Part 2c final review): `d` and `r` are refused in the column
-/// stage, through the same `not_a_column_verb` notice `x`, `shift+j` and
-/// `shift+k` already answer with.
-///
-/// The crumb has narrowed the object to one column, and both verbs act
-/// on the WHOLE view — `d` deletes the user-layer view, `r` undoes the
-/// trader's personalisation of every column of it, not the open one. The
-/// fixture makes that reachable rather than merely refused-anyway: one
-/// `space` on `scale` gives the view a user-layer presentation override,
-/// so `r` would arm a real `Confirm::Revert` here absent the guard.
-///
-/// The last block is the scoping half: the refusal is the column
-/// stage's, not a blanket disabling of the two letters — one `escape`
-/// back to the view and `r` arms exactly as it always did.
+/// Delete and Revert are unavailable inside a column stage because they act on the
+/// whole object. Give the view a real presentation override so Revert would otherwise
+/// arm. After Escape returns to the view, Revert must become available again.
 #[gpui::test]
 fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7076,10 +6856,9 @@ fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppConte
     );
 }
 
-/// §5.3: `width` is a typed value, not a stepped one — `i` opens it
-/// seeded with `auto`, a pixel count inside the range applies and reaches
-/// the overlay, and anything else is refused with the range named and the
-/// field still open on the trader's own text.
+/// Width is typed rather than stepped. `i` opens a field seeded with `auto`; an
+/// in-range pixel count reaches the overlay, while invalid text keeps the field open
+/// and names the allowed range.
 #[gpui::test]
 fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7088,8 +6867,7 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     cx.run_until_parked();
     cx.simulate_keystrokes("j"); // label → width
     cx.run_until_parked();
-    // §5.2: the list verbs answer about THIS stage, not about a column
-    // list that is not on screen — one sentence, whichever key.
+    // List-only commands explain their unavailability in the current column stage.
     for (key, pressed) in [("x", "x"), ("shift-j", "shift+j"), ("shift-k", "shift+k")] {
         cx.simulate_keystrokes(key);
         cx.run_until_parked();
@@ -7098,9 +6876,7 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
             Some(format!("{pressed} is not a verb in a column's stage"))
         );
     }
-    // `enter` names the verb this row actually has — `i`, not `space`,
-    // and certainly not "read-only", which is what an editable `Text`
-    // used to be told it was.
+    // Enter's notice points to this text row's edit command, `i`.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
@@ -7121,9 +6897,8 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     cx.simulate_keystrokes("backspace backspace backspace backspace");
     cx.simulate_input("wide");
     cx.run_until_parked();
-    // Typing mirrors through the `Input`'s change subscription; the
-    // cursor must still be on the width row (1), not reset to the top as a
-    // filter keystroke is (found on a display 2026-09-13).
+    // Typing mirrors through the input change subscription without moving the cursor
+    // off Width. Value editing must not reset selection as query filtering does.
     assert_eq!(
         edit_draft(&shell, &cx, |d| d.selected),
         1,
@@ -7145,7 +6920,7 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     assert!(written.contains("width = 160"), "{written}");
 }
 
-// --- Task 5: the Colours dialog (Part 2c §6.1) --------------------------
+// Colour configuration.
 
 /// A builtin `colours` doc with one colour (`delta`, `hue = 240`) plus
 /// the keymap — the same shape `services_with_sources` uses, so a first
@@ -7165,9 +6940,8 @@ fn services_with_colours() -> ShellServices {
     services
 }
 
-/// §6.1: the browse rows and the edit header carry a swatch resolved
-/// against the active theme; stepping the hue repaints it; `n` refuses a
-/// reserved name.
+/// Colour browse rows and edit headers paint theme-resolved swatches. Stepping hue
+/// repaints the swatch, and creation refuses reserved names.
 #[gpui::test]
 fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7258,12 +7032,8 @@ fn ticking_tint_by_sign_paints_the_two_variant_swatches(cx: &mut gpui::TestAppCo
     );
 }
 
-/// A double-click on a value row is `i` (user ruling 2026-09-19,
-/// interaction-model spec §17 amendment): the first mouse-down selects
-/// the row exactly as a single click does, and the second — the one the
-/// platform stamps `click_count: 2` — opens the row's field through the
-/// same door the key and the action-bar button take, here a `Choice`
-/// row's typeahead. A single click on its own still only selects.
+/// A value-row double-click selects on the first press, then opens the same field as
+/// `i` on the second. For a Choice row this is typeahead; a single click only selects.
 #[gpui::test]
 fn a_double_click_on_a_value_row_is_i(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7347,11 +7117,9 @@ fn a_double_click_on_a_door_row_opens_the_stage_and_nothing_more(cx: &mut gpui::
     );
 }
 
-/// The browse list is a door too: a double-click on a browse row opens
-/// its edit stage and nothing more. The second click lands on whatever
-/// the new stage painted at that point — on Groupings, slot 3's chooser
-/// puts a row under the pointer that a click would otherwise open as
-/// the chain field (review finding, 2026-09-19).
+/// A browse-row double-click opens its edit stage once. Its second click must not
+/// activate a control newly painted under the pointer, such as the grouping chain-field
+/// row.
 #[gpui::test]
 fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     cx: &mut gpui::TestAppContext,
@@ -7380,18 +7148,9 @@ fn a_double_click_on_a_browse_row_opens_the_edit_stage_and_nothing_more(
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-/// A Scopes `dimensions` row is a door too (scopes-editing spec §4): a
-/// double-click on it opens the column's Values stage and nothing more.
-/// The pair's first click opens the stage; by the time its second
-/// arrives the distinct outcome has usually landed (a distinct query is
-/// milliseconds, a double-click a few hundred), so that click lands on
-/// a VALUE row — which `open_field` would answer with
-/// `edit_commit_notice`'s "nothing to type here" — and the guard the
-/// column-stage door arms (`click_opened_stage`) must be armed by this
-/// door as well. The test delivers the outcome between the two clicks
-/// for exactly that reason, and proves a value row really is under the
-/// pointer before the second one; the notice is what tells the two
-/// doors apart, since neither opens a text field on a list row.
+/// Double-clicking a scope dimension opens Values once. Deliver distinct values between
+/// clicks so the second click lands on a value row; it must not invoke that new row's
+/// edit action or produce an unrelated notice.
 #[gpui::test]
 fn a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field(
     cx: &mut gpui::TestAppContext,
@@ -7480,12 +7239,10 @@ fn a_double_click_on_a_scopes_dimension_row_opens_its_values_and_not_a_field(
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
 }
 
-// --- Spec §20.3 / §20.6: the value chip, the i/n buttons, the armed guard --
+// Value chips, edit/create buttons, and confirmation guards.
 
-/// Spec §20.3 on the object dialog: the hue chip steps on click and
-/// shift+click through `step_selected_row`'s own path (so it writes), a
-/// click on the row's label only selects, and the chip is plain text —
-/// no handler — while a confirm is armed.
+/// The hue chip steps forward on click and backward on Shift-click through the normal
+/// write path. Label clicks only select; an armed confirmation makes the chip inert.
 #[gpui::test]
 fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7566,11 +7323,9 @@ fn the_value_chip_steps_a_number_and_is_inert_under_a_confirm(cx: &mut gpui::Tes
     );
 }
 
-/// Spec 2026-09-19 §3.2: `i` on a `Choice` row opens the shared field as
-/// a typeahead over the options, painted in the row list's place;
-/// typing narrows, `enter` picks the LIT row (never the typed text),
-/// the change rides the tick's own commit path (a builtin colour forks
-/// and says so), and the cursor is back on the row.
+/// `i` on a Choice opens typeahead in place of the rows. Typing narrows options; Enter
+/// commits the highlighted option through the stepping path and restores the row
+/// cursor. Editing a builtin colour creates and announces a user copy.
 #[gpui::test]
 fn i_on_a_choice_row_opens_a_typeahead_and_enter_picks_the_lit_option(
     cx: &mut gpui::TestAppContext,
@@ -7724,9 +7479,7 @@ fn tab_completes_and_escape_cancels_a_choice_field(cx: &mut gpui::TestAppContext
     );
 }
 
-/// §19.4: the read-only Schema inspector refuses `i` on its rows
-/// through the same gate every other verb uses — nothing in the choice
-/// path opens a field there.
+/// Schema's read-only rows refuse `i` without opening a choice field.
 #[gpui::test]
 fn i_is_refused_on_the_schema_inspector(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7743,18 +7496,10 @@ fn i_is_refused_on_the_schema_inspector(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("open a column"), "{notice}");
 }
 
-/// Review finding (2026-09-19): the column stage's `scale`/`negative`/
-/// `colour` rows are multi-option `Choice` fields, so `i` opens a
-/// typeahead there exactly as it does on the object stage's own `Choice`
-/// rows — the footer must say "choose a value", not "type a value", and
-/// `i` must actually open the typeahead rather than the plain text field
-/// the stale comment above this site used to claim it would refuse.
-///
-/// The footer paints no selector on the hint's WORD (only on its key
-/// chip), so the word is read through `render::i_hint_word` directly —
-/// the same pure door the footer itself now calls (`help_line`'s own
-/// pattern for reading painted-but-unselectored text, a few tests
-/// below) — rather than by measuring pixels.
+/// Column-stage Choice fields use typeahead and advertise choosing a value in the
+/// footer. Read `render::i_hint_word` directly for the wording because debug selectors
+/// identify key chips, not hint text; separately assert the field actually opens as
+/// typeahead.
 #[gpui::test]
 fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
     cx: &mut gpui::TestAppContext,
@@ -7788,8 +7533,7 @@ fn the_column_stages_choice_rows_teach_choose_and_i_opens_the_typeahead(
     });
     assert_eq!(word, "choose a value", "scale is a Choice row");
 
-    // `i` opens the typeahead here too — not the plain text field the
-    // stale comment above this footer site used to describe.
+    // `i` opens this Choice row as typeahead.
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
     assert!(
@@ -7898,9 +7642,8 @@ fn the_i_button_is_withheld_on_a_list_item_row(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// §20.6's fallout: an edit-row click while a confirm is armed is claimed
-/// and dropped, like the tick click — it neither moves the cursor nor
-/// opens a column stage that would silently disarm the question.
+/// An armed confirmation consumes edit-row clicks without moving the cursor or opening
+/// another stage.
 #[gpui::test]
 fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7963,8 +7706,7 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
         "and the question was not silently disarmed"
     );
 
-    // The frozen filter row (the mouse form of `/`, §17.1 rule 1) is
-    // dropped too: the question owns the mouse until it is answered.
+    // The confirmation also consumes clicks on the frozen filter row.
     let frozen = cx
         .debug_bounds("dialog-filter-frozen")
         .expect("the frozen row still paints while a confirm is armed");
@@ -7992,9 +7734,8 @@ fn an_edit_row_click_is_dropped_while_a_confirm_is_armed(cx: &mut gpui::TestAppC
     );
 }
 
-/// The `n` button carries §19.3's Sources seeding exactly as the key
-/// does — the dataset and the name field both from the row under the
-/// cursor — read at click time, not baked into the button at paint.
+/// The Sources create button derives its dataset and name from the row selected at
+/// click time, matching `n`.
 #[gpui::test]
 fn the_n_button_seeds_a_new_source_from_the_cursor_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8018,11 +7759,8 @@ fn the_n_button_seeds_a_new_source_from_the_cursor_row(cx: &mut gpui::TestAppCon
     assert_eq!(dialog_input_text(&shell, &cx), "vol");
 }
 
-/// Groupings is the one domain whose `i` reaches past the selected row
-/// to the slot's whole chain (§18.8), so its button is live on every row
-/// of a slot's chooser and opens the CHAIN field — the key's own door,
-/// not a per-row value field — and browse offers no `n` on a fixed
-/// roster, exactly as its footer names none.
+/// Groupings' edit button opens the slot-wide chain field from any chooser row,
+/// matching `i`. Browse offers no create button for the fixed slot list.
 #[gpui::test]
 fn the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld(
     cx: &mut gpui::TestAppContext,
@@ -8059,12 +7797,10 @@ fn the_i_button_opens_the_chain_field_on_groupings_and_n_is_withheld(
     );
 }
 
-/// `enter` is named wherever it opens something and nowhere else (user
-/// ruling 2026-09-13): browse in both modes (it opens the edit stage),
-/// the Views edit stage (a member row opens its column stage), the
-/// Schema edit stage (a column row opens the dataset-level stage) — and
-/// not inside a column stage, where `enter` on a field only gives a
-/// notice.
+/// The footer offers Enter in browse and on rows that open a column stage. Filter mode
+/// uses Enter to keep the query and return to normal mode; opening a match then
+/// requires another Enter. Column fields that only answer with a notice have no open
+/// hint.
 #[gpui::test]
 fn the_footers_name_enter_where_it_opens_something(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8126,7 +7862,7 @@ fn the_schema_edit_footer_names_enter_and_the_notice_teaches_the_door(
     assert!(notice.contains("enter"), "{notice}");
 }
 
-// ---- Step keys and the row-sensitive footer (user ruling 2026-09-13) ---
+// Step keys and row-sensitive footer hints.
 
 /// The `scale` `Choice`'s selected index in an open column stage — the
 /// one number every stepping-key assertion below reads. Found by key
@@ -8146,10 +7882,8 @@ fn scale_index(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize
     })
 }
 
-/// User ruling 2026-09-13 ("I keep reaching for them"): `l`/`h` step the
-/// row under the cursor forward and back in normal mode, exactly as
-/// `space`/`shift+space` do — one path, `Draft::step_selected`, so the
-/// aliases cannot drift from the keys they alias.
+/// In normal mode, `l` and `h` step the selected row forward and backward through the
+/// same `Draft::step_selected` path as Space and Shift-Space.
 #[gpui::test]
 fn l_and_h_step_the_selected_row_in_the_column_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8189,10 +7923,8 @@ fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("j enter"); // npv's column stage, cursor on `label`
     cx.run_until_parked();
 
-    // An inert row names the key the trader actually pressed (review
-    // 2026-09-13): `space` TYPES in filter mode, so "nothing on this row
-    // changes with space" would be a sentence about a key that puts a
-    // character in the query.
+    // An inert row names the actual command key. Space is typing in filter mode, so a
+    // step refusal there must not describe it as the pressed step key.
     cx.simulate_keystrokes("/ tab");
     cx.run_until_parked();
     assert_eq!(
@@ -8259,18 +7991,14 @@ fn tab_steps_the_selected_row_in_both_modes(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The footer names the keys the row under the CURSOR answers to, not
-/// the ones its domain has somewhere (user ruling 2026-09-13). The
-/// column stage is where all three cases sit side by side: `label` is an
-/// editable `Text` (`i` only), `scale` a multi-option `Choice` (both,
-/// since §3.2's typeahead), `precision` a `Number` (both).
+/// Footer hints follow the selected row's capabilities. The column stage provides
+/// editable Text (`i` only), multi-option Choice (stepping and typeahead), and Number
+/// (stepping and typing) side by side.
 #[gpui::test]
 fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
-    // The reorder group is row-sensitive for the same reason (review
-    // 2026-09-13): `shift+j`/`shift+k` move a list ITEM, and this fixture
-    // lands on one.
+    // The reorder hint follows the selected item row's capabilities.
     assert!(
         cx.debug_bounds("objectdialog-hint-reorder").is_some(),
         "a member row can be reordered"
@@ -8346,12 +8074,8 @@ fn the_edit_footer_names_only_what_the_selected_row_offers(cx: &mut gpui::TestAp
     );
 }
 
-/// Scopes-editing spec §3.2 (ruling 4): a scope's own dimensions list is
-/// unreorderable, so the footer offers no `shift+j`/`shift+k` chip on its
-/// item row even though `vocabulary_of` answers `RowVocabulary::Item` for
-/// it exactly as any other list item does — the domain exclusion this
-/// task adds to `reorders` (`render.rs`) is what keeps that chip off,
-/// not the row's own vocabulary.
+/// Scope dimensions cannot be reordered, so their footer omits move-item keys despite
+/// using the same item-row vocabulary as reorderable domains.
 #[gpui::test]
 fn the_scopes_dimensions_list_offers_no_reorder_chip(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8370,11 +8094,9 @@ fn the_scopes_dimensions_list_offers_no_reorder_chip(cx: &mut gpui::TestAppConte
     );
 }
 
-/// A click on an available dimension's tick opens its Values stage
-/// exactly as `space` does from the keyboard (`on_tick_clicked` walks
-/// [`step_selected_row`] itself, scopes-editing spec §3) — without that,
-/// the click would fall straight to `Draft::toggle_selected` and add an
-/// empty selection instead.
+/// Clicking an available dimension's tick opens Values through the same path as Space.
+/// It must not add an empty selection by falling through to the generic toggle
+/// operation.
 #[gpui::test]
 fn clicking_an_available_dimensions_tick_opens_its_values_stage(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8401,7 +8123,7 @@ fn clicking_an_available_dimensions_tick_opens_its_values_stage(cx: &mut gpui::T
     ));
 }
 
-// --- Delete and revert from the browse list (user request 2026-09-19) ---
+// Delete and revert from browse.
 
 /// [`services_with_sources`] plus one source the USER layer defines, so a
 /// browse row exists whose `layer` is `Layer::User` and `d` has something
@@ -8553,9 +8275,8 @@ fn browse_d_and_r_refuse_on_a_desk_row_with_the_edit_stages_notices(cx: &mut gpu
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
-/// A read-only domain refuses the browse `d`/`r` through the same gate
-/// every other verb goes through (§19.4), rather than silently dropping
-/// the key as browse used to.
+/// A read-only domain refuses browse Delete and Revert with the same notice as its
+/// other unavailable edit actions.
 #[gpui::test]
 fn browse_d_and_r_are_refused_on_a_read_only_domain(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
@@ -8601,9 +8322,8 @@ fn escape_disarms_a_browse_confirm_and_deletes_nothing(cx: &mut gpui::TestAppCon
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
 
-/// While a browse confirm is armed the question owns the keys AND the
-/// mouse (spec §20.1): a row click neither opens the row nor moves the
-/// target out from under the question.
+/// While browse confirmation is armed, a row click cannot open another row or move
+/// selection away from the confirmation target.
 #[gpui::test]
 fn a_row_click_is_dropped_while_a_browse_confirm_is_armed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8631,9 +8351,8 @@ fn a_row_click_is_dropped_while_a_browse_confirm_is_armed(cx: &mut gpui::TestApp
     assert!(cx.debug_bounds("objectdialog-confirm").is_some());
 }
 
-/// Spec §20.3: the browse bar offers `d` and `r` as buttons beside `n`,
-/// each only while the SELECTED row makes it live — the edit bar's own
-/// gates — and the button arms exactly as the key does.
+/// Browse Delete and Revert buttons appear only when the selected row supports them.
+/// Clicking one arms the same confirmation as the corresponding key.
 #[gpui::test]
 fn the_browse_bar_offers_delete_and_revert_for_the_selected_row(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8756,15 +8475,9 @@ fn services_with_user_sources(extra: &[(&str, &str)]) -> ShellServices {
     services
 }
 
-/// Review finding (2026-09-19): the removal is applied to memory by a
-/// spawned task, AFTER `run_confirmed` returns, so a landing that reads
-/// `services.config` clamps against the list as it stood BEFORE the
-/// delete — a no-op. Deleting the LAST row from browse then left
-/// `selected` one past the end: no row highlighted, no bar, `enter`
-/// answering "no object is selected" with rows plainly on screen. The
-/// landing has to read the pending-aware config
-/// (`apply::config_with_pending`), the fold `enter_edit_stage` already
-/// uses for the same reason.
+/// After deleting the last browse row, clamp selection against configuration including
+/// pending removal. The committed config is updated asynchronously, so reading it alone
+/// would leave the cursor beyond the surviving rows.
 #[gpui::test]
 fn a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row(
     cx: &mut gpui::TestAppContext,
@@ -8800,12 +8513,9 @@ fn a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row(
     );
 }
 
-/// Review finding (2026-09-19): the browse cursor is an INDEX, and a
-/// config reload landing between `d` and `enter` (a desk push, an
-/// external editor) re-ranks the list under the question — so the
-/// prompt named one object and the answer removed another. The name is
-/// recorded when the question is armed, and an answer whose target no
-/// longer matches it is refused with a notice rather than carried out.
+/// Confirmation records the target name, not only its browse index. If a reload changes
+/// the row under the question, refuse the answer with a notice instead of deleting
+/// another object.
 #[gpui::test]
 fn a_reload_under_an_armed_confirm_refuses_the_answer(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8933,10 +8643,8 @@ fn d_on_an_empty_slot_from_browse_names_the_browse_remedy(cx: &mut gpui::TestApp
     assert!(cx.debug_bounds("objectdialog-confirm").is_none());
 }
 
-/// Re-review minor (2026-09-19): one verb, one landing. A delete from the
-/// EDIT stage lands the cursor on the deleted row's neighbour exactly as
-/// a browse delete does — not on row 0, which is where a by-name lookup
-/// against the pending-aware rows (the name is gone) fell through to.
+/// Deleting from the edit stage selects the deleted row's surviving neighbor, matching
+/// browse deletion instead of resetting to the first row.
 #[gpui::test]
 fn an_edit_stage_delete_lands_the_cursor_on_the_neighbour(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -8969,10 +8677,8 @@ fn an_edit_stage_delete_lands_the_cursor_on_the_neighbour(cx: &mut gpui::TestApp
     );
 }
 
-/// Re-review minor (2026-09-19): the armed prompt names the object the
-/// question was RECORDED for, not whatever the index resolves to on the
-/// current frame — after a reload re-ranks the list under it, the prompt
-/// and the refusal agree about which object was asked about.
+/// Confirmation renders its recorded object name even if a reload changes the row at
+/// that index. The prompt and any stale-target refusal must refer to the same object.
 #[gpui::test]
 fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -9011,7 +8717,7 @@ fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// --- Field help: one context-sensitive line per selected row (2026-09-19) ---
+// Context-sensitive field help.
 
 /// The help line painted in the edit footer for the row under the cursor.
 fn help_line(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {

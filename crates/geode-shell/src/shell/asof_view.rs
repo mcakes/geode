@@ -234,6 +234,18 @@ pub fn segment_paint(theme: &Theme) -> SegmentPaint {
     }
 }
 
+/// A painted row's element id, from what the row IS rather than where
+/// the filter left it; `listrow::paint_row` needs one for its hover.
+fn row_id(row: &Row) -> gpui::ElementId {
+    match row {
+        Row::Current(_) => ("as-of-current", 0usize).into(),
+        Row::Live => ("as-of-live", 0usize).into(),
+        Row::Preset(i) => ("as-of-preset", *i).into(),
+        Row::Custom => ("as-of-custom", 0usize).into(),
+        Row::Publish(i) => ("as-of-publish", *i).into(),
+    }
+}
+
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,
@@ -287,7 +299,8 @@ fn build(
             last_section = Some(row.section);
         }
         let is_highlighted = position == state.highlighted();
-        let mut el = h_flex()
+        let el = h_flex()
+            .id(row_id(&row.row))
             .w_full()
             .h(scale::design(ROW_HEIGHT))
             .flex_shrink_0()
@@ -297,11 +310,7 @@ fn build(
             .text_sm()
             .rounded(radius)
             .debug_selector(move || format!("as-of-row-{position}"));
-        if is_highlighted {
-            el = el.bg(paint.active).text_color(paint.text);
-        } else {
-            el = el.hover(move |s| s.bg(paint.hover));
-        }
+        let mut el = super::listrow::paint_row(el, paint, is_highlighted);
         let entity_for_click = entity.clone();
         let is_custom = matches!(row.row, Row::Custom);
         el = el.child(super::keybindings_view::highlighted_text(

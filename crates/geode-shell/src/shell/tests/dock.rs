@@ -3,11 +3,9 @@
 
 use super::*;
 
-/// Review fix 4: the which-key hint paints a solid panel with no
-/// occlusion and no handlers, so a mouse-down through it would fall
-/// onto a strip beneath — a pending keystroke sequence must therefore
-/// gate the strips off exactly like the palette/modal overlays do,
-/// and completing the sequence brings them back.
+/// A pending key sequence disables dock strips beneath the which-key panel. The panel
+/// has no occluding mouse handler, so allowing the strips to remain active would let
+/// clicks pass through it. Completing the sequence reenables them.
 #[gpui::test]
 fn a_pending_key_sequence_gates_the_divider_strips(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -162,12 +160,9 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
     });
 }
 
-/// End-to-end (dock-trees task): an add lands *inside* a focused dock
-/// through gpui's real key pipeline. A first tile (the test layer's
-/// ctrl+v = `tile::add_rec_horizontal`) is parked via ctrl+{, then a
-/// second add splits within the dock's tree (the old build refused
-/// this) — two tiles in the dock, session dirty — and ctrl+w closes
-/// one, leaving the dock visible with the survivor.
+/// Adding inside a focused dock splits its tree through real key dispatch, marks the
+/// session dirty, and leaves two tiles in the dock. Closing one keeps the dock visible
+/// with its remaining tile.
 #[gpui::test]
 fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);
@@ -236,12 +231,9 @@ fn a_literal_ctrl_shift_bracket_shape_does_not_move_the_tile(cx: &mut gpui::Test
     });
 }
 
-/// Spec 2026-09-08 add-tile §7.3: the empty-tree hint is now one hint
-/// whatever holds focus — `ctrl+k` adds a tile into the focused region,
-/// so the same advice is true from a focused dock as from the main
-/// tree, and the old state-aware "return" variants are gone. Same
-/// `debug_bounds` honesty limits as the other hint tests: selectors,
-/// not text.
+/// The empty-tree hint offers `ctrl+k` regardless of whether the main tree or a dock is
+/// focused: adding targets the focused region. Debug selectors establish that the hint
+/// is painted, not its exact text.
 #[gpui::test]
 fn empty_tree_hint_paints_whichever_region_holds_focus(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);

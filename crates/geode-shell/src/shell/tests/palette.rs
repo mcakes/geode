@@ -3,12 +3,8 @@
 
 use super::*;
 
-/// End-to-end: a theme picked from the palette by real keystrokes —
-/// open, type its full name, `enter` — is applied through
-/// `dispatch_palette_item`'s `Theme` arm. Exercises the same wiring as
-/// `ctrl_v_keystroke_splits_the_active_workspace` above, through the
-/// one keyboard path a theme change has now that `mod+shift+t` and its
-/// light/dark toggle are retired (user ruling 2026-09-12).
+/// Selecting a theme through real palette keystrokes applies it through
+/// `dispatch_palette_item`'s Theme arm.
 #[gpui::test]
 fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -70,13 +66,9 @@ fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppC
     );
 }
 
-/// Pressing the first `g` of a `"g g"` sequence leaves the matcher
-/// pending (which the status bar renders as `"g"`) and the window still
-/// draws cleanly — the status bar's pending-keystroke path is live end
-/// to end through the real key-event pipeline. Task 8: the which-key
-/// overlay (`whichkey-overlay`, same `debug_selector` test hook as the
-/// empty-workspace hint) must be absent before any key is pressed and
-/// painted with real bounds once the `g` is pending.
+/// The first key of the fixture's `g g` sequence leaves the matcher pending and paints
+/// the which-key overlay. Assert the overlay is absent before typing and has bounds
+/// while the sequence is pending.
 #[gpui::test]
 fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -105,8 +97,7 @@ fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::Te
 
     cx.simulate_keystrokes("g");
 
-    // The pending keystroke must not stall the render thread (spec
-    // PHILOSOPHY.md): the status bar draws the same frame it renders in.
+    // The status bar must keep rendering while a key sequence is pending.
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -133,12 +124,9 @@ fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::Te
     );
 }
 
-/// Opening the palette while a keystroke sequence is pending cancels
-/// that pending state (Task 6: `Matcher::cancel()` on palette open —
-/// supersedes a 1b-ui deferred note that pending state would survive a
-/// palette session). Pressing the first "g" of "g g", opening then
-/// closing the palette, and pressing a fresh "g" must NOT complete the
-/// original "g g" sequence — it starts a new one instead.
+/// Opening the palette cancels a pending keymap sequence. After closing it, a fresh `g`
+/// must start a new sequence instead of completing the one begun before the palette
+/// opened.
 #[gpui::test]
 fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -199,25 +187,10 @@ fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestA
     );
 }
 
-/// End-to-end command palette flow (Task 6), through the real
-/// key-event pipeline exactly like the tests above: `ctrl+k` opens it,
-/// typing "rec: split" filters the list down to the three rows
-/// `register_add_actions` registers for the "rec" kind ("Rec: Split",
-/// "Rec: Split Horizontal", "Rec: Split Vertical" — the crate's
-/// `Category: Verb` pattern, user ruling 2026-09-09 superseding spec
-/// 2026-09-08 add-tile §3.2's original "Add <Kind>" wording). All three
-/// contain the run as a subsequence, matched entirely within the shared
-/// "Rec: Split" prefix, so all three score identically; the plain row
-/// leads. Which one lands at index 0 is not a fuzzy-match property; it
-/// is `PaletteState::filtered`'s stable sort preserving `build_items`'
-/// input order, which is `ActionRegistry::iter()`'s `BTreeMap<ActionId,
-/// _>` order — and `"tile::add_rec"` sorts ahead of
-/// `"tile::add_rec_horizontal"`/`"…_vertical"` (a prefix is less than
-/// what extends it). That tie-break is deterministic, so this test is
-/// not flaky. Enter then dispatches the selected item through the
-/// normal chain, closing the palette and adding the (until then empty)
-/// active workspace's first tile — an add through the palette, end to
-/// end.
+/// `ctrl+k`, a `rec: split` query, and Enter add the first recorder tile through the
+/// palette. The query matches three action titles equally; stable ranking preserves
+/// registry order, where `tile::add_rec` precedes its longer direction-specific IDs, so
+/// the plain Split action is selected deterministically.
 #[gpui::test]
 fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     cx: &mut gpui::TestAppContext,
@@ -293,24 +266,9 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     );
 }
 
-/// End-to-end: Enter on a *theme* row (not an action) changes the
-/// active theme, through the same real key-event pipeline as the
-/// action-dispatch test above — the brief-mandated "theme item ->
-/// `ThemeService::apply`" path had no direct test coverage before
-/// this one; it was previously verified only by reading
-/// `dispatch_palette_item`'s source.
-///
-/// Query "gruvbox" ranks "Theme: Gruvbox Dark" and "Theme: Gruvbox
-/// Light" identically (both match the literal, fully-consecutive run
-/// "gruvbox" right after the "Theme: " word boundary — same
-/// computation as any other title sharing that whole run, so same
-/// score); no other registered action or bundled theme title contains
-/// "gruvbox" as a subsequence at all, bundled or not, so those two are
-/// the entire tied-for-first set. As in the split-horizontal test
-/// above, which one lands at index 0 is a deterministic tie-break —
-/// `build_items` appends themes in `ThemeService::names()`'s sorted
-/// order, and `"Gruvbox Dark" < "Gruvbox Light"` alphabetically — not
-/// a property of the fuzzy match itself.
+/// Enter on a theme row reaches `ThemeService::apply` through real key dispatch. The
+/// query `gruvbox` gives Dark and Light equal scores; stable ranking preserves sorted
+/// theme-name order, placing Dark first deterministically.
 #[gpui::test]
 fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
     cx: &mut gpui::TestAppContext,
@@ -386,19 +344,9 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
     );
 }
 
-/// The full-list scroll behavior this task adds: real `down` keystrokes
-/// (not a direct `PaletteState::set_selected` call — this is the
-/// actual key-event pipeline `handle_palette_key` drives) move the
-/// selection well past `palette::VISIBLE_ROWS` (12) into rows that,
-/// before this task, `render` would never have drawn (it truncated to
-/// the top 12 filtered rows) and the palette's old `VISIBLE_ROWS` clamp
-/// would never have let the selection reach. Also checks, via gpui's
-/// test-only `debug_selector`/
-/// `debug_bounds` (wired up in `palette::render`), that the selected
-/// row's *painted* bounds actually land inside the scrollable list
-/// container's bounds — proving the viewport followed the selection
-/// (`ShellView::sync_palette_scroll`'s `ScrollHandle::scroll_to_item`)
-/// rather than just moving an index nothing on screen reflects.
+/// Real Down keystrokes move beyond the initial visible palette rows. Assert that the
+/// selected row's painted bounds lie inside the scroll container, proving the viewport
+/// follows selection rather than merely updating an off-screen index.
 #[gpui::test]
 fn arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_view(
     cx: &mut gpui::TestAppContext,
@@ -471,15 +419,9 @@ fn arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_view(
     );
 }
 
-/// Esc closes the palette without dispatching anything — typing a
-/// query that would otherwise match and select an action must not
-/// leave any trace once the palette is dismissed. Also covers the
-/// palette-input-polish task's focus contract: `ctrl+k` should have
-/// focused `palette_input`'s real `FocusHandle` (proven directly, not
-/// just inferred from typing having worked), and escape should hand
-/// focus back to the shell root — the same "return focus on close"
-/// story `escape_in_the_filter_input_returns_focus_to_the_shell_root`
-/// proves for the toolbar's filter field.
+/// Escape closes the palette without dispatching the selected action and returns focus
+/// to the shell root. Assert the input's actual focus handle on open and the root's on
+/// close.
 #[gpui::test]
 fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -547,12 +489,8 @@ fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// Left/right arrow keys are consumed by the palette's query `Input` as
-/// native caret movement (palette-input-polish task: "OS text input
-/// stuff... from the component") and must not leak to the shell as
-/// workspace chords — proven two ways: the caret actually moves inside
-/// the input (`InputState::cursor`, not inferred from the query
-/// staying the same), and the workspace stays untouched.
+/// Left and Right move the query input's caret without reaching workspace handling.
+/// Assert both cursor movement and an unchanged workspace.
 #[gpui::test]
 fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
     cx: &mut gpui::TestAppContext,
@@ -620,21 +558,9 @@ fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
     );
 }
 
-/// ctrl+a is consumed by the palette's query `Input` (native "OS text
-/// input stuff") rather than leaking to the shell — there is no
-/// `ctrl+a` shell binding at all (checked against `defaults.rs`'s
-/// `BUILTIN_KEYMAP`), so the meaningful proof is that the input
-/// actually reacts to it and the query/palette are otherwise
-/// untouched. Platform quirk, asserted directly rather than assumed
-/// (gpui-component's own hardcoded bindings, `gpui-base-0.6.2/src/input/
-/// base/state.rs`, not this crate's configurable mod-alias): on macOS
-/// `ctrl+a` is bound to `MoveHome` (Emacs-style — `cmd+a` is
-/// `SelectAll` there instead), everywhere else `ctrl+a` *is*
-/// `SelectAll`. Both handlers fully consume the keystroke (neither
-/// calls `cx.propagate()` — checked against the pinned release), so
-/// "does not leak" holds on every platform CI builds this on (spec: “CI
-/// runs on both macOS and Windows”); only the resulting caret/selection
-/// differs.
+/// The query input consumes Ctrl-A using its platform bindings: MoveHome on macOS,
+/// SelectAll elsewhere. Since the shell has no Ctrl-A binding, assert the actual caret
+/// or selection effect as well as the unchanged query and open palette.
 #[gpui::test]
 fn ctrl_a_is_consumed_by_the_input_and_does_not_leak_to_the_shell(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -699,20 +625,10 @@ fn ctrl_a_is_consumed_by_the_input_and_does_not_leak_to_the_shell(cx: &mut gpui:
     );
 }
 
-/// A row click DISPATCHES that row — the mouse form of `enter` (user
-/// request 2026-09-12, the palette's own half of §17.1 rule 2), through
-/// the same `commit_selected` door the key uses. Real mouse coordinates,
-/// recovered from `palette::render`'s `"palette-row-{i}"` debug selector
-/// (same pattern `arrow_down_past_visible_rows_advances_selection_and_
-/// scrolls_it_into_view` uses) rather than a direct `PaletteState` call,
-/// so this exercises the real click -> `ShellView::render`'s
-/// `on_row_click` -> dispatch path end to end.
-///
-/// The clicked row is deliberately NOT the highlighted one: with
-/// "gruvbox" typed, row 0 is `Theme: Gruvbox Dark` (highlighted) and row
-/// 1 is `Theme: Gruvbox Light`, so asserting the active theme became
-/// Gruvbox *Light* proves the click dispatched the row under the mouse,
-/// not whatever the keyboard had selected.
+/// Clicking a palette row dispatches that row through the shared commit path. Click
+/// Gruvbox Light while Gruvbox Dark is highlighted to prove mouse selection wins over
+/// the existing keyboard selection. Coordinates come from the rendered row's debug
+/// bounds.
 #[gpui::test]
 fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -781,13 +697,8 @@ fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext)
     );
 }
 
-/// A mouse-down well outside the palette panel — on the transparent
-/// click-catcher `ShellView::render` wraps the panel in — dismisses the
-/// palette (design brief: "click anywhere outside the palette panel ->
-/// dismisses the palette"). Same real-mouse-event structure and corner
-/// point as `backdrop_click_closes_the_modal` (the panel is centered,
-/// starting at least a third of the way down and inset horizontally,
-/// so a point near the window's origin always falls on the catcher).
+/// A mouse-down outside the palette panel dismisses it through the backdrop handler. A
+/// point near the window origin lies outside the centered, inset panel.
 #[gpui::test]
 fn click_outside_the_palette_panel_closes_it(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -1019,8 +930,8 @@ fn palette_selection_wraps_up_from_index_zero(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The palette gains the dialogs' larger steps (spec §3): ctrl+d/u
-/// move ±5, ctrl+f/b and pageup/pagedown ±10.
+/// Palette navigation supports five-row moves with Ctrl-D/U and ten-row moves with
+/// Ctrl-F/B or PageUp/PageDown.
 #[gpui::test]
 fn the_palette_takes_the_larger_navigation_steps(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
@@ -1061,18 +972,9 @@ fn the_palette_takes_the_larger_navigation_steps(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// The split this change deliberately preserves (spec §3): the new
-/// larger steps clamp, while the ±1 keys keep wrapping. This test and
-/// its partner above (`the_palette_takes_the_larger_navigation_steps`)
-/// are jointly, not individually, sufficient: that one alone would
-/// pass against a `nav_command` that returned `Move(0)` for every key
-/// (every assertion there stays put or moves by the size actually
-/// under test, never wraps), and this one alone would pass against a
-/// palette that ignored the new keys entirely (every clamp assertion
-/// here is also satisfied by "nothing moved"). Together they pin both
-/// that the new keys move the selection by the right amount AND that
-/// the amount clamps rather than wraps — do not delete one believing
-/// the other still covers navigation.
+/// Large navigation steps clamp at the ends; single-row moves wrap. Keep this test
+/// alongside the step-size test: boundary-only checks would also pass for ignored keys,
+/// while step-size checks alone do not establish clamping.
 #[gpui::test]
 fn palette_big_steps_clamp_while_arrows_still_wrap(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
@@ -1138,15 +1040,9 @@ fn test_services_with_ctrl_k_rebound_to_close_tile() -> ShellServices {
     services
 }
 
-/// Regression for `is_palette_toggle` respecting keymap layering
-/// (last-exact-match-wins, spec §3.4): a user layer rebinding `ctrl+k`
-/// away from `palette::toggle` must mean pressing it does NOT open the
-/// palette — the pre-matcher intercept in `handle_key_down` must not
-/// fire just because *some* binding for that key, anywhere in the
-/// keymap, happens to be `palette::toggle`. The rebound action
-/// (`workspace::close_tile`) must dispatch instead, through the
-/// normal matcher path, proving the key was fully handed over rather
-/// than merely swallowed.
+/// Palette-toggle interception respects last-exact-match-wins keymap layering.
+/// Rebinding `ctrl+k` to close a tile must dispatch that action instead of opening the
+/// palette or swallowing the key.
 #[gpui::test]
 fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_action(
     cx: &mut gpui::TestAppContext,
@@ -1286,7 +1182,7 @@ fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
     );
 }
 
-// --- Phase 4a §3.9: saved scopes in the palette ----------------------
+// Saved scopes in the palette.
 
 /// A saved scope appears as `Scope: {name}` (category "Scope") and
 /// selecting it loads it onto the frame via `Frame::load_scope`, bumping
@@ -1301,11 +1197,8 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
     .unwrap();
     let scopes =
         LayerDoc::builtin("scopes", "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n").unwrap();
-    // Finding 1 (post-display-fixes piece 1): this fixture used to load
-    // `config` from a non-empty builtin while leaving `test_services()`'s
-    // empty `builtin` in place — harmless today (nothing here reloads),
-    // but a false pairing all the same. `config_and_builtin` makes it
-    // impossible to get wrong.
+    // Keep the merged config paired with the builtin documents it was loaded from so a
+    // later reload sees the same layers.
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
@@ -1483,10 +1376,8 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
     assert!(again.is_none(), "one dispatch flushes once");
 }
 
-/// Spec §20.5: `tab` inside the palette is reclaimed so gpui-component's
-/// `Root` cannot cycle focus off the query field while the palette is
-/// open — `dialog::init_reclaimed_keybindings` binds it to `NoAction` in
-/// the `GeodePalette` context, the modal's own treatment.
+/// Tab is reclaimed in the `GeodePalette` context so the component root cannot move
+/// focus away from the palette query field.
 #[gpui::test]
 fn tab_in_the_palette_leaves_the_query_field_focused(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, test_services());
@@ -1588,5 +1479,90 @@ fn pending_keys_which_key_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestA
     assert!(
         cx.debug_bounds("kbd:q").is_some() && cx.debug_bounds("kbd:w").is_some(),
         "the palette's binding column paints `q w` as Kbd chips"
+    );
+}
+
+/// A pointer moving onto a result row repaints at once. gpui notifies
+/// the rendering view on a hover transition only for an element with an
+/// id (`gpui-pre-0.3.5/src/elements/div.rs`, the `MouseMoveEvent`
+/// listener that flips `hover_state`); an id-less row's hover fill
+/// waited for some unrelated repaint, so it read as a slow hover. A real
+/// mouse move, and the notification the frame needs, counted on both
+/// views that could own the row.
+#[gpui::test]
+fn a_pointer_entering_a_result_row_repaints_at_once(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("gruvbox");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let row_bounds = cx
+        .debug_bounds("palette-row-1")
+        .expect("row 1 should have painted bounds to hover");
+    let inside = gpui::point(
+        row_bounds.origin.x + gpui::px(10.0),
+        row_bounds.origin.y + gpui::px(10.0),
+    );
+    // Row 0 (the highlighted one) is off row 1 and inside the panel, so
+    // resting there first makes the move below a hover transition on
+    // row 1 and not the window's first mouse event (which also ends the
+    // keyboard modality that suppresses hover after typing).
+    let elsewhere = cx
+        .debug_bounds("palette-row-0")
+        .expect("row 0 should have painted bounds to rest the pointer on");
+    cx.simulate_mouse_move(
+        gpui::point(
+            elsewhere.origin.x + gpui::px(10.0),
+            elsewhere.origin.y + gpui::px(10.0),
+        ),
+        None,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let _subscriptions = cx.update(|_window, cx| {
+        let on_shell = notified.clone();
+        let on_root = notified.clone();
+        [
+            cx.observe(&shell, move |_, _| on_shell.set(on_shell.get() + 1)),
+            cx.observe(&root, move |_, _| on_root.set(on_root.get() + 1)),
+        ]
+    });
+
+    cx.simulate_mouse_move(inside, None, gpui::Modifiers::none());
+    cx.run_until_parked();
+
+    assert!(
+        notified.get() > 0,
+        "entering a non-highlighted row must notify its view, or the hover fill waits for an unrelated repaint"
     );
 }

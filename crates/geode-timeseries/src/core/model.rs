@@ -105,7 +105,7 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// The chip/popup label (§9.3), and the name `:` commands and
+    /// The chip/popup label, and the name `:` commands and
     /// expressions use for a source series: the identity, `@source` only
     /// when the source is not the default. An expression's label is its
     /// text, cut to `LABEL_MAX` characters ending in `…`.
@@ -407,9 +407,9 @@ impl Model {
         Ok(SETTING)
     }
 
-    /// Every expression that references `number` (§7: "removing an
-    /// operand removes every expression that references it"). Only a
-    /// source slot has dependants: an expression names sources only.
+    /// Every expression that references source slot `number`. Removing a source
+    /// also removes these dependants. Expressions reference sources only, so
+    /// an expression slot has no dependants.
     pub fn dependants(&self, number: u8) -> Vec<u8> {
         self.slots
             .iter()

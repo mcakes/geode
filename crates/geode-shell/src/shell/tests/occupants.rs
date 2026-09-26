@@ -8,12 +8,9 @@ use super::*;
 use crate::session;
 use crate::tiling::Orientation;
 
-/// A minimal `ModuleFactory` that calls `Diagnostics::watch`/`unwatch`
-/// from `set_visible` — the same thing `geode_diagnostics::DiagnosticsTile`
-/// does (a crate `geode-shell` cannot depend on: layering), modelling the
-/// generic occupant-lifecycle contract MAJ-2 is about (`ensure_occupants`
-/// must tell a vanished tile's occupant it is hidden before dropping it)
-/// without needing the real module.
+/// A fixture factory pairs `Diagnostics::watch` and `unwatch` through `set_visible`,
+/// modeling the diagnostics module without depending on that module crate. It verifies
+/// that an occupant is hidden before being dropped.
 mod watching {
     use super::*;
     use crate::keymap::KeyContext;
@@ -41,11 +38,9 @@ mod watching {
 
     struct WatchingContent {
         diagnostics: Entity<Diagnostics>,
-        // Mirrors `DiagnosticsTile::visible`'s own de-dup guard: `ensure_
-        // occupants` tells a freshly created, active occupant `true`
-        // twice (I2, final review — "harmless" for a private bool flip,
-        // but `Diagnostics::watch` is a real counter, so a real occupant
-        // must not double-count it either).
+        // Ignore repeated visibility values before changing the watch counter. A newly
+        // created active occupant can receive `true` from both creation and visibility
+        // reconciliation.
         visible: std::cell::Cell<bool>,
     }
     impl TileContent for WatchingContent {
@@ -126,19 +121,17 @@ mod watching {
     }
 }
 
-/// MAJ-2 (Phase 4b Task 5 fix round 1): closing a tile must tell its
-/// occupant it went invisible before dropping it, so an occupant that
-/// opened something in `set_visible(true)` (`Diagnostics::watch`, here)
-/// gets the matching `unwatch` rather than leaking a watcher forever.
+/// Closing a tile calls `set_visible(false)` before dropping its occupant, balancing
+/// any resource opened by `set_visible(true)`; the fixture observes the matching
+/// diagnostics unwatch.
 #[gpui::test]
 fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
     let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(watching::WatchingFactory));
     roster.register_actions(&mut services.registry);
-    // This roster has no "rec", so the fixture layer's `ctrl+v` would
-    // paint a placeholder; the watching tile is added by its own kind's
-    // row instead (spec 2026-09-08 add-tile §3.2).
+    // Add the watching kind explicitly; the shared recorder binding would create a
+    // placeholder because this roster has no "rec" factory.
     crate::defaults::register_add_actions(&mut services.registry, &["watching"]);
     services.keymap = test_keymap(&services.registry, &[]);
     services.roster = roster;
@@ -176,11 +169,8 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     );
 }
 
-/// A session holding exactly one tile, id 1, whose module kind nothing
-/// in the fixture's roster registers — the §7.2 unplaced-record fixture,
-/// shared by the two tests below. Hands back the services to open a
-/// shell on, the recorder's log, and the record exactly as it was
-/// restored (what `current_tiles` must write back verbatim).
+/// Restore one tile whose kind the fixture roster does not register. Return its
+/// original record so tests can verify that `current_tiles` preserves it verbatim.
 fn services_with_an_unknown_restored_kind() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
@@ -216,10 +206,9 @@ fn services_with_an_unknown_restored_kind() -> (
     (services, log, original)
 }
 
-/// Spec 2026-09-08 add-tile §7.2: a restored record whose kind the
-/// roster does not know paints the placeholder (never some other
-/// module, never that module's state), and the record rides through
-/// `current_tiles` verbatim so the next flush cannot forget it.
+/// An unknown restored kind displays a placeholder while preserving the original record
+/// verbatim through `current_tiles`. A later flush must not replace its kind or
+/// serialized state.
 #[gpui::test]
 fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives(
     cx: &mut gpui::TestAppContext,
@@ -247,11 +236,9 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
     let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
     assert_eq!(tiles.get(&1).map(|r| r.kind.as_str()), Some("rec"));
-    // `current_tiles` alone cannot see a stale entry here — the live
-    // occupant wins id 1 through `or_insert_with` — so the map itself is
-    // the assertion: `add_tile` drops the record the moment the tile is
-    // claimed (§7.2), rather than leaving it to shadow-box with the
-    // occupant for the rest of the session.
+    // Assert the unplaced-record map directly: the live occupant wins serialization for
+    // this ID, which could otherwise hide a stale record after `add_tile` claims the
+    // tile.
     assert!(
         shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()),
         "filling the placeholder in place drops the record it rode in on"
@@ -268,10 +255,8 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
     );
 }
 
-/// The other end of §7.2's lifetime: an unplaced record outlives only
-/// its own tile. Close the tile and there is nothing left to write the
-/// record back for — riding through `current_tiles` anyway would
-/// resurrect, on the next flush, a tile the trader just closed.
+/// An unplaced record survives only while its tile does. Closing the tile must remove
+/// the record so a later flush cannot resurrect it.
 #[gpui::test]
 fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestAppContext) {
     let (services, _log, _original) = services_with_an_unknown_restored_kind();
@@ -302,16 +287,9 @@ fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestApp
     assert!(shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()));
 }
 
-/// I2, final review: `fill_all_tiles` walks every workspace, so the
-/// FIRST render creates an occupant for a tile in an inactive
-/// workspace too — restored here via `session::from_toml`, the same
-/// real path `current_tiles_reflects_live_occupants_and_restored_
-/// state_reaches_the_factory` above builds. Before the fix, only
-/// tiles in the *active* set ever got a `set_visible` call at all;
-/// an occupant created outside it heard nothing, ever. `RecordingFactory`
-/// does not default a fresh occupant to anything — the assertion
-/// below is only meaningful because `set_visible` is required to be
-/// called at creation time, per its own doc comment's contract.
+/// Occupants are created for restored tiles in inactive workspaces too. Each must
+/// receive its initial `set_visible(false)` call; the recorder has no default
+/// visibility state, making the notification observable.
 #[gpui::test]
 fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
     cx: &mut gpui::TestAppContext,
@@ -429,10 +407,8 @@ fn a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count(
     );
 }
 
-/// The whole point of a keymap fragment (market-data documents §8.4): a
-/// key the shell's own `BUILTIN_KEYMAP` never mentions reaches the module
-/// that shipped it, through the live keymap, on a real keypress. Nothing
-/// but the roster carries `q` here.
+/// A real keypress reaches the module through its own keymap fragment. Only the roster
+/// supplies `q`; the shell builtin and fixture add layer do not bind it.
 #[gpui::test]
 fn a_binding_from_a_modules_fragment_reaches_its_hosted_tile(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_a_module_fragment(REC_FRAGMENT);
@@ -474,8 +450,8 @@ fn a_user_layer_binding_wins_over_a_modules_fragment(cx: &mut gpui::TestAppConte
     services.keymap =
         test_keymap_with_fragments(&services.registry, &services.keymap_fragments, &[user]);
     let (window, mut cx) = open_shell(cx, services);
-    // The first `ctrl-v` fills the starting placeholder in place (add-tile
-    // §4.2), so two are needed for a second tile to exist at all.
+    // The first add fills the initial placeholder in place; a second add is needed to
+    // create another tile.
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
@@ -549,10 +525,9 @@ fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
 #[gpui::test]
 fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
-    // gpui focuses a tracked element on mouse down; an occupant that
-    // tracks its own handle (DataTable does) would take focus with it
-    // and every shell chord would go dead. The tile's click handler
-    // arms the same restore `apply_reload` uses (§3.3).
+    // GPUI focuses tracked elements on mouse-down. The tile click handler arms
+    // root-focus restoration so an occupant's tracked handle cannot strand shell
+    // chords.
     let (services, _log) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
@@ -591,11 +566,8 @@ fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::T
 fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
     cx: &mut gpui::TestAppContext,
 ) {
-    // Same hazard as the tree-tile test above, but for a tile parked
-    // in a dock (fix-round finding: the dock-tile `on_mouse_down`
-    // listener did not re-arm `pending_focus_restore`, so a
-    // focus-tracking occupant docked instead of tiled would leave
-    // shell chords dead after a click).
+    // Dock tile clicks also arm root-focus restoration when the occupant tracks its own
+    // handle.
     let (services, _log) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
@@ -631,13 +603,9 @@ fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
     );
 }
 
-/// The render-top safety net (focus-trap fix): a window with NOTHING
-/// focused sends keys nowhere, so the next render hands focus back to
-/// the shell root. `Window::blur` is gpui's own "remove focus from all
-/// elements within this window" — the same `focus == None` state an
-/// orphaned `FocusId` leaves behind when the view holding the focused
-/// handle is unmounted, which is what the net is really for; blur is
-/// just the deterministic way to reach that state from a test.
+/// When a window has no focused handle, the next render restores shell-root focus so
+/// key dispatch can resume. `Window::blur` constructs this state deterministically,
+/// modeling a focused handle dropped when its view is unmounted.
 #[gpui::test]
 fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
     cx: &mut gpui::TestAppContext,
@@ -675,18 +643,10 @@ fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
     );
 }
 
-/// The reachable half of the same trap, and the one the workspace-switch
-/// story is really about (review finding, Important 1): `ensure_occupants`
-/// keeps occupants for tiles in EVERY workspace, so a switch unmounts the
-/// tile's *element* while its view entity — and the `FocusHandle` it holds
-/// as a field — stays alive. `window.focused` is therefore still `Some`,
-/// the `is_none()` net above cannot fire, and gpui falls back to
-/// `root_node_id` dispatch for a focus id absent from the rendered tree:
-/// the shell's own `on_key_down` never runs and every key is dead.
-///
-/// Focus is put on the tile DIRECTLY here, never through a mouse-down —
-/// a mouse-down is exactly the path that re-arms `pending_focus_restore`,
-/// so clicking would test the arming, not the backstop.
+/// Workspace switching unmounts an occupant's element while preserving its entity and
+/// focus handle. A nonempty focus handle can therefore refer to an element outside the
+/// rendered tree, bypassing the dropped-handle recovery. Focus the occupant directly to
+/// test the switch backstop independently of mouse-down's restore flag.
 #[gpui::test]
 fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
     cx: &mut gpui::TestAppContext,
@@ -737,21 +697,9 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
     );
 }
 
-/// The same trap with `dispatch` taken OUT of the path — which is what
-/// makes this the backstop's own test rather than a second test of
-/// `note_keyboard_focus_move`.
-///
-/// I-3 (final whole-branch review) put an earlier defence in front of the
-/// backstop: every keyboard verb that moves the focused tile arms
-/// `pending_focus_restore` through `note_keyboard_focus_move`, and
-/// `dispatch`'s workspace branch is one of them. A workspace switch that
-/// is TYPED — as the test above types it, and as the sidebar's own click
-/// handler dispatches it — is therefore handled by the flag at the top of
-/// the next render, and `ensure_occupants`'s backstop could be deleted
-/// with nothing noticing. What neither path can skip is the switch
-/// itself: `Workspaces::switch` is the method both of them end in, and
-/// calling it directly leaves the backstop as the only thing that can
-/// hand the keyboard back.
+/// Switch workspaces directly to isolate `ensure_occupants`' focus backstop. Dispatch
+/// normally arms `pending_focus_restore` first, which would restore focus even if the
+/// backstop were missing. Calling `Workspaces::switch` bypasses that earlier guard.
 #[gpui::test]
 fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
     cx: &mut gpui::TestAppContext,
@@ -883,16 +831,11 @@ fn the_focus_net_leaves_a_live_focused_input_alone(cx: &mut gpui::TestAppContext
     );
 }
 
-// The status bar's diagnostics-summary indicator (Phase 3 §5.1's
-// data-status contract, replaced by Phase 4b's `Diagnostics` entity) is
-// covered in `shell/tests/diagnostics.rs` now — `set_data_status` no
-// longer exists; `Diagnostics::note_health` is the door.
+// Status-summary integration is covered in `shell/tests/diagnostics.rs` using
+// `Diagnostics::note_health`.
 
-/// `open_module` (Phase 4b Task 5): the first call splits a fresh tile and
-/// hands it to the requested kind's factory; a second call with nothing
-/// else changed must focus that same tile rather than splitting again —
-/// "opening by kind" means at most one occupant of that kind per
-/// workspace, focused, not one per press.
+/// `open_module` creates the requested kind when absent, then focuses the existing tile
+/// on subsequent calls in that workspace.
 #[gpui::test]
 fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestAppContext) {
     let (mut services, log) = services_with_recorder();
@@ -904,9 +847,8 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
 
-    // Drive `open_module` directly — the status bar's diagnostics-summary
-    // click is the one production caller since `diagnostics::open` was
-    // retired (user ruling 2026-09-09), so there is no chord to press.
+    // Call `open_module` directly; the diagnostics-summary click exercises its
+    // production entry point in a separate test.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.open_module("diagnostics", window, cx);
@@ -964,17 +906,9 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     );
 }
 
-/// MIN-7 (Phase 4b Task 5 fix round 1), carried forward to the addressed
-/// pending map (spec 2026-09-08 add-tile §4.3): two `open_module` calls
-/// for the same kind within one render (a double click on the status
-/// bar's diagnostics summary, or its equivalent) both miss the "existing
-/// occupant" search (the first
-/// call's new tile has no occupant yet; `ensure_occupants` only creates
-/// one at the top of the *next* render), so without the pending-kind
-/// guard the second call would add a second tile and leave one hosting
-/// the requested kind and a stray one hosting the roster's default. Two
-/// presses with no render between them must still yield exactly one add,
-/// one tile.
+/// Two `open_module` calls before a render still add only one tile of the requested
+/// kind. The first occupant does not exist until `ensure_occupants` runs, so duplicate
+/// suppression must include pending requests.
 #[gpui::test]
 fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     cx: &mut gpui::TestAppContext,
@@ -1358,10 +1292,8 @@ fn add_into_a_focused_empty_dock_lands_in_the_dock(cx: &mut gpui::TestAppContext
     });
 }
 
-/// Spec 2026-09-08 add-tile §4.3: a pending request is addressed to
-/// the tile that asked, so two tiles going occupant-less in one render
-/// (a plain split, then an `open_module` that splits again) each get
-/// exactly what was asked of them — no "lower id wins" rule.
+/// Pending occupant requests are addressed to tile IDs. Multiple unfilled tiles in one
+/// render must each receive their own requested kind, independent of ID ordering.
 #[gpui::test]
 fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestAppContext) {
     let (mut services, _log) = services_with_recorder();
@@ -1402,12 +1334,8 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
     );
 }
 
-/// The other half of §4.3's addressing rule: a request whose tile closed
-/// before the render that would have filled it is *dropped*, never
-/// re-aimed at some surviving tile. It is not merely tidiness — a stale
-/// entry keeps `open_module`'s "already pending" guard
-/// (`pending_tiles.values().any(|p| p.kind == kind)`) true forever, so
-/// that kind could never be opened again for the rest of the session.
+/// Drop a pending request if its tile closes before being filled. It must not target
+/// another tile or keep the duplicate-kind guard active for the rest of the session.
 #[gpui::test]
 fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module(
     cx: &mut gpui::TestAppContext,
@@ -1472,10 +1400,8 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     );
 }
 
-/// `ShellView::deliver` routes solely on `delivery.key()` (§5.1): a
-/// `Delivery` addressed to one tile must reach that tile's occupant and
-/// no other's, even when a second tile is live and could just as easily
-/// have been the one mistakenly picked.
+/// A keyed delivery reaches exactly the addressed tile's occupant, even when another
+/// live tile could receive it.
 #[gpui::test]
 fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::TestAppContext) {
     use crate::module::Delivery;
@@ -1618,12 +1544,9 @@ fn add_recording_tile_on_workspace_two(
     hidden
 }
 
-/// Timeseries spec §5.4: a `SeriesFetched` is keyed by the `(identity,
-/// source)` pair, not by a tile, so `Delivery::key()` answers `None`
-/// and `ShellView::deliver` hands a copy to every occupant of a VISIBLE
-/// tile — and to no other. A hidden tile holds no subscription and
-/// requeries on `set_visible(true)`; telling it here would be work
-/// nobody can see.
+/// `SeriesFetched` identifies an identity/source pair rather than a tile. Deliver it to
+/// every visible occupant and no hidden occupants; hidden tiles have no subscription
+/// and requery when made visible.
 #[gpui::test]
 fn a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one(
     cx: &mut gpui::TestAppContext,
@@ -1727,8 +1650,7 @@ fn a_series_outcome_is_routed_to_its_key_alone(cx: &mut gpui::TestAppContext) {
     assert_eq!(delivered, vec![(target, 42)]);
 }
 
-/// `Delivery::Price` (line-pricer spec §5.4) rides the same router:
-/// keyed like a query, delivered to that tile alone.
+/// Price deliveries use the keyed router and reach only the addressed tile.
 #[gpui::test]
 fn a_price_delivery_is_routed_by_key_like_a_query(cx: &mut gpui::TestAppContext) {
     use crate::module::Delivery;

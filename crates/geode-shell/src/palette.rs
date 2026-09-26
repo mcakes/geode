@@ -76,15 +76,28 @@ impl PaletteItem {
     }
 }
 
-/// Case-insensitive subsequence match returning the best score and its
-/// alignment. Every query character must appear in order. Scores reward prefix
-/// starts, starts after space/colon/underscore/hyphen, and consecutive matches.
-/// Dynamic programming chooses the best alignment; backtracking favors the
-/// earliest equal-score endpoint and continuation of a run.
+/// Case-insensitive fuzzy match returning the best score and its alignment.
+///
+/// A single-word query is a subsequence match: every query character must
+/// appear in order. Scores reward prefix starts, starts after
+/// space/colon/underscore/hyphen, and consecutive matches. Dynamic programming
+/// chooses the best alignment; backtracking favors the earliest equal-score
+/// endpoint and continuation of a run.
+///
+/// A query of several whitespace-separated words matches when every word
+/// matches in any order on characters of its own, so `scope clear` finds
+/// "Clear scope" and `scope scope` does not. [`ORDER_BONUS`] rewards the typed
+/// order: either the whole query, spaces included, matches as one subsequence,
+/// or the words' separate alignments fall one after another. Each word first
+/// takes its best alignment; when two of those share a character, the words
+/// are placed again one at a time, longest first, each on characters the
+/// earlier ones left free. That placement is greedy, so a candidate a
+/// different assignment would fit can still be missed.
 ///
 /// Indices address characters in the lowercased candidate, not bytes or guaranteed
 /// positions in the original text. Lowercase expansion can shift highlights.
-/// An empty query matches with score zero and no indices; whitespace is literal.
+/// An empty query matches with score zero and no indices. Whitespace in a
+/// query without two words (leading, trailing, or alone) is literal.
 pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
     fuzzy_match_lowered(&query.to_lowercase(), &candidate.to_lowercase(), usize::MAX)
 }
@@ -97,6 +110,83 @@ fn fuzzy_match_lowered(
     query: &str,
     candidate: &str,
     title_len: usize,
+) -> Option<(u32, Vec<usize>)> {
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if words.len() < 2 {
+        return align(query, candidate, title_len, None);
+    }
+    // A word that matches nowhere fails every placement, the whole-query
+    // subsequence included, so a row missing any word stops here.
+    let alone = words
+        .iter()
+        .map(|w| align(w, candidate, title_len, None))
+        .collect::<Option<Vec<_>>>()?;
+    let by_word =
+        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));
+    let ordered = align(query, candidate, title_len, None).map(|(s, ix)| (s + ORDER_BONUS, ix));
+    match (ordered, by_word) {
+        (Some(o), Some(w)) if w.0 > o.0 => Some(w),
+        (Some(o), _) => Some(o),
+        (None, w) => w,
+    }
+}
+
+/// Combine per-word alignments, given in query order: the scores sum and the
+/// indices merge in ascending order. `None` when two words share a character,
+/// since one letter cannot stand for two typed ones. [`ORDER_BONUS`] applies
+/// when each word's alignment lies wholly after the previous word's.
+fn combine_words(alignments: Vec<(u32, Vec<usize>)>) -> Option<(u32, Vec<usize>)> {
+    let mut score = 0;
+    let mut in_order = true;
+    let mut last_end: Option<usize> = None;
+    let mut indices = Vec::new();
+    for (s, ix) in alignments {
+        score += s;
+        // `ix` is non-empty and ascending: a word has at least one char.
+        in_order &= last_end.is_none_or(|end| ix[0] > end);
+        last_end = ix.last().copied();
+        indices.extend(ix);
+    }
+    indices.sort_unstable();
+    if indices.windows(2).any(|w| w[0] == w[1]) {
+        return None;
+    }
+    if in_order {
+        score += ORDER_BONUS;
+    }
+    Some((score, indices))
+}
+
+/// Place the words one at a time, longest first (ties in query order), each
+/// on characters no earlier word claimed. Runs only after the words' best
+/// alignments collided; `None` when a word finds no free placement.
+fn align_words_disjoint(
+    words: &[&str],
+    candidate: &str,
+    title_len: usize,
+) -> Option<(u32, Vec<usize>)> {
+    let mut claimed = vec![false; candidate.chars().count()];
+    let mut by_length: Vec<usize> = (0..words.len()).collect();
+    by_length.sort_by_key(|&w| std::cmp::Reverse(words[w].chars().count()));
+    let mut placed: Vec<Option<(u32, Vec<usize>)>> = vec![None; words.len()];
+    for w in by_length {
+        let (s, ix) = align(words[w], candidate, title_len, Some(&claimed))?;
+        for &j in &ix {
+            claimed[j] = true;
+        }
+        placed[w] = Some((s, ix));
+    }
+    combine_words(placed.into_iter().collect::<Option<Vec<_>>>()?)
+}
+
+/// Subsequence alignment of the whole query, whitespace included; see
+/// [`fuzzy_match_lowered`] for the other arguments. A candidate character
+/// whose `claimed` entry is true cannot be matched.
+fn align(
+    query: &str,
+    candidate: &str,
+    title_len: usize,
+    claimed: Option<&[bool]>,
 ) -> Option<(u32, Vec<usize>)> {
     if query.is_empty() {
         return Some((0, Vec::new()));
@@ -120,7 +210,7 @@ fn fuzzy_match_lowered(
         let mut any = false;
         for j in 0..m {
             let mut cell = None;
-            if c[j] == q[i] && j >= i {
+            if c[j] == q[i] && j >= i && !claimed.is_some_and(|taken| taken[j]) {
                 let base = base_at(j);
                 if i == 0 {
                     cell = Some(base);
@@ -168,6 +258,12 @@ fn fuzzy_match_lowered(
 
     Some((score, indices))
 }
+
+/// The bonus for a multi-word query whose words appear in the typed order.
+/// Worth a prefix start: the typed order outranks the same words reversed,
+/// while a much tighter match in the wrong order can still outrank a
+/// scattered one in the right order. It is not category-discounted.
+const ORDER_BONUS: u32 = PREFIX_BONUS;
 
 /// The bonus for matching the candidate's first character.
 const PREFIX_BONUS: u32 = 10;
@@ -273,7 +369,7 @@ pub struct PaletteState {
     lowered: Vec<String>,
     /// Each item's lowered title length in chars: where `lowered`'s title
     /// ends and its category begins, the boundary [`fuzzy_match_lowered`]
-    /// discounts past and [`split_label_indices`] splits the highlight at.
+    /// discounts past and `split_label_indices` splits the highlight at.
     title_len: Vec<usize>,
     /// Each item's usage bonus (`crate::palette_usage`), baked once at
     /// construction against the clock as it stood when the palette opened
@@ -351,10 +447,8 @@ impl PaletteState {
                 scored.push((i, score + self.bonus[i], indices));
             }
         }
-        // Stable sort: ties — including an empty query, where every item
-        // scores the same 0 plus its usage bonus — keep their original
-        // `items` order (the brief's "empty query returns all in registry
-        // order", now after the rows a trader has actually used).
+        // Usage bonuses rank previously chosen items first under an empty query.
+        // Ties retain registry order.
         scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
         self.filtered = scored
             .into_iter()
@@ -406,15 +500,16 @@ impl PaletteState {
     }
 
     /// [`filtered`](Self::filtered) without the clones — the render's
-    /// per-frame walk: each row's item, its matched indices over
+    /// per-frame walk: each row's index into the unfiltered items (its
+    /// stable element id), the item, its matched indices over
     /// `"{title} {category}"`, and the title length the matcher scored
     /// against (the lowered title's char count), which is what
-    /// [`split_label_indices`] must split at for the highlight to agree
+    /// `split_label_indices` must split at for the highlight to agree
     /// with the alignment by construction.
-    pub fn rows(&self) -> impl Iterator<Item = (&PaletteItem, &[usize], usize)> {
+    pub fn rows(&self) -> impl Iterator<Item = (usize, &PaletteItem, &[usize], usize)> {
         self.filtered
             .iter()
-            .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
+            .map(|(i, indices)| (*i, &self.items[*i], indices.as_slice(), self.title_len[*i]))
     }
 
     /// The currently selected row, if any (an empty filtered list, or a
@@ -615,9 +710,10 @@ pub fn render(
                 .child("no matches"),
         );
     } else {
-        for (i, (item, indices, title_len)) in state.rows().enumerate() {
+        for (i, (item_ix, item, indices, title_len)) in state.rows().enumerate() {
             let is_selected = i == state.selected();
-            let mut row = h_flex()
+            let row = h_flex()
+                .id(("palette-row", item_ix))
                 .w_full()
                 .justify_between()
                 .items_center()
@@ -628,11 +724,7 @@ pub fn render(
             // The list-row tokens through the one door (`shell::listrow`):
             // the highlighted row is the state, the hovered row is the
             // pointer, and they are distinct fills.
-            if is_selected {
-                row = row.bg(row_paint.active).text_color(row_paint.text);
-            } else {
-                row = row.hover(|s| s.bg(row_paint.hover));
-            }
+            let row = crate::shell::listrow::paint_row(row, row_paint, is_selected);
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
             // The shell callback selects and commits this filtered row. Clone the
@@ -813,6 +905,65 @@ mod tests {
         );
     }
 
+    // -- fuzzy_match words ------------------------------------------------
+
+    #[test]
+    fn words_typed_out_of_order_still_match() {
+        let (_, indices) = fuzzy_match("scope clear", "Clear scope").unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn words_in_the_candidate_order_score_higher_than_reversed() {
+        let (ordered, _) = fuzzy_match("clear scope", "Clear scope").unwrap();
+        let (reversed, _) = fuzzy_match("scope clear", "Clear scope").unwrap();
+        assert!(ordered > reversed, "ordered={ordered} reversed={reversed}");
+        // Across candidates too: the one holding the words in the typed
+        // order outranks the one holding the same words reversed.
+        let (in_order, _) = fuzzy_match("tile add", "tile add").unwrap();
+        let (out_of_order, _) = fuzzy_match("tile add", "add tile").unwrap();
+        assert!(
+            in_order > out_of_order,
+            "in_order={in_order} out_of_order={out_of_order}"
+        );
+    }
+
+    #[test]
+    fn words_in_order_without_a_literal_space_between_them_earn_the_order_bonus() {
+        let (split, _) = fuzzy_match("clear scope", "clearscope").unwrap();
+        let (reversed, _) = fuzzy_match("scope clear", "clearscope").unwrap();
+        assert!(split > reversed, "split={split} reversed={reversed}");
+    }
+
+    #[test]
+    fn every_word_must_match() {
+        assert_eq!(fuzzy_match("scope xyz", "Clear scope"), None);
+    }
+
+    #[test]
+    fn words_claim_distinct_characters() {
+        // A second "scope" cannot reuse the first one's letters.
+        assert_eq!(fuzzy_match("scope scope", "Clear scope"), None);
+        // A repeated prefix still matches when it has letters of its own:
+        // each word's best alignment alone is the prefix, so the typed
+        // order (space included) supplies the distinct characters.
+        let (_, indices) = fuzzy_match("tile til", "tile tiling").unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn colliding_words_are_placed_again_on_free_characters() {
+        // Both words' best alignment is the prefix, and reversed they are
+        // no subsequence (no `e` after "til" in "tiling"): the longer word
+        // keeps the prefix and `til` moves to "tiling".
+        let (_, indices) = fuzzy_match("til tile", "tile tiling").unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3, 5, 6, 7]);
+        // The single-letter word takes the second `e` once "clear" has
+        // claimed the first.
+        let (_, indices) = fuzzy_match("e clear", "Clear scope").unwrap();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 10]);
+    }
+
     // -- fuzzy_match indices ----------------------------------------------
 
     #[test]
@@ -975,6 +1126,21 @@ mod tests {
             .map(|(item, _)| item.title())
             .collect();
         assert_eq!(titles, vec!["Close tile".to_string()]);
+    }
+
+    #[test]
+    fn query_words_in_either_order_find_the_action() {
+        let mut state = PaletteState::new(vec![
+            action("frame::scope_clear", "Clear scope", "Frame", None),
+            action("frame::scope_edit", "Edit scope", "Frame", None),
+        ]);
+        state.set_query("scope clear");
+        let titles: Vec<String> = state
+            .filtered()
+            .iter()
+            .map(|(item, _)| item.title())
+            .collect();
+        assert_eq!(titles, vec!["Clear scope".to_string()]);
     }
 
     #[test]
@@ -1560,7 +1726,7 @@ mod tests {
         let cloned = state.filtered();
         let rows: Vec<_> = state.rows().collect();
         assert_eq!(rows.len(), cloned.len());
-        for ((item, indices), (row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
+        for ((item, indices), (_, row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
             assert_eq!(*item, *row_item);
             assert_eq!(indices, row_indices);
             assert_eq!(*title_len, item.title().chars().count());

@@ -1,34 +1,16 @@
-//! The line-numbers setting (`[ui] line_numbers`, user ruling
-//! 2026-09-11) and the pure numbering rule a tile paints from. Mirrors
-//! `vimfind::FindStyle`'s shape exactly — `ALL`/`label`/`config_value`/
-//! `from_value`/`from_config` plus a `persist_to_user_config` sibling —
-//! so the settings row, startup resolution and hot reload ride the paths
-//! font size, find style and the add direction already do.
+//! The `[ui] line_numbers` setting and the numbering rule tiles paint.
 //!
-//! ## How it reaches a tile
+//! The shell owns the setting and publishes [`UiSettings`] at startup and
+//! on changes from settings, `ui::line_numbers_cycle`, or config reload.
+//! Modules read it with `cx.try_global::<UiSettings>()` and subscribe with
+//! `cx.observe_global::<UiSettings>()`; they do not access `ShellView`.
+//! This global carries UI changes independently of document reload events.
 //!
-//! The shell owns the setting (`ShellView::line_numbers`) and publishes
-//! it as the [`UiSettings`] gpui global, set at startup and on every
-//! change (the settings row, `ui::line_numbers_cycle`, a config hot
-//! reload). A module reads it through `cx.try_global::<UiSettings>()`
-//! and observes it with `cx.observe_global::<UiSettings>` — the module
-//! contract forbids a module reaching into `ShellView`, and the
-//! `ConfigReloaded` route the blotter's `find_style` rides only fires for
-//! a `views`/`dimensions` reload, which a settings-row change is not. A
-//! global is what gpui offers for exactly this: app-wide state many
-//! entities read and a few write. Nothing else in this crate is a global
-//! today; keep it that way unless the state is genuinely app-wide and
-//! module-visible, as this one is.
-//!
-//! ## Numbering
-//!
-//! [`gutter_number`] is the whole rule: `on` is the 1-based visible-row
-//! index (the same index `12G` jumps to), `rel` is the distance from the
-//! cursor row with the cursor row itself showing its absolute number —
-//! vim's `number relativenumber` hybrid, so `NG` and `Nj`/`Nk` can both
-//! be read straight off the gutter. Numbers count *visible* rows: what
-//! the tile shows after grouping, expansion and any narrowing, never the
-//! dataset's own row ids.
+//! [`gutter_number`] counts visible rows after grouping, expansion, and
+//! narrowing. `on` shows the one-based row index used by `NG`; `rel` shows
+//! distance from the cursor except on the cursor row, which retains its
+//! absolute number. This lets both absolute and relative motion be read
+//! from the gutter.
 
 use std::path::Path;
 
@@ -225,7 +207,7 @@ mod tests {
 
     #[test]
     fn relative_shows_the_absolute_number_on_the_cursor_row() {
-        // The hybrid (`number relativenumber`), by ruling: never a `0`.
+        // The cursor row keeps its absolute number, never `0`.
         assert_eq!(gutter_number(LineNumbers::Relative, 5, 5), Some(6));
         assert_eq!(gutter_number(LineNumbers::Relative, 0, 0), Some(1));
     }

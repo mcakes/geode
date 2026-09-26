@@ -1,14 +1,12 @@
-//! The module-hosting contract. A tile is
-//! still a `TileId`; what lives in it is a [`TileOccupant`] the shell
-//! created through a [`ModuleFactory`] from the app's [`ModuleRoster`].
+//! The contract between the shell and hosted modules. A [`TileOccupant`]
+//! contains the view and content for a `TileId`, created by a [`ModuleFactory`]
+//! registered in the app's [`ModuleRoster`].
 //!
-//! Nothing here names `geode-data`. The factory gets shell-side handles
-//! only — the tile id and the frame entity — and a module that needs
-//! data carries its own handle as a field of its factory, built in
-//! `geode-app` where both sides meet. The one data type that
-//! crosses is [`Delivery`], which the shell routes to the tile whose id
-//! is `Delivery::key()` — or, where that answers `None`, to every tile
-//! on screen.
+//! Factories receive shell-side handles: tile id, frame, and diagnostics.
+//! A factory needing data carries its own handle, supplied by `geode-app`.
+//! This crate does not depend on `geode-data`; asynchronous outcomes cross
+//! through [`Delivery`]. Keyed outcomes go to their tile, while keyless
+//! outcomes go to every visible occupant.
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::diagnostics::Diagnostics;
@@ -24,7 +22,7 @@ use geode_core::series::SeriesOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
 
-/// What the `/` line tells the occupant (§3.4).
+/// Changes, commits, and cancellation from the tile's `/` find line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FindEvent {
     Changed(String),
@@ -193,93 +191,63 @@ pub trait TileContent {
         window: &mut Window,
         cx: &mut App,
     ) -> bool;
-    /// A `:` line, without the colon. `Err` is shown inline on the line.
+    /// Execute a tile-local `:` command, without the colon. `Err` is displayed
+    /// inline. Commands may change this tile's query, presentation, cursor, or
+    /// draft; shared frame, configuration, shell, and log-level changes belong
+    /// to palette actions.
     ///
-    /// A `:` line changes only this tile: what it queries for, how it paints,
-    /// its cursor, or its draft. It never writes the frame (scope, grouping,
-    /// as-of, slots), the shell, the config or the log levels, and never
-    /// changes what another tile shows. A frame- or app-wide effect is a
-    /// palette action instead (the palette is global or local per
-    /// action). Every module with a vocabulary keeps a sweep test (an
-    /// `every_colon_command_leaves_…` test) that runs each word and
-    /// checks, of the channels its own vocabulary could reach, that the
-    /// frame's `scope`/`grouping`/`as_of` counters, `Frame::
-    /// take_pending_persist`, `Frame::take_pending_scope_persist` and
-    /// the `Diagnostics` entity's pending level/overlay requests are all
-    /// untouched; a word that used to be frame-wide stays in the parser
-    /// as a REFUSAL whose message names the door.
+    /// Modules with a command vocabulary test that every command leaves shared
+    /// frame counters, pending persistence, and diagnostics requests untouched.
+    /// Unsupported shared-state commands return an error naming the appropriate
+    /// palette action.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
-    /// Candidates for the word under `cursor` on a `:` line. The shell
-    /// ranks and shows them; the occupant only knows its vocabulary.
-    /// Each candidate is the bare WORD for that position (`ingest`,
-    /// never `level ingest`): the shell splices the accepted one into
-    /// the line in place of the word under the cursor
-    /// (`commandline::accept`), so a whole-line candidate doubles the
-    /// line (`level level ingest` — seen on a display 2026-09-08). Return
-    /// the position's whole vocabulary, unfiltered; the shell's ranking
-    /// narrows it, and Enter refuses a partial word that ranks more than
-    /// one candidate rather than guessing.
+    /// Return the unfiltered vocabulary for the word under `cursor` on a
+    /// `:` line. Each candidate is a bare word, such as `ingest`, because the
+    /// shell replaces only that word through `commandline::accept`. A full-line
+    /// candidate would duplicate the surrounding words.
+    ///
+    /// The shell ranks candidates and rejects an ambiguous partial word on
+    /// Enter instead of choosing arbitrarily.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
-    /// What the shell routed to this tile (§5.1): a query result today,
-    /// with more kinds to come through the same door (Part 4 adds a
-    /// document upload's own outcome). [`Delivery`] is an enum rather
-    /// than a second trait method precisely so this `match` — and every
-    /// other occupant's — refuses to compile the moment a new variant
-    /// lands, until it has an arm for it; silently ignoring a delivery
-    /// kind is not an option a wildcard arm could reach for.
+    /// Handle an asynchronous outcome routed to this tile. Match [`Delivery`]
+    /// exhaustively so adding an outcome requires every occupant to handle or
+    /// explicitly ignore it.
     fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App);
-    /// Hidden tiles may drop subscriptions; shown tiles requery if stale.
+    /// Set whether this tile is visible. Hidden tiles may drop subscriptions;
+    /// shown tiles requery if stale.
     ///
-    /// **Contract (I2, final review):** an occupant is told its
-    /// visibility on the first render after `ModuleFactory::create`
-    /// returns it, whatever that visibility is — `ShellView::
-    /// ensure_occupants` calls this once, immediately, with the tile's
-    /// membership in the active workspace's visible set. Until that call
-    /// arrives, a fresh occupant must treat itself as hidden: it is
-    /// created for every tile in every workspace and dock on first
-    /// render (`fill_all_tiles`), most of them off-screen, and holding
-    /// live subscriptions for all of them until the shell speaks would be
-    /// exactly the resource leak this method exists to prevent.
+    /// A fresh occupant must assume it is hidden until the first call.
+    /// `ShellView::ensure_occupants` creates occupants across workspaces and
+    /// docks, then announces visibility on the first render after creation.
+    /// Subscribing before that announcement would retain resources for tiles
+    /// that may never appear on screen.
     fn set_visible(&self, visible: bool, cx: &mut App);
-    /// This tile's place in its stack, or `None` when it is not a member
-    /// (tile-stacks spec §5.1). Delivered by `ShellView::ensure_occupants`
-    /// on the first render after creation and on every change of
-    /// `(index, len)` thereafter, never on an unrelated render. The
-    /// module paints `stack.text` first in its header while `len > 1` and
-    /// calls `open_list` from the chip's click. Required, not defaulted:
-    /// a module that forgot would ship a stack a trader cannot see.
+    /// Set this tile's stack position, or `None` outside a stack.
+    /// `ShellView::ensure_occupants` calls this after creation and whenever
+    /// `(index, len)` changes. Modules paint the marker first in their header
+    /// when `len > 1` and open the member list when it is clicked.
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App);
-    /// The row this tile paints as in the stack list (spec §5.2): the
+    /// The row this tile paints as in the stack list: the
     /// same words its own header leads with (`risk · book, lhu`,
     /// `CVI · SPX.Z`, `diagnostics · log`).
     fn title(&self, cx: &App) -> SharedString;
-    /// State for `session.toml` (§3.5); stored opaquely by the shell.
+    /// State for `session.toml`; stored opaquely by the shell.
     fn serialize(&self, cx: &App) -> toml::Table;
-    /// Does one of THIS occupant's own text inputs hold window focus right
-    /// now — its open cell editor, its picker's field? Default `false`:
-    /// an occupant with no input of its own (the blotter, the
-    /// diagnostics tile, the placeholder) never holds the keyboard.
+    /// Whether an input owned by this occupant currently holds window focus.
+    /// The default is `false` for occupants without text inputs.
     ///
-    /// The ownership half of the shell's insert-focus predicate
-    /// (`ShellView::occupant_insert_stack`, user ruling 2026-09-17 and its
-    /// review's C-1): a module reports `mode == insert` while its editor
-    /// is OPEN, and the keyboard's own rule (`note_keyboard_focus_move`)
-    /// deliberately leaves an editor open when tile focus moves away — so
-    /// "the focused tile claims insert" and "the focused handle is this
-    /// tile's" are two different facts, and the shell must read the
-    /// second from the module itself. Answered off the focus handles, not
-    /// off the mode: `focus_handle(cx).is_focused(window)` on each input
-    /// the occupant owns.
+    /// An open editor may report insert mode while focus belongs to another
+    /// tile. The shell's `occupant_insert_stack` therefore needs this ownership
+    /// check as well as the mode. Implement it by testing each owned input's
+    /// `focus_handle(cx).is_focused(window)`, not by reading the editor mode.
     fn holds_focus(&self, _window: &Window, _cx: &App) -> bool {
         false
     }
-    /// The last [`StackHandle`] this occupant was told about (spec
-    /// §5.1's `set_stack`), for a test that has no other path to it —
-    /// `TileOccupant::content` is a `Box<dyn TileContent>`, so a test
-    /// cannot read a module's own field even when the module is a test
-    /// fixture. Default `None`; [`recording::RecordingContent`] is the
-    /// one override, returning its stored handle.
+    /// Expose the last stack handle to hosting tests. Content is stored as
+    /// `Box<dyn TileContent>`, so tests cannot access the concrete occupant's
+    /// fields. Defaults to `None`; [`recording::RecordingContent`] returns its
+    /// stored handle.
     #[cfg(any(test, feature = "test-support"))]
     fn stack_handle_for_test(&self) -> Option<StackHandle> {
         None
@@ -298,49 +266,31 @@ pub trait ModuleFactory {
     /// Runs once, before the keymap builds — `build_keymap` drops any
     /// binding whose action is unregistered.
     fn register_actions(&self, registry: &mut ActionRegistry);
-    /// The key contexts this module's [`TileContent::key_context`] can
-    /// name (`["blotter"]`).
+    /// The contexts this module's [`TileContent::key_context`] can name.
+    /// Defaults to its kind; override when several kinds share a vocabulary,
+    /// such as market-data kinds using the `marketdata` context.
     ///
-    /// **A fragment can never shadow a shell binding or another module's**
-    /// — and the rule that delivers it is stated here rather than left
-    /// implicit: a fragment binding's predicate must be a plain
-    /// CONJUNCTION (`ctx`, or `ctx && key == value`) whose FIRST
-    /// identifier is one of these contexts, or
-    /// [`crate::keymap::fragments::check_fragment`] drops it with an error
-    /// diagnostic. With `&&` as the only connective, naming one of these
-    /// makes the whole predicate require that context; `!`, `||` and `(`
-    /// are refused anywhere in the text precisely because they break that
-    /// implication (`blotter || workspace` fires everywhere,
-    /// `(!blotter)` everywhere but the blotter).
+    /// [`crate::keymap::fragments::check_fragment`] requires each default
+    /// binding's predicate to be a plain conjunction beginning with one of
+    /// these contexts. `!`, `||`, and parentheses are rejected because they
+    /// could let the binding match outside the module's context.
     ///
-    /// Defaults to the kind, which is what every module whose context and
-    /// kind are the same word wants — but it is a separate answer on
-    /// purpose, because the two names are genuinely independent: the
-    /// market-data panel is kind `cvi` (one roster entry per document
-    /// kind) and context `marketdata` (one vocabulary shared by all of
-    /// them). A `Vec` rather than the `&'static [&'static str]` the plan
-    /// sketched: a default body has only `self.kind()` to work with, and
-    /// a `&'static` slice cannot be built from a value without leaking.
-    /// Called once per factory at startup and on each reload, so the
-    /// allocation is not on any hot path.
+    /// Returning a `Vec` lets the default use `self.kind()` without leaking a
+    /// static slice. The app validates fragments at startup; reload reuses
+    /// those validated documents without calling the factories again.
     fn contexts(&self) -> Vec<&'static str> {
         vec![self.kind()]
     }
-    /// This module's default bindings, as keymap TOML (`[[bindings]]`
-    /// tables only) — the module's own copy of what used to live in the
-    /// shell's `BUILTIN_KEYMAP`. `None` for a module with no keys of its
-    /// own (the placeholder). See [`crate::keymap::fragments`] for where
-    /// it sits in the layer order and why.
+    /// Default bindings as keymap TOML containing only `[[bindings]]` tables.
+    /// `None` for a module without its own bindings. See
+    /// [`crate::keymap::fragments`] for validation and layer order.
     fn default_keymap(&self) -> Option<&'static str> {
         None
     }
-    /// Build a fresh occupant for `tile`. **Contract (I2, final
-    /// review):** the occupant does not yet know whether it is on
-    /// screen — `TileContent::set_visible`'s own doc comment states the
-    /// other half: the shell announces that on the first render after
-    /// this call returns. A factory whose occupant does anything
-    /// screen-dependent (subscribing, requerying) before that first
-    /// `set_visible` call should assume it is hidden.
+    /// Build an occupant for `tile`, optionally restoring its opaque state.
+    /// The occupant must assume it is hidden until the shell calls
+    /// [`TileContent::set_visible`] on the first render after creation. Defer
+    /// screen-dependent subscriptions and queries until that announcement.
     fn create(
         &self,
         tile: TileId,
@@ -352,12 +302,9 @@ pub trait ModuleFactory {
     ) -> TileOccupant;
 }
 
-/// The only place the app knows which modules exist (§9.1).
-///
-/// There is no default kind (spec 2026-09-08 add-tile §7.1): a tile is
-/// added by naming the kind it should host, and a tile nothing claims
-/// paints the [`placeholder`] instead of silently becoming whichever
-/// module a config key happened to name.
+/// The app's registered module factories. Adding a tile requires an
+/// explicit kind. If no factory claims that kind, the shell paints a
+/// [`placeholder`] with a recovery hint instead of selecting another module.
 #[derive(Default)]
 pub struct ModuleRoster {
     factories: Vec<Box<dyn ModuleFactory>>,
@@ -430,15 +377,9 @@ pub mod placeholder {
     use gpui::{Context, Render, div};
     use gpui_component::{ActiveTheme as _, v_flex};
 
-    /// The kind string a placeholder occupant's `TileOccupant::kind`
-    /// carries (Phase 4b Task 1 fix round 1, MIN-7) — named here, next
-    /// to the factory that is its one source of truth, so every other
-    /// site that must recognize a placeholder occupant (`PlaceholderFactory
-    /// ::kind`, `PlaceholderFactory::create`'s `TileOccupant`, and
-    /// `shell::occupants`'s two `visible_tile_keys`/`current_tiles`
-    /// filters) names this constant instead of repeating the bare string
-    /// literal `"placeholder"` — a rename of one becomes a compile error
-    /// everywhere else instead of a silent behaviour change.
+    /// The kind used by the placeholder factory and occupant. Shell filters
+    /// use this constant to recognize placeholders, keeping their identity
+    /// consistent with the factory that creates them.
     pub const PLACEHOLDER_KIND: &str = "placeholder";
 
     pub struct PlaceholderFactory;
@@ -452,7 +393,7 @@ pub mod placeholder {
         fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = cx.theme();
             // The marker rides above the hint through the one builder
-            // every module uses (`StackHandle::marker`, spec §5.1).
+            // every module uses (`StackHandle::marker`).
             let content = v_flex()
                 .items_center()
                 .justify_center()
@@ -634,7 +575,7 @@ pub mod recording {
     struct RecordingView {
         tile: TileId,
         focus: FocusHandle,
-        /// The tile-owned `Input` of insert mode (market-data spec §8.6),
+        /// The tile-owned `Input` of insert mode,
         /// standing in for the panel's cell editor: created and focused
         /// on `<kind>::edit`, dropped on `<kind>::commit`/`::cancel`. The
         /// VIEW holds it, not the content, because it has to be rendered
@@ -666,20 +607,13 @@ pub mod recording {
         /// `InputState` somewhere that is PAINTED, and the view is the only
         /// thing the shell renders.
         view: Entity<RecordingView>,
-        /// The insert-mode toggle (market-data spec §8.6): `true` while
-        /// THIS tile's view owns a focused `InputState` — the fixture's
-        /// stand-in for the panel's cell editor. [`TileContent::
-        /// key_context`] reports `mode == insert` instead of `mode ==
-        /// normal` while it is set, which is the whole of what the shell's
-        /// insert branch keys on. Flipped in `dispatch` (`<kind>::edit`
-        /// sets it, `<kind>::commit` and `<kind>::cancel` clear it), so a
-        /// test drives it through a real keypress rather than poking at
-        /// it. **Per tile, never per factory** (2026-09-17): a real module's
-        /// editor belongs to one tile, and the shell's insert-focus
-        /// predicate (`occupant_insert_stack`) reads the FOCUSED tile's
-        /// context — a flag shared across a factory's tiles made a second
-        /// tile claim insert mode for an editor it did not own, which is
-        /// a state no real module can reach.
+        /// Whether this tile owns an open editor. `key_context` reports insert
+        /// mode while set; `dispatch` opens it on `<kind>::edit` and closes it
+        /// on `<kind>::commit` or `<kind>::cancel`.
+        ///
+        /// Keep this flag per tile: the shell inspects the focused tile's context,
+        /// and another tile's editor must not put it into insert mode. Input focus
+        /// is checked separately by `holds_focus`.
         insert: Cell<bool>,
         /// Shared with [`RecordingFactory::input`]; see it for what a test
         /// reads it for.
@@ -699,7 +633,7 @@ pub mod recording {
             };
             // `counts()` stays on in insert mode deliberately: the shell's
             // insert branch, not this context, is what must stop a typed
-            // `3` from becoming a count prefix (spec §8.6), and a fixture
+            // `3` from becoming a count prefix, and a fixture
             // that quietly dropped the flag would let a shell with no
             // branch at all pass that test.
             KeyContext::new("rec").pair("mode", mode).counts()
@@ -733,7 +667,7 @@ pub mod recording {
                     self.insert.set(false);
                     // Give the keyboard up, then drop the input — in that
                     // order, and BOTH halves (a real panel's cell editor
-                    // must do the same, market-data spec §8.6):
+                    // must do the same):
                     //
                     // `blur` is what the shell's dropped-focus net
                     // (`render`'s `window.focused(cx).is_none()`) is
@@ -835,10 +769,8 @@ pub mod recording {
         fn serialize(&self, _: &App) -> toml::Table {
             self.state.borrow().clone()
         }
-        /// The panel's own answer, off THIS tile's view's own input —
-        /// never the factory-shared `input` cell, which holds whichever
-        /// tile's editor opened last and would make a tile whose editor
-        /// was abandoned (I-3) claim another tile's field as its own.
+        /// Check this tile's input. The factory-shared input cell points to the
+        /// most recently opened editor and could belong to another tile.
         fn holds_focus(&self, window: &Window, cx: &App) -> bool {
             self.view
                 .read(cx)
@@ -866,7 +798,7 @@ pub mod recording {
             self.fragment
         }
         /// `noop`, plus the four verbs a keymap fragment needs to drive
-        /// insert mode through real keypresses (market-data spec §8.6):
+        /// insert mode through real keypresses:
         /// `edit` opens the tile-owned input, `commit`/`cancel` drop it,
         /// and `down` is the normal-mode motion that must NOT fire while a
         /// trader is typing. Registered here because `build_keymap` drops
@@ -931,9 +863,8 @@ mod tests {
 
     #[test]
     fn stack_handle_prepares_its_text_once() {
-        // `open_list` needs a `Window`, so the closure itself is
-        // exercised in `shell/tests/stacks.rs` (whole-branch review,
-        // Minor 6: this test never ran it — the name said it did).
+        // This unit test checks prepared text. `open_list` needs a window;
+        // `shell/tests/stacks.rs` covers opening the member list.
         let h = StackHandle::new(2, 4, |_w, _cx| {});
         assert_eq!(h.index, 2);
         assert_eq!(h.len, 4);

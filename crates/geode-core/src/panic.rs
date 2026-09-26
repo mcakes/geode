@@ -1,22 +1,11 @@
-//! Panic containment tracking (Phase 4b Task 6 fix round 1, MAJ-1): a
-//! thread-local marker set while code runs inside one of this
-//! codebase's own `catch_unwind` boundaries (the ingest load, the
-//! ingest runner's pop-time catalog recheck, a discovery poll, a query
-//! pool worker), read by the process panic hook
-//! (`geode_app::crash::install_panic_hook`) to tell a *contained*
-//! panic — one of those boundaries doing exactly what it is for — from
-//! an *uncontained* one that is genuinely taking the process down. A
-//! contained panic is not a crash: the hook logs it and writes no
-//! file.
+//! Thread-local tracking for code inside a panic-containment boundary.
+//! `contained` marks a call; it does not catch a panic itself. Callers pair it
+//! with `catch_unwind`. The app's panic hook reads the marker to log contained
+//! panics without writing a crash file.
 //!
-//! A depth counter, not a bool: `contained` calls can nest (a boundary
-//! calling into code that itself opens another one), and only the
-//! outermost guard's drop should clear the marker. Thread-local because
-//! a process panic hook always runs on the panicking thread itself
-//! (Rust panic semantics: the hook fires *before* unwinding begins, on
-//! the same thread `panic!` was called from), so a guard entered on the
-//! ingest thread must stay invisible to a panic on, say, the query
-//! pool's own thread.
+//! The hook runs on the panicking thread before unwinding drops the guard, so
+//! it can observe the marker. A depth counter preserves it across nested calls;
+//! the outermost guard clears it on return or unwind. Other threads are unaffected.
 
 use std::cell::Cell;
 
@@ -90,15 +79,9 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// The property the panic hook's decision actually depends on
-    /// (fix round 1, MAJ-1's own instruction: "test the decision
-    /// function, not the global hook" — no `std::panic::set_hook` here,
-    /// just the same `contained`/`catch_unwind` pairing every real
-    /// boundary uses): a panic raised inside `contained`, caught by
-    /// `catch_unwind` the way this codebase's four boundaries wrap it,
-    /// is visible to `is_contained()` for as long as it is unwinding
-    /// through the guard's frame — which is exactly when the panic hook
-    /// runs — and clears once `catch_unwind` has returned.
+    /// A caught panic clears the marker after unwinding. This exercises the
+    /// `contained`/`catch_unwind` pairing without replacing the process-wide hook;
+    /// the separate scope test checks the marker while the call is active.
     #[test]
     fn a_panic_inside_contained_stays_visible_through_the_unwind_and_clears_after() {
         assert!(!is_contained());

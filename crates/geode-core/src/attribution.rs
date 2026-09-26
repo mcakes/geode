@@ -1,5 +1,5 @@
 //! Whether a measure can be summed at a given grouping level, and how a
-//! scope predicate reached it (spec §6.3).
+//! scope predicate reached it.
 //!
 //! Both are decidable from the schema alone — no data is consulted — which
 //! is why they live in core beside the grain vocabulary rather than in the
@@ -48,8 +48,8 @@ pub enum ScopeSemantics {
     /// "positions that have SPX risk", not "the SPX share".
     SemiJoined { dimensions: Vec<String> },
     /// Some scope selection named a dimension this dataset does not have
-    /// at all, so it was dropped for this query rather than applied
-    /// (market-data spec §3.4). Weaker than `SemiJoined`: a semi-join
+    /// at all, so it was dropped for this query rather than applied.
+    /// Weaker than `SemiJoined`: a semi-join
     /// still narrowed the rows, a dropped selection did not.
     NotApplicable { dimensions: Vec<String> },
 }
@@ -120,7 +120,7 @@ pub fn attribution_of(
     grouping: &[String],
     dims: &DerivedDimensions,
 ) -> Attribution {
-    // Dimension keys plus carried dimensions (spec §3.3): a carried
+    // Dimension keys plus carried dimensions: a carried
     // dimension is functionally determined by this grain's key, so
     // grouping by it partitions the rows exactly as a key does. The pair
     // grain's canonicalised underlyings are still excluded, for the
@@ -240,10 +240,8 @@ IDX_EXO_EU = ["BK000", "BK001"]
         attribution_of(&dataset(), grain, &g, &dims())
     }
 
-    /// The Phase 4 §3.3 carried-dimension fixture (`currency` carried by
-    /// the instrument grain), duplicated from `schema::mod::tests::CARRIED`
-    /// — attribution and schema parsing are tested separately even though
-    /// they share a fixture shape.
+    /// An instrument-grain `currency` dimension. Attribution and schema parsing
+    /// use independent fixtures with the same carried-dimension relationship.
     fn carried_dataset() -> DatasetSpec {
         let text = r#"
 [risk.columns.book]
@@ -287,7 +285,7 @@ grain = "underlying"
 
     #[test]
     fn the_specs_worked_example_reads_additive_blank_determined() {
-        // spec §6.3: grouping lhu > underlying > position, trading PnL,
+        // Grouping lhu > underlying > position, trading PnL,
         // which is position grain. Each level is a prefix of the grouping.
         assert_eq!(
             attribution(Grain::Position, &["lhu"]),
@@ -324,7 +322,7 @@ grain = "underlying"
 
     #[test]
     fn a_derived_dimension_is_additive_through_its_source_column() {
-        // desk is not a key column, but book determines it (spec §6.8), so
+        // desk is not a key column, but book determines it, so
         // every position sits in exactly one desk.
         assert_eq!(
             attribution(Grain::Position, &["desk"]),
@@ -362,7 +360,7 @@ grain = "underlying"
 
     #[test]
     fn cross_gamma_is_not_attributable_at_an_underlying_level_grouping() {
-        // spec §6.3: the pair is canonicalized, so an SPX-RUT pair would
+        // The pair is canonicalized, so an SPX-RUT pair would
         // land under whichever name sorts first — arbitrary. Additive at
         // or coarser than instrument, blank below.
         assert_eq!(

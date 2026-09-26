@@ -1,9 +1,6 @@
-//! Value types shared by both ends of the query path (spec §5.1, §2.7).
-//!
-//! The shell holds the frame's as-of and routes query outcomes to tiles;
-//! the data layer produces them. Those two crates may never depend on
-//! each other (CLAUDE.md), so what they exchange sits below both — the
-//! same reason `Scope` lives here.
+//! Requests and outcomes shared by the shell, feature modules, and data layer.
+//! The shell owns frame context and routes answers; the data layer executes
+//! requests. Shared types keep those crates independent of each other.
 
 use crate::scope::Scope;
 use crate::snapshot::Snapshot;
@@ -11,7 +8,7 @@ use chrono::{DateTime, NaiveTime, Utc};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Which point in time a query reads (foundation §4.5).
+/// Which point in time a query reads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AsOf {
     #[default]
@@ -25,9 +22,10 @@ impl AsOf {
     }
 }
 
-/// The coalescing key for queries: one in-flight query per key, latest
-/// wins (spec §2.4). A tile uses its tile id, so two tiles showing one
-/// view never supersede each other.
+/// Identity used to coalesce pending queries and route outcomes. New requests
+/// supersede older pending requests for the same key; running work may still
+/// answer, so callers also check tags. Tiles use their IDs to avoid superseding
+/// another tile's request for the same view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueryKey(pub u64);
 
@@ -35,33 +33,28 @@ pub struct QueryKey(pub u64);
 #[derive(Debug)]
 pub struct QueryOutcome {
     pub key: QueryKey,
-    /// Echoed from the request. The submitter keeps its own counter and
-    /// drops an outcome whose tag is older than its latest submission, so
-    /// "a stale result is never rendered" (§7.3) holds at both ends.
+    /// Echoed from the request. The submitter compares it with its current tag
+    /// to reject results from superseded submissions.
     pub tag: u64,
     /// `Err` is the failure text; the tile keeps its last good snapshot.
     pub snapshot: Result<Arc<Snapshot>, String>,
-    /// When the submitter asked, for the §7.1 timing readout.
+    /// Submission time used to measure request latency.
     pub submitted: Instant,
 }
 
-/// The picker's distinct-values request (spec §3.4): per value, how many
-/// rows the frame's scope — with this column's own selection removed by
-/// the caller — would leave, across every dataset that carries the
-/// column.
+/// Request value counts across datasets carrying `column`, under the frame's
+/// scope with that column's selection removed by the caller. Expressions and
+/// other selections still constrain the counts.
 ///
-/// `PartialEq` (not `Eq` — `Scope` itself stops at `PartialEq`, since a
-/// scope's expression can carry a float literal) so `ShellEvent::
-/// DistinctRequested(DistinctParams)` (`geode_shell::shell`) can still be
-/// compared in a test's recorded-events `Vec` the way every other
-/// `ShellEvent` variant already is.
+/// `PartialEq` supports request comparisons; `Scope` contains floating-point
+/// expression literals and therefore does not implement `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DistinctParams {
     pub key: QueryKey,
     pub tag: u64,
     pub column: String,
     /// The frame's scope with this column's own selection removed —
-    /// the caller does the removal (spec §3.4).
+    /// the caller does the removal.
     pub scope: Scope,
     pub as_of: AsOf,
 }
@@ -76,11 +69,9 @@ pub struct DistinctOutcome {
     pub values: Result<Vec<(String, u64)>, String>,
 }
 
-/// The diagnostics tile's request: what the database holds (Phase 4b
-/// §4.5). Built on the data service thread, from the `generations`
-/// summary table, `file_generations`, and DuckDB's own introspection
-/// functions — never a data-table scan (`geode_data::query::catalog::
-/// build_catalog`'s doc comment says why).
+/// Request stored datasets, generations, and resource metrics for diagnostics.
+/// The data service reads summary tables and database introspection functions,
+/// avoiding scans of the stored payload tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogParams {
     pub key: QueryKey,
@@ -88,16 +79,9 @@ pub struct CatalogParams {
     pub as_of: AsOf,
 }
 
-/// A document request (market-data spec §7): one document, named by its
-/// full key, live or as-of. Unlike [`QueryParams`] there is no view, no
-/// grouping, and no scope — the key names the one row set a document
-/// dataset's key identifies, and `compile_document`
-/// (`geode_data::query::document`) is the whole compiler for it.
-///
-/// `PartialEq` rather than `Eq`, matching `QueryParams`/`DistinctParams`:
-/// `AsOf` carries a `DateTime<Utc>`, not a float, so this could derive
-/// `Eq` too, but there is no caller that needs it and matching its
-/// siblings' bound keeps the three requests looking alike.
+/// Request one document by its full key, live or at a historical time.
+/// Document reads have no view, grouping, or scope. The data layer's document
+/// compiler selects the row set identified by the dataset and key tuple.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DocumentParams {
     pub key: QueryKey,
@@ -123,23 +107,14 @@ pub struct CatalogOutcome {
 /// What the database holds, as of the moment it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CatalogSnapshot {
-    /// The `AsOf` this snapshot's `resolved_gen` markers were resolved
-    /// under (MIN-5, final review) — carried so a reader can tell a
-    /// snapshot built under a stale as-of apart from the frame's current
-    /// one, rather than trusting `resolved_gen` at face value the moment
-    /// the frame's as-of has moved on but a fresh `CatalogSnapshot`
-    /// hasn't arrived yet.
+    /// The time context used to resolve `resolved_gen`. Consumers must compare
+    /// it with the current frame before showing historical-generation markers:
+    /// a fresh frame context can precede its matching catalog answer.
     pub as_of: AsOf,
     pub datasets: Vec<DatasetCatalog>,
     /// `sum(block_size * total_blocks)` from `pragma_database_size()`.
-    ///
-    /// **Reflects the last checkpoint, not the current WAL.** DuckDB
-    /// only counts a block toward `total_blocks` once it has reached
-    /// disk; `store::retention::sweep`'s own `checkpoint` call is what
-    /// moves this number, not every write. Right after a burst of
-    /// uncommitted ingest this can read `0` — indistinguishable from a
-    /// genuinely empty database — which is the honest answer to "what
-    /// is on disk right now", not a bug in the read.
+    /// Reports checkpointed database blocks, excluding the current write-ahead log.
+    /// Zero can mean an empty database or writes not yet checkpointed.
     pub database_bytes: u64,
     /// `sum(used_blocks)` from the same.
     pub used_blocks: u64,
@@ -156,7 +131,7 @@ pub struct CatalogSnapshot {
     /// `current_setting('threads')`.
     pub threads: u64,
     /// Each fetch source that answered a catalogue, with its identities
-    /// sorted, for the picker's typeahead (timeseries spec §5.5). Empty
+    /// sorted, for the picker's typeahead. Empty
     /// for a source that cannot enumerate, and for a build with no fetch
     /// source at all.
     pub identities: Vec<(String, Vec<String>)>,
@@ -166,20 +141,19 @@ pub struct CatalogSnapshot {
 pub struct DatasetCatalog {
     pub name: String,
     pub partitions: Vec<PartitionCatalog>,
-    /// Summed `estimated_size` (spec: a row *estimate*, labelled
-    /// "rows (est.)") over the dataset's live tables at every grain.
+    /// Estimated row count summed over the dataset's live tables at every grain.
+    /// This is an estimate from database introspection, not an exact count.
     pub live_rows: u64,
     /// The same, over the archive tables.
     pub archive_rows: u64,
-    /// Series family only: one row per `(identity, source)` pair, from
-    /// the coverage table (timeseries spec §4.6), never a data-table
-    /// scan. Empty on every other family.
+    /// Series family only: one row per `(identity, source)` pair from the coverage
+    /// table, without scanning series values. Empty for other dataset families.
     pub series: Vec<SeriesCatalog>,
 }
 
-/// One series pair as the coverage table records it (timeseries spec
-/// §4.6): the hull of every span fetched for it, how many fetches wrote
-/// that coverage, and the newest `received_at` among them.
+/// Fetch coverage for one source/identity pair: the hull of recorded spans,
+/// their count, and their newest receive time. The hull can contain gaps;
+/// it does not promise a stored point at every timestamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeriesCatalog {
     pub source: String,
@@ -193,7 +167,7 @@ pub struct SeriesCatalog {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PartitionCatalog {
     pub batch: String,
-    /// `None` is the bookless partition (spec §4.4) — a real partition,
+    /// `None` is the bookless partition — a real partition,
     /// not a missing one.
     pub book: Option<String>,
     pub generations: Vec<GenerationInfo>,
@@ -231,8 +205,8 @@ pub const END_OF_DAY: NaiveTime = match NaiveTime::from_hms_micro_opt(23, 59, 59
 };
 
 /// `HH:MM` or `HH:MM:SS` means today at that time on the trader's
-/// CONFIGURED clock (`clock`; one clock throughout, as-of dialog spec
-/// §6); `YYYY-MM-DD` means the end of that day ([`END_OF_DAY`]);
+/// configured clock (`clock`). `YYYY-MM-DD` means the end of that day
+/// ([`END_OF_DAY`]);
 /// `YYYY-MM-DD HH:MM` or `YYYY-MM-DD HH:MM:SS` means that local instant;
 /// anything else must be RFC 3339. `now` stays UTC; the date-carrying
 /// forms never consult it. A local time that does not exist or is
@@ -409,10 +383,8 @@ mod tests {
         );
     }
 
-    /// Pins the behaviour F1 fixed: `HH:MM`/`HH:MM:SS` resolve on the
-    /// CLOCK's date, not UTC's — computed independently of the parser
-    /// under test. Harness: mutate `parse_as_of`'s `today` derivation
-    /// back to `now.date_naive()` (the old UTC-resolving behaviour).
+    /// Time-only input resolves on the configured clock's date. The expected
+    /// instant is computed independently at a time when UTC and New York dates differ.
     #[test]
     fn as_of_resolves_on_the_clocks_date_not_utcs() {
         use chrono::TimeZone;

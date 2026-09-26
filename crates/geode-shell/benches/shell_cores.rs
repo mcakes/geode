@@ -1,20 +1,13 @@
-//! Criterion benchmarks over the shell's pure cores (spec §7.4): the
-//! per-frame / per-keystroke logic whose budgets PHILOSOPHY.md treats as
-//! contracts. Everything here is pure — no gpui, no window — exercised
-//! through the same public APIs `ShellView` calls per frame (`Tree::layout`,
-//! `divider_strips`, `resolve_drop_target`) or per keystroke
-//! (`Matcher::press`, `PaletteState::set_query`), plus the session
-//! serialization round-trip that runs on the ~500ms background flush.
+//! Criterion benchmarks for layout, divider and drop-zone geometry,
+//! keymap matching, palette filtering, config edits, and session encoding.
+//! They exercise public shell APIs without opening a window.
 //!
-//! Regression gating in CI is deliberately deferred to Phase 2 (see
-//! docs/perf.md); until then these run locally via
-//! `cargo bench -p geode-shell` and compile-check in CI via
-//! `cargo bench --workspace --no-run`.
+//! Run locally with `cargo bench -p geode-shell`. CI checks compilation with
+//! `cargo bench --workspace --no-run`; timings are not a CI regression gate.
+//! See `docs/perf.md` for measurement scope and interpretation.
 //!
-//! Sample sizes / measurement times are trimmed so the whole suite stays
-//! in the tens of seconds — these are microbenchmarks of small pure
-//! functions; criterion's defaults (100 samples, 3s+ per bench) buy no
-//! extra signal at this scale.
+//! Sample sizes and measurement times are reduced to keep this suite of
+//! small-function benchmarks practical to run locally.
 
 use std::hint::black_box;
 use std::time::Duration;
@@ -314,19 +307,11 @@ fn bench_session(c: &mut Criterion) {
     group.finish();
 }
 
-/// What ONE KEYSTROKE in a config dialog costs, and what the debounced
-/// flush behind it costs (Phase 4c §7.1).
-///
-/// The split matters and is the reason both are here. A keystroke
-/// changes the draft, revalidates it, and renders the changed object —
-/// all bounded by the one object being edited. It does **not** merge the
-/// config or run `apply_reload`; those moved onto the 250 ms debounce
-/// with the file write, because `apply_reload` emits `ConfigReloaded` and
-/// every blotter tile requeries on it. `build_keymap` is the largest
-/// thing `apply_reload` does unconditionally, so it is measured here as
-/// the per-flush cost it now is rather than assumed free — it used to run
-/// only on a 500 ms poll, and moving code from a poll into an interactive
-/// path is exactly when "it was already there" stops being an excuse.
+/// Measure interactive config edits separately from the debounced flush.
+/// A keystroke changes and validates one draft; the 250ms flush merges config,
+/// runs `apply_reload`, and writes the file. Reload can emit `ConfigReloaded`
+/// and cause tile requeries, so that work must stay off the keystroke path.
+/// `build_keymap` is measured as part of the flush cost.
 fn bench_config_edit(c: &mut Criterion) {
     let mut group = c.benchmark_group("config_edit");
     group.sample_size(50);

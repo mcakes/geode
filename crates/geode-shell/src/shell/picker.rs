@@ -9,7 +9,8 @@
 //! Enter applies visible pre-ticks or edited ticks. Only an untouched empty
 //! tick set falls back to the highlighted value; if no value is highlighted,
 //! that empty result removes the column constraint. Loading and query errors
-//! do not disable Enter. Row clicks move the highlight; tick clicks toggle.
+//! do not disable Enter. Row clicks move the highlight; a row double-click or
+//! a tick click toggles.
 //!
 //! This dialog is filter-only. Escape from Values discards that stage's query
 //! and ticks and returns to Columns; Escape there closes the modal. Neither
@@ -309,6 +310,9 @@ fn commit_column(
             column: column.clone(),
         };
         p.selected = 0;
+        // `set_value` below emits no change event, so the mirror is reset
+        // here; the column filter would otherwise hide every value.
+        p.query.clear();
     }
     sync_picker_scroll(shell);
     shell.dialog_input.update(cx, |input, cx| {
@@ -559,7 +563,8 @@ fn build_columns(
     for (position, (row_ix, indices)) in matches.iter().enumerate() {
         let p = &shell.pickable[*row_ix];
         let is_selected = position == picker.selected;
-        let mut row = h_flex()
+        let row = h_flex()
+            .id(("picker-column-row", *row_ix))
             .w_full()
             .justify_between()
             .items_center()
@@ -567,11 +572,7 @@ fn build_columns(
             .px_2()
             .py_1()
             .rounded(radius);
-        if is_selected {
-            row = row.bg(row_paint.active).text_color(row_paint.text);
-        } else {
-            row = row.hover(|s| s.bg(row_paint.hover));
-        }
+        let row = listrow::paint_row(row, row_paint, is_selected);
         let datasets = if p.datasets.is_empty() {
             "derived".to_string()
         } else {
@@ -635,7 +636,8 @@ fn build_values(
                         let (value, n) = &values[*idx];
                         let is_ticked = ticked.contains(value);
                         let is_selected = i == selected;
-                        let mut row = h_flex()
+                        let row = h_flex()
+                            .id(("picker-value-row", *idx))
                             .w_full()
                             .justify_between()
                             .items_center()
@@ -643,11 +645,7 @@ fn build_values(
                             .px_2()
                             .py_1()
                             .rounded(radius);
-                        if is_selected {
-                            row = row.bg(row_paint.active).text_color(row_paint.text);
-                        } else {
-                            row = row.hover(|s| s.bg(row_paint.hover));
-                        }
+                        let row = listrow::paint_row(row, row_paint, is_selected);
                         let value_for_tick = value.clone();
                         let tick_entity = entity.clone();
                         let tick = if is_ticked {
@@ -684,11 +682,17 @@ fn build_values(
                         row.child(label)
                             .child(count_el)
                             .debug_selector(move || format!("picker-value-{value_for_selector}"))
-                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                            .on_mouse_down(gpui::MouseButton::Left, move |event, _window, cx| {
                                 entity.update(cx, |shell, cx| {
                                     if let Some(p) = shell.picker.as_mut() {
-                                        // row: select only
+                                        // The first press selects; the second
+                                        // press of a double-click is `tab`.
+                                        // Exactly 2, so a triple-click does
+                                        // not toggle back.
                                         p.selected = i;
+                                        if event.click_count == 2 {
+                                            p.toggle_selected();
+                                        }
                                     }
                                     sync_picker_scroll(shell);
                                     cx.notify();

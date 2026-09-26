@@ -1,9 +1,6 @@
-//! `ShellView`'s `Render` implementation (spec §3): chrome (toolbar, sidebar,
-//! status bar), the tiling tree, dividers, drag ghosts, palette and dialogs.
-//! Split out of `shell/mod.rs` (Phase 3c Task 0) because the one `render`
-//! function was ~1,190 lines, far from the pure cores in `input.rs`,
-//! `commandline_ctl.rs`, `palette_ctl.rs`, `drag.rs` and `occupants.rs` that
-//! it calls into every frame.
+//! Window rendering: toolbar, sidebar, status bar, tiles and docks, drag
+//! feedback, and overlays. Before painting, reconcile occupants, restore
+//! keyboard focus, and discard interactions whose targets are no longer live.
 
 use gpui::prelude::*;
 use gpui::{
@@ -30,16 +27,11 @@ use super::{
     perf_overlay, picker, scope_expr_view, sidebar, stacklist, status, toolbar, whichkey,
 };
 
-/// gpui hover-group name shared by every divider strip (drag-splitters
-/// task): the strip is the group, its inner 2px line is the member that
-/// tints on `group_hover`. One shared name is correct — gpui resolves a
-/// `group_hover` against the *innermost enclosing* group's bounds during
-/// paint, so each strip's line only lights for its own strip (precedent:
-/// gpui-component's `ResizeHandle` shares the name "handle" across every
-/// handle the same way).
+/// Shared hover-group name for divider strips. GPUI resolves each line
+/// against its innermost enclosing group, so only that strip lights up.
 const DIVIDER_GROUP: &str = "divider-strip";
 
-/// Height, in pixels, of the as-of warning stripe (Phase 4a §3.6) painted
+/// Height, in pixels, of the as-of warning stripe painted
 /// directly under the toolbar while the frame is historical.
 const AS_OF_STRIPE_HEIGHT: f32 = 3.0;
 
@@ -60,7 +52,7 @@ pub(super) fn content_area(window: &Window) -> Rect {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Frame-time instrumentation (spec §7.4), first thing so the
+        // Frame-time instrumentation, first thing so the
         // interval is measured from the true top of each render. Records
         // the render-to-render interval — see `crate::perf`'s module doc
         // for exactly what this signal captures (consecutive renders
@@ -80,33 +72,10 @@ impl Render for ShellView {
         }
         self.last_render_started = Some(render_started);
 
-        // Fix-round finding: consume a pending focus restore left by a
-        // background path that closed the palette with no `Window` in hand
-        // (see `pending_focus_restore`'s and `apply_reload`'s own doc
-        // comments for the orphaned-`FocusId` bug this closes). `render`
-        // is the first point downstream that actually has a `&mut Window`
-        // — and the *only* point that will reliably run at all in the
-        // failure state being fixed, since an orphaned focus is exactly
-        // what makes `handle_key_down` stop firing until a mouse click
-        // claims focus elsewhere first. Kept ahead of everything else in
-        // render, per its contract.
-        //
-        // SKIPPED — flag cleared, focus left exactly where it is — while a
-        // tile's occupant ITSELF holds the focused handle in insert mode
-        // (`occupant_holds_insert_focus`, occupants.rs: the focused tile's
-        // occupant answering `TileContent::holds_focus` for the focused
-        // handle — its own input, never a shell surface — AND its context
-        // stack carrying `mode == insert`; user ruling 2026-09-17,
-        // reversing the 2026-09-14 "editing is keyboard-only" ruling —
-        // the ownership half is review C-1's, see the predicate's doc).
-        // Every tile mouse-down re-arms this flag, so without the skip an
-        // editor a module opened from a double-click would lose the
-        // keyboard on the very next frame. A module in insert mode owns
-        // the keyboard, and the shell's chords still dispatch from there
-        // through `handle_key_down`'s insert branch — the same predicate —
-        // so nothing goes dead. The orphaned-focus case this flag was born
-        // for has no occupant claiming `insert`, and the workspace-switch
-        // case lives in `ensure_occupants`, so both stay covered.
+        // Restore focus for deferred paths that lack a `Window`, before any
+        // painting. Preserve a focused tile's own insert-mode input using the
+        // same predicate as key routing, so a mouse-opened editor keeps focus.
+        // Hidden-tile focus is reconciled separately by `ensure_occupants`.
         if self.pending_focus_restore {
             self.pending_focus_restore = false;
             if !self.occupant_holds_insert_focus(window, cx) {
@@ -114,48 +83,16 @@ impl Render for ShellView {
             }
         }
 
-        // The safety net under that flag: a window with NOTHING focused
-        // sends keys nowhere at all, so every shell chord is dead until a
-        // mouse click claims focus somewhere.
-        //
-        // Read the scope narrowly (review finding, Important 1). This
-        // covers exactly one thing: a focused `FocusHandle` that was
-        // actually DROPPED — every clone of it gone, so `Window::focused`
-        // (which resolves the stored id back through the focus map and
-        // refuses a zero-refcount entry — pinned rev's
-        // `FocusHandle::for_id`) reports `None`. In this crate that means
-        // a focus-tracking tile view destroyed while focused, i.e. its
-        // tile CLOSED. It does NOT cover a workspace switch: occupants
-        // are retained for tiles in every workspace (`fill_all_tiles`),
-        // so a switched-away view is unmounted but very much alive,
-        // focus still `Some`, and this branch never fires. That case is
-        // handled where it is actually visible — `ensure_occupants`'s
-        // departed-tile backstop, just below — and the two are
-        // complementary, not redundant.
-        //
-        // The condition is EXACTLY `is_none()`, deliberately: taking
-        // focus is only unambiguously right when nobody has it. Anything
-        // broader — "focus isn't the shell root", say — would yank the
-        // caret out of every live focused element this app has (the
-        // palette's filter, a dialog's `Input`, the scope bar's text
-        // field, a per-tile command line, a focus-tracking occupant that
-        // is still mounted), on every frame, mid-type. `the_focus_net_
-        // leaves_a_live_focused_input_alone` guards that half.
+        // Restore shell focus when no live focus handle remains, such as after
+        // a focused occupant is destroyed. Retained hidden occupants still have
+        // handles and need `ensure_occupants`'s visibility check instead.
+        // Do not reclaim focus from live inputs that legitimately own a caret.
         if window.focused(cx).is_none() {
             self.focus_handle.focus(window, cx);
         }
 
-        // The transient stack-member list's own staleness check (tile-
-        // stacks spec §5.2), the same shape as the command-line one just
-        // below: a list stays open only while its tile IS the workspace's
-        // own focused tile AND still a stack member — a workspace switch,
-        // a directional focus move that leaves the stack, or the stack
-        // collapsing out from under it (its last other member unstacked)
-        // all close it here rather than leaving stale chrome painted over
-        // whatever tile now has focus. Ahead of `ensure_occupants` (not
-        // beside the command-line check below, which needs the rem/
-        // surface arithmetic that follows it): nothing this reads depends
-        // on this render's own occupant reconciliation.
+        // Close a member list when its tile loses workspace focus or leaves
+        // the stack. This check needs no occupant or geometry reconciliation.
         if self.stack_list.as_ref().is_some_and(|l| {
             self.services.workspaces.active().focused_tile() != Some(l.tile)
                 || self
@@ -168,36 +105,15 @@ impl Render for ShellView {
             self.stack_list = None;
         }
 
-        // Create occupants for any tile that lacks one, drop occupants
-        // whose tile is gone, and tell occupants when they enter/leave the
-        // screen (Phase 3 §3.2) — the one place every path that can change
-        // the tile set (split, close, restore, workspace switch) reliably
-        // funnels through with a `Window` in hand.
+        // Reconcile occupants and visibility for every path that changes tiles.
         self.ensure_occupants(window, cx);
 
-        // Cancel an in-flight divider drag when the surface it was
-        // resizing is no longer the one on screen (drag-splitters task):
-        // the palette or a modal opened mid-drag (keyboard stays live
-        // during a drag — ctrl+k works with the button held), a tree tile
-        // went fullscreen (mod+f likewise), or mod+N switched to another
-        // workspace (review fix: the recorded address and bounds belong to
-        // the workspace the drag started in; without this, the next move
-        // would apply them to the new workspace's tree). All of these hide
-        // the dragged boundary, and letting the drag keep mutating an
-        // invisible layout would be a surprise on return. Cancel means
-        // "stop tracking the mouse", NOT "undo": whatever the drag already
-        // applied stays applied and — review fix — still persists like
-        // any resize (`cancel_divider_drag` dirties the session when the
-        // drag had moved; the first cut silently dropped that, leaving a
-        // visible layout the next restore wouldn't reproduce). Same
-        // consume-state-at-the-top-of-render precedent as
-        // `pending_focus_restore` just above: render is the one place
-        // every one of those paths reliably funnels through with the
-        // state fresh.
+        // Stop divider tracking when an overlay, fullscreen, or workspace switch
+        // hides its boundary. Keep and persist resizes already applied.
         if self.divider_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal.is_some()
-                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
                     .services
@@ -210,26 +126,14 @@ impl Render for ShellView {
             self.cancel_divider_drag();
         }
 
-        // Cancel an in-flight tile drag on the same conditions (tile-drag
-        // task) — palette/modal opened, workspace switched, fullscreen
-        // toggled — PLUS a which-key hint appearing: unlike a divider
-        // drag (which keeps its already-applied resize live behind the
-        // handler-less hint), a tile drag is all about *choosing a drop
-        // target among the tiles*, and doing that under a panel that
-        // covers part of them would be blind targeting. PLUS (post-merge
-        // review BUG 3) the dragged tile no longer existing anywhere:
-        // ctrl+w can close it mid-drag (the keyboard stays hot), and
-        // without this check the ghost and zone highlight kept painting
-        // — promising a drop the verbs would silently refuse. All of
-        // these make cancelling truly free here: a tile drag applies
-        // nothing until its drop, so cancel undoes nothing, dirties
-        // nothing, and needs none of the divider guard's `moved`
-        // bookkeeping.
+        // Cancel tile tracking when overlays obscure its targets, the workspace
+        // changes, fullscreen begins, or the grabbed tile disappears. No layout
+        // change has been applied, so cancellation needs no persistence update.
         if self.tile_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal.is_some()
                 || !self.matcher.pending().is_empty()
-                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
                     .services
@@ -248,32 +152,10 @@ impl Render for ShellView {
             self.cancel_tile_drag();
         }
 
-        // The per-tile command line's own invariant (I1, final review):
-        // "the focused tile IS `command_line.tile`, for as long as the
-        // line is open" holds only while BOTH (a) the active workspace's
-        // own focused tile is still that tile, and (b) `command_input`
-        // still holds keyboard focus. Both tile mouse-down handlers
-        // (`render`, below) already call `leave_command_line` before
-        // acting, and that remains the fast, explicit path for the two
-        // surfaces that need it — this is the generic backstop for
-        // everything else that can change (a) or (b) without going
-        // through one of those call sites: the sidebar's workspace-switch
-        // mouse-down (`sidebar::sidebar`) changes (a) — a plain, non-
-        // focusable `div`, so keyboard focus never moves — and a click
-        // into the toolbar's `filter_input` changes (b) — a real `Input`
-        // that takes focus on click, with no workspace-state change at
-        // all. One check here, at the top of render (same "reliably
-        // funnels through with fresh state" precedent as `pending_focus_
-        // restore` above), covers both without a third and fourth
-        // `leave_command_line` call site — and is a no-op on the tile-
-        // mouse-down paths, since they already set `command_line` to
-        // `None` before this runs, so there is no double cancel (no
-        // second `FindEvent::Cancelled`/`Committed`). This leaves
-        // (commits a find, cancels a command — `leave_command_line`,
-        // spec §20.4) rather than unconditionally cancelling: the
-        // sidebar switch and the filter-input click are both a click
-        // away from the tile, exactly like the tile mouse-down handlers
-        // below, not `escape` — a `/` line with text still commits here.
+        // Keep a command line open only while its tile remains focused and its
+        // input owns keyboard focus. This catches sidebar switches and scope
+        // input clicks as well as the explicit tile-click paths. Leaving commits
+        // a find and cancels a command; it is distinct from Escape cancellation.
         if self.command_line.as_ref().is_some_and(|line| {
             self.services.workspaces.active().focused_tile() != Some(line.tile)
                 || !self
@@ -300,22 +182,9 @@ impl Render for ShellView {
             window.set_rem_size(rem);
         }
 
-        // `viewport_size` is the drawable area (excludes window chrome),
-        // which is what `Tree::layout` should partition (gpui/window.rs).
-        // Task 4 adds a top toolbar (the native title bar,
-        // `TITLE_BAR_HEIGHT`) and a left sidebar (`sidebar::WIDTH`) on top
-        // of the existing bottom status bar (`status::HEIGHT`); the tile
-        // area gets the viewport minus all three, and `Tree::layout` is
-        // still called exactly once, over those shrunk bounds.
-        //
-        // Phase 4a §3.6/§4.5: while the frame is scoped to a past instant,
-        // a 3px warning stripe (`AS_OF_STRIPE_HEIGHT`) sits directly under
-        // the toolbar, spanning the window — the part of the historical
-        // indicator that survives a maximised tile hiding the toolbar's
-        // own AS OF badge and the status bar's own segment. Its height
-        // comes out of `content_height` here, the one place every other
-        // chrome element's height already does, so the tile area never
-        // overflows underneath it.
+        // Layout uses the viewport minus toolbar, sidebar, and status bar. A
+        // historical frame adds a warning stripe below the toolbar; subtract its
+        // height before sizing the tile surface so content fits below it.
         let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));
         let stripe_height = if is_historical {
             AS_OF_STRIPE_HEIGHT
@@ -336,16 +205,10 @@ impl Render for ShellView {
         let status_height = status::height(window);
         let rem_size = window.rem_size();
 
-        // One layout pass for the whole surface (dock-regions task,
-        // generalized by dock-trees): the pure `tiling::dock_layout`
-        // carves the visible docks' pixel rects out of the content area,
-        // `Tree::layout` partitions what's left for the main tree, and
-        // each visible dock's rect feeds that dock's own `Tree::layout` —
-        // one geometry call per region (main + up to three visible docks),
-        // still a single pass overall. While a tree tile is fullscreen it
-        // covers the entire surface and the docks are not painted at all
-        // (the docks keep their state; they're just not part of the
-        // fullscreen picture).
+        // Lay out each region once. Dock geometry carves space from the surface;
+        // the main tree fills the remainder and each visible dock lays out its
+        // own tree. Fullscreen uses the whole surface and hides dock rendering
+        // while retaining dock state.
         let area = Rect {
             x: 0.0,
             y: 0.0,
@@ -358,22 +221,11 @@ impl Render for ShellView {
             Vec<(crate::tiling::TileId, Rect)>,
             Option<crate::tiling::TileId>,
         );
-        // Divider strips are painted (and their listeners armed) only
-        // while no overlay is up: the palette's click-catcher and the
-        // modal's backdrop both cover the whole window ABOVE the strips
-        // but without occluding them, so a live strip underneath would
-        // still take the same mouse-down that dismisses the overlay and
-        // start a drag from under it. The which-key hint (review fix) is
-        // the same leak in miniature: `whichkey::render` paints a solid
-        // panel with no `.occlude()` and no handlers, so a mouse-down
-        // inside its bounds would fall straight through to a strip
-        // beneath — it shows exactly while a keystroke sequence is
-        // pending, so that state gates too. (An already-in-flight drag is
-        // NOT cancelled for which-key the way palette/modal cancel it:
-        // the hint has no mouse handlers to fight the drag catcher, and
-        // the dragged boundary stays visible behind it.) Gating at paint
-        // time keeps the rule simple: strips exist exactly when the tiles
-        // they resize are the frontmost interactive surface.
+        // Create interactive divider strips only when no palette, modal, or
+        // which-key panel covers the tiles. Those overlays do not all occlude
+        // underlying hitboxes, so retaining strip listeners could start a drag
+        // with the same click that dismisses an overlay. An existing divider
+        // drag can continue under which-key because its catcher owns the mouse.
         let dividers_active =
             self.palette.is_none() && self.modal.is_none() && self.matcher.pending().is_empty();
         // Mouse events arrive in window coordinates while the tile
@@ -396,7 +248,7 @@ impl Render for ShellView {
                 crate::tiling::dock_layout(workspace.docks(), area)
             };
             // The frame's divider strips, from the same rects this pass
-            // just computed (drag-splitters task): the main tree's
+            // just computed: the main tree's
             // interior boundaries, each visible dock tree's interior
             // boundaries, then the dock frame edges — edges last so they
             // paint above a dock tree's own strips where the two meet at
@@ -462,25 +314,11 @@ impl Render for ShellView {
             )
         };
 
-        // The active drop target's zone highlight (tile-drag task): the
-        // SAME resolution core the drop itself uses
-        // (`tiling::resolve_drop_target` — post-merge review cleanup 8:
-        // the first cut restated the dock-frame → dock-tile →
-        // dock-background → tree-tile order here by hand, and two copies
-        // of a targeting rule is how a highlight drifts from the drop it
-        // promises), fed the rects the single layout pass above just
-        // produced — no second layout, no I/O, and no allocation (the
-        // core takes a borrowed iterator), per the render-discipline
-        // constraint. An edge zone highlights the half of the target tile
-        // the insert would occupy, center the whole tile, a dock
-        // background the dock's frame. What stays HERE, on top of the
-        // core, is the Workspace-side no-op filtering — targets whose
-        // drop the verbs would refuse paint nothing, because
-        // highlighting them would promise a rearrangement that won't
-        // happen: the dragged tile itself (self-drops are recorded
-        // no-ops for every zone), and the background of the dock the
-        // tile already lives in (defensive — an occupied dock's tiles
-        // cover its whole frame, so this is unreachable in practice).
+        // Resolve preview targets with the same core as the eventual drop,
+        // using this frame's borrowed layout rectangles without a second layout
+        // pass. Highlight split halves, stack centers, or dock backgrounds.
+        // Suppress self-drops and the source dock's background, which workspace
+        // operations would refuse, so the preview promises a real change.
         let drop_highlight: Option<Rect> = self
             .tile_drag
             .as_ref()
@@ -521,7 +359,7 @@ impl Render for ShellView {
         // shows the focused ring: the main tree's focused tile only counts
         // as focused while `region == Main`, and a dock tile only when
         // focus lives in that dock AND the dock's own tree has it focused
-        // (dock-trees task — a dock holds many tiles, one ring).
+        // A dock holds many tiles, with one focused ring.
         let tile_cell = |id: crate::tiling::TileId,
                          r: Rect,
                          is_focused: bool,
@@ -571,7 +409,7 @@ impl Render for ShellView {
             .flex_none();
 
         // The focused tile's rect, in window space (`to_window_space`),
-        // for the command line strip (§3.4): it paints along that tile's
+        // for the command line strip: it paints along that tile's
         // bottom edge, not the surface's, so it must follow focus into a
         // dock exactly like the focused ring does. Captured from the same
         // per-tile `is_focused` computed in the loops below rather than a
@@ -579,21 +417,9 @@ impl Render for ShellView {
         // which tile, if any, is the one ring shows.
         let mut focused_rect: Option<Rect> = None;
         if rects.is_empty() {
-            // The empty hint fills the *tree's* remaining area (not the
-            // whole surface — visible docks keep their columns), so it is
-            // its own absolutely-positioned, internally-centered child
-            // rather than turning the surface itself into a flex row.
-            //
-            // One hint whatever holds focus (spec 2026-09-08 add-tile
-            // §7.3): the palette adds a tile into the focused region, so
-            // the advice reads the same from the main tree and from a
-            // focused dock — the old state-aware "return" variants, which
-            // existed because the split chords could not fill this area
-            // from a dock, collapse into it. One selector, one verb; a
-            // dock-focused empty tree only appends where the add would
-            // actually land (final-review Ruling J), because the hint
-            // paints over the *tree's* area and would otherwise read as
-            // an offer to fill the space the reader is looking at.
+            // Place the empty-tree hint in the area remaining after visible docks.
+            // Adding targets the focused region; name a focused dock in the hint so
+            // it does not promise to fill the empty main area instead.
             let hint = match region {
                 crate::tiling::FocusRegion::Main => {
                     "double-click or `ctrl+k` → Add a tile".to_string()
@@ -619,7 +445,7 @@ impl Render for ShellView {
                     .items_center()
                     .justify_center()
                     // A bare double-click anywhere on the empty tree
-                    // opens the tile picker (2026-09-19), the mouse form
+                    // opens the tile picker, the mouse form
                     // of the `ctrl+k` the hint names — see
                     // `try_pick_on_empty_tree_double_click`. A single
                     // click is nothing: there is no tile to focus.
@@ -659,7 +485,7 @@ impl Render for ShellView {
                         // goes dirty like any workspace-mutating dispatch.
                         // With the configured mod key held, the same
                         // mouse-down instead arms a pending tile drag
-                        // (tile-drag task) — and deliberately does NOT
+                        // — and deliberately does NOT
                         // focus: see `try_arm_tile_drag` / `TileDrag`.
                         // "Does not focus" is about TILE focus, the
                         // workspace's own notion. Window focus is a
@@ -670,31 +496,9 @@ impl Render for ShellView {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                // Any tile mouse-down leaves an open
-                                // command line first, unconditionally
-                                // (fix round 1, finding 2, and spec
-                                // §20.4 — `leave_command_line`'s own doc
-                                // comment): this is the fast, explicit
-                                // path for the one focus-stealing surface
-                                // that is itself a tile click. It leaves
-                                // (commits a find, cancels a command —
-                                // `leave_command_line`) rather than
-                                // unconditionally cancelling, so clicking
-                                // away from a `/` line with text commits
-                                // it. The render-time check (I1, final
-                                // review — see the comment just above
-                                // `ensure_occupants`'s drag-cancel
-                                // neighbours) is the generic backstop
-                                // that also covers surfaces that are NOT
-                                // a tile mouse-down (the sidebar's
-                                // workspace switch, the toolbar's filter
-                                // field) — this call just means a tile
-                                // click doesn't wait a frame for that
-                                // backstop to notice. Together they keep
-                                // "the focused tile IS the line's tile,
-                                // whenever it's open" an invariant — see
-                                // the comment where the strip is painted,
-                                // below.
+                                // Leave the old tile's command line before changing focus: commit
+                                // a find, cancel a command. The render-time check covers other
+                                // surfaces that move tile or input focus.
                                 view.leave_command_line(window, cx);
                                 // Ahead of the drag arm on purpose — see
                                 // `try_fullscreen_on_double_click`; the
@@ -710,14 +514,9 @@ impl Render for ShellView {
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
                                     view.session_dirty = true;
                                 }
-                                // An occupant may track its own
-                                // `FocusHandle` (the recording module does
-                                // — `RecordingView` — and `DataTable` will
-                                // too) and take focus with this
-                                // mouse-down; without re-arming the same
-                                // restore `apply_reload` uses, the shell
-                                // root would never get focus back and
-                                // every shell chord would go dead (§3.3).
+                                // An occupant can claim window focus on mouse-down. Re-arm
+                                // restoration so the next render preserves a valid editor or
+                                // returns the keyboard to the shell.
                                 view.pending_focus_restore = true;
                                 cx.notify();
                             }),
@@ -740,16 +539,9 @@ impl Render for ShellView {
             }
         }
 
-        // The docks, painted with the identical chrome (dock-trees task:
-        // each visible dock lays its own tree's tiles into its frame —
-        // same `tile_cell`, click-to-focus included; a click focuses that
-        // tile *within* the dock's tree AND moves the region there). A
-        // visible but empty dock renders a centered muted hint naming the
-        // palette (a dock takes focus when it is shown, so `ctrl+k` adds
-        // into it — spec 2026-09-08 add-tile §7.3/§8) and the *physical*
-        // keys that would move an existing tile into it (the user presses
-        // ctrl+shift+[ even though the binding is spelled `ctrl+{` — see
-        // BUILTIN_KEYMAP's doc comment).
+        // Dock trees use the same tile cells and gestures as the main tree.
+        // Empty docks show add and move hints using physical key labels; clicks
+        // focus the empty region before opening its picker.
         for (side, r, dock_tiles, dock_focused) in dock_cells {
             if !dock_tiles.is_empty() {
                 for (id, tr) in dock_tiles {
@@ -767,11 +559,7 @@ impl Render for ShellView {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |view, event: &MouseDownEvent, window, cx| {
-                                    // Same command-line leave as the tree-tile
-                                    // listener above (commits a find, cancels a
-                                    // command — `leave_command_line`), and for
-                                    // the identical reason (fix round 1, finding
-                                    // 2, and spec §20.4).
+                                    // Leave the previous command line before focusing this dock tile.
                                     view.leave_command_line(window, cx);
                                     // The fullscreen door refuses a docked tile
                                     // (fullscreen is main-tree-only), but it is
@@ -791,11 +579,8 @@ impl Render for ShellView {
                                     {
                                         view.session_dirty = true;
                                     }
-                                    // Docked tiles get real occupants too (a
-                                    // focus-tracking occupant like the recording
-                                    // module can steal focus on this same
-                                    // mouse-down) — re-arm the identical restore
-                                    // the tree-tile listener above uses (§3.3).
+                                    // Dock occupants can also claim window focus; use the same
+                                    // deferred restoration as main-tree clicks.
                                     view.pending_focus_restore = true;
                                     cx.notify();
                                 }),
@@ -849,10 +634,7 @@ impl Render for ShellView {
                         .border_1()
                         .border_color(cx.theme().border)
                         .text_color(cx.theme().muted_foreground)
-                        // A click focuses the empty dock as the region,
-                        // a double-click opens the tile picker into it
-                        // (`on_empty_dock_mouse_down`, user ruling
-                        // 2026-09-19).
+                        // Focus the empty dock on click; double-click opens its tile picker.
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, event: &MouseDownEvent, window, cx| {
@@ -868,7 +650,7 @@ impl Render for ShellView {
             }
         }
 
-        // The divider strips (drag-splitters task), painted after — so
+        // The divider strips, painted after — so
         // above — every tile and dock cell: transparent hit areas
         // `DIVIDER_HIT_WIDTH` wide centered on each draggable boundary,
         // each carrying a 2px line that lights up `primary` on hover (and
@@ -950,7 +732,7 @@ impl Render for ShellView {
             );
         }
 
-        // The zone highlight (tile-drag task), painted after — so above —
+        // The zone highlight, painted after — so above —
         // every tile, dock cell, and divider strip: a translucent
         // theme-primary wash over exactly the area the drop would occupy.
         // Instant, no animation; no handlers and no `.occlude()`, so it
@@ -976,40 +758,37 @@ impl Render for ShellView {
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
-        // Computed once per frame (§4.4) rather than read field-by-field
-        // from inside `toolbar::toolbar` — the frame is an entity, and this
-        // is the one place `render` already has `cx` in hand to read it.
-        // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
-        // its `as_of` segment reads `bar_model.as_of`, the same formatted
-        // text the toolbar's own AS OF badge shows. `self.today` (Phase 4b
-        // Task 1 fix round 1, MIN-9), not a fresh clock read every paint —
-        // the date read moved to the ~500ms reload-poll tick, so a held key
-        // no longer pays it on every repaint. `self.clock(cx)` (as-of
-        // dialog spec §6.1) is the `AppClock` global.
+        // Share the cached scope bar model between toolbar and status bar.
+        // Use the poll-updated date and configured clock, avoiding a fresh
+        // clock read during rendering.
         let bar_model = self.frame.read(cx).bar_model(self.clock(cx), self.today);
-        // Phase 4b §4.4: the status bar's diagnostics indicator now reads
-        // `Diagnostics::summary()` (cached there, keyed on its own
-        // version, and returning an `Rc<str>` — Task 4 fix round 1,
-        // MAJ-1 — so a cache hit on this render-path call clones a
-        // refcount, never a buffer) rather than the deleted `data_status`
-        // field — an empty summary means nothing to report, same
-        // "`None` clears it" contract `data_status` had.
+        // Read the cached diagnostics summary. Cloning its shared string
+        // increments a reference count without copying its buffer.
         let diagnostics_read = self.diagnostics.read(cx);
         let diagnostics_summary = diagnostics_read.summary();
-        // The ingest activity, read alongside the summary (spec
-        // 2026-09-19 §5.3) — borrowed straight through to the
-        // `status_bar` call below rather than cloned: `diagnostics_read`
-        // borrows `cx` (not `self`), and nothing between here and that
-        // call needs `cx` mutably, so `status_bar` gets `Option<&
-        // IngestActivity>` with no per-render allocation at all.
+        // Borrow ingest activity through the status-bar call without cloning.
+        // Nothing before that call needs a mutable context.
         let ingest = diagnostics_read.ingest.as_ref();
-        // Clicking the summary opens the diagnostics tile (Phase 4b Task
-        // 5), same `cx.entity()`-captured-into-a-closure shape as
-        // `on_chip_close`/`on_chip_open` just below.
+        // Clicking the summary opens the diagnostics tile.
         let diagnostics_click_entity = cx.entity();
         let on_diagnostics_click = move |window: &mut Window, cx: &mut App| {
             diagnostics_click_entity.update(cx, |view, cx| {
                 view.open_module("diagnostics", window, cx);
+            });
+        };
+        // Clicking the fullscreen segment restores the layout through the
+        // same action `mod+f` and a tile double-click dispatch.
+        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();
+        let fullscreen_click_entity = cx.entity();
+        let on_fullscreen_click = move |window: &mut Window, cx: &mut App| {
+            fullscreen_click_entity.update(cx, |view, cx| {
+                view.dispatch(
+                    &crate::actions::ActionId("workspace::fullscreen_tile".into()),
+                    None,
+                    window,
+                    cx,
+                );
+                cx.notify();
             });
         };
         let status_bar = status::status_bar(
@@ -1022,6 +801,8 @@ impl Render for ShellView {
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
             on_diagnostics_click,
             ingest,
+            fullscreen_hidden,
+            on_fullscreen_click,
             bar_model.as_of.as_deref(),
             bar_model.as_of_full.as_ref(),
             self.services.theme.active_name(),
@@ -1029,7 +810,7 @@ impl Render for ShellView {
         );
         let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
         // A chip's close glyph drops that dimension from the scope
-        // (spec §3.1) — an undoable edit, same door as every other scope
+        // — an undoable edit, same door as every other scope
         // mutation. Built here, not `cx.listener` (whose signature takes
         // `&Evt`, not `&str`): capture `cx.entity()` and update through
         // it, matching `on_chip_close`'s plain-`Fn(&str, ..)` shape.
@@ -1043,10 +824,8 @@ impl Render for ShellView {
                 });
             });
         };
-        // The chip body opens the dimension picker on that column (Phase
-        // 4a §3.3) — `picker::open` needs `&mut ShellView`, so this reaches
-        // it the same way `on_chip_close` reaches `frame.update` above: a
-        // fresh `cx.entity()` handle, updated inside the closure.
+        // Open the dimension picker through an entity handle so the callback
+        // can update `ShellView`.
         let chip_open_entity = cx.entity();
         let on_chip_open = move |column: &str, window: &mut Window, cx: &mut App| {
             let column = column.to_string();
@@ -1091,7 +870,7 @@ impl Render for ShellView {
                 objectdialog::render::open_save_scope(view, window, cx);
             });
         };
-        // The grouping readout's click (2026-09-19) — the mouse form of
+        // The grouping readout's click — the mouse form of
         // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
         // dispatch arm uses.
         let grouping_entity = cx.entity();
@@ -1100,7 +879,7 @@ impl Render for ShellView {
                 choicedialog::open_grouping(view, window, cx);
             });
         };
-        // The AS OF chip's click (toolbar restyle 2026-09-19) — the mouse
+        // The AS OF chip's click — the mouse
         // form of `frame::as_of`/`mod+t`, through the same door `input.rs`'s
         // dispatch arm uses.
         let as_of_entity = cx.entity();
@@ -1162,37 +941,18 @@ impl Render for ShellView {
         let width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
 
-        // Which-key hint (Task 8): only computed while a sequence is
-        // actually pending — `continuations` over an empty `pending` would
-        // be well-defined (every binding "strictly extends" it) but the
-        // overlay has nothing to say when no sequence is in flight, so it
-        // must not appear then. Display-only: this reads `self.matcher`
-        // without touching it, so it can never affect what `handle_key_down`
-        // does with the next keystroke.
-        //
-        // M10 (3b final review): this same gate also hides `whichkey::
-        // render`'s count row for a *bare* count (e.g. `4` with no chord
-        // typed yet), since a bare count leaves `pending` empty. Spec §3.3
-        // describes the overlay appearing "after a held prefix"; the
-        // reading chosen here is that a bare count alone is not yet a held
-        // prefix — nothing is "held" until a key extends it into an actual
-        // sequence — so the overlay stays hidden and the status bar (a
-        // separate reading: it always has a count to show, held-prefix or
-        // not) is where a bare count surfaces instead.
+        // Build which-key only for a pending key sequence. A bare count leaves
+        // `pending` empty and appears in the status bar instead. Reading matcher
+        // state here must not change how the next keystroke resolves.
         let pending = self.matcher.pending();
         let which_key_continuations = (!pending.is_empty()).then(|| {
             whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
         });
         let registry = &self.services.registry;
 
-        // Task 9 instant-modal redesign: clone the cheap pieces (`title`:
-        // `SharedString`, `title_extra`: `Option<Rc<dyn Fn>>`, `build`:
-        // `Rc<dyn Fn>`) out of `self.modal` up front — the same "extract
-        // into a local ahead of the render chain" move `pending`/
-        // `registry` just above already make, one field further in. See
-        // `ShellModal`'s own doc comment for why this step is required
-        // rather than just reading `self.modal.as_ref()` inline inside the
-        // `when_some` below.
+        // Clone the modal's shared title and callbacks before building the
+        // element tree, releasing the borrow of `self.modal` before closures
+        // need access to the rest of the view.
         let modal = self.modal.as_ref().map(|modal| {
             (
                 modal.title.clone(),
@@ -1222,48 +982,19 @@ impl Render for ShellView {
             .size_full()
             .relative()
             .track_focus(&self.focus_handle)
-            // Two identifiers in one `KeyContext` (gpui's
-            // `KeyContext::parse` takes whitespace-separated ones):
-            //
-            // `GeodeShell` is carried ALWAYS — the shell root's own name
-            // on the dispatch stack, and `init_reclaimed_keybindings`'
-            // last bullet binds `tab`/`shift-tab` to `NoAction` on it.
-            // gpui-component's `Root` binds both keys window-wide to its
-            // own focus cycling and gpui dispatches a matched binding
-            // BEFORE any `on_key_down` listener, so without this reclaim a
-            // bare `tab` never reaches `handle_key_down` at all while a
-            // tile is focused — a module binding `tab` in its own context
-            // (the timeseries tile's `tab = timeseries::next`, timeseries
-            // spec §9.4) was dead in the real app. Permanent rather than
-            // conditional: inside the shell it is the shell's keymap that
-            // owns the key, in every context.
-            //
-            // `GeodeModalOpen` is added on top while a modal is up: "a
-            // Geode modal is open", carried by the shell ROOT rather than
-            // the modal panel — the one context that is on the dispatch
-            // stack in normal mode, where focus is this very handle and
-            // the panel's own `"GeodeModal"` context is therefore absent.
-            // Kept as its own identifier rather than folded into the
-            // unconditional one, since `init_reclaimed_keybindings` scopes
-            // more than `tab` by it and the two answers must stay
-            // separable.
+            // `GeodeShell` reclaims tab/shift-tab from Root's window-wide focus
+            // cycling so they reach the shell matcher, including module bindings.
+            // `GeodeModalOpen` additionally reclaims modal commands while focus is
+            // on the shell root; the panel's context is absent in Normal mode.
             .key_context(if self.modal.is_some() {
                 "GeodeShell GeodeModalOpen"
             } else {
                 "GeodeShell"
             })
             .on_key_down(cx.listener(Self::handle_key_down))
-            // Root-level left-release fallback (post-merge review BUG 1,
-            // extended to divider drags by the fix-round should-fix):
-            // ends a drag of either kind whose release landed in the
-            // arm-to-first-paint gap, before its catcher's own up
-            // handlers exist — see `heal_drags_on_root_release`'s doc
-            // comment for the full mechanism, the four modality×state
-            // combinations, and why BOTH listeners are needed
-            // (`on_mouse_up` is bubble-phase and hover-gated,
-            // `on_mouse_up_out` capture-phase and NOT-hovered-gated;
-            // input modality and occluding overlays flip which one
-            // fires, and together they cover every left release).
+            // Cover releases between drag arming and the first catcher paint.
+            // Hovered and non-hovered listeners together cover mouse and keyboard
+            // modality; `heal_drags_on_root_release` preserves active tile drops.
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _event, _window, cx| {
@@ -1279,12 +1010,8 @@ impl Render for ShellView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(toolbar)
-            // The as-of warning stripe (Phase 4a §3.6/§4.5): 3px, spanning
-            // the window, directly under the toolbar — paints if and only
-            // if the frame's as-of is `At`, never otherwise (spec §4.5:
-            // nothing on screen may look live when it is not). Its height
-            // is already subtracted from `content_height` above, so `body`
-            // never overflows underneath it.
+            // Paint the warning stripe only for `AsOf::At`. Its height was
+            // already subtracted from the tile surface.
             .when(is_historical, |el| {
                 el.child(
                     div()
@@ -1296,26 +1023,11 @@ impl Render for ShellView {
             })
             .child(body)
             .child(status_bar)
-            // The divider drag catcher (drag-splitters task): while a drag
-            // is active, a transparent full-window layer above the tiles
-            // and status bar (but below the palette/modal overlays, which
-            // cancel drags anyway — see the guard at the top of `render`)
-            // owns every mouse-move and mouse-up until the button is
-            // released. This is the capture mechanism: a fast drag leaves
-            // the thin strip immediately, and gpui's element-level
-            // `on_mouse_move` is hover-gated — but this layer's hitbox IS
-            // the whole window, so hover-gating is satisfied wherever the
-            // cursor goes (the div-composition equivalent of the
-            // window-level `window.on_mouse_event` listeners Zed's own
-            // pane-resize custom element registers in paint). `.occlude()`
-            // also suppresses tile hover/click behavior for the drag's
-            // duration, and the layer carries the axis resize cursor so
-            // the pointer keeps its col/row-resize shape even while it's
-            // off the strip — the same effect as Zed's
-            // `set_window_cursor_style` during a handle drag. Mouse-up out
-            // of the window (capture-phase `on_mouse_up_out`) and a move
-            // arriving with the button no longer pressed (a missed
-            // release) both end the drag too, so it can never get stuck.
+            // Capture divider moves and release with a full-window occluding
+            // layer. Fast drags leave the narrow strip, so the catcher maintains
+            // hit coverage and resize cursor shape. A release through either
+            // mouse-up route, or a later buttonless move, ends tracking while
+            // preserving resizes already applied.
             .when_some(drag_axis, |el, axis| {
                 el.child(
                     div()
@@ -1332,13 +1044,8 @@ impl Render for ShellView {
                         })
                         .debug_selector(|| "divider-drag-catcher".to_string())
                         .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            // Post-merge review BUG 4 (platform-uniform
-                            // rule, shared with the tile catcher below —
-                            // see its comment for the verified platform
-                            // evidence): only a BUTTONLESS move is the
-                            // lost-release finish; a move reporting a
-                            // non-Left button is a chorded second button
-                            // and is ignored entirely.
+                            // Only a buttonless move means the release was lost. Ignore
+                            // moves attributed to a second button during a chorded press.
                             match event.pressed_button {
                                 None => {
                                     // The release happened where we
@@ -1371,36 +1078,12 @@ impl Render for ShellView {
                         ),
                 )
             })
-            // The tile-drag catcher (tile-drag task): the same full-window
-            // capture mechanism as the divider catcher above — while a
-            // drag is armed or active, a transparent occluding layer owns
-            // every mouse-move and the release, wherever the cursor goes.
-            // Its `.occlude()` is also what keeps the divider strips (and
-            // tile click-to-focus, and strip hover styling) from fighting
-            // an in-flight tile drag: the catcher is painted after the
-            // whole tile surface, so everything under it leaves the hover
-            // chain for the drag's duration. The two catchers can never
-            // coexist — each drag kind's mouse-down is unreachable while
-            // the other's catcher occludes the window (and
-            // `try_arm_tile_drag` checks anyway). A move arriving with
-            // the button no longer pressed cancels with nothing applied
-            // — see `TileDrag`'s doc for why that differs from the
-            // divider catcher's finish. `on_mouse_up_out` routes through
-            // the DROP, not a cancel (review blocker fix): gpui's
-            // input-modality hover suppression means it fires for a
-            // perfectly ordinary in-window release whenever a keystroke
-            // was the last input — a KeyDown sets the window's
-            // `last_input_modality` to Keyboard (pinned window.rs,
-            // `dispatch_event`), a MouseUp does NOT reset it, and
-            // `HitboxId::is_hovered` returns false under keyboard
-            // modality, which flips the hovered-gated `on_mouse_up` off
-            // and the `!is_hovered`-gated `on_mouse_up_out` on. The
-            // keyboard is documented hot mid-drag, so "press any key,
-            // release without moving" is a real user path and must drop,
-            // not silently cancel. A genuinely outside-window release
-            // still applies nothing through this route:
-            // `locate_drop_target` has no target at a position outside
-            // every tile and dock, and a no-target drop is a no-op.
+            // Capture tile moves and release across the whole window, occluding
+            // tile and divider hitboxes. Only one drag kind can be active.
+            // A buttonless move cancels without applying a drop. Both mouse-up
+            // routes attempt the drop: keyboard modality suppresses hover and
+            // can send an in-window release through `on_mouse_up_out`. A release
+            // outside the layout has no target and changes nothing.
             .when(tile_drag_armed, |el| {
                 el.child(
                     div()
@@ -1414,28 +1097,9 @@ impl Render for ShellView {
                         .cursor_grabbing()
                         .debug_selector(|| "tile-drag-catcher".to_string())
                         .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            // Post-merge review BUG 4 (recorded decision +
-                            // platform evidence): the old
-                            // `pressed_button != Some(Left)` test made
-                            // this catcher platform-divergent. macOS
-                            // translates NSRightMouseDragged /
-                            // NSOtherMouseDragged into MouseMoveEvents
-                            // whose `pressed_button` is that button
-                            // (`gpui_macos/src/events.rs`, the
-                            // `*MouseDragged` arm — buttonNumber mapped
-                            // verbatim, no left-first normalization), so
-                            // pressing a second button mid-drag CANCELLED
-                            // here; Windows' WM_MOUSEMOVE translation
-                            // (`gpui_windows/src/events.rs`,
-                            // `handle_mouse_move_msg`) checks MK_LBUTTON
-                            // first, so the same chord SURVIVED there.
-                            // Unified rule: only a BUTTONLESS move is the
-                            // lost-release cancel (every platform reports
-                            // `None` once all buttons are up); a move
-                            // reporting a non-Left button is a chorded
-                            // second press and is IGNORED — it neither
-                            // advances the drag (its position belongs to
-                            // another button's stream) nor cancels it.
+                            // Ignore moves attributed to non-left buttons: platforms may
+                            // report a second held button differently. Only `None` proves
+                            // all buttons were released and cancels the tile drag.
                             match event.pressed_button {
                                 None => {
                                     view.cancel_tile_drag();
@@ -1475,12 +1139,8 @@ impl Render for ShellView {
                         ),
                 )
             })
-            // The drag ghost (tile-drag task): a lightweight fixed-size
-            // outline following the cursor — deliberately NOT a copy of
-            // the tile content (see TILE_DRAG_GHOST_SIZE's recorded
-            // choice). Painted above the catcher; a plain div with no
-            // handlers and no `.occlude()`, so it can never swallow the
-            // catcher's events even when the cursor overlaps it.
+            // Paint the fixed-size drag outline above its catcher. With no
+            // handlers or occlusion, it cannot intercept the catcher's events.
             .when_some(tile_drag_ghost, |el, (gx, gy)| {
                 el.child(
                     div()
@@ -1494,34 +1154,10 @@ impl Render for ShellView {
                         .debug_selector(|| "tile-drag-ghost".to_string()),
                 )
             })
-            // The per-tile command line (§3.4): a one-line strip along
-            // the focused tile's bottom edge, plus a completions popup
-            // above it. Painted at `focused_rect` — the WORKSPACE's own
-            // notion of the focused tile, computed in the loops above —
-            // rather than by looking up `self.command_line.tile`'s own
-            // rect. That is only correct because "the focused tile IS
-            // `command_line.tile`, for as long as the line is open" is an
-            // invariant, not a coincidence — but (I1, final review) a
-            // tile mouse-down is NOT the only other way it could move:
-            // keyboard input can't (the command-line branch in
-            // `handle_key_down` intercepts every key ahead of the matcher
-            // and every workspace action), and both tile mouse-down
-            // handlers (tree and dock, above) cancel an open command line
-            // before acting on their click — but the sidebar's
-            // workspace-switch mouse-down changes the active workspace's
-            // own focused tile without touching either of those, and a
-            // click into the toolbar's `filter_input` steals keyboard
-            // focus without touching the workspace at all. The generic
-            // check at the top of render (see its own doc comment, just
-            // above `ensure_occupants`'s drag-cancel neighbours) closes
-            // both, so by the time this runs `command_line` is `None`
-            // whenever the tile it named is no longer the workspace's
-            // focused one. Painted only while both a line is open AND
-            // that tile still has a rect this frame (a tile can close
-            // out from under an open line — `ensure_occupants` above
-            // already drops the occupant; `handle_command_line_key`'s own
-            // `None` arms handle the same race for dispatch, this is
-            // render's twin).
+            // Paint the command line at the focused tile's bottom edge, with
+            // completions above. The render-time check guarantees that an open
+            // line still belongs to that tile and owns input focus. A missing
+            // rect suppresses painting if the tile disappeared.
             .when_some(
                 self.command_line.as_ref().zip(focused_rect),
                 |el, (line, rect)| {
@@ -1534,16 +1170,9 @@ impl Render for ShellView {
                     ))
                 },
             )
-            // The transient stack-member list (tile-stacks spec §5.2):
-            // painted from the focused tile's own rect, above the tile
-            // surface and the command line but below the palette — the
-            // two are never open at once (the palette's open arm closes
-            // the list first), but this ordering is what would govern it
-            // if that ever changed. `rows` is prepared fresh per frame
-            // only while the list is open, at most nine `SharedString`
-            // clones (`TileContent::title`) — accepted for now, per the
-            // task brief; Task 9 caches the blotter's own title instead
-            // of formatting it here every frame.
+            // Paint the member list above its focused tile and below overlays.
+            // Build row titles only while it is open; occupant titles are shared
+            // strings, so each row clones a handle rather than formatting text.
             .when_some(
                 self.stack_list.as_ref().zip(focused_rect),
                 |el, (list, rect)| {
@@ -1618,21 +1247,9 @@ impl Render for ShellView {
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
             .when_some(self.palette.as_ref(), |el, state| {
-                // Row click -> select, then commit — the mouse form of
-                // `enter` (user request 2026-09-12; the palette's half of
-                // the interaction model's §17.1 rule 2). The select comes
-                // first so `commit_selected` — the ONE door the key path
-                // also goes through (`palette_ctl`) — reads the clicked
-                // row as the highlighted one; a click never dispatches by
-                // any other route, so the two cannot drift. A small
-                // `Clone`-able closure over a `WeakEntity<Self>`, not
-                // `cx.listener` directly (its returned `impl Fn` isn't
-                // itself `Clone`, and `palette::render` clones this once
-                // per row to close over each row's own index — see that
-                // function's doc comment) — this way building it costs one
-                // stack closure, not a heap allocation per row, per frame,
-                // while the palette is open (PHILOSOPHY.md: "per-frame heap
-                // churn is a defect").
+                // Select the clicked row before calling the same commit path as
+                // Enter. A clonable weak-entity callback can be shared by rows
+                // without a separate heap allocation for each row on each render.
                 let weak = cx.entity().downgrade();
                 let on_row_click = move |idx: usize, window: &mut Window, cx: &mut App| {
                     let _ = weak.update(cx, |view, cx| {
@@ -1682,15 +1299,9 @@ impl Render for ShellView {
                         .child(panel),
                 )
             })
-            // The modal overlay paints above the palette (later children
-            // paint above earlier siblings) but still below gpui-
-            // component's own dialog/notification layers below — Task 9
-            // instant-modal redesign, see `dialog`'s module doc. `palette`
-            // is always `None` by the time `modal` is `Some`
-            // (`open_shell_dialog` closes it on open), so this and the
-            // block above never both add a child in the same frame, but
-            // the ordering here is what would govern it if that ever
-            // changed.
+            // Paint modals above the palette layer and below component overlays.
+            // The modal opening path closes the palette, so these are mutually
+            // exclusive in normal operation.
             .when_some(modal, |el, (title, title_extra, build)| {
                 let extra = title_extra.map(|f| f(self, cx));
                 let content = build(self, window, cx);
@@ -1725,7 +1336,7 @@ impl Render for ShellView {
                     cx,
                 ))
             })
-            // The frame-time readout (spec §7.4, `perf::toggle_overlay`),
+            // The frame-time readout (`perf::toggle_overlay`),
             // painted above every other shell layer — a diagnostic that
             // must stay visible while the palette/modal/which-key it might
             // be measuring are up. Top-right, clear of the which-key panel
@@ -1742,10 +1353,8 @@ impl Render for ShellView {
                     cx,
                 ))
             })
-            // ShellView is the first-level view Root wraps; Root's own
-            // Render impl does not paint these overlay layers itself, so
-            // whoever it wraps must (spec: gpui-component usage.md "Overlay
-            // Layers"). Task 6's palette/dialogs need this in place now.
+            // Root delegates overlay painting to its child view. Paint the
+            // component dialog and notification layers after shell content.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }

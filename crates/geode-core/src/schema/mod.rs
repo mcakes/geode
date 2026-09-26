@@ -1662,8 +1662,7 @@ role = "attribute"
     #[test]
     fn a_measure_attribute_still_requires_its_grain() {
         // `Attribute { grain: None }` is the document reading only; on a
-        // measure dataset a grainless attribute is the same missing-grain
-        // error it always was.
+        // measure dataset a grainless attribute is a missing-grain error.
         let text = SAMPLE.to_string()
             + "\n[risk_snapshot.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\n";
         let (_, diags) = SchemaSpec::from_doc(&doc(&text));
@@ -1963,7 +1962,7 @@ role = "attribute"
         assert_eq!(names[1..3], ["node", "term"]);
     }
 
-    /// Important 2: `create_document_table_sql` appends a `book VARCHAR`
+    /// `create_document_table_sql` appends a `book VARCHAR`
     /// of its own (no grain key supplies one), so a document column of
     /// that name is a duplicate-column DDL error — and `RESERVED_COLUMNS`
     /// cannot list `book`, which is a legal grain key column on the
