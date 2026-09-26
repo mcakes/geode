@@ -2396,8 +2396,7 @@ fn the_frequency_trigger_toggles_its_menu(cx: &mut gpui::TestAppContext) {
     assert!(h.popup_is_none(&vcx));
 }
 
-/// `F` used to step the frequency coarser; it is unbound now, and `f`
-/// opens the menu rather than stepping.
+/// `F` is unbound. `f` opens the frequency menu without changing the frequency.
 #[gpui::test]
 fn shift_f_does_nothing_and_f_no_longer_steps(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);

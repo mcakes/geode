@@ -376,9 +376,9 @@ fn catalog_sheets(d: &Diagnostics) -> Vec<String> {
 pub struct PricerFactory {
     data: DataHandle,
     shared: Rc<Shared>,
-    /// Whether the diagnostics observer seeding the store's known names
-    /// (planning decision 12) exists; the first `create` makes it — every
-    /// tile is handed the one app-wide `Diagnostics`.
+    /// Whether the shared diagnostics catalog is already observed for known
+    /// sheet names. The first `create` installs the observer; subsequent tiles
+    /// use the same app-wide `Diagnostics` entity and subscription.
     catalog_watched: Cell<bool>,
 }
 

@@ -240,7 +240,7 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
                     .child(n),
             )
         })
-        // The armed `:rm` confirm (planning decision 14): the question in
+        // The armed `:rm` confirm: the question in
         // the primary text tone — a decision awaiting the trader, not a
         // warning — on the element that holds the keyboard while it
         // stands. Its `on_key_down` sits on the focused element and so

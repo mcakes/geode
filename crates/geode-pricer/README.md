@@ -127,8 +127,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   accepted save is only queued: `PricerFactory::save_answered` settles it by
   sheet name. The app delivers every outcome, in the writer's order, so the
   last to arrive is the latest queued save's. Only a confirmed
-  outcome reaches the store's known names (`note_saved`/`note_forgotten`,
-  no-ops on `MemorySheetStore`). The save state has its own header slot,
+  outcome updates the production store's known names through
+  `note_saved`/`note_forgotten`. The save state has its own header slot,
   which pricing notices and `escape` never touch.
 - Loads carry the tile's own `load_tag` (separate from the pricing `tag`);
   `Delivery::Query` under any other tag is dropped, and the answer is decoded
@@ -149,7 +149,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
-- The `:rm` confirm is market-data's upload confirm: a focused prompt in the
+- The `:rm` confirmation uses a focused prompt in the
   header whose `on_key_down` consumes every key (bare `y` confirms), the
   tile in `insert` mode while armed, cancelled by focus leaving or a pointer
   press, blurred before it drops.

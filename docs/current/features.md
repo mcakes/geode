@@ -324,8 +324,8 @@ not. See the [measurement log](../perf.md) for conditions and timings.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
-allowing the market-data panel and as-of dialog to share behavior without
-depending on each other.
+allowing the market-data panel, pricer expiry editor, timeseries date editor,
+and as-of dialog to share behavior without depending on each other.
 
 ## Diagnostics
 
@@ -514,9 +514,10 @@ tile holds:
   the other sheet (`loading…` until it answers). If that sheet has a save
   still queued, the read waits for the save's answer before it is sent:
   reads and saves run on different lanes, so an earlier read could return
-  the generation before the save. A restored tile waits the same way. Undo history, open packages,
-  the cursor, and the save state stay with the sheet left behind, and pricing
-  in flight for it is cancelled. A sheet open in another tile is refused
+  the generation before the save. A restored tile waits the same way. Switching
+  sheets clears undo history, package expansion, cursor, and per-sheet save
+  state, and cancels pricing in flight for the outgoing sheet. A sheet open in
+  another tile is refused
   (`sheet 'x' is open in another tile`). The tile's own name does nothing,
   unless its load failed (`did not load`): then `:e` of it asks again,
   which is the way to retry a refused or failed load in place.
@@ -632,9 +633,9 @@ latest queued save's. The next change and the close both retry. A close with
 a save queued but unconfirmed writes nothing extra: the write is already
 queued. An empty sheet publishes nothing.
 
-Quitting the app saves every unsaved sheet at once, before the data service is
-told to stop, and the writer runs the app's queued saves and removals before
-it exits.
+Quitting the app attempts to queue every unsaved sheet before stopping the data
+service. The writer drains queued local saves and removals, subject to the
+request-capacity and quit-time limits below.
 
 If a sheet's document fails to load (its rows do not decode, or the store
 answers with an error), the tile shows an empty fallback and the save slot
@@ -659,7 +660,8 @@ saved). A new tile takes the next free `untitled-N` name, skipping names open
 in another tile, known documents, and names with a save still queued.
 **Known limitation:** before the first catalog arrives a new tile can pick an
 `untitled-N` that already has a document this session has not seen; its first
-save adds a generation to that document (history is kept, nothing is lost).
+save adds a generation to that document, replacing its live contents. Previous
+generations remain available only within the retention limit.
 
 **Known limitations** of storage:
 

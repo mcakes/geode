@@ -1,7 +1,8 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
 //! state or I/O. Count, pending keys, configuration messages, diagnostics, ingestion,
 //! and historical-time indicators occupy the left region. The right region is the
-//! view-state section: the fullscreen indicator, then the active theme name. Workspace indicators belong to the sidebar. StatusBar supplies
+//! view-state section: the fullscreen indicator, then the active theme name.
+//! Workspace indicators belong to the sidebar. StatusBar supplies
 //! the status_bar and status_bar_border theme tokens.
 
 use gpui::prelude::*;
@@ -18,8 +19,8 @@ use crate::diagnostics::IngestActivity;
 use crate::fonts;
 use crate::keymap::Keystroke;
 
-/// Height of the status bar, in pixels at the design rem (spec target:
-/// ~26px; `shell::scale`). Layout arithmetic reads it through
+/// Height of the status bar, in pixels at the design rem (`shell::scale`).
+/// Layout arithmetic reads it through
 /// [`height`] so the bar follows the font size with its own text.
 pub const HEIGHT: f32 = 26.0;
 
@@ -54,13 +55,13 @@ pub fn fullscreen_label(hidden: usize) -> SharedString {
 /// Render optional status segments in order: count, nonempty pending keys, reload
 /// failure, write failure, restart requirement, shell notice, diagnostics summary,
 /// ingestion activity, and historical time on the left; fullscreen, then the theme
-/// name, on the right. The fullscreen segment shows while a main-tree tile is maximised, carrying the number of tiles it hides, so a
-/// maximised tile never reads as a workspace's only tile; clicking it restores the
+/// name, on the right. The fullscreen segment shows while a main-tree tile is
+/// maximised, carrying the number of tiles it hides; clicking it restores the
 /// layout through the supplied callback. Configuration errors use danger, restart
 /// and diagnostics use warning, and ordinary notices are muted. Diagnostics clicks
 /// invoke the supplied callback. The historical badge requires both the shortened and
-/// full timestamps; its tooltip shows the full timestamp. Inputs remain separate because callers already hold these values
-/// independently.
+/// full timestamps; its tooltip shows the full timestamp. Inputs remain separate
+/// because callers already hold these values independently.
 #[allow(clippy::too_many_arguments)]
 pub fn status_bar(
     pending: &[Keystroke],
@@ -140,9 +141,8 @@ pub fn status_bar(
     }
     if let Some(message) = diagnostics_summary {
         bar = bar.left(
-            // The one clickable segment on the bar takes pointer states
-            // (`control::PointerStates`, a bare glyph's) with a little
-            // horizontal padding so the hover box has a shape.
+            // The diagnostics segment uses the shared bare-control pointer
+            // states and horizontal padding to define its hover area.
             div()
                 .id("diagnostics-summary")
                 .px_1()

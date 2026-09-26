@@ -97,8 +97,7 @@ fn blocked_notice(name: &str, why: &str) -> SharedString {
 /// The footer after an `:rm` confirm answered anything but `y`.
 pub(crate) const NOT_REMOVED: &str = "sheet not removed";
 
-/// An armed `:rm` confirm (planning decision 14, the market-data upload
-/// confirm's shape). The confirm holds the keyboard on its own `focus`
+/// An armed `:rm` confirmation. It holds the keyboard on its own `focus`
 /// handle, tracked by the prompt the header paints, whose `on_key_down`
 /// runs before the shell root's listener (`PricerTile::confirm_key`).
 /// `_blur` is the focus-leaving half: any move of window focus off the
@@ -384,10 +383,10 @@ fn app_clock(cx: &App) -> Clock {
         .unwrap_or_else(|| Clock::machine().0)
 }
 
-/// The first `untitled-N` with no document, no queued save and no open
-/// tile (spec §7.4). Known limitation (planning decision 12): before the
-/// first catalog lands, a name with a document this session has not seen
-/// can be picked; its first save adds a generation to that document.
+/// The first `untitled-N` absent from known documents, pending saves, open
+/// tiles, and retiring names. Before the first catalog arrives, an existing
+/// document's name can still be picked if this session has not seen it;
+/// the first save then adds a generation to that document.
 fn untitled(shared: &Shared) -> String {
     (1..)
         .map(|n| format!("untitled-{n}"))
@@ -483,11 +482,8 @@ impl PricerTile {
                 notices.push(LOADING.to_string());
                 (fallback(&name, &record), true)
             }
-            // The load was never submitted: nothing will ever call
-            // `loaded` to clear a `loading` state, so this is the
-            // failed-load path (spec §7.1), not a load still on its
-            // way — a refused read must never let the empty fallback
-            // stand in for, and then overwrite, the real document.
+            // No load answer will arrive. Block saves immediately so the
+            // empty fallback cannot overwrite the stored document.
             Loaded::Refused => {
                 blocked = Some(blocked_notice(&name, LOAD_REFUSED));
                 (fallback(&name, &record), false)
@@ -1572,7 +1568,7 @@ impl PricerTile {
         }
     }
 
-    /// The outcome of this sheet's latest queued save (spec §7.3): `Ok`
+    /// The outcome of a queued save for the current sheet: `Ok`
     /// clears a failure and its notice; `Err` paints the reason and marks
     /// the sheet to be written again by the next burst or the close. A
     /// sheet whose load failed queues nothing, so no outcome is its own:
@@ -1890,7 +1886,7 @@ impl PricerTile {
         }
     }
 
-    /// A `Pending` load's answer (planning decision 7), reached from the
+    /// A `Pending` load's answer, reached from the
     /// `Delivery::Query` arm through `query_answered`.
     pub fn loaded(&mut self, answer: Result<Option<DocumentRows>, String>, cx: &mut Context<Self>) {
         if !self.loading {
@@ -2610,9 +2606,9 @@ impl PricerTile {
         }
     }
 
-    // ---- sheets: `:e`, `:new`, `:name`, `:rm` (spec §7.4) --------------
+    // ---- sheets: `:e`, `:new`, `:name`, `:rm` -------------------------
 
-    /// `:e <sheet>` (planning decision 13): refused when another tile
+    /// `:e <sheet>` is refused when another tile
     /// holds `name` (two writers would race) or its document is being
     /// removed; the tile's own name is a no-op, unless its load failed
     /// (`save_blocked`): then it reloads, the in-place retry of a refused
@@ -2638,9 +2634,9 @@ impl PricerTile {
 
     /// Put `name` in this tile: flush the outgoing sheet if it has
     /// unsaved changes (refused → stay, so nothing is lost to the switch),
-    /// give its name back, claim `name`, and start over — undo, expansion,
-    /// cursor and every per-sheet save state belong to the sheet left
-    /// behind. Pricing in flight is cancelled and its tag retired: line
+    /// release its name, claim `name`, and clear undo history, expansion,
+    /// cursor, and per-sheet save state. Pricing in flight is cancelled
+    /// and its tag retired: line
     /// ids restart per sheet, so an old answer would install onto a new
     /// sheet's line. `load`: ask the store (`:e`); otherwise the sheet is
     /// new and empty (`:new`).
@@ -2700,7 +2696,7 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `:name <new>` (planning decision 13): refused when `new` is open or
+    /// `:name <new>` is refused when `new` is open or
     /// already a document (or about to be one: a queued save). Otherwise
     /// the tile takes the new name at once and saves the whole sheet under
     /// it now. The OLD name's document is forgotten only once a save under
@@ -2708,7 +2704,7 @@ impl PricerTile {
     /// tile keeps the new name (the trader asked for it), the save notice
     /// paints the reason, the old document is left alone, and the next
     /// edit retries — its confirmation retires the old name then. An empty
-    /// sheet writes nothing (spec §7.2), so its old document stays as it
+    /// sheet writes nothing, so its old document stays as it
     /// was. A tile closed or switched before the confirmation leaves the
     /// old document too: nothing is ever lost to a rename.
     fn rename(&mut self, name: String, cx: &mut Context<Self>) -> Result<(), String> {
@@ -2754,7 +2750,7 @@ impl PricerTile {
         Ok(())
     }
 
-    /// `:rm <sheet>` (planning decisions 13–14): refused for any open
+    /// `:rm <sheet>` is refused for any open
     /// sheet (this tile's own included) and for a name that is no
     /// document; otherwise arms the y/n confirm. Nothing is forgotten here.
     fn arm_remove(
@@ -5300,8 +5296,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// Spec §12: `dd` then `u` restores the row with its numbers and asks
-    /// for nothing.
+    /// `dd` then `u` restores the row and its pricing results without a request.
     #[gpui::test]
     fn dd_then_u_restores_the_row_with_its_numbers_and_no_request(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -7020,7 +7015,7 @@ pub(crate) mod tests {
         assert!(!store.contains("gone"));
     }
 
-    // ---- known names, `:e`, `:new`, `:name`, `:rm` (Task 5) ----
+    // ---- known names, `:e`, `:new`, `:name`, `:rm` ----
 
     fn catalog(names: &[&str]) -> geode_core::query::CatalogSnapshot {
         use geode_core::query::{CatalogSnapshot, DatasetCatalog, PartitionCatalog};
@@ -7097,8 +7092,7 @@ pub(crate) mod tests {
         vcx.run_until_parked();
     }
 
-    /// Planning decision 12 and the controller's ruling: the catalog's
-    /// `pricer_sheets` partitions seed the known names, a later catalog
+    /// The catalog's `pricer_sheets` partitions seed known names. A later catalog
     /// only adds, `untitled-N` skips them, and `:e`/`:rm` offer them.
     #[gpui::test]
     fn the_catalog_seeds_the_known_names_and_a_later_one_adds(cx: &mut gpui::TestAppContext) {
@@ -7213,7 +7207,7 @@ pub(crate) mod tests {
         assert_eq!(asked.get(), 1, "asked once, not per tile");
     }
 
-    /// The controller's ruling: a closed tile's save that is queued but
+    /// A closed tile's save that is queued but
     /// not yet confirmed keeps its name taken — a new sheet under it
     /// would save on top of that document.
     #[gpui::test]
@@ -7439,8 +7433,8 @@ pub(crate) mod tests {
         assert_eq!(h.store.forgets(), vec!["book".to_string()]);
     }
 
-    /// The controller's ruling on a failed save under the new name: the
-    /// tile keeps the new name, the old document stays, the notice says so.
+    /// A failed save after rename keeps the new name and the old document,
+    /// and reports the failure in the save notice.
     #[gpui::test]
     fn a_failed_save_after_colon_name_keeps_the_new_name_and_the_old_document(
         cx: &mut gpui::TestAppContext,

@@ -140,7 +140,7 @@ impl BucketRule {
 }
 
 /// One slot of a request: a source pair bucketed by a rule, or an
-/// expression over source slots (spec §7).
+/// expression over source slots.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SlotKind {
     Source {

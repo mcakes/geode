@@ -134,12 +134,8 @@ fn a_keymap_reload_refreshes_the_chords_global(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// 2c §6.2: a named color is part of what a tile paints, so a
-/// `colours.toml` edit must reach the modules the same way a `views`
-/// edit does — through `ConfigReloaded`, which is what makes the app's
-/// bridge re-read the doc and hand the blotter factory the new
-/// definitions. Without it a trader's color change would sit on disk
-/// until the next restart.
+/// A `colors.toml` edit emits `ConfigReloaded`, allowing the app bridge to
+/// reload named colors and update module factories without a restart.
 #[gpui::test]
 fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);

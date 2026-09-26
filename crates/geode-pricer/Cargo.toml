@@ -14,12 +14,12 @@ bench = false
 test-support = []
 
 # The pure core (`core`) needs `geode-core` and `chrono` alone. The tile
-# (Part 3) adds `geode-shell` for the module-hosting contract (`TileContent`,
+# adds `geode-shell` for the module-hosting contract (`TileContent`,
 # `Frame`, the keymap and action vocabulary, `ChoiceList`, the chip, colour,
 # list-row and control doors), `geode-data` for `DataHandle` alone — the one
 # door a module asks for data (pricing) through — `gpui`/`gpui-component`
 # for the tile and its `DataTable`, `toml` for the session record,
-# `tracing` for the delivery bug log (spec §10.1), and `geode-widgets` for
+# `tracing` for delivery diagnostics, and `geode-widgets` for
 # the expiry's segmented date field (its pure core and painter). Never
 # `geode-pricing`: a module reaches the pricer only through the data tier's
 # request door (PHILOSOPHY §1, "In-process calculation"); never a sibling

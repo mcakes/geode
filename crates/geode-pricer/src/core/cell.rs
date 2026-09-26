@@ -1,5 +1,5 @@
-//! The cell editor's pure half (line-pricer spec §8.4): what an editable
-//! cell opens with, what a commit means as ONE `Edit`, and how an arrow
+//! The cell editor's pure half: what an editable cell opens with,
+//! whether a commit produces an `Edit`, and how an arrow
 //! key nudges the open text. The tile only opens an `InputState` (or, for
 //! an expiry, a segmented date field) on the answer and hands the
 //! committed text or date back here.
@@ -15,7 +15,7 @@ use geode_core::nudge::nudge_text;
 use geode_core::pricing::{Expiry, Instrument, OptionKind, Vanilla};
 use geode_core::schema::ColumnType;
 
-/// The footer's word for a cell that does not edit (spec §8.4).
+/// The footer's word for a cell that does not edit.
 pub const READ_ONLY: &str = "read-only";
 
 const TYPES: [&str; 2] = ["C", "P"];
@@ -26,22 +26,21 @@ pub enum CellEditor {
     /// A text field opened on this text.
     Text(String),
     /// A typeahead over `options`, highlighted on `current`; `free` lets an
-    /// unmatched query commit as typed (the underlying, planning decision 17).
+    /// unmatched query commit as typed, as in the underlying cell.
     Choice {
         options: Vec<String>,
         current: String,
         free: bool,
     },
-    /// A segmented date field — every expiry, whatever it holds (user
-    /// ruling: "date field always"). `Some` is a date expiry's own date;
+    /// A segmented date field for every expiry. `Some` is a date expiry's date;
     /// `None` is a tenor, which has no date here: the pricer never
     /// resolves a tenor (the library's calendar does), so the host seeds
     /// the field from its clock's today.
     Date(Option<NaiveDate>),
 }
 
-/// The line's instrument, or `READ_ONLY` for a package (planning decision
-/// 18) — every editable column reads one.
+/// The line's instrument, or `READ_ONLY` for a package. Every editable
+/// column reads an instrument; package cells are derived from their legs.
 fn instrument(sheet: &Sheet, row: usize) -> Result<&Instrument, &'static str> {
     sheet.instrument(row).ok_or(READ_ONLY)
 }
@@ -142,10 +141,9 @@ fn shift(text: &str, what: &str) -> Result<Option<f64>, String> {
         .ok_or_else(|| format!("{what} '{t}' is not a number"))
 }
 
-/// The one `Edit` a committed cell means (spec §8.4), `Ok(None)` when it
-/// parses to the value the line already holds, or the footer's refusal.
-/// The tile re-checks that the cell has not moved before it applies this
-/// (spec §8.4, "a commit whose cell moved is refused").
+/// Validate a committed cell and return its edit, `Ok(None)` when the parsed
+/// value is unchanged, or a refusal for the footer. The tile checks the target
+/// line and column before applying the edit so it cannot change another cell.
 pub fn commit(
     sheet: &Sheet,
     row: usize,
