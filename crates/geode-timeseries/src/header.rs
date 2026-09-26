@@ -25,7 +25,9 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
-use gpui::{App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div};
+use gpui::{
+    AnyElement, App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
@@ -195,6 +197,9 @@ pub(crate) fn render_header(
     tile_id: u64,
     stack: Option<&StackHandle>,
     menu_open: bool,
+    // The open colour picker: the slot number it targets and the
+    // component element, which takes that chip's swatch position.
+    mut colour_picker: Option<(u8, AnyElement)>,
 ) -> impl IntoElement {
     let mut row = h_flex()
         .w_full()
@@ -288,6 +293,48 @@ pub(crate) fn render_header(
         }
         let states = control::for_chip(theme, &paint, theme.background);
         let number = chip.number;
+        // The picker's trigger is `Size::XSmall`'s square — the swatch
+        // target's own size — so the strip keeps its geometry while it
+        // stands in for the swatch. The trigger stops its own press, so
+        // neither the chip's click nor the swatch's toggle runs under it.
+        let picker = colour_picker
+            .take_if(|(target, _)| *target == number)
+            .map(|(_, el)| el);
+        let swatch = match picker {
+            Some(picker) => picker,
+            None => div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("ts-swatch"),
+                    number as u64,
+                ))
+                .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
+                .size(scale::design(SWATCH_TARGET))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(theme.radius_tokens().sm)
+                .pointer_states(bare_states)
+                .tooltip(tips::tip_with(
+                    chip.swatch_tip_selector.clone(),
+                    SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
+                    Some("timeseries::toggle_visible"),
+                    None,
+                ))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_: &MouseDownEvent, _window, cx| {
+                        tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
+                    }
+                })
+                .child(
+                    div()
+                        .size(scale::design(SWATCH))
+                        .rounded_full()
+                        .bg(chip.swatch),
+                )
+                .into_any_element(),
+        };
         let mut el = div()
             .id(ElementId::NamedInteger(
                 SharedString::new_static("ts-chip"),
@@ -312,39 +359,7 @@ pub(crate) fn render_header(
             // No propagation stop, for the chip's reason below — the
             // chip's own handler also runs and moves the cursor onto
             // the slot just toggled, which is the slot `v` would act on.
-            .child(
-                div()
-                    .id(ElementId::NamedInteger(
-                        SharedString::new_static("ts-swatch"),
-                        number as u64,
-                    ))
-                    .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
-                    .size(scale::design(SWATCH_TARGET))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(theme.radius_tokens().sm)
-                    .pointer_states(bare_states)
-                    .tooltip(tips::tip_with(
-                        chip.swatch_tip_selector.clone(),
-                        SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
-                        Some("timeseries::toggle_visible"),
-                        None,
-                    ))
-                    .on_mouse_down(MouseButton::Left, {
-                        let tile = tile.clone();
-                        move |_: &MouseDownEvent, _window, cx| {
-                            tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
-                        }
-                    })
-                    .child(
-                        div()
-                            .size(scale::design(SWATCH))
-                            .rounded_full()
-                            .bg(chip.swatch),
-                    ),
-            )
+            .child(swatch)
             .child(chip.label.clone())
             .child(
                 div()
@@ -538,6 +553,7 @@ mod tests {
         match colour {
             Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         }
     }
 

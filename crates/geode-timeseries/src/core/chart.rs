@@ -106,6 +106,7 @@ mod tests {
                 a: 1.0,
             },
             Colour::Named(_) => gpui::black(),
+            Colour::Custom(c) => c.to_hsla(),
         };
         let cm = build(&result(), &m, 9, 3600, &colour_of, Some("demo_kdb"));
         assert_eq!(cm.version, 9);

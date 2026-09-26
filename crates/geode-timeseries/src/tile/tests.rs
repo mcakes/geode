@@ -20,6 +20,7 @@ use geode_shell::series::{FetchSource, SeriesSettings};
 use geode_shell::tiling::TileId;
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
+use gpui_component::color_picker::ColorPickerState;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
@@ -569,7 +570,7 @@ impl Harness {
                 .and_then(|p| match p {
                     Popup::Picker(p) => Some(p.input.clone()),
                     Popup::Expr(f) => Some(f.input.clone()),
-                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) => None,
+                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) | Popup::Colour(_) => None,
                 })
                 .expect("a field popup is open");
             input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
@@ -2543,4 +2544,280 @@ fn the_empty_state_buttons_open_the_picker_and_the_expression_field(cx: &mut gpu
     h.draw(&mut vcx);
     let selector: &'static str = Box::leak(format!("timeseries-empty-{TILE}-0").into_boxed_str());
     assert!(vcx.debug_bounds(selector).is_none());
+}
+
+// ---- the colour picker -------------------------------------------
+
+impl Harness {
+    /// The slot the open colour picker targets, if the picker is up.
+    fn colour_target(&self, vcx: &gpui::VisualTestContext) -> Option<u8> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Colour(c)) => Some(c.target),
+            _ => None,
+        })
+    }
+    /// The open picker's component state and its captured featured row.
+    fn colour_pick(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> (Entity<ColorPickerState>, Vec<(gpui::Hsla, Colour)>) {
+        self.tile
+            .read_with(vcx, |t, _| match (t.popup(), t.pick_context()) {
+                (Some(Popup::Colour(c)), Some(p)) => {
+                    assert_eq!(c.target, p.target);
+                    (c.picker.clone(), p.featured.clone())
+                }
+                _ => panic!("the colour picker is open"),
+            })
+    }
+    /// Commit `colour` through the component's own commit — the method
+    /// a swatch click and the hex field's `enter` both run.
+    fn select_colour(&self, vcx: &mut gpui::VisualTestContext, colour: gpui::Hsla) {
+        let (picker, _) = self.colour_pick(vcx);
+        vcx.update(|window, cx| {
+            picker.update(cx, |s, cx| s.select_color(colour, window, cx));
+        });
+        self.draw(vcx);
+    }
+    fn holds_focus(&self, vcx: &mut gpui::VisualTestContext) -> bool {
+        vcx.update(|window, cx| self.content.holds_focus(window, cx))
+    }
+    /// Open the menu and pick `Colour…` with the menu's own verbs (`j`
+    /// until it is lit, then `enter`).
+    fn pick_colour_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
+        self.dispatch(vcx, "menu", None);
+        let row = self.menu_row_index(vcx, "Colour…");
+        while !self.menu_rows(vcx)[row].1 {
+            self.dispatch(vcx, "list_down", None);
+        }
+        self.dispatch(vcx, "menu_pick", None);
+        // The component's popup surface paints the frame after its
+        // trigger's bounds are known.
+        self.draw(vcx);
+        self.draw(vcx);
+    }
+}
+
+/// A focus handle standing in for the shell root the keyboard sits on
+/// before the picker opens — what its popover hands focus back to.
+fn focus_stand_in(vcx: &mut gpui::VisualTestContext) -> gpui::FocusHandle {
+    vcx.update(|window, cx| {
+        let f = cx.focus_handle();
+        f.focus(window, cx);
+        f
+    })
+}
+
+#[gpui::test]
+fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(2), "the cursor's slot");
+    let (picker, featured) = h.colour_pick(&vcx);
+    assert!(picker.read_with(&vcx, |s, _| s.is_open()));
+    assert_eq!(
+        picker.read_with(&vcx, |s, _| s.value()),
+        Some(h.tile.read_with(&vcx, |t, _| t.header().chips[1].swatch)),
+        "seeded with the slot's colour as painted"
+    );
+    assert_eq!(
+        featured.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
+        vec![
+            Colour::Palette(0),
+            Colour::Palette(1),
+            Colour::Palette(2),
+            Colour::Palette(3),
+            Colour::Palette(4),
+            Colour::Named("spx".into()),
+        ]
+    );
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    // The component stands in the target chip, in place of its swatch.
+    let picker_sel: &'static str =
+        Box::leak(format!("timeseries-colour-picker-{TILE}-2").into_boxed_str());
+    let swatch_sel: &'static str =
+        Box::leak(format!("timeseries-swatch-{TILE}-2").into_boxed_str());
+    assert!(vcx.debug_bounds(picker_sel).is_some());
+    assert!(vcx.debug_bounds(swatch_sel).is_none());
+    h.dispatch(&mut vcx, "cancel", None);
+    assert!(h.popup_is_none(&vcx));
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()), "told closed");
+    // By pointer: a right-click on s1's chip opens the menu on it, and
+    // a click on the row opens the picker there.
+    h.right_click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
+    let row = h.menu_row_index(&vcx, "Colour…");
+    h.click(&mut vcx, &format!("ts-menu-row-{TILE}-{row}"));
+    h.draw(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(1));
+    // The same picker entity is reused, not rebuilt.
+    assert_eq!(h.colour_pick(&vcx).0, picker);
+    assert!(picker.read_with(&vcx, |s, _| s.is_open()));
+}
+
+#[gpui::test]
+fn a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, featured) = h.colour_pick(&vcx);
+    h.select_colour(&mut vcx, featured[5].0);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+    assert!(h.popup_is_none(&vcx), "a swatch commit closes the picker");
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (_, featured) = h.colour_pick(&vcx);
+    h.select_colour(&mut vcx, featured[3].0);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(3));
+    // Off the featured row: absolute, and the chart paints exactly it.
+    h.pick_colour_row_by_keys(&mut vcx);
+    let before = h.chart(&vcx).slots[0].colour;
+    let green = crate::core::Rgb8([0x00, 0xcc, 0x44]);
+    h.select_colour(&mut vcx, green.to_hsla());
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Custom(green));
+    let after = h.chart(&vcx).slots[0].colour;
+    assert_ne!(before, after);
+    assert_eq!(after, green.to_hsla(), "no floor, no theme");
+    assert_eq!(h.swatch(&vcx), green.to_hsla());
+    // And the session carries it as `#rrggbb`.
+    assert!(
+        toml::to_string(&h.tile.read_with(&vcx, |t, _| t.serialize()))
+            .unwrap()
+            .contains("colour = \"#00cc44\"")
+    );
+}
+
+#[gpui::test]
+fn a_pick_lands_on_the_target_slot_even_after_the_cursor_moves(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    // The cursor moves under the open picker (the chip door), and a
+    // delivery rebuilds the chrome: neither retargets it.
+    vcx.update(|_, cx| h.tile.update(cx, |t, cx| t.chip_clicked(0, cx)));
+    h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
+    assert_eq!(h.model(&vcx).cursor(), Some(0));
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    let blue = crate::core::Rgb8([0x11, 0x22, 0xee]);
+    h.select_colour(&mut vcx, blue.to_hsla());
+    let m = h.model(&vcx);
+    assert_eq!(m.slots()[1].colour, Colour::Custom(blue), "the target");
+    assert_eq!(m.slots()[0].colour, Colour::Palette(0), "not the cursor");
+}
+
+#[gpui::test]
+fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    // The popover holds the keyboard, and the tile says so: the shell's
+    // insert branch then keeps bare keys (typing in the hex field) away
+    // from the tile's verbs.
+    assert!(h.holds_focus(&mut vcx), "the picker holds the keyboard");
+    assert_eq!(h.key_context_mode(&mut vcx), "insert");
+    let colour = h.model(&vcx).slots()[0].colour.clone();
+    vcx.simulate_keystrokes("escape");
+    h.draw(&mut vcx);
+    assert!(h.popup_is_none(&vcx), "escape closes");
+    assert_eq!(h.model(&vcx).slots()[0].colour, colour, "unchanged");
+    assert!(
+        vcx.update(|window, _| root.is_focused(window)),
+        "focus is back where it was"
+    );
+    assert!(!h.holds_focus(&mut vcx));
+    assert_eq!(h.key_context_mode(&mut vcx), "normal");
+    // The tile's own keys drive it again.
+    h.dispatch(&mut vcx, "colour", None);
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+}
+
+#[gpui::test]
+fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    // The hex field, as a click on it would leave it: focused, emptied.
+    vcx.update(|window, cx| {
+        let input = picker.read(cx).hex_input().clone();
+        input.update(cx, |s, cx| s.set_value("", window, cx));
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    });
+    h.draw(&mut vcx);
+    assert!(h.holds_focus(&mut vcx), "the hex field is the picker's");
+    // Typing edits the field and commits nothing until `enter`. (That a
+    // typed `c` is not the tile's `Cycle colour` is the shell's insert
+    // branch's doing, which routes on `holds_focus` + `insert`, both
+    // asserted above; this harness has no shell matcher.)
+    vcx.simulate_input("#ffcc00");
+    vcx.simulate_keystrokes("backspace backspace backspace backspace 8 8 0 0");
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+    // `enter` commits AND closes the popover in one keystroke; the
+    // commit's `Change` lands after the close and still counts.
+    vcx.simulate_keystrokes("enter");
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.model(&vcx).slots()[0].colour,
+        Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
+    );
+    assert!(h.popup_is_none(&vcx));
+    // That close was the popover's own: it handed focus back.
+    assert!(vcx.update(|window, _| root.is_focused(window)));
+}
+
+/// A swatch commit closes the state without the popover ever seeing a
+/// close, so nothing hands focus back: the tile's closer blurs the
+/// picker's focused surface before dropping it — checked before the
+/// next frame, which would collect the popover's handle either way —
+/// leaving the window unfocused for the shell's focus net.
+#[gpui::test]
+fn a_swatch_commit_blurs_the_picker_before_dropping_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    let _root = focus_stand_in(&mut vcx);
+    h.pick_colour_row_by_keys(&mut vcx);
+    assert!(h.holds_focus(&mut vcx));
+    let (picker, featured) = h.colour_pick(&vcx);
+    vcx.update(|window, cx| {
+        picker.update(cx, |s, cx| s.select_color(featured[1].0, window, cx));
+    });
+    // A second update, no draw between: the first one's effects (the
+    // tile's close) have flushed, the popover's element state has not
+    // yet been collected.
+    let focused_after = vcx.update(|window, cx| window.focused(cx));
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(focused_after, None, "blurred before the drop");
+    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+}
+
+#[gpui::test]
+fn removing_the_target_slot_closes_the_picker(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.pick_colour_row_by_keys(&mut vcx);
+    let (picker, _) = h.colour_pick(&vcx);
+    // Another slot going leaves it up.
+    h.command(&mut vcx, "remove s1").unwrap();
+    assert_eq!(h.colour_target(&vcx), Some(2));
+    h.command(&mut vcx, "remove s2").unwrap();
+    assert!(h.popup_is_none(&vcx), "its target is gone");
+    assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
+}
+
+#[gpui::test]
+fn the_colour_row_with_no_series_explains(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    assert!(!h.dispatch_handled(&mut vcx, "pick_colour", None));
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.notice(&vcx).as_deref(), Some("add a series first"));
 }

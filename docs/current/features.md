@@ -176,6 +176,32 @@ empty tile offers the add and compose verbs as buttons under its hint. A
 right press focuses a tile exactly as a left one does, so a module's context
 menu always opens in the tile whose keys it will answer to.
 
+A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an
+absolute `#rrggbb`. The first two follow the theme and get its readability
+floor. An absolute colour is painted exactly as chosen: it ignores the theme
+and gets no contrast adjustment, so it can be hard to see on a theme it was
+not chosen against. The session stores it as lowercase `#rrggbb`; `[colours]`
+names cannot start with `#`, so this is never read as a name, and a malformed
+value keeps the slot's default colour. `c` cycles the palette and moves an
+absolute or named colour back to palette colour 1.
+`:colour s<n> <1..5|name|#rrggbb>` sets any of the three and refuses a
+malformed hex by naming the form. The action menu's `Colour…` row (also in
+the chip's right-click menu) opens gpui-component's colour picker on the
+cursor slot's chip, where its swatch button stands in for the chip's swatch.
+The row has no key of its own; `:colour` is the keyboard route. The picker's
+featured row shows the five palette colours and then every `[colours]` name,
+each resolved when the picker opens. Picking one of those keeps the
+theme-following colour. Every other choice (the palette grid, the HSLA
+sliders, or a hex typed and entered) becomes absolute, with alpha dropped.
+Swatch and hex choices commit and close the picker. Slider steps commit live
+and leave it open. Escape and a click outside close it without a change. The
+picker always writes to the slot it was opened on, even if the cursor moves
+meanwhile. Removing that slot closes the picker. While the picker holds the
+keyboard, the tile reports insert mode, so typing in the hex field never
+reaches the tile's single-key commands. A pick first matches exact colours in
+the featured row, so a `[colours]` name that resolves to the same colour as a
+palette entry is read as that palette entry.
+
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
 allowing the market-data panel and as-of dialog to share behavior without

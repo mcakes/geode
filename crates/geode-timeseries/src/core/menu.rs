@@ -67,7 +67,7 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
 }
 
 /// The action list, in order: the four openers; then, under a heading
-/// naming the cursor's slot, the six slot verbs (all disabled with
+/// naming the cursor's slot, the seven slot verbs (all disabled with
 /// `no series` while the tile holds none — the section stays so the
 /// list keeps one shape); then the frequency steps, the two toggles
 /// (ticked when on) and the view reset.
@@ -105,6 +105,7 @@ pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     ));
     out.push(action("timeseries::axis_next", "Cycle axis", none));
     out.push(action("timeseries::colour", "Cycle colour", none));
+    out.push(action("timeseries::pick_colour", "Colour…", none));
     out.push(action(
         "timeseries::rule",
         "Cycle bucket rule",
@@ -232,6 +233,7 @@ mod tests {
                 "Hide",
                 "Cycle axis",
                 "Cycle colour",
+                "Colour…",
                 "Cycle bucket rule",
                 "Edit expression…",
                 "Remove",
@@ -247,6 +249,7 @@ mod tests {
             "timeseries::toggle_visible",
             "timeseries::axis_next",
             "timeseries::colour",
+            "timeseries::pick_colour",
             "timeseries::rule",
             "timeseries::edit",
             "timeseries::remove",
@@ -318,9 +321,9 @@ mod tests {
         // step down lands on `Hide` (6).
         assert_eq!(step(&rows, 3, 1), 6);
         assert_eq!(step(&rows, 6, -1), 3);
-        // On a source `Edit expression…` (10) is greyed: stepped over.
-        assert_eq!(step(&rows, 9, 1), 11);
-        assert_eq!(step(&rows, 11, -1), 9);
+        // On a source `Edit expression…` (11) is greyed: stepped over.
+        assert_eq!(step(&rows, 10, 1), 12);
+        assert_eq!(step(&rows, 12, -1), 10);
         assert_eq!(step(&rows, 0, -1), 0, "clamped at the top");
         let last = rows.len() - 1;
         assert_eq!(step(&rows, last, 1), last, "clamped at the bottom");
@@ -334,11 +337,11 @@ mod tests {
     fn stepping_skips_disabled_rows() {
         let m = Model::new();
         let rows = rows(&MenuInputs { model: &m }, None);
-        assert_eq!(step(&rows, 3, 1), 13, "over the greyed slot section");
-        assert_eq!(step(&rows, 13, -1), 3);
+        assert_eq!(step(&rows, 3, 1), 14, "over the greyed slot section");
+        assert_eq!(step(&rows, 14, -1), 3);
         assert_eq!(
             step(&rows, 8, 1),
-            13,
+            14,
             "a highlight the pointer left on a greyed row steps from it"
         );
         assert_eq!(step(&rows, 8, 0), 8, "a refresh keeps it there");
