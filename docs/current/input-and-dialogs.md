@@ -348,6 +348,8 @@ The rows depend on the caret's position in the grammar:
 | An operator, or inside an open `in (` list | Values for that column, when there are any to list |
 | A complete term | `and`, `or`, plus `)` when a paren is open (or `,` / `)` inside an `in` list) |
 
+Right after typing `in` and before its `(`, the only row offered is `(` itself.
+
 Operators are filtered by the column's type: text offers `= != in like`;
 number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
 a derived dimension offers `= != in`. `<>` still parses but is never offered;
@@ -387,14 +389,12 @@ A warning line under the rows names the first schema problem in the text — an
 unknown column (with `did you mean <name>?` when one is close) or an
 ordering/`like` comparison on a derived dimension — but never one whose span
 still touches the caret, so a warning never flags a word still being typed.
-Syntax errors stay silent while typing; they surface only on Enter, as before.
+Syntax errors stay silent while typing; they surface only on Enter.
 
-Enter now refuses a syntax error or a schema error (the same check the
-warning line uses) with its message, and the text stays in the field. This
-replaces the old behavior, where an unknown column was accepted and could
-only fail later when a tile queried its dataset. With no schema loaded (an
-empty vocabulary), the schema check does nothing and Enter accepts the text
-as before.
+Enter refuses a syntax error or a schema error (the same check the warning
+line uses) with its message, and the text stays in the field. With no schema
+loaded (an empty vocabulary), the schema check does nothing and Enter
+accepts the text.
 
 Known limitations: the grammar has no date literal, so a malformed date is
 only caught at query time; values are not narrowed by the text already typed;
