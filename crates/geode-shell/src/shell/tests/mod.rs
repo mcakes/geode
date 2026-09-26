@@ -172,14 +172,13 @@ pub(super) fn services_with_a_dropped_fragment_binding() -> ShellServices {
     services
 }
 
-fn services_with_rec_roster_shipping(
-    fragment: Option<&'static str>,
-) -> (
-    ShellServices,
-    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
-    RecFocus,
-    RecInput,
-) {
+/// A `ShellServices` whose roster is exactly `recorders`, in order, built
+/// in `main.rs`'s startup order (builtin actions, pick and scope actions,
+/// add actions for every recorder kind, module actions, fragments, keymap).
+pub(super) fn services_with_recorders(
+    recorders: Vec<crate::module::recording::RecordingFactory>,
+) -> ShellServices {
+    use crate::module::ModuleFactory as _;
     // No compiled-in builtin layer in this fixture, so a reload has
     // nothing to preserve. `ShellServices::config_and_builtin` is the
     // constructor that keeps `config` and `builtin` from disagreeing
@@ -206,14 +205,12 @@ fn services_with_rec_roster_shipping(
     register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
     // Register recorder add actions from the roster before building the keymap,
     // matching application startup.
-    crate::defaults::register_add_actions(&mut registry, &["rec"]);
-    let mut recorder = crate::module::recording::RecordingFactory::new("rec");
-    recorder.fragment = fragment;
-    let log = recorder.log.clone();
-    let last_focus = recorder.last_focus.clone();
-    let input = recorder.input.clone();
+    let kinds: Vec<&'static str> = recorders.iter().map(|r| r.kind()).collect();
+    crate::defaults::register_add_actions(&mut registry, &kinds);
     let mut roster = crate::module::ModuleRoster::new();
-    roster.add(Box::new(recorder));
+    for r in recorders {
+        roster.add(Box::new(r));
+    }
     // Module actions exist before `build_keymap`, exactly as `main.rs`
     // orders it — a binding into the module's own context is what
     // `services_with_recorder`'s extra layer needs to resolve.
@@ -225,7 +222,7 @@ fn services_with_rec_roster_shipping(
     let keymap = test_keymap_with_fragments(&registry, &keymap_fragments, &[]);
     let (theme, warnings) = crate::theme::load_bundled();
     assert!(warnings.is_empty(), "{warnings:?}");
-    let services = ShellServices {
+    ShellServices {
         config,
         builtin,
         registry,
@@ -245,8 +242,28 @@ fn services_with_rec_roster_shipping(
         keymap_diagnostics: Vec::new(),
         keymap_fragments,
         keymap_fragment_diagnostics,
-    };
-    (services, log, last_focus, input)
+    }
+}
+
+fn services_with_rec_roster_shipping(
+    fragment: Option<&'static str>,
+) -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    RecFocus,
+    RecInput,
+) {
+    let mut recorder = crate::module::recording::RecordingFactory::new("rec");
+    recorder.fragment = fragment;
+    let log = recorder.log.clone();
+    let last_focus = recorder.last_focus.clone();
+    let input = recorder.input.clone();
+    (
+        services_with_recorders(vec![recorder]),
+        log,
+        last_focus,
+        input,
+    )
 }
 
 /// The shared services with a binding into the recording module's own context, used to
@@ -579,6 +596,7 @@ mod flip;
 mod grouping;
 mod input;
 mod keybindings_dialog;
+mod launch;
 mod objectdialog;
 mod occupants;
 mod palette;
