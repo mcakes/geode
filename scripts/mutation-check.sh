@@ -1,98 +1,38 @@
 #!/bin/zsh
 #
-# Mutation check for the query path (spec §6).
-#
-# Each entry breaks one load-bearing behaviour and runs the suite. A
-# mutation that SURVIVES is a branch no test can see — the suite is green
-# whether that code is right or wrong.
-#
-# This exists because five rounds of code review found silent defects the
-# suite could not see, and the fixture was the reason every time: reviews
-# find what the fixture makes reachable. Reading the tests never revealed
-# that; twenty minutes of mutation did. Run it after touching the
-# compiler, the scope lowering, as-of routing, publish, the grain
-# vocabulary, the document family, the adapter tier, the coalescer, the
-# receiver pipeline, or the panel's matrix model and draft, and treat a
-# SURVIVED line as a missing test rather than a curiosity.
-#
-# The two source-time tie-break entries were described as "caught
-# probabilistically, because the tests loop twenty times". Measured, that
-# reasoning was wrong: the query plan is deterministic within a process,
-# so twenty iterations sample one answer twenty times rather than twenty
-# times independently. The as-of entry survived two runs in three.
-#
-# What fixes it is the fixture, not the loop. Eight tied generations
-# instead of two, with the winner inserted first, makes an unordered pick
-# land on the wrong row every time rather than half the time: 4/4 caught
-# after, 1/3 before. The retention entry measured 3/3 as it stood and was
-# left alone. Neither is probabilistic now — treat a SURVIVED on either as
-# a real finding.
-#
-# This script edits tracked source files in place and restores them
-# afterwards, so it takes three precautions.
-#
-#   * The backup path is unique per run. A single shared /tmp path let two
-#     concurrent runs restore each other's backup over the wrong file, and
-#     one checkout ended up with the contents of scope_sql.rs inside
-#     compile.rs.
-#   * A lock directory serialises runs against the same checkout, because
-#     two runs mutating the same files cannot both be meaningful anyway.
-#   * A trap restores the file in flight however the script exits, so an
-#     interrupt or a stale anchor cannot leave a mutation in the tree. An
-#     earlier abort did exactly that, and the mutation was found committed
-#     to a working tree days later.
+# Mutation checks: replace one source anchor and run the tests expected to
+# detect the broken behavior. A surviving mutation identifies a behavior the
+# selected package's tests did not distinguish from the original code.
 #
 # Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
-#   (from the repo root)
 #
-# --anchors-only runs no cargo at all: it checks every selected entry's
-# anchor against its file and reports the ones that no longer match
-# (ANCHOR) or match more than once (AMBIG), then a one-line summary.
-# Under a second over the whole file (one python pass, each source file
-# read once). Exits non-zero on any finding, so it can gate a merge; a
-# selection that matches nothing says so rather than passing. Run it
-# before every merge and after
-# any edit near an anchored line — a normal run reports these two only
-# for the entries it happens to select, and an ambiguous anchor is the
-# quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
-# anchor is duplicated by a later verbatim reuse (the final review of the
-# health follow-ups found exactly that — a seed loop copied the ingest
-# sink's emit closure, and the entry guarding the sink mutated the seed
-# instead) keeps printing "caught" while defending nothing. A normal run
-# now prints AMBIG for the entries it does select, and still mutates the
-# first match.
+# --anchors-only runs no Cargo commands and changes no source files. It checks
+# every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
+# exits nonzero for either finding or an empty selection. Run the unfiltered
+# anchor check before merging and after editing an anchored source block.
 #
-# With a substring, only entries whose name contains it are run — for
-# iterating on the entries you just added. Always finish with an unfiltered
-# run; a filtered one proves nothing about the rest. The unfiltered run is
-# what CI and a merge gate should use; --changed is the everyday form
-# while a change is in flight.
+# --changed defaults to main. It selects files changed versus REF, changed in
+# the working tree, or untracked. The set is captured before mutation so the
+# script cannot select files because of its own edits. A substring narrows the
+# selection by entry name; both filters can be combined. Use targeted entries
+# or --changed during development; a full mutation run is a broader audit.
 #
-# --changed (default REF: main) skips any entry whose `file` is not among
-# the files changed versus REF, changed in the working tree, or untracked.
-# The changed set is computed once, before the first mutation — this
-# script edits tracked files in place, so computing it later would see
-# its own mutations. A run prints "skipped N entries whose files are
-# unchanged since REF" at the end. --changed and a substring compose:
-# `--changed "pool:"` runs only entries matching both filters.
+# Mutation runs edit tracked source in place. Preserve work before running
+# them. A per-checkout lock serializes runs; unique temporary files isolate
+# backups and logs. Exit and signal traps restore the file in flight, though
+# forced termination can bypass cleanup. Concurrent external edits to that
+# file can be overwritten by restoration.
 #
-# Cost note (measured on this checkout, warm cache): a geode-data entry
-# with a covering test filter ("pool: the tag is echoed, not
-# regenerated", filtered to the one test) took ~3s; the same entry with
-# no filter, running the whole geode-data --lib suite, took ~36s — the
-# filter is why every entry now names one. The last 79 that did not were
-# filled in by probing each mutation against the full suite and reading
-# back which test failed; a `--changed` run over service.rs and catalog.rs
-# had been taking over an hour on those alone. An entry added from here on
-# names its test too: without one, "caught" says nothing about WHICH test
-# saw the mutation, which is the "two defences overlapping" lie the header
-# above warns about. `.cargo/config.toml`
-# pinning `profile.dev.split-debuginfo = "unpacked"` was also tried, to
-# skip dsymutil packing on macOS: measured with `time` across two warm
-# runs of a single entry, before (~3.1-3.4s) and after (~3.0-3.1s) adding
-# the file — no measurable difference on this toolchain (cargo's macOS
-# default is already "unpacked"), so the file was dropped rather than
-# kept for a change that does nothing here.
+# Each entry names the package containing its detecting test and a test-name
+# filter. The filtered test runs first; if it passes or matches nothing, the
+# full package suite runs. caught* means another test failed, while FILTER
+# means the declared filter matched no tests. Correct either mismatch before
+# relying on the entry as evidence for its named test.
+#
+# A failed Cargo command is reported as caught; this script does not distinguish
+# compilation failure from a failing assertion. Inspect the failure when
+# validating an entry. Repeating a deterministic fixture does not add coverage;
+# the fixture must exercise the behavior the mutation changes.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -156,7 +96,7 @@ trap 'cleanup; exit 143' TERM
 #                                           matches no test", then falls
 #                                           back to the full suite for a
 #                                           plain caught/SURVIVED verdict
-# Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+# Omitting `test_filter` runs the full crate suite.
 anchors_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
@@ -13079,18 +13019,12 @@ run_mutation "mdcursor: j from the strip returns to the remembered column" \
 run_mutation "mdattr: a refused attribute value stays in insert mode" \
   crates/geode-marketdata/src/tile.rs \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.notice = Some(e.into());
                     return true;
                 }' \
   '                Err(e) => {
-                    // Refused, staying in insert mode with the typed text
-                    // (the cell rule, spec §5.2) — retyping is one
-                    // keystroke away where dropping the editor would
-                    // throw the whole line back at the trader.
+                    // Keep refused text in the focused editor for correction.
                     self.close_editor(window, cx);
                     self.notice = Some(e.into());
                     return true;
@@ -13608,9 +13542,9 @@ run_mutation "mddate: insert_up steps a date field" \
 # — the trader sees the edit land with the day they typed gone.
 run_mutation "mddate: enter completes an unambiguous pending digit, never commits the old date" \
   crates/geode-marketdata/src/tile.rs \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // `commit`) come through here, so they cannot disagree.
+  '                // keyboard commit routes use this check.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata enter_completes_a_pending_digit_rather_than_committing_the_old_date
 
@@ -13619,9 +13553,9 @@ run_mutation "mddate: enter completes an unambiguous pending digit, never commit
 # `commit` on `ex` writes the 18th the cell had, marked edited.
 run_mutation "mddate: a date cell's enter completes a pending digit too" \
   crates/geode-marketdata/src/tile.rs \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = field.complete_pending() {' \
-  '                // the value door. Both `enter`s land here.
+  '                // the shared value commit path.
                 if let Err(segment) = Ok::<(), Segment>(()) {' \
   geode-marketdata a_date_cell_commits_and_cancels_through_the_fragments_verbs
 
@@ -14294,19 +14228,15 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
 
-# ---- Popup hover (user report 2026-09-17) ------------------------------
+# ---- Popup hover and occlusion ---------------------------------------
 #
-# The popup must OCCLUDE: without `occlude()` gpui keeps hit-testing the
-# grid beneath it, so a hover over a menu row lit up the table row under
-# the pointer. Mutated out, every keyboard test passes — only the test
-# Host's hover-gated move counter (the grid's stand-in) sees the leak.
+# Popup occlusion prevents pointer events from reaching the grid underneath.
+# The host's hover-gated counter detects the leak; keyboard tests do not
+# exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
   crates/geode-marketdata/src/popup.rs \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // The popup OCCLUDES (user report 2026-09-17): without this, gpui
-        // keeps hit-testing the grid painted beneath it, so hovering a
-        // menu row lit up the table row under the pointer instead. The
-        // shell'"'"'s own modal (`dialog.rs`) makes the same call.
+        // Occlude the grid so popup hover and press events do not also hit its rows.
         .occlude()' \
   '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
   geode-marketdata \
@@ -17780,10 +17710,8 @@ run_mutation "panel: a key switch drops the upload's sent rows" \
   crates/geode-marketdata/src/tile.rs \
   '        self.sent = None;
         self.submitted = None;
-        self.upload_error = None;
-        // Park the outgoing draft' \
-  '        self.upload_error = None;
-        // Park the outgoing draft' \
+        self.upload_error = None;' \
+  '        self.upload_error = None;' \
   geode-marketdata \
   outcome_after_a_key_switch_is_a_notice_naming_the_key
 

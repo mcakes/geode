@@ -128,6 +128,32 @@ schema; production migration needs an explicit procedure. See
 [`store/mod.rs`](../../crates/geode-data/src/store/mod.rs) and
 [`geode-data README`](../../crates/geode-data/README.md).
 
+## Document validation and storage
+
+Document kinds expose a column vocabulary and parse/write functions through
+[`DocumentKind`](../../crates/geode-core/src/document.rs). Source startup
+checks that kind and dataset have the same column names and types in both
+directions. That check does not compare order or validate payload values.
+The [document kinds](../../crates/geode-documents/README.md) apply their own
+wire-format rules, including required fields and finite numeric values.
+
+Before staging, `DocumentRows::validate` checks key arity and the reserved key
+separator, nonempty rows, axis order and types, unique axis tuples, required
+values and attributes, and equal column lengths. Values and attributes match
+by name. This shared validator does not reject duplicate value or attribute
+names or enforce each kind's numeric rules. A parser or caller remains
+responsible for producing an unambiguous document. Empty documents are
+refused: replacing a live document with no payload rows would leave its new
+generation indistinguishable from a missing document.
+
+[`publish_document`](../../crates/geode-data/src/store/document.rs) stages in
+the dataset's column order, repeating keys and document-level attributes on
+each row. Key parts join with a reserved separator to form the batch; book is
+NULL. The single ingest writer owns the shared staging table. Publication
+commits rows, categorical dictionaries, and provenance together, using the
+same backfill and source-time rules as file publication. Explicit appender
+flush errors abort publication rather than silently storing a shorter document.
+
 ## Source discovery and adapters
 
 Directory discovery reads metadata and the JSON sentinel at

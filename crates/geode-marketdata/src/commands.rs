@@ -1,14 +1,10 @@
-//! The panel's `:` line (market-data spec §8.3). Pure — no gpui, no
-//! entity, no I/O — the same discipline `geode_blotter::core::commands`
-//! and `geode_diagnostics::commands` keep, and the reason this half is
-//! tested without a window.
+//! Pure parsing and completion vocabulary for the panel's tile-local `:` line.
+//! Commands are returned as data; the tile owns mutation, focus, and I/O.
 //!
-//! The vocabulary is `underlying <value>` (trader-facing; `key` is a silent
-//! alias), `revert`, `bump <delta> [row|col]`, `rebase`,
-//! `upload`, `set <attr> [value...]`, `auto [hold|rebase|replace]`,
-//! `menu`. Every verb is built and executed by the tile
-//! (`MarketDataTile::command`); `upload [target]` arms the panel's y/n
-//! confirm (egress spec §6).
+//! Vocabulary: `underlying <value>` (`key` is an unlisted alias), `revert`,
+//! `bump <delta> [row|col]`, `rebase`, `upload [target]`, `set <attr> [value...]`,
+//! `auto [hold|rebase|replace]`, and `menu`. Upload arms confirmation rather than
+//! sending immediately. Completion returns candidates for the shell to rank.
 
 use crate::core::UpdatePolicy;
 use geode_core::document::KEY_SEPARATOR;
@@ -35,9 +31,8 @@ pub enum BumpAxis {
 /// A parsed `:` line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-    /// The document key, already split on [`KEY_DISPLAY_SEPARATOR`] into
-    /// the dataset's declared `key` order — what `DocumentParams::
-    /// document_key` wants.
+    /// Key parts split on [`KEY_DISPLAY_SEPARATOR`]. Dataset compatibility is
+    /// checked by the document-query path rather than this parser.
     Key(Vec<String>),
     Revert,
     Bump {
@@ -45,35 +40,23 @@ pub enum Command {
         axis: BumpAxis,
     },
     Rebase,
-    /// `upload [target]`: the egress target named, or `None` to let the
-    /// tile pick the one eligible target (egress spec §6) — which target
-    /// is eligible is the tile's question, never this parser's.
+    /// Optional upload-target name. The tile resolves eligibility and requires
+    /// an explicit target when more than one is available.
     Upload(Option<String>),
-    /// Open the action list (spec §6.1), the typed door onto exactly what
-    /// `.`/`⋯` open.
+    /// Open the action list also reached through the menu key and header button.
     Menu,
-    /// A document-level attribute edit typed at the `:` line — the same
-    /// vocabulary `i`/`enter` on `Cursor::Attr` writes through, but
-    /// reachable without moving the cursor into the strip at all. `value`
-    /// is `None` for "show me the current value" (spec §5.2).
+    /// Set a document attribute without moving the cursor. None asks the tile
+    /// to show its current value; type validation belongs to the tile.
     Set {
         attr: String,
         value: Option<String>,
     },
-    /// `auto <policy>` sets what the panel does with a newer document
-    /// under its edits (spec §8.4, 2026-09-19); `None` is a bare `auto`,
-    /// which the tile answers by naming the current policy — this core
-    /// has no tile to read it off, the same reason `Set { value: None }`
-    /// is a variant and not a parse error.
+    /// Set the new-document policy, or ask the tile for its current value.
     Auto(Option<UpdatePolicy>),
 }
 
-/// Every verb, in the order completions offer them. `key` is a silent
-/// alias of `underlying` (the trader-facing word, spec §3) and is not
-/// listed: it parses, it is not taught. `rebase` is filtered by the
-/// caller's `behind` flag (spec §8.3: it is offered only while a newer
-/// generation sits under the draft) — listed here so one table is the
-/// vocabulary and the filter is one line.
+/// Completion verbs in declared order. The parser also accepts `key` as an
+/// alias, but never suggests it. Rebase is offered only when `behind` is true.
 pub(crate) const VERBS: [&str; 8] = [
     "underlying",
     "revert",
@@ -98,10 +81,10 @@ fn behind_only(verb: &str) -> bool {
     verb == "rebase"
 }
 
-/// Parse a `:` line, without its leading colon. `Err` is one line, shown
-/// inline on the command line — the same contract every other module's
-/// `command` keeps.
-///
+/// Parse a line without its leading colon. Names are case-sensitive.
+/// Underlying and upload reject extra arguments, as does auto. Set joins its
+/// value words with single spaces. Revert, rebase, and menu ignore trailing
+/// words; bump reads a delta and optional axis without checking the remaining tail.
 pub fn parse(line: &str) -> Result<Command, String> {
     let mut words = line.split_whitespace();
     match words.next() {
@@ -159,10 +142,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
             let attr = words
                 .next()
                 .ok_or_else(|| "usage: set <attribute> [value]".to_string())?;
-            // The tail is the whole value, words joined by single spaces
-            // (final review, A5): a `Utf8` attribute may carry spaces, and
-            // a numeric or date one refuses the joined text at parse time
-            // with its own message rather than here.
+            // Preserve a multiword attribute value with normalized spacing. The tile
+            // performs type validation after parsing the command.
             let tail: Vec<&str> = words.collect();
             let value = (!tail.is_empty()).then(|| tail.join(" "));
             Ok(Command::Set {
@@ -188,22 +169,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
     }
 }
 
-/// Candidates for the word under `cursor`. Each is a bare WORD for that
-/// position (`SPX.Z`, never `key SPX.Z`): the shell splices the accepted
-/// one over the word under the cursor (`commandline::accept`), so a
-/// whole-line candidate doubles the line. The whole vocabulary for the
-/// position is returned unfiltered — the shell's own fuzzy ranking
-/// narrows it, and Enter refuses an ambiguous prefix rather than
-/// guessing.
+/// Return unfiltered candidates for the cursor's token, not whole command lines.
+/// The shell ranks them and replaces the token when a completion is accepted.
 ///
-/// `keys` is the catalog's own document keys in this panel's dataset, in
-/// the `/`-separated display spelling, and `behind` gates `rebase`
-/// (spec §8.3). `behind` is a fourth parameter the brief's
-/// sketch left out: the rule it implements is the brief's own, and this
-/// core has no `Draft` to read it off. `attrs` is the panel's own header
-/// attribute column names, in spec order, for `set`'s first word;
-/// `targets` the egress targets eligible for this panel's document, for
-/// `upload`'s.
+/// Keys use slash-separated display spelling; attrs and targets are supplied
+/// by the tile. Rebase is offered only while behind. Cursor offsets are bytes;
+/// commas and whitespace delimit completion tokens, unlike parse's whitespace-only
+/// word splitting.
 pub fn completions(
     line: &str,
     cursor: usize,
@@ -212,10 +184,7 @@ pub fn completions(
     attrs: &[String],
     targets: &[String],
 ) -> Vec<String> {
-    // The caller's cursor should land on a char boundary; this pure core
-    // must not panic on the slice below if it ever does not — the same
-    // guard `geode_blotter::core::commands::completions` keeps, itself
-    // mirroring `commandline::word_at`'s.
+    // Clamp a supplied byte cursor backward to a UTF-8 boundary before slicing.
     let mut cursor = cursor.min(line.len());
     while !line.is_char_boundary(cursor) {
         cursor -= 1;

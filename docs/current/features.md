@@ -53,13 +53,36 @@ registers the concrete CVI and dividend kinds.
 
 `geode-marketdata` renders a document as either a matrix or a flat typed table.
 `PanelSpec` describes axes and value columns. `MatrixModel` is rebuilt on a
-delivery or structural edit and patched for an ordinary cell commit.
+delivery or structural edit. Ordinary cell commits patch it when possible;
+editing a Sent draft rebuilds to clear sent styling throughout the grid.
 
-Edits live in a `Draft` over a base generation. A newer delivery marks the
-draft behind rather than silently rebasing it. Rebase resolves edits by row and
-column labels, keeping stable intent across reordered documents. The module
-supports numeric, date, text, and closed-choice cells, row insertion/deletion,
-and kind-specific actions.
+Edits live in a `Draft` over a base identified by the document's source time.
+The default Hold policy retains the base snapshot when available after a
+document with a different source time arrives. `:auto` selects how later deliveries resolve
+such a transition:
+
+| Policy | Effect on unsent edits |
+|---|---|
+| Hold | Enter Behind and retain the base when available until explicit rebase or revert |
+| Rebase | Move edits by row and column labels, reporting labels that cannot be resolved |
+| Replace | Discard edits and report how much unsent work was replaced |
+
+Changing policy does not retroactively apply it to a held delivery. Redelivery
+of the same source time does not trigger it, and the first usable delivery
+after session restoration uses Hold. If the saved base is unavailable, a
+restored Behind draft paints the delivered grid while withholding unresolved
+cell edits. Automatic rebase also holds when the
+incoming document has no rows. Sent drafts follow the separate echo rules
+below. A snapshot that cannot build a valid grid leaves the last usable model
+and draft unchanged and reports the error.
+
+Source time is not an immutable generation id: a historical delivery can also
+put the draft Behind, while different contents republished with the same time
+are indistinguishable to this transition logic. Returning to the base time
+restores Editing. The module supports numeric, date, text, and closed-choice
+cells, row insertion/deletion, and kind-specific actions. See the
+[crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
+command-parser contracts.
 
 Dividend row labels use the ex date and a same-date ordinal (`<date>#n`).
 Rebase drops cell edits and deletions in a same-date group whose row count
@@ -68,6 +91,11 @@ captures group sizes from its painted base before rebase or session save.
 Restored drafts without these saved sizes cannot apply this guard. A reorder
 within an unchanged-size group remains undetectable and can move an edit to
 the wrong dividend.
+
+Session drafts store cell edits with row and column labels, allowing restore
+to resolve them against a delivered grid. Attribute serialization has a type
+ambiguity: a text attribute that looks like an ISO date restores as a Date.
+The saved draft therefore does not preserve every attribute value's type.
 
 ### Uploads
 

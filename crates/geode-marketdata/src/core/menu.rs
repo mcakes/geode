@@ -1,7 +1,5 @@
-//! The action list's own pure core (market-data spec 2026-09-14 §6.2):
-//! turning what the draft and the spec say into an ordered list of rows,
-//! with which ones are pickable and why the rest are not. No gpui, no
-//! entity — `popup.rs` is the paint, this is the decision.
+//! Prepared action-menu rows, enablement reasons, and policy choices.
+//! The popup renders this data; these functions own no entity or window.
 
 use crate::core::draft::{DraftBadge, UpdatePolicy, local_hhmm};
 use crate::core::spec::KindAction;
@@ -9,10 +7,9 @@ use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
 use gpui::SharedString;
 
-/// Everything [`rows`] needs: every row's enablement reads the draft's
-/// badge alone (a `has_key` input once sat here for the picker row and
-/// was never read — removed by the final review); `policy` decides which
-/// of the "On new document" rows carries the tick.
+/// Inputs for [`rows`]: draft state, upload availability, current update
+/// policy, and the kind's advertised actions. The tile can impose further
+/// execution guards beyond this menu's enablement.
 pub struct MenuInputs<'a> {
     pub badge: DraftBadge,
     pub upload_built: bool,
@@ -72,15 +69,10 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
     })
 }
 
-/// The action list, in order (spec §6.2's table): `Load underlying…`
-/// (always enabled since 2026-09-19 — a switch PARKS the current draft
-/// under its underlying rather than being refused by it, spec §7's
-/// amendment), `Upload`, `Rebase` only while `Behind`, `Revert edits`,
-/// then a separator and the `On new document` section (three policy
-/// rows, one ticked — always enabled, since a policy is a setting and not
-/// a verb on the draft), then — only while the spec names any — a
-/// separator, the kind's own section header, and one row per
-/// [`KindAction`].
+/// Ordered actions: load, upload, rebase while behind, and revert; then
+/// update-policy choices and any kind-specific actions. Load stays enabled
+/// because the tile parks drafts by underlying. Policy choices are always
+/// enabled because they configure later deliveries rather than edit the draft.
 pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
     let behind = matches!(i.badge, DraftBadge::Behind { .. });
@@ -249,8 +241,8 @@ mod tests {
         assert_eq!(enabled(&rows, "Reanchor"), Err("not built yet"));
     }
 
-    /// Per-underlying drafts (2026-09-19): a dirty draft no longer greys
-    /// `Load underlying…` — a switch parks it under its own underlying.
+    /// Loading another underlying remains available with pending edits;
+    /// the tile parks the draft under its current underlying.
     #[test]
     fn a_dirty_draft_leaves_load_live_and_a_built_upload_is_live() {
         let mut i = inputs(DraftBadge::Dirty);

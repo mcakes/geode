@@ -1,14 +1,10 @@
-//! Publishing a parsed document (market-data spec §4.1): stage the rows
-//! through DuckDB's appender, then run the same transaction a CSV file's
-//! grain tables go through (`publish_file`) against the dataset's one
-//! document pair. The message *is* the file: its key is the batch, its
-//! book is empty, and every downstream mechanism — generations, the
-//! backfill guard, as-of, retention, the freshness catalog — is reused
-//! rather than reimplemented.
+//! Validate and stage columnar document rows, then publish them through the
+//! shared storage transaction. The document key identifies its batch, and its
+//! book is NULL. Generations, backfill, as-of reads, retention, and freshness use
+//! the same catalog and publication machinery as file ingestion.
 //!
-//! Nothing here is a row (PHILOSOPHY §6): `DocumentRows` is
-//! struct-of-arrays, and the appender loop reads each staged column at
-//! index `i` through a plan built once before the loop.
+//! A column access plan is built once per document; the appender reads columns
+//! by row index without constructing intermediate domain row objects.
 
 use crate::store::catalog::{Catalog, FileGeneration};
 use crate::store::ddl::{self, TablePair};
@@ -20,17 +16,14 @@ use geode_core::health::Health;
 use geode_core::schema::{ColumnSpec, DatasetSpec};
 use std::path::PathBuf;
 
-/// One global staging table, like `staging_raw`: the ingest runner is the
-/// single writer, so two documents never stage concurrently (see
-/// `docs/ingest-cold-start-handoff.md` for why that invariant matters — a
-/// fixed global name is exactly what makes concurrent staging unsafe).
+/// Shared staging table, used only by the single ingest writer. Concurrent
+/// staging would replace another document's rows before publication.
 pub const STAGING_TABLE: &str = "staging_document";
 
 pub struct DocumentPublishRequest<'a> {
     pub dataset: &'a DatasetSpec,
-    /// The `[sources.<name>]` name, for the synthetic path and the
-    /// `Published` event. Not the dataset: a source whose name differs
-    /// from its dataset is ordinary (Phase 4b's MAJ-1).
+    /// Source configuration name, used in the synthetic path and `Published`
+    /// event. It can differ from the dataset name.
     pub source: &'a str,
     pub rows: &'a DocumentRows,
     pub source_time: DateTime<Utc>,
@@ -117,14 +110,12 @@ pub fn publish_document(
     let ds = req.dataset;
     let batch = join_key(&req.rows.key);
     let catalog = Catalog::new(conn);
-    // Reserved rather than peeked, for the reasons `ingest::load` records:
-    // the file id is stamped onto the staged rows before the catalog entry
-    // exists, and a generation id must be spent whether or not anything is
-    // ever recorded against it.
+    // Reserve identifiers before staging so failed attempts cannot reuse ids
+    // already stamped onto rows, even when no catalog entry was committed.
     let file_id = catalog.reserve_file_id()?;
     let gen_id = catalog.reserve_gen_id()?;
 
-    // 1. Stage. `create or replace` so a previous attempt's leftovers can
+    // Stage with `create or replace` so a previous attempt's leftovers can
     // never be published as this document's rows. The column list is
     // `document_columns()` order followed by the same storage columns
     // `ddl::create_document_table_sql` appends — `batch`, `book`,
@@ -181,9 +172,8 @@ pub fn publish_document(
                 });
             }
             cells.push(duckdb::types::Value::Text(batch.clone()));
-            // A document's book is empty (market-data spec §4.1), and
-            // empty is a NULL in a column that exists: every
-            // partition-keyed statement in `store` joins on `book`.
+            // Document partitions have a NULL book. The column remains present
+            // because partition-keyed storage statements join on it.
             cells.push(duckdb::types::Value::Null);
             cells.push(duckdb::types::Value::BigInt(file_id));
             app.append_row(duckdb::appender_params_from_iter(cells.iter()))
@@ -201,7 +191,7 @@ pub fn publish_document(
         })?;
     }
 
-    // 2. Publish through the shared transaction. One partition: the key as
+    // Publish through the shared transaction. One partition: the key as
     // the batch, no book. The backfill guard reads the live source time
     // the same way `load_file` does — for the one partition this writes,
     // so a document older than what is live becomes history instead of
@@ -227,20 +217,17 @@ pub fn publish_document(
         },
     )?;
 
-    // 3. Dictionary refresh, so the query path can cast the key dimension
-    // to its ENUM and the text filter's rewrite can reach it (spec §3.5,
-    // §3.6; same reasoning as `load_file` step 5). No grain search here,
-    // unlike a CSV load: the document family's one pair carries every
-    // column the dataset declares, so there is only one table a
-    // categorical column could be read from.
+    // Refresh categorical dictionaries from both live and archive rows in this
+    // transaction. Queries and text filters can then resolve values from either
+    // current or historical documents. The document's single table pair carries
+    // all declared columns.
     for col in ddl::categorical_columns(ds) {
         ddl::refresh_enum(conn, &ds.name, col, &tables.live, &tables.archive)?;
     }
 
-    // 4. Provenance commits together with the rows and dictionaries. A document
-    // that went straight to the archive is recorded all the same — the
-    // load happened — but flagged, because a generation that was never
-    // live cannot be what freshness measures staleness from (§4.5).
+    // Commit provenance with rows and dictionaries. Record archived-only
+    // backfills too, but exclude them from live freshness: they never replaced
+    // the current document.
     catalog.record(&FileGeneration {
         file_id,
         dataset: ds.name.clone(),
@@ -520,8 +507,7 @@ mod tests {
         );
         assert!(matches!(out.outcome, PublishOutcome::ArchivedOnly { .. }));
         assert_eq!(live_params(&store, "SPX.Z"), vec![5.; 6]);
-        // Provenance says the generation happened and never went live, so
-        // freshness does not measure staleness from it (§4.5).
+        // Archived-only backfill must not change the current document's freshness.
         let flag: bool = store
             .writer()
             .query_row(

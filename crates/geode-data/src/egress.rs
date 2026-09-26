@@ -107,8 +107,8 @@ pub(crate) struct EgressWorkers {
     sink: EventSink,
 }
 
-/// Log and deliver one upload result. The only door an outcome leaves by,
-/// so every path logs and answers exactly once.
+/// Log one result and offer its outcome to the event sink. Sink refusal is
+/// ignored here; logging does not establish that the tile received the outcome.
 fn answer(
     sink: &EventSink,
     target: &str,
@@ -154,10 +154,10 @@ fn work(name: String, mut egress: Box<dyn Egress>, jobs: Receiver<Job>, sink: Ev
 }
 
 impl EgressWorkers {
-    /// One worker per spec, owning that adapter's egress. A spec whose
-    /// adapter is missing or has no egress side (only reachable from a
-    /// config built in code; `resolve` drops them from files) keeps its
-    /// name, so uploads to it answer why rather than "unknown target".
+    /// Start one transport worker per target. Missing adapters, unavailable
+    /// egress handles, and thread-start failures retain the target's name and
+    /// reason so subsequent uploads can report the startup failure. The earlier
+    /// `resolve` check obtains a separate handle and cannot guarantee this succeeds.
     pub(crate) fn spawn(specs: &[EgressSpec], adapters: &AdapterRegistry, sink: EventSink) -> Self {
         let mut targets = HashMap::new();
         for spec in specs {
@@ -199,8 +199,10 @@ impl EgressWorkers {
         EgressWorkers { targets, sink }
     }
 
-    /// Resolve, write and queue one upload. Every refusal here answers its
-    /// own `DataEvent::Upload`; an accepted job answers from the worker.
+    /// Resolve, serialize, and queue an upload. Validation and queue refusals
+    /// offer an error outcome on the service thread. The worker offers the
+    /// transport result if it completes; panic and blocked-call limits are
+    /// described in the module documentation.
     pub(crate) fn upload(&self, p: UploadParams, documents: &DocumentRegistry) {
         let document_key = p.rows.key.join("/");
         let refuse = |message: String| {

@@ -1,6 +1,6 @@
-//! The panel's header row (spec 2026-09-14 §4): prepared once per change
-//! by [`HeaderModel::prepare`] — the tile's `changed()` door — and painted
-//! by [`render`] with no formatting of its own.
+//! Prepared panel header: identity, attributes, draft status, upload/echo
+//! feedback, source time, and the action-menu control. HeaderModel::prepare formats
+//! text on state changes; render uses the prepared strings and current theme.
 
 use crate::core::SegmentPaint;
 use crate::core::draft::{DraftBadge, local_hhmm};
@@ -62,15 +62,9 @@ pub(crate) fn tone_colour(
     }
 }
 
-/// One date-field segment's colours (header spec §5.2, 2026-09-19): the
-/// active segment on the theme's `primary` (the mockup's cursor-blue
-/// block) in `primary_foreground` FLOORED against that fill
-/// (`FlooredTones::primary_text` — seven bundled themes ship the pair
-/// under 3:1), a segment mid-typing on `accent` in `accent_foreground`
-/// (the mockup's "typing colour"; every bundled theme's pair clears the
-/// floor as shipped), every other segment bare in `foreground`. The sweep
-/// below checks all three rather than assuming them. Read by `render` and
-/// by that test.
+/// Date-segment colors: typing uses the accent pair; active selection uses
+/// primary fill with contrast-adjusted primary text; inactive segments use plain
+/// foreground. The bundled-theme test checks these against their painted ground.
 pub(crate) fn date_segment_paint(
     theme: &Theme,
     tones: &FlooredTones,
@@ -98,20 +92,11 @@ pub(crate) fn date_segment_paint(
     }
 }
 
-/// The segmented date field in an attribute's editor slot — or, since
-/// spec §4.4, in a `Date` cell of the grid, painted there by
-/// `MatrixDelegate::render_td` through this same function so the two
-/// cannot paint or route keys differently: three spans in the data face
-/// separated by `-`, the active segment highlighted, the container
-/// bordered as the cell editor is. The field is the focusable
-/// (`track_focus`) so its `on_key_down` sits on the focused element and
-/// runs before the shell root's: `MarketDataTile::date_field_key` decides,
-/// and a consumed key stops here. A click on a segment selects it and
-/// STOPS propagation — the attribute value's own mouse-down (or the
-/// table's own cell click, which cancels an open editor) would otherwise
-/// cancel the editor the click was aimed into; a click on the container's
-/// padding or the separators bubbles as before, so a click "elsewhere"
-/// still cancels.
+/// Shared segmented-date painter for header attributes and grid cells.
+/// The container tracks the editor's focus handle and routes handled keys before
+/// the shell listener. Segment clicks are consumed by the shared painter to avoid
+/// the parent cell/attribute click closing the editor; padding and separators
+/// still allow parent click handling.
 pub(crate) fn render_date_field(
     paint: &DateFieldPaint,
     focus: &FocusHandle,
@@ -180,24 +165,19 @@ pub(crate) struct HeaderInputs<'a> {
     pub badge: DraftBadge,
     pub unresolved_restore: bool,
     pub notice: Option<&'a SharedString>,
-    /// `upload failed: <e>` (egress spec §6), held by the tile until the
-    /// next edit or upload.
+    /// Last upload failure for the associated edit set. Cleared when those edits
+    /// change or a subsequent upload is submitted.
     pub upload_error: Option<&'a SharedString>,
-    /// What the last echo of an upload said (egress spec §7) and its tone:
-    /// `sent HH:MM, confirmed HH:MM` quietly, `echo differs (N rows)` as a
-    /// warning.
+    /// Prepared upload-echo result and tone: confirmed timestamps or a mismatch
+    /// warning. Transport success and publication confirmation are separate states.
     pub echo: Option<(&'a SharedString, Tone)>,
     /// The armed `:upload` confirm's question, `upload … to <target>?
     /// (y/n)`.
     pub prompt: Option<&'a SharedString>,
     pub source_at: Option<DateTime<Utc>>,
-    /// `Draft::incomplete_rows` — inserted rows with a required cell
-    /// still empty (spec §5.2).
+    /// Count of inserted rows with a required cell still empty.
     pub incomplete: usize,
-    /// The `AppClock` global (as-of dialog spec §6.1), read once by the
-    /// tile and carried in here so `prepare` stays a pure function of
-    /// its inputs — the tile's own `clock` field, never a fresh global
-    /// read from inside `prepare`.
+    /// Tile-supplied clock used to format timestamps without reading GPUI globals.
     pub clock: Clock,
 }
 
@@ -209,9 +189,8 @@ pub(crate) struct HeaderModel {
     pub title: SharedString,
     /// `display_key(key)`, or `None` with no underlying loaded at all.
     pub underlying: Option<SharedString>,
-    /// Whether the draft has any edit — cell, attribute, or a row
-    /// inserted or deleted (the badge reads `Dirty` for all three, one
-    /// draft state) — the dirty dot.
+    /// Dirty indicator for Dirty and Behind badges. Sent retains draft edits but
+    /// suppresses this indicator because those edits are no longer unsent work.
     pub dirty: bool,
     /// A clone of `model.header` — `Rc`-cheap `SharedString`s, prepared by
     /// [`crate::core::matrix::MatrixModel::build`] already.
@@ -222,12 +201,10 @@ pub(crate) struct HeaderModel {
     /// "no document yet"/"edits await a document") without reparsing
     /// `state`'s text.
     pub badge: DraftBadge,
-    /// The one short state run (spec §4 item 5), if any.
+    /// Prepared primary state message, if any.
     pub state: Option<(SharedString, Tone)>,
-    /// `N rows incomplete` (dividend spec §5.2), painted after the state
-    /// run and ahead of the notice, only while the count is non-zero.
-    /// Prepared as a `(text, tone)` pair like `state`, so `render` paints
-    /// the two through the same arm.
+    /// Nonzero incomplete-row count and warning tone, painted after state and
+    /// before upload/notice feedback.
     pub incomplete: Option<(SharedString, Tone)>,
     pub notice: Option<SharedString>,
     /// `upload failed: <e>`, painted in the error tone ahead of the
@@ -248,9 +225,9 @@ pub(crate) struct HeaderModel {
 }
 
 impl HeaderModel {
-    /// Build the header from the tile's current state. Called from
-    /// `rebuild_chrome` — the one door every mutation on the tile ends
-    /// at — so `render` never formats.
+    /// Build formatted header text from supplied tile state. An empty model with
+    /// a selected key overrides the draft state message with its document-wait state.
+    /// Staleness starts false and is supplied separately at paint time.
     pub(crate) fn prepare(i: HeaderInputs) -> HeaderModel {
         let underlying = i.key.map(|k| SharedString::from(display_key(k)));
         let (dirty, mut state) = match &i.badge {
@@ -343,16 +320,10 @@ impl HeaderModel {
     }
 }
 
-/// Paint the header row (spec §4): kind badge, bold underlying, dirty
-/// dot, inline attribute strip, spacer, state, notice, time, `⋯`.
-///
-/// `cursor_attr`/`editor` (Task 5, spec §5.1/§5.2): which attribute, if
-/// any, the cursor is on, and the open editor's own index and form
-/// ([`EditorPaint`]: the text `Input`, or the segmented date field) when
-/// it is an attribute being edited. `menu_open` (Task 6, spec §6.1)
-/// is whether the action list is open, painting `⋯`'s own pressed state;
-/// `tile` is this attribute strip's own mouse door (`cursor_to_attr`) and
-/// `⋯`'s (`toggle_menu`).
+/// Render prepared identity, attribute, status, upload, and time runs.
+/// The attribute cursor and editor are passed separately from prepared values;
+/// menu_open controls the action button's selected appearance. A pending upload
+/// prompt carries its own focus handle and consumes its confirmation keys.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     h: &HeaderModel,
@@ -381,10 +352,7 @@ pub(crate) fn render(
         .border_color(theme.border)
         .debug_selector(move || format!("marketdata-header-{tile_id}"));
 
-    // 0. The stack marker (tile-stacks spec §5.1), first in the strip,
-    //    through the one builder every module uses (`StackHandle::marker`)
-    //    — a trader reading the chip never learns a second shape per
-    //    module.
+    // Keep the shared stack marker first in the header strip.
     row = row.children(stack.and_then(|s| s.marker(theme, TileId(tile_id))));
 
     // 1. Kind badge.
@@ -442,17 +410,9 @@ pub(crate) fn render(
                 gpui::transparent_black()
             })
             .debug_selector(move || format!("marketdata-attr-{tile_id}-{i}"))
-            // The mouse's form of `k` (spec §5.1): a click on an
-            // attribute value moves the cursor to `Attr(i)` — cancelling
-            // an open cell editor first, exactly as a grid cell click
-            // does — and a DOUBLE-click opens the editor on it (user
-            // ruling 2026-09-17; `attr_clicked` is the door, the count
-            // decides). Deliberately no `cx.stop_propagation()` — the
-            // shell's own tile-level mouse-down (focus re-arm) must still
-            // run, the same rule every other tile mouse-down in this
-            // codebase keeps (CLAUDE.md's focus rule); it is the shell's
-            // insert-mode rule on that restore, not a swallowed event,
-            // that keeps the opened editor focused.
+            // Select the clicked attribute, closing an existing editor first; a double
+            // click opens its editor. Leave propagation enabled so the shell can focus
+            // this tile and reconcile focus without stealing an active insert field.
             .on_mouse_down(gpui::MouseButton::Left, {
                 let tile = tile.clone();
                 move |event: &gpui::MouseDownEvent, window, cx| {
@@ -506,9 +466,7 @@ pub(crate) fn render(
                 }),
         );
     }
-    // The incomplete-rows chip (dividend spec §5.2), between the state
-    // and the notice: a warning, since an incomplete row is one an
-    // upload will refuse, and not an error, since nothing has gone wrong.
+    // Incomplete inserted rows show a warning because upload will reject them.
     if let Some((text, tone)) = &h.incomplete {
         row = row.child(
             div()
@@ -540,12 +498,8 @@ pub(crate) fn render(
                 .child(n.clone()),
         );
     }
-    // The armed `:upload` confirm (egress spec §6): the question in the
-    // primary text tone — a decision awaiting the trader, not a warning —
-    // on the element that holds the keyboard while it stands. Its
-    // `on_key_down` sits on the focused element and so runs before the
-    // shell root's listener; every key is the confirm's
-    // (`MarketDataTile::confirm_key`), so propagation always stops.
+    // The focused upload prompt consumes its keys before shell routing. Bare y
+    // submits; any other key cancels. Its text uses the ordinary foreground tone.
     if let (Some(p), Some(focus)) = (&h.prompt, confirm) {
         let tile = tile.clone();
         row = row.child(
@@ -575,44 +529,10 @@ pub(crate) fn render(
         );
     }
 
-    // 7. `⋯` — the mouse door onto the action list (spec §6.1), the
-    // click's own form of `.`.
-    //
-    // **On the CAPTURE phase, not the bubble one — and it does NOT stop
-    // propagation (fix round 1, IMPORTANT-1).** The popup's own
-    // `on_mouse_down_out` (`popup.rs`) is a Capture-phase listener that
-    // fires on ANY mouse-down whose position is outside the popup's own
-    // bounds — the button included, since the button is not inside the
-    // popup — and Capture always runs to completion BEFORE Bubble even
-    // starts. A Bubble-phase handler here would always run one beat
-    // behind that: `down_out` would have already closed the popup by the
-    // time this button's own handler asked whether one was open, so a
-    // second click on the button (meant to close it) would instead see
-    // it already closed and reopen it. Capturing here, ahead of
-    // `down_out` in the same pass, is what lets this button decide the
-    // click before the popup's own "outside" rule gets a say — that
-    // ordering alone is what the toggle needs, and it needs nothing more:
-    //
-    // - First click (no popup open, so no `down_out` listener is even
-    //   painted yet — the popup this click is about to open does not
-    //   exist in the frame the click was dispatched against): this
-    //   handler opens the menu; Bubble then runs untouched, exactly as
-    //   any other tile click does — click-to-focus, drag arming,
-    //   `pending_focus_restore` all still fire.
-    // - Second click (popup open, so `down_out` IS painted): this
-    //   handler closes the menu first, in Capture, ahead of `down_out`;
-    //   `down_out`'s own `close_popup` then runs on an already-`None`
-    //   popup and is a no-op; Bubble again runs untouched.
-    //
-    // `cx.stop_propagation()` was here in the first cut and was wrong: it
-    // suppressed the shell's ENTIRE bubble phase for this click, so a
-    // click on `⋯` on an unfocused tile opened the menu without ever
-    // focusing that tile — `mode == menu` reached a context stack no
-    // longer topped by this tile, and the menu's own `j`/`k`/`enter`/
-    // `escape` drove whichever tile the shell had focused instead. This
-    // button needs to go FIRST in Capture, never to be the LAST thing
-    // that runs — unlike the attribute strip's click above, which was
-    // never a propagation question at all (it always let Bubble run).
+    // Toggle the action menu in capture phase, before its outside-press
+    // listener can close it. A bubble-phase toggle would see an already-closed
+    // popup and reopen it on the second click. Keep propagation enabled so the
+    // shell still focuses the tile and runs its normal pointer handling.
     row = row.child(
         div()
             .id(ElementId::NamedInteger(
@@ -625,12 +545,8 @@ pub(crate) fn render(
             .border_color(theme.border)
             .when(menu_open, |d| d.bg(theme.secondary))
             .text_color(muted)
-            // A bare control's pointer states (`control::PointerStates`)
-            // while CLOSED; open, the button keeps its persistent fill
-            // above and answers the pointer with nothing, as the guide
-            // asks of a button that owns a popup (and as gpui-component's
-            // own `Button` does while `selected`). The header sits on the
-            // tile surface, the window background.
+            // Closed uses bare-control pointer feedback; open retains its selected fill.
+            // Colors are derived against the header's tile background.
             .when(!menu_open, |d| {
                 d.pointer_states(control::paint(
                     theme,
@@ -717,9 +633,8 @@ mod tests {
         }
     }
 
-    /// §5.2: an inserted row with a required cell still empty is counted
-    /// in the header, in the warning tone, after the state run and ahead
-    /// of the notice — and a count of zero paints nothing at all.
+    /// Nonzero incomplete-row counts appear in warning tone between state and
+    /// notice; zero adds no message.
     #[test]
     fn incomplete_rows_are_a_warn_chip_after_the_state() {
         let model = model_with_rows();
@@ -803,11 +718,8 @@ mod tests {
         );
     }
 
-    /// `Sent { at }` (Part 4) reads `sent HH:MM` through the same
-    /// `local_hhmm` `Behind`'s `update HH:MM` does, and paints in
-    /// `Tone::Time` rather than `Tone::Warn` — a sent draft is not a
-    /// problem the way a behind one is — and carries no dirty dot: the
-    /// edits are no longer unsent work as far as the header's glance goes.
+    /// Sent uses the supplied clock for its timestamp and Time tone, without a
+    /// dirty dot. Behind uses the same formatter but retains warning state.
     #[test]
     fn sent_reads_sent_hhmm_and_carries_no_dirty_dot() {
         let model = model_with_rows();
@@ -890,14 +802,8 @@ mod tests {
         );
     }
 
-    /// The date field's two highlighted segments — the active one on
-    /// `primary`, a mid-typing one on `accent` — must be readable on EVERY
-    /// bundled theme at the same 3:1 floor the cell states hold to. Each is
-    /// the theme's own paired token, but a pair is a promise the author
-    /// made, not one this crate checked: seven bundled themes broke the
-    /// `primary` pair (which is why `FlooredTones::primary_text` exists),
-    /// none the `accent` one. Checked here rather than assumed, with the
-    /// bare segment's `foreground` against the header ground beside them.
+    /// Check active, typing, and inactive date-segment text against their actual
+    /// fills on every bundled theme, including the adjusted primary text color.
     #[gpui::test]
     fn date_segment_colours_are_readable_on_every_bundled_theme(cx: &mut gpui::TestAppContext) {
         use crate::delegate::tests::{ground, over};
