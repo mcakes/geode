@@ -14074,17 +14074,23 @@ run_mutation "picker: escape from Values steps back to Columns instead of closin
   geode-shell \
   escape_cancels_without_touching_the_scope
 
+# Re-anchored on the double-click gate: a single press (click_count 1)
+# toggling is the whole-row-toggles defect this entry guards.
 run_mutation "picker: a values row click selects, only the tick toggles (spec §20.3)" \
   crates/geode-shell/src/shell/picker.rs \
-  '                                        p.selected = i;
-                                    }
-                                    sync_picker_scroll(shell);' \
-  '                                        p.selected = i;
-                                        p.toggle_selected();
-                                    }
-                                    sync_picker_scroll(shell);' \
+  '                                        if event.click_count == 2 {' \
+  '                                        if event.click_count >= 1 {' \
   geode-shell \
   a_values_row_click_selects_and_only_the_tick_toggles
+
+# A row double-click toggles that value's tick: drop the second press's
+# toggle and the double-click only selects.
+run_mutation "picker: a values row double-click toggles its tick" \
+  crates/geode-shell/src/shell/picker.rs \
+  '                                        if event.click_count == 2 {' \
+  '                                        if event.click_count == 99 {' \
+  geode-shell \
+  a_values_row_double_click_toggles_its_tick
 
 # As-of dialog Part 3 (2026-09-20) replaced the calendar and free-text
 # grammar wholesale — the entries that used to defend `compose_with_date`,

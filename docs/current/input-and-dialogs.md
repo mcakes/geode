@@ -222,7 +222,9 @@ underlying request. Values are displayed in a virtualized list.
 
 Tab toggles the highlighted value. Ctrl+A adds all filtered values without
 clearing ticks outside the filter; Ctrl+X clears every tick. A row click moves
-the highlight, while a tick click toggles that value. Enter applies to the
+the highlight, while a tick click or a row double-click toggles that value, as
+Tab does (the double-click's second press toggles; a third press does not
+toggle back). Enter applies to the
 current frame scope, preserving its other fields:
 
 - Nonempty ticks, including pre-ticks, are authoritative. Moving the highlight

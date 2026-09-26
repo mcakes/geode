@@ -512,6 +512,64 @@ fn a_values_row_click_selects_and_only_the_tick_toggles(cx: &mut gpui::TestAppCo
     assert_eq!(ticked(&vcx), 1, "the tick click is `tab`");
 }
 
+/// A double-click on a Values row toggles its tick: the first press
+/// selects, the second (`click_count == 2`) is `tab`. A second double-click
+/// toggles it back, and the toggle counts as a touch, so enter applies the
+/// shown ticks rather than falling back to the highlighted value.
+#[gpui::test]
+fn a_values_row_double_click_toggles_its_tick(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag: 1,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 1), ("BK001".into(), 2)]),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    let ticked = |vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.picker
+                .as_ref()
+                .unwrap()
+                .ticked
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+    };
+
+    let row = vcx.debug_bounds("picker-value-BK001").expect("row paints");
+    let at = gpui::point(row.origin.x + row.size.width / 2.0, row.center().y);
+    super::double_click(&mut vcx, at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().selected),
+        1,
+        "the double-click selected the row"
+    );
+    assert_eq!(ticked(&vcx), vec!["BK001".to_string()], "and ticked it");
+
+    super::double_click(&mut vcx, at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(ticked(&vcx).is_empty(), "a second double-click unticks it");
+
+    // The emptied set was touched: enter drops the selection instead of
+    // committing the highlighted BK001.
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, cx| s.frame.read(cx).scope().dimensions.is_empty()),
+        "enter applied the touched, empty tick set"
+    );
+}
+
 /// The Values footer says `back`, the Columns footer says `close`.
 #[test]
 fn the_values_hint_says_escape_goes_back() {

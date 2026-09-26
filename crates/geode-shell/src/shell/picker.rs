@@ -9,7 +9,8 @@
 //! Enter applies visible pre-ticks or edited ticks. Only an untouched empty
 //! tick set falls back to the highlighted value; if no value is highlighted,
 //! that empty result removes the column constraint. Loading and query errors
-//! do not disable Enter. Row clicks move the highlight; tick clicks toggle.
+//! do not disable Enter. Row clicks move the highlight; a row double-click or
+//! a tick click toggles.
 //!
 //! This dialog is filter-only. Escape from Values discards that stage's query
 //! and ticks and returns to Columns; Escape there closes the modal. Neither
@@ -684,11 +685,17 @@ fn build_values(
                         row.child(label)
                             .child(count_el)
                             .debug_selector(move || format!("picker-value-{value_for_selector}"))
-                            .on_mouse_down(gpui::MouseButton::Left, move |_event, _window, cx| {
+                            .on_mouse_down(gpui::MouseButton::Left, move |event, _window, cx| {
                                 entity.update(cx, |shell, cx| {
                                     if let Some(p) = shell.picker.as_mut() {
-                                        // row: select only
+                                        // The first press selects; the second
+                                        // press of a double-click is `tab`.
+                                        // Exactly 2, so a triple-click does
+                                        // not toggle back.
                                         p.selected = i;
+                                        if event.click_count == 2 {
+                                            p.toggle_selected();
+                                        }
                                     }
                                     sync_picker_scroll(shell);
                                     cx.notify();
