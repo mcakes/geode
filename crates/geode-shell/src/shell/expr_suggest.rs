@@ -181,6 +181,24 @@ pub(crate) fn accept(
     refresh(view, cx);
 }
 
+/// A pointer accept: write the ranked row labelled `label` as the list
+/// stands at the press. The row is found by label, not by its painted
+/// position, so a list rebuilt between paint and press never accepts a
+/// different row; a label no longer listed does nothing.
+pub(crate) fn accept_label(
+    view: &mut ShellView,
+    label: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let Some(i) =
+        completion_mut(view).and_then(|c| c.rows().iter().position(|r| r.label == label))
+    else {
+        return;
+    };
+    accept(view, i, window, cx);
+}
+
 /// Row height at the design rem; the viewport shows at most this many rows.
 const ROW_HEIGHT: f32 = 26.0;
 const VISIBLE_ROWS: usize = 8;
@@ -192,7 +210,7 @@ pub(crate) fn render(
     c: &ExprCompletion,
     scroll: &ScrollHandle,
     theme: &Theme,
-    on_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
+    on_click: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
 ) -> AnyElement {
     let paint = super::listrow::row_paint(theme);
     let mut column = v_flex().gap_1().w_full().child(
@@ -213,6 +231,7 @@ pub(crate) fn render(
         for (position, row) in c.rows().iter().enumerate().take(MAX_ROWS) {
             let selector = format!("scope-expr-row-{}", row.label);
             let on_click = on_click.clone();
+            let label = row.label.clone();
             let element = h_flex()
                 .id(SharedString::from(selector.clone()))
                 .w_full()
@@ -237,8 +256,13 @@ pub(crate) fn render(
                         .text_color(theme.muted_foreground)
                         .child(SharedString::from(row.detail.clone())),
                 )
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    on_click(position, window, cx);
+                .on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                    // A double-click's second press lands on the list its
+                    // first accept rebuilt; it must not accept again.
+                    if event.click_count > 1 {
+                        return;
+                    }
+                    on_click(&label, window, cx);
                 });
             rows = rows.child(super::listrow::paint_row(
                 element,

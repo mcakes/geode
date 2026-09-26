@@ -379,6 +379,33 @@ fn clicking_a_row_inserts_it_and_typing_continues(cx: &mut gpui::TestAppContext)
     assert_eq!(field(&shell, &vcx), "npv >");
 }
 
+/// A double-click on a row inserts it once: the second press lands on the
+/// list the first accept rebuilt (operators), where `npv` is not a row.
+#[gpui::test]
+fn double_clicking_a_row_inserts_it_once(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+    vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("scope-expr-row-npv").expect("row painted");
+    double_click(&mut vcx, bounds.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "npv ");
+}
+
+/// A row that survives its own accept (`(` opens a group, whose list
+/// offers `(` again) still inserts once on a double-click: the second
+/// press, `click_count` 2, is not a second accept.
+#[gpui::test]
+fn double_clicking_a_row_that_stays_listed_inserts_it_once(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+    vcx.run_until_parked();
+    let bounds = vcx.debug_bounds("scope-expr-row-(").expect("row painted");
+    double_click(&mut vcx, bounds.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "(");
+}
+
 /// Enter refuses an unknown column inline, and the text stays.
 #[gpui::test]
 fn enter_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {

@@ -337,9 +337,9 @@ fn build(
         &state.completion,
         &shell.expr_scroll,
         theme,
-        move |i, window, cx| {
+        move |label, window, cx| {
             entity.update(cx, |shell, cx| {
-                super::expr_suggest::accept(shell, i, window, cx)
+                super::expr_suggest::accept_label(shell, label, window, cx)
             });
         },
     ));
