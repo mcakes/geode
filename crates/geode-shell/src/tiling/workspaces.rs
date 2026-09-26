@@ -369,6 +369,27 @@ impl Workspace {
         self.tree_for(region).stack_members(id)
     }
 
+    /// While a main-tree tile is fullscreen, how many other tiles the
+    /// unmaximised picture would show: the main tree's other slots plus
+    /// every visible dock's slots (fullscreen paints no dock). A stack is
+    /// one slot, as in [`Tree::layout`]. `None` when nothing is fullscreen,
+    /// including a dangling fullscreen id, which `Tree::layout` also
+    /// ignores. Feeds the status bar's fullscreen segment, so a lone
+    /// maximised tile reads differently from a lone tile.
+    pub fn fullscreen_hidden(&self) -> Option<usize> {
+        let fs = self.tree.fullscreen()?;
+        if !self.tree.contains(fs) {
+            return None;
+        }
+        let docked: usize = self
+            .docks
+            .iter()
+            .filter(|(_, dock)| dock.visible())
+            .map(|(_, dock)| dock.tree().slot_count())
+            .sum();
+        Some(self.tree.slot_count() - 1 + docked)
+    }
+
     /// Fullscreen stays main-tree-only, even now that docks are trees:
     /// while a dock is focused this is a no-op (still claimed as handled
     /// by the router — the keystroke must not fall through). A fullscreen
@@ -1764,6 +1785,69 @@ mod tests {
     }
 
     // --- Dock toggling ------------------------------------------------
+
+    #[test]
+    fn fullscreen_hidden_is_none_without_a_fullscreen_tile() {
+        let ws = two_tiles();
+        assert_eq!(ws.active().fullscreen_hidden(), None);
+    }
+
+    #[test]
+    fn fullscreen_hidden_counts_the_other_main_tree_slots() {
+        let mut ws = Workspaces::new();
+        ws.split_active(Orientation::Horizontal);
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert_eq!(
+            ws.active().fullscreen_hidden(),
+            Some(0),
+            "a lone maximised tile hides nothing, but still reads as fullscreen"
+        );
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Vertical);
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert_eq!(ws.active().fullscreen_hidden(), Some(2));
+    }
+
+    #[test]
+    fn fullscreen_hidden_counts_a_stack_as_one_slot() {
+        let mut ws = two_tiles();
+        ws.stack_active().expect("focus is on a tile");
+        assert_eq!(ws.active().tree().tiles().len(), 3);
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert_eq!(
+            ws.active().fullscreen_hidden(),
+            Some(1),
+            "the stack's hidden member would not show unmaximised either"
+        );
+    }
+
+    #[test]
+    fn fullscreen_hidden_counts_visible_dock_slots_only() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        ws.split_active(Orientation::Vertical);
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().slot_count(),
+            2
+        );
+        let main = ws.active().tree().tiles()[0];
+        assert!(ws.active_mut().focus_main_tile(main));
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert_eq!(ws.active().tree().fullscreen(), Some(main));
+        assert_eq!(
+            ws.active().fullscreen_hidden(),
+            Some(2),
+            "fullscreen paints no dock, so a visible dock's tiles are hidden too"
+        );
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        assert_eq!(
+            ws.active().fullscreen_hidden(),
+            Some(0),
+            "a hidden dock's tiles are hidden with or without fullscreen"
+        );
+    }
 
     #[test]
     fn toggle_shows_then_hides_a_dock() {

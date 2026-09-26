@@ -538,6 +538,13 @@ impl Tree {
         out
     }
 
+    /// The number of slots [`Tree::layout`] paints when no tile is
+    /// fullscreen: one per leaf and one per stack (only its active member
+    /// shows). Counted without allocating, so render may ask every frame.
+    pub fn slot_count(&self) -> usize {
+        self.root.as_ref().map_or(0, count_slots)
+    }
+
     /// The geometric neighbor of the focused tile in `dir`, per the visible
     /// layout: nearest facing edge within EPS, positive perpendicular
     /// overlap, ties broken by larger overlap.
@@ -1140,6 +1147,15 @@ fn remove_leaf(node: Node, target: TileId, done: &mut bool) -> Option<Node> {
     }
 }
 
+/// [`layout_node`]'s slot rule without the geometry: must emit exactly one
+/// count wherever `layout_node` pushes one rect.
+fn count_slots(node: &Node) -> usize {
+    match node {
+        Node::Leaf(_) | Node::Stack { .. } => 1,
+        Node::Split { children, .. } => children.iter().map(count_slots).sum(),
+    }
+}
+
 fn layout_node(node: &Node, rect: Rect, out: &mut Vec<(TileId, Rect)>) {
     match node {
         Node::Leaf(id) => out.push((*id, rect)),
@@ -1220,6 +1236,25 @@ mod tests {
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn slot_count_matches_the_unmaximised_layout() {
+        let mut t = Tree::default();
+        assert_eq!(t.slot_count(), 0);
+        t.split(TileId(1), Orientation::Horizontal);
+        t.split(TileId(2), Orientation::Horizontal);
+        t.split(TileId(3), Orientation::Vertical);
+        assert!(t.stack_after(TileId(3), TileId(4)));
+        assert_eq!(t.tiles().len(), 4);
+        assert_eq!(t.slot_count(), 3);
+        assert_eq!(t.slot_count(), t.layout(Rect::UNIT).len());
+        t.toggle_fullscreen();
+        assert_eq!(
+            t.slot_count(),
+            3,
+            "the count ignores fullscreen; layout's fullscreen filter is the caller's"
+        );
     }
 
     #[test]

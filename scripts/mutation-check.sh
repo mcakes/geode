@@ -6845,6 +6845,42 @@ run_mutation "docks: showing a dock focuses it" \
             self.docks.get_mut(side).set_visible(true);' \
   geode-shell toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty
 
+# The status bar's fullscreen segment counts what a maximised tile hides:
+# one per layout slot (a stack is one), visible docks included, hidden
+# docks not. It must paint whenever a main-tree tile is fullscreen, even
+# a lone one, and its click must restore the layout.
+run_mutation "fullscreen segment: a stack is one hidden slot" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        Node::Leaf(_) | Node::Stack { .. } => 1,' \
+  '        Node::Leaf(_) => 1,
+        Node::Stack { children, .. } => children.len(),' \
+  geode-shell fullscreen_hidden_counts_a_stack_as_one_slot
+
+run_mutation "fullscreen segment: visible dock slots count as hidden" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        Some(self.tree.slot_count() - 1 + docked)' \
+  '        Some(self.tree.slot_count() - 1 + 0 * docked)' \
+  geode-shell fullscreen_hidden_counts_visible_dock_slots_only
+
+run_mutation "fullscreen segment: hidden docks do not count" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            .filter(|(_, dock)| dock.visible())
+            .map(|(_, dock)| dock.tree().slot_count())' \
+  '            .map(|(_, dock)| dock.tree().slot_count())' \
+  geode-shell fullscreen_hidden_counts_visible_dock_slots_only
+
+run_mutation "fullscreen segment: paints while a tile is fullscreen" \
+  crates/geode-shell/src/shell/render.rs \
+  '        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();' \
+  '        let fullscreen_hidden: Option<usize> = None;' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
+run_mutation "fullscreen segment: a click restores the layout" \
+  crates/geode-shell/src/shell/status.rs \
+  '                    on_fullscreen_click(window, cx);' \
+  '                    let _ = (&on_fullscreen_click, window, cx);' \
+  geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
+
 # Final review, Important 1: the cross-workspace restore pass must heal
 # only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
 # OR empty") drags focus back to `Main` and prints a launch-time warning

@@ -1,13 +1,15 @@
 //! Bottom status bar prepared from arguments and the active theme, with no retained
 //! state or I/O. Count, pending keys, configuration messages, diagnostics, ingestion,
-//! and historical-time indicators occupy the left region; the active theme name
+//! fullscreen, and historical-time indicators occupy the left region; the active theme name
 //! occupies the right. Workspace indicators belong to the sidebar. StatusBar supplies
 //! the status_bar and status_bar_border theme tokens.
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, MouseButton, SharedString, Window, div, px};
 use gpui_component::status_bar::StatusBar;
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, progress::Progress};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, Size, h_flex, progress::Progress,
+};
 
 use super::chip;
 use super::control::{self, PointerStates as _};
@@ -27,9 +29,34 @@ pub fn height(window: &Window) -> f32 {
     scale::design_px(HEIGHT, window.rem_size())
 }
 
+/// The fullscreen segment's text for `hidden` other tiles. The common
+/// counts are literals so an idle repaint of a maximised tile formats
+/// nothing.
+pub fn fullscreen_label(hidden: usize) -> SharedString {
+    const LABELS: [&str; 10] = [
+        "fullscreen",
+        "fullscreen · 1 hidden",
+        "fullscreen · 2 hidden",
+        "fullscreen · 3 hidden",
+        "fullscreen · 4 hidden",
+        "fullscreen · 5 hidden",
+        "fullscreen · 6 hidden",
+        "fullscreen · 7 hidden",
+        "fullscreen · 8 hidden",
+        "fullscreen · 9 hidden",
+    ];
+    match LABELS.get(hidden) {
+        Some(label) => SharedString::new_static(label),
+        None => format!("fullscreen · {hidden} hidden").into(),
+    }
+}
+
 /// Render optional status segments in order: count, nonempty pending keys, reload
 /// failure, write failure, restart requirement, shell notice, diagnostics summary,
-/// ingestion activity, and historical time. Configuration errors use danger, restart
+/// ingestion activity, fullscreen, and historical time. The fullscreen segment shows
+/// while a main-tree tile is maximised, carrying the number of tiles it hides, so a
+/// maximised tile never reads as a workspace's only tile; clicking it restores the
+/// layout through the supplied callback. Configuration errors use danger, restart
 /// and diagnostics use warning, and ordinary notices are muted. Diagnostics clicks
 /// invoke the supplied callback. The historical badge requires both the shortened and
 /// full timestamps; its tooltip shows the full timestamp. Theme name appears on the
@@ -49,6 +76,10 @@ pub fn status_bar(
     // Current ingestion activity, shown as a loading label and a two-pixel strip along
     // the bar's top edge. None hides both.
     ingest: Option<&IngestActivity>,
+    // Other tiles hidden by a fullscreen main-tree tile; None while nothing is
+    // fullscreen.
+    fullscreen_hidden: Option<usize>,
+    on_fullscreen_click: impl Fn(&mut Window, &mut App) + 'static,
     as_of: Option<&str>,
     // Full resolved historical timestamp for the badge tooltip. Supply alongside as_of,
     // whose shortened text is painted and repeated in the tooltip detail.
@@ -143,6 +174,37 @@ pub fn status_bar(
                 .text_color(theme.muted_foreground)
                 .debug_selector(|| "ingest-loading".to_string())
                 .child(activity.label.clone()),
+        );
+    }
+    if let Some(hidden) = fullscreen_hidden {
+        // Muted, like the notice: maximising is a layout the trader chose,
+        // not a fault. Clickable like the diagnostics summary; the
+        // tooltip names the key, resolved on hover rather than per frame.
+        bar = bar.left(
+            h_flex()
+                .id("status-fullscreen")
+                .gap_1()
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(theme.muted_foreground)
+                .pointer_states(control::paint(
+                    theme,
+                    control::Rest::Bare,
+                    theme.status_bar,
+                    theme.muted_foreground,
+                ))
+                .debug_selector(|| "status-fullscreen".to_string())
+                .child(Icon::new(IconName::Maximize).xsmall())
+                .child(fullscreen_label(hidden))
+                .tooltip(crate::tips::tip(
+                    "tip-status-fullscreen",
+                    "Restore the layout",
+                    Some("workspace::fullscreen_tile"),
+                    Some(SharedString::new_static("click to restore")),
+                ))
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_fullscreen_click(window, cx);
+                }),
         );
     }
     if let Some((t, full)) = as_of.zip(as_of_full) {
