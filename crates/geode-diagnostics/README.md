@@ -56,7 +56,7 @@ cargo test -p geode-diagnostics
 - The sources section paints a source's two detail rows by
   `SourceSummary::shape`, resolved once in the app bridge: a fetch source
   is `adapter` plus `fetch`, never an empty `topics:`.
-- Warning and error rows take their colours through
+- Warning and error rows take their colors through
   `geode_shell::shell::chip::chip_paint`, never a semantic foreground
   token over a tint by hand.
 - Paint shares prepared rows through `Rc` and cached header/title strings.

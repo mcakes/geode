@@ -79,6 +79,38 @@ impl Expr {
         }
     }
 
+    /// The expression's top-level conjuncts, left to right: every `And`
+    /// on either side is flattened, and anything else (`Or`, `Not`, a
+    /// comparison, a membership) is one term. `a and (b and c)` and
+    /// `(a and b) and c` both give `[a, b, c]`; `a or b` gives itself.
+    /// The toolbar paints one chip per term and edits them one at a time,
+    /// so a term must be exactly what [`Expr::from_conjuncts`] can put
+    /// back without changing which rows match.
+    pub fn conjuncts(&self) -> Vec<&Expr> {
+        let mut out = Vec::new();
+        self.walk_conjuncts(&mut out);
+        out
+    }
+
+    fn walk_conjuncts<'a>(&'a self, out: &mut Vec<&'a Expr>) {
+        match self {
+            Expr::And(a, b) => {
+                a.walk_conjuncts(out);
+                b.walk_conjuncts(out);
+            }
+            other => out.push(other),
+        }
+    }
+
+    /// A left-folded `And` chain over `terms` in order (`((a and b) and
+    /// c)`), or `None` for no terms. The inverse of [`Expr::conjuncts`]
+    /// up to `And` association, which does not change the rows matched.
+    pub fn from_conjuncts(terms: impl IntoIterator<Item = Expr>) -> Option<Expr> {
+        terms
+            .into_iter()
+            .reduce(|acc, term| Expr::And(Box::new(acc), Box::new(term)))
+    }
+
     fn walk_columns<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             Expr::And(a, b) | Expr::Or(a, b) => {
@@ -550,5 +582,65 @@ mod tests {
         // Parsing is schema-free; validation needs the dataset.
         let e = parse("nonesuch = 'A'");
         assert_eq!(e.columns(), vec!["nonesuch"]);
+    }
+
+    fn conjunct_texts(e: &Expr) -> Vec<String> {
+        e.conjuncts().iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn conjuncts_split_a_chain_and_rebuild_it() {
+        let e = parse("a = 1 and b = 2 and c = 3");
+        assert_eq!(conjunct_texts(&e), vec!["a = 1", "b = 2", "c = 3"]);
+        let rebuilt = Expr::from_conjuncts(e.conjuncts().into_iter().cloned()).unwrap();
+        assert_eq!(rebuilt, e, "a left-folded chain round-trips exactly");
+    }
+
+    #[test]
+    fn a_single_term_is_one_conjunct() {
+        let e = parse("a = 1 or b = 2");
+        assert_eq!(e.conjuncts(), vec![&e], "an or is one term");
+        let n = parse("not a = 1");
+        assert_eq!(n.conjuncts(), vec![&n], "a not is one term");
+        assert_eq!(Expr::from_conjuncts([e.clone()]), Some(e));
+        assert_eq!(
+            Expr::from_conjuncts(Vec::new()),
+            None,
+            "no terms, no expression"
+        );
+    }
+
+    #[test]
+    fn nested_ands_flatten_on_both_sides_in_order() {
+        let right = parse("a = 1 and (b = 2 and (c = 3 or d = 4))");
+        assert_eq!(
+            conjunct_texts(&right),
+            vec!["a = 1", "b = 2", "(c = 3) or (d = 4)"]
+        );
+        let left = parse("(a = 1 and b = 2) and c = 3");
+        assert_eq!(conjunct_texts(&left), vec!["a = 1", "b = 2", "c = 3"]);
+    }
+
+    #[test]
+    fn dropping_a_term_keeps_the_others_in_order() {
+        let e = parse("a = 1 and b = 2 and c = 3");
+        let drop = |i: usize| {
+            let terms = e
+                .conjuncts()
+                .into_iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, t)| t.clone());
+            Expr::from_conjuncts(terms).map(|x| conjunct_texts(&x))
+        };
+        assert_eq!(drop(0), Some(vec!["b = 2".into(), "c = 3".into()]));
+        assert_eq!(drop(1), Some(vec!["a = 1".into(), "c = 3".into()]));
+        assert_eq!(drop(2), Some(vec!["a = 1".into(), "b = 2".into()]));
+        let one = parse("a = 1");
+        assert_eq!(
+            Expr::from_conjuncts(one.conjuncts().into_iter().skip(1).cloned()),
+            None,
+            "dropping the only term leaves no expression"
+        );
     }
 }

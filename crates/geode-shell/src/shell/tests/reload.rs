@@ -134,11 +134,11 @@ fn a_keymap_reload_refreshes_the_chords_global(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// 2c §6.2: a named colour is part of what a tile paints, so a
+/// 2c §6.2: a named color is part of what a tile paints, so a
 /// `colours.toml` edit must reach the modules the same way a `views`
 /// edit does — through `ConfigReloaded`, which is what makes the app's
 /// bridge re-read the doc and hand the blotter factory the new
-/// definitions. Without it a trader's colour change would sit on disk
+/// definitions. Without it a trader's color change would sit on disk
 /// until the next restart.
 #[gpui::test]
 fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
@@ -172,7 +172,7 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     // `view_presentation` and `dimensions` are all absent before and
     // after, which is what makes the emission attributable to `colours`.
     let new_config = Config::load(&ConfigSources {
-        builtin: vec![LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap()],
+        builtin: vec![LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap()],
         desk: None,
         user: None,
     });
@@ -186,6 +186,69 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
         "a colours-only reload must fire ConfigReloaded: {:?}",
         events.borrow()
     );
+}
+
+/// The hot-reload path reads the user directory from disk: a `colors.toml`
+/// edit and a still-unrenamed `colours.toml` both land in the `colors` doc,
+/// so either fires `ConfigReloaded` and the modules see the definitions.
+#[gpui::test]
+fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    let user = tempfile::tempdir().unwrap();
+    for (file, hue) in [("colors.toml", 240), ("colours.toml", 120)] {
+        for stale in ["colors.toml", "colours.toml"] {
+            let _ = std::fs::remove_file(user.path().join(stale));
+        }
+        std::fs::write(
+            user.path().join(file),
+            format!("config_version = 1\n[delta]\nhue = {hue}\n"),
+        )
+        .unwrap();
+        events.borrow_mut().clear();
+        let new_config =
+            crate::reload::load_config(Vec::new(), None, Some(user.path().to_path_buf()));
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ShellEvent::ConfigReloaded)),
+            "{file}: a colors reload must fire ConfigReloaded: {:?}",
+            events.borrow()
+        );
+        let hue_now = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .config
+                .get(geode_core::config::COLORS_DOC, "delta.hue")
+                .and_then(toml::Value::as_integer)
+        });
+        assert_eq!(hue_now, Some(hue), "{file} is the live colors doc");
+    }
 }
 
 /// dataset-presentation spec §6: `dataset_presentation.toml` is merged

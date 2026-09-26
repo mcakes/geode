@@ -36,7 +36,7 @@ the visible window, and handles cursor, find, and yank behavior.
 
 Attribution metadata decides whether a measure is meaningful at each depth. A
 non-attributable cell is shown as NULL rather than a plausible but incorrect
-sum. Pinned grouping, unscoped mode, local as-of, filtering, and named colours
+sum. Pinned grouping, unscoped mode, local as-of, filtering, and named colors
 are tile state and survive through the module's session record.
 
 The `DataTable` delegate paints a prepared row model. Rendering does not
@@ -184,9 +184,9 @@ chart and report a notice or failed slot.
 A series is named by its chip label: its identity, with `@source` only when
 the source is not the configured default. Slot numbers stay internal (session
 keys, request tags, element IDs) and never appear on screen or in anything the
-trader types. `:rule`, `:colour`, `:yaxis`, and `:remove` act on the selected
-series, or on a series named first (`:colour VIX 2`, `:remove
-SPX.close@demo_rest`); the word count tells the two apart, so `:colour spx`
+trader types. `:rule`, `:color`, `:yaxis`, and `:remove` act on the selected
+series, or on a series named first (`:color VIX 2`, `:remove
+SPX.close@demo_rest`); the word count tells the two apart, so `:color spx`
 sets the selected series' color. A bare identity also names a series when it is
 unambiguous; otherwise the command is refused with the matching labels, and
 with no selection and no name it is refused outright. An expression has no
@@ -221,7 +221,7 @@ results, but the barrier timeout can release them while lagging tiles still
 show older data.
 
 The series list, add picker, expression editor, custom dates editor, the three
-menus (action list, range, frequency), and colour picker share one `Popup`
+menus (action list, range, frequency), and color picker share one `Popup`
 owner. The list has no text field; input popups
 own their fields and key routing. Closing uses one cleanup path and blurs a focused input before
 releasing it. Series and add-picker rows share geometry, theme treatment,
@@ -291,23 +291,25 @@ Modified presses and subsequent presses in a multi-click do not start chart
 drags, leaving those gestures available to the shell. Right presses focus the
 tile before its context menu handles keys.
 
-A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolute
-`#rrggbb`. Palette and named colours follow the theme. Absolute colours receive
+A slot's color is a palette index (`1`–`5`), a `[colors]` name, or an absolute
+`#rrggbb`. Palette and named colors follow the theme. Absolute colors receive
 no theme or contrast adjustment. Sessions store them as lowercase six-digit
-hex; malformed hex restores the slot's default colour. Colour names beginning
-with `#` are reserved. `c` cycles the palette, starting at colour 1 from a named
-or absolute colour. `:colour [series] <1..5|name|#rrggbb>` sets the colour
-directly; an explicit hex remains absolute even if it matches a palette colour.
+hex; malformed hex restores the slot's default color. The slot record's key is
+`color`; a record saved under the old `colour` key still restores, without a
+notice, and the next save rewrites it. Color names beginning
+with `#` are reserved. `c` cycles the palette, starting at color 1 from a named
+or absolute color. `:color [series] <1..5|name|#rrggbb>` sets the color
+directly; an explicit hex remains absolute even if it matches a palette color.
 
-The action menu's `Colour…` row opens a picker at the selected slot's chip.
-Its featured swatches capture the five palette colours and all named colours
+The action menu's `Color…` row opens a picker at the selected slot's chip.
+Its featured swatches capture the five palette colors and all named colors
 as resolved when the picker opens. Picks are quantized to opaque 8-bit RGB:
 
-- A pick within one step per channel of the slot's currently painted colour
-  leaves its colour setting unchanged.
+- A pick within one step per channel of the slot's currently painted color
+  leaves its color setting unchanged.
 - Otherwise, a pick within that tolerance of a featured swatch retains its
   palette or name identity. The nearest swatch wins, with the first on a tie.
-- Other picks become absolute colours, with alpha discarded.
+- Other picks become absolute colors, with alpha discarded.
 
 The tolerance preserves palette and named choices through the component's hex
 field conversion. Swatches and entered hex commit and close; sliders apply
@@ -402,7 +404,7 @@ values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
 largest supported font size. These examples do not bound every possible
 value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
 `pricing…` on a stale line and a failed line's reason, so neither state is
-shown by colour alone. The tree column reserves a fixed chevron slot on every
+shown by color alone. The tree column reserves a fixed chevron slot on every
 row, so roots share one leading edge and legs sit one step in; the entry row
 opens at the depth it will land at. A long tree label or text cell ends in
 `…`; a number never truncates. Cell text is floored to the readable ratio on
@@ -651,7 +653,7 @@ save adds a generation to that document (history is kept, nothing is lost).
   until it switches sheet, and a sheet with a save queued stays taken.
 
 Other known gaps: the underlying typeahead does not yet offer catalogue
-underlyings; result cells are not sign-coloured; column widths are the
+underlyings; result cells are not sign-colored; column widths are the
 vocabulary's fixed pixel widths and cannot be resized.
 
 In-process pricing remains an upstream leaf. A feature submits definitions

@@ -31,13 +31,13 @@ pub enum Command {
 }
 
 pub const VERBS: &[&str] = &[
-    "add", "expr", "remove", "rule", "colour", "axis", "freq", "range", "pct", "density", "yaxis",
+    "add", "expr", "remove", "rule", "color", "axis", "freq", "range", "pct", "density", "yaxis",
     "split", "clear",
 ];
 
-/// `:colour`'s color word: `1`..`5` is a palette index, `#rrggbb` an
-/// absolute color, anything else a `[colours]` name `has_name` knows.
-/// `#` is checked before the name because no `[colours]` name may start
+/// `:color`'s color word: `1`..`5` is a palette index, `#rrggbb` an
+/// absolute color, anything else a `[colors]` name `has_name` knows.
+/// `#` is checked before the name because no `[colors]` name may start
 /// with one (`geode_core::colour::RESERVED_PREFIX`).
 pub fn color_arg(word: &str, has_name: impl Fn(&str) -> bool) -> Result<Color, String> {
     let len = geode_chart::core::palette::Palette::LEN;
@@ -49,13 +49,13 @@ pub fn color_arg(word: &str, has_name: impl Fn(&str) -> bool) -> Result<Color, S
     if word.starts_with(geode_core::colour::RESERVED_PREFIX) {
         return Rgb8::parse_hex(word)
             .map(Color::Custom)
-            .ok_or_else(|| format!("'{word}' is not a colour — #rrggbb, six hex digits"));
+            .ok_or_else(|| format!("'{word}' is not a color — #rrggbb, six hex digits"));
     }
     if has_name(word) {
         Ok(Color::Named(word.into()))
     } else {
         Err(format!(
-            "no colour named '{word}' — 1..{len}, a [colours] entry or #rrggbb"
+            "no color named '{word}' — 1..{len}, a [colors] entry or #rrggbb"
         ))
     }
 }
@@ -119,8 +119,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
             let (name, r) = named(&words, true, FORM)?;
             Ok(Command::Rule(name, BucketRule::parse(r).ok_or(FORM)?))
         }
-        "colour" => {
-            const FORM: &str = "colour [series] <1..5|name|#rrggbb>";
+        "color" => {
+            const FORM: &str = "color [series] <1..5|name|#rrggbb>";
             let (name, c) = named(&words, true, FORM)?;
             Ok(Command::Color(name, c.to_string()))
         }
@@ -255,10 +255,10 @@ pub fn completions(
         (0, _) => s(VERBS),
         (1, "remove") => names.to_vec(),
         (1, "rule") => then(rules().collect()),
-        (1, "colour") => then(color_words().collect()),
+        (1, "color") => then(color_words().collect()),
         (1, "yaxis") => then(axes().collect()),
         (2, "rule") => rules().collect(),
-        (2, "colour") => color_words().collect(),
+        (2, "color") => color_words().collect(),
         (2, "yaxis") => axes().collect(),
         (1, "axis") => s(&["session", "time"]),
         (1, "freq") => Frequency::ALL
@@ -319,12 +319,12 @@ mod tests {
             Command::Rule(some("VIX"), BucketRule::Mean)
         );
         assert_eq!(
-            parse("colour spx").unwrap(),
+            parse("color spx").unwrap(),
             Command::Color(None, "spx".into()),
             "one word is the color, for the selected series"
         );
         assert_eq!(
-            parse("colour VIX #FF8800").unwrap(),
+            parse("color VIX #FF8800").unwrap(),
             Command::Color(some("VIX"), "#FF8800".into())
         );
         assert_eq!(
@@ -363,7 +363,7 @@ mod tests {
                 "expr" => "expr X",
                 "remove" => "remove",
                 "rule" => "rule last",
-                "colour" => "colour x",
+                "color" => "color x",
                 "axis" => "axis session",
                 "freq" => "freq 1d",
                 "range" => "range 1y",
@@ -390,7 +390,7 @@ mod tests {
         for bad in ["#ff88", "#ff88001", "#gg8800", "#"] {
             assert_eq!(
                 color_arg(bad, known),
-                Err(format!("'{bad}' is not a colour — #rrggbb, six hex digits")),
+                Err(format!("'{bad}' is not a color — #rrggbb, six hex digits")),
                 "{bad}"
             );
         }
@@ -399,11 +399,11 @@ mod tests {
         assert!(color_arg("#ff88", |_| true).is_err());
         assert_eq!(
             color_arg("nope", known),
-            Err("no colour named 'nope' — 1..5, a [colours] entry or #rrggbb".into())
+            Err("no color named 'nope' — 1..5, a [colors] entry or #rrggbb".into())
         );
         assert_eq!(
-            parse("colour").unwrap_err(),
-            "colour [series] <1..5|name|#rrggbb>"
+            parse("color").unwrap_err(),
+            "color [series] <1..5|name|#rrggbb>"
         );
     }
 
@@ -411,12 +411,18 @@ mod tests {
     fn refusals_name_the_form() {
         assert_eq!(
             parse("").unwrap_err(),
-            "commands: add expr remove rule colour axis freq range pct density yaxis split clear"
+            "commands: add expr remove rule color axis freq range pct density yaxis split clear"
         );
         assert!(
             parse("bogus")
                 .unwrap_err()
                 .starts_with("unknown command 'bogus'")
+        );
+        // The old spelling is not kept as an alias.
+        assert!(
+            parse("colour 2")
+                .unwrap_err()
+                .starts_with("unknown command 'colour'")
         );
         assert_eq!(parse("add").unwrap_err(), "add <identity>[@source]");
         assert_eq!(parse("add a@b@c").unwrap_err(), "add <identity>[@source]");
@@ -430,8 +436,8 @@ mod tests {
             "rule [series] last|first|mean|min|max"
         );
         assert_eq!(
-            parse("colour a b c").unwrap_err(),
-            "colour [series] <1..5|name|#rrggbb>"
+            parse("color a b c").unwrap_err(),
+            "color [series] <1..5|name|#rrggbb>"
         );
         assert_eq!(parse("axis wall").unwrap_err(), "axis session|time");
         assert_eq!(parse("freq 2h").unwrap_err(), "freq 1m|5m|15m|1h|1d|1w");
@@ -488,8 +494,8 @@ mod tests {
             c("rule VIX@demo_rest "),
             vec!["last", "first", "mean", "min", "max"]
         );
-        assert_eq!(c("colour "), with_names(&["spx", "1", "2", "3", "4", "5"]));
-        assert_eq!(c("colour SPX.close "), vec!["spx", "1", "2", "3", "4", "5"]);
+        assert_eq!(c("color "), with_names(&["spx", "1", "2", "3", "4", "5"]));
+        assert_eq!(c("color SPX.close "), vec!["spx", "1", "2", "3", "4", "5"]);
         assert_eq!(
             c("yaxis "),
             with_names(&["left", "right", "bottomleft", "bottomright"])
@@ -516,7 +522,7 @@ mod tests {
         let names = ["SPX.close".to_string()];
         let sources = ["demo_kdb".to_string()];
         let colors = ["spx".to_string()];
-        let line = "colour SPX.close café";
+        let line = "color SPX.close café";
         // `é` is two bytes; this cursor lands one byte past its start,
         // inside the character, not on a char boundary.
         let cursor = line.find('é').unwrap() + 1;

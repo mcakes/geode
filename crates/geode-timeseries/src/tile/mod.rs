@@ -490,7 +490,7 @@ impl TimeseriesTile {
                     | "toggle_visible"
                     | "axis_next"
                     | "axis_prev"
-                    | "colour"
+                    | "color"
                     | "rule"
                     | "remove"
                     | "edit"
@@ -521,7 +521,7 @@ impl TimeseriesTile {
             "axis_prev" => self.model.cycle_axis(false, n),
             "split_shrink" => self.model.step_split(false, n),
             "split_grow" => self.model.step_split(true, n),
-            "colour" => self.model.cycle_color(),
+            "color" => self.model.cycle_color(),
             "rule" => self.model.cycle_rule(),
             "remove" => self.remove_at_cursor(cx),
             "density" => self.model.toggle_density(),
@@ -536,7 +536,7 @@ impl TimeseriesTile {
             // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "range_custom" | "freq" | "list_down"
             | "list_up" | "list_close" | "commit" | "cancel" | "insert_up" | "insert_down"
-            | "menu" | "menu_pick" | "pick_colour" => {
+            | "menu" | "menu_pick" | "pick_color" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -658,7 +658,7 @@ impl TimeseriesTile {
     }
 
     /// `1`..`5` is a palette index, `#rrggbb` an absolute color,
-    /// anything else a `[colours]` name (`commands::color_arg`).
+    /// anything else a `[colors]` name (`commands::color_arg`).
     fn color_named(&self, name: &str) -> Result<Color, String> {
         let colors = self.colors.borrow();
         commands::color_arg(name, |n| colors.get(n).is_some())
@@ -1086,7 +1086,7 @@ impl Render for TimeseriesTile {
                         .child(
                             ColorPicker::new(&c.picker)
                                 .featured_colors(c.swatches.clone())
-                                .accessibility_label(SharedString::new_static("Series colour"))
+                                .accessibility_label(SharedString::new_static("Series color"))
                                 .xsmall(),
                         )
                         .into_any_element(),
@@ -1198,7 +1198,7 @@ fn chart_key(
 }
 
 /// A slot's color on this theme: a palette index through the floored
-/// five chart colors, a `[colours]` name through the shared wheel, an
+/// five chart colors, a `[colors]` name through the shared wheel, an
 /// absolute color as itself, and a name the trader has since deleted
 /// back to the first palette color rather than an error — a stale name
 /// costs a color, never a tile.

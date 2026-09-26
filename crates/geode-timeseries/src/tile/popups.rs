@@ -131,7 +131,7 @@ impl TimeseriesTile {
                 self.open_expr(Some(seed), window, cx);
                 true
             }
-            "pick_colour" => self.open_color_picker(window, cx),
+            "pick_color" => self.open_color_picker(window, cx),
             // The color picker commits through its own keys (a hex
             // field's `enter`, a swatch) inside the component; an
             // `enter` that reaches the tile is inert.

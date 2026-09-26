@@ -142,7 +142,18 @@ pub fn build_keymap(
                         continue;
                     }
                 };
-                let action = ActionId(action_str.to_string());
+                let mut action = ActionId(action_str.to_string());
+                if let Some(current) = registry.renamed(&action) {
+                    diags.push(Diagnostic::warning(
+                        doc.layer,
+                        doc.file.clone(),
+                        format!(
+                            "'{spec}' names the old action id '{action_str}'; bound to \
+                             '{current}' — rename it in the file"
+                        ),
+                    ));
+                    action = current.clone();
+                }
                 if action_str != UNBOUND_ACTION && !registry.contains(&action) {
                     diags.push(Diagnostic::warning(
                         doc.layer,
@@ -284,6 +295,33 @@ mod tests {
         assert_eq!(bindings[1].layer, Layer::User);
         assert!(bindings[1].predicate.is_none());
         assert!(bindings[0].index < bindings[1].index);
+    }
+
+    /// A user override written before an action was renamed still binds —
+    /// to the current id, so persistence and display name the new one — and
+    /// a warning names both ids.
+    #[test]
+    fn a_binding_naming_a_renamed_action_binds_the_current_id_with_a_warning() {
+        let mut reg = registry();
+        reg.register_rename("workspace::focus_west", "workspace::focus_left")
+            .unwrap();
+        let user = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+y\" = \"workspace::focus_west\"\n",
+        );
+        let (keymap, diags) = build_keymap(&[user], Modifiers::ALT, &reg);
+        let bindings = keymap.bindings();
+        assert_eq!(bindings.len(), 1, "{diags:?}");
+        assert_eq!(bindings[0].action.0, "workspace::focus_left");
+        assert_eq!(bindings[0].key_source, "mod+y");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert!(
+            diags[0].message.contains("workspace::focus_west")
+                && diags[0].message.contains("workspace::focus_left"),
+            "{}",
+            diags[0].message
+        );
     }
 
     #[test]

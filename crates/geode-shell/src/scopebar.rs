@@ -26,6 +26,38 @@ pub struct Chip {
     pub close_title: SharedString,
 }
 
+/// One expression-term chip: the term's canonical source, elided for the
+/// chip and whole for the tooltip, plus the per-index selectors the chip
+/// and its `×` paint with. Indexed by position (`Expr::conjuncts` order),
+/// which is also what `Frame::drop_expression_term` and the dialog's
+/// term mode address — the index IS the term's identity within one scope
+/// version, and the model is rebuilt whenever the scope changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExprTerm {
+    /// Elided source text (≤ 40 chars + `…`).
+    pub label: SharedString,
+    /// Complete term source for the tooltip.
+    pub full: SharedString,
+    /// The chip body's debug selector (`"scope-expr-chip-{i}"`).
+    pub selector: SharedString,
+    /// The chip body's tooltip selector (`"tip-scope-expr-chip-{i}"`).
+    pub tip_selector: SharedString,
+    /// The `×`'s debug selector (`"scope-expr-chip-close-{i}"`).
+    pub close_selector: SharedString,
+    /// The `×`'s tooltip selector (`"tip-scope-expr-chip-close-{i}"`).
+    pub close_tip_selector: SharedString,
+}
+
+/// Elide to 40 characters plus `…`, the scope bar's one rule for
+/// expression text.
+fn elide(s: &str) -> String {
+    if s.chars().count() > 40 {
+        format!("{}…", s.chars().take(40).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
 /// Preformatted scope-bar labels and tooltip content for one frame state.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ScopeBarModel {
@@ -36,11 +68,9 @@ pub struct ScopeBarModel {
     /// The scope's text layer. The toolbar shows it in its text Input rather
     /// than a separate chip; this field retains it for model consumers.
     pub text: Option<String>,
-    /// Elided source text (≤ 40 chars + `…`), or `None` when the scope has
-    /// no expression.
-    pub expr: Option<String>,
-    /// Complete expression source for the tooltip, shared across renders.
-    pub expr_full: Option<SharedString>,
+    /// One chip per top-level `and` term of the scope's expression
+    /// (`Expr::conjuncts`), in order; empty when there is no expression.
+    pub terms: Vec<ExprTerm>,
     /// Contradiction marker, using the first name from `Scope::columns()`.
     /// That name need not identify the dimension that caused the contradiction.
     pub impossible: Option<String>,
@@ -82,14 +112,27 @@ pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarMod
             close_title: format!("Remove {}", d.column).into(),
         })
         .collect();
-    let expr_full: Option<SharedString> = scope.expression.as_ref().map(|e| e.to_string().into());
-    let expr = expr_full.as_ref().map(|s| {
-        if s.chars().count() > 40 {
-            format!("{}…", s.chars().take(40).collect::<String>())
-        } else {
-            s.to_string()
-        }
-    });
+    let terms = scope
+        .expression
+        .as_ref()
+        .map(|e| {
+            e.conjuncts()
+                .into_iter()
+                .enumerate()
+                .map(|(i, term)| {
+                    let full = term.to_string();
+                    ExprTerm {
+                        label: elide(&full).into(),
+                        full: full.into(),
+                        selector: format!("scope-expr-chip-{i}").into(),
+                        tip_selector: format!("tip-scope-expr-chip-{i}").into(),
+                        close_selector: format!("scope-expr-chip-close-{i}").into(),
+                        close_tip_selector: format!("tip-scope-expr-chip-close-{i}").into(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let impossible = scope.impossible.then(|| {
         let named = scope.columns().into_iter().next().unwrap_or_default();
         format!("∅ {named}")
@@ -118,8 +161,7 @@ pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarMod
         slot_label,
         chips,
         text: scope.text.clone(),
-        expr,
-        expr_full,
+        terms,
         impossible,
         as_of,
         as_of_badge,
@@ -155,21 +197,30 @@ mod tests {
         assert_eq!(m.chips[0].full, "book ∈ A, B, C");
     }
 
-    /// The expression label elides after 40 characters; its tooltip keeps the
-    /// complete canonical Display form, including explicit parentheses.
+    /// One chip per top-level `and` term, in order: each label elides
+    /// after 40 characters while its tooltip keeps the whole canonical
+    /// term, and each carries its own per-index selectors.
     #[test]
-    fn expr_full_is_the_whole_expression_while_expr_is_elided() {
+    fn each_and_term_is_its_own_chip_elided_with_its_full_text() {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        let long = "npv > 1000000 and delta < -50000 and book = 'ABCDEFGH'";
-        let expr = parse_expr(long).unwrap();
+        let long = "npv > 1000000 and (delta < -50000 or book = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')";
         f.set_scope(Scope {
-            expression: Some(expr.clone()),
+            expression: Some(parse_expr(long).unwrap()),
             ..Scope::default()
         });
         let clock = geode_core::clock::Clock::utc();
         let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
-        assert!(m.expr.as_deref().unwrap().ends_with('…'));
-        assert_eq!(m.expr_full.as_deref(), Some(expr.to_string().as_str()));
+        assert_eq!(m.terms.len(), 2, "an or inside an and is one term");
+        assert_eq!(m.terms[0].label, "npv > 1000000");
+        assert_eq!(m.terms[0].full, "npv > 1000000");
+        let or = "(delta < -50000) or (book = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')";
+        assert_eq!(m.terms[1].full, or);
+        assert!(m.terms[1].label.ends_with('…'));
+        assert_eq!(m.terms[1].label.chars().count(), 41);
+        assert_eq!(m.terms[1].selector, "scope-expr-chip-1");
+        assert_eq!(m.terms[1].tip_selector, "tip-scope-expr-chip-1");
+        assert_eq!(m.terms[1].close_selector, "scope-expr-chip-close-1");
+        assert_eq!(m.terms[1].close_tip_selector, "tip-scope-expr-chip-close-1");
     }
 
     /// The model carries finished slot and as-of strings for rendering.

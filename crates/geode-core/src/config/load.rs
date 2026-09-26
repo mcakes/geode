@@ -19,6 +19,13 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
         .filter(|p| p.extension().is_some_and(|x| x == "toml"))
         .collect();
     paths.sort();
+    // Every stem on disk, loaded or not: a current file that fails to read or
+    // parse still shadows its old-named copy (`adopt_renamed_docs`).
+    let stems: Vec<String> = paths
+        .iter()
+        .filter_map(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
     for path in paths {
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -66,21 +73,60 @@ pub fn load_layer(layer: Layer, root: &Path) -> (Vec<LayerDoc>, Vec<Diagnostic>)
             table,
         });
     }
+    adopt_renamed_docs(layer, &stems, &mut docs, &mut diags);
     (docs, diags)
+}
+
+/// Load an old-named file (`colours.toml`) under its current doc name, or drop
+/// it when the same layer also holds the current file. Either way a warning
+/// names both files, so a stale copy is never merged or ignored in silence.
+/// "Holds" means exists on disk (`stems`): a current file that failed to load
+/// keeps its own error and still shadows the old one, whose content would
+/// otherwise stand in for it.
+fn adopt_renamed_docs(
+    layer: Layer,
+    stems: &[String],
+    docs: &mut Vec<LayerDoc>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for (old, new) in super::RENAMED_DOCS {
+        let Some(i) = docs.iter().position(|d| d.name == *old) else {
+            continue;
+        };
+        if stems.iter().any(|s| s == new) {
+            let legacy = docs.remove(i);
+            diags.push(Diagnostic::warning(
+                layer,
+                legacy.file,
+                format!(
+                    "ignored: {new}.toml in the same directory takes precedence over the old \
+                     name {old}.toml — move anything still needed into {new}.toml and delete \
+                     {old}.toml"
+                ),
+            ));
+        } else {
+            docs[i].name = (*new).to_string();
+            diags.push(Diagnostic::warning(
+                layer,
+                docs[i].file.clone(),
+                format!("{old}.toml is the old name — loaded as {new}.toml; rename the file"),
+            ));
+        }
+    }
 }
 
 /// Read merged view definitions and apply presentation overlays per property:
 /// kind default → view definition → dataset presentation → view presentation.
 /// A missing `views` document returns no views or diagnostics.
 ///
-/// Named colours are checked at each definition site before overlays can hide
+/// Named colors are checked at each definition site before overlays can hide
 /// invalid values or reorder columns. Definition diagnostics use file column
-/// indices; overlay diagnostics use column names. Dataset colours are checked
+/// indices; overlay diagnostics use column names. Dataset colors are checked
 /// even when no view-presentation document exists.
 ///
 /// The raw merged `views` document stays unchanged so dialogs can persist view
 /// definitions separately from presentation. Returned diagnostics cover views,
-/// overlay parsing/application, and colour references; schema and named-colour
+/// overlay parsing/application, and color references; schema and named-color
 /// definition diagnostics are left to their readers' callers.
 pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     let Some(views_doc) = config.doc("views") else {
@@ -101,12 +147,12 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
             diags.extend(d);
             spec
         });
-    let colours = config
-        .doc("colours")
+    let colors = config
+        .doc(super::COLORS_DOC)
         .map(|d| crate::colour::NamedColours::from_doc(d).0)
         .unwrap_or_default();
 
-    // Dataset colour references must be checked even without a
+    // Dataset color references must be checked even without a
     // `view_presentation` document.
     if let Some(overlay) = &dataset_overlay {
         for (dataset, columns) in &overlay.datasets {
@@ -114,16 +160,16 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
                 };
-                if colours.get(name).is_none() {
+                if colors.get(name).is_none() {
                     diags.push(Diagnostic {
                         severity: Severity::Warning,
                         layer: None,
                         file: None,
                         message: format!(
-                            "dataset presentation '{dataset}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
+                            "dataset presentation '{dataset}': column '{col}' names color '{name}', which colors.toml does not define — painted in foreground"
                         ),
                         path: Some(format!(
-                            "dataset_presentation.{dataset}.columns.{col}.colour"
+                            "dataset_presentation.{dataset}.columns.{col}.color"
                         )),
                     });
                 }
@@ -134,26 +180,26 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
     for view in &views {
         for (i, column) in view.columns.iter().enumerate() {
             if let Some(Colour::Named(name)) = &view.presentation_of(column.name()).colour
-                && colours.get(name).is_none()
+                && colors.get(name).is_none()
             {
                 diags.push(Diagnostic {
                     severity: Severity::Warning,
                     layer: None,
                     file: None,
                     message: format!(
-                        "view '{}': column '{}' names colour '{name}', which colours.toml does not define — painted in foreground",
+                        "view '{}': column '{}' names color '{name}', which colors.toml does not define — painted in foreground",
                         view.name,
                         column.name()
                     ),
-                    path: Some(format!("views.{}.columns.{i}.format.colour", view.name)),
+                    path: Some(format!("views.{}.columns.{i}.format.color", view.name)),
                 });
             }
         }
     }
 
-    // Validate definition colours before applying this overlay: otherwise a
+    // Validate definition colors before applying this overlay: otherwise a
     // valid override could hide an invalid definition, or an overlay's error
-    // could be attributed to a definition that never named that colour.
+    // could be attributed to a definition that never named that color.
     if let Some(overlay) = &dataset_overlay {
         diags.extend(overlay.apply(&mut views, &schema));
     }
@@ -167,16 +213,16 @@ pub fn load_views(config: &Config) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
                 let Some(Colour::Named(name)) = &cp.colour else {
                     continue;
                 };
-                if colours.get(name).is_none() {
+                if colors.get(name).is_none() {
                     diags.push(Diagnostic {
                         severity: Severity::Warning,
                         layer: None,
                         file: None,
                         message: format!(
-                            "view presentation '{view_name}': column '{col}' names colour '{name}', which colours.toml does not define — painted in foreground"
+                            "view presentation '{view_name}': column '{col}' names color '{name}', which colors.toml does not define — painted in foreground"
                         ),
                         path: Some(format!(
-                            "view_presentation.{view_name}.columns.{col}.colour"
+                            "view_presentation.{view_name}.columns.{col}.color"
                         )),
                     });
                 }
@@ -256,6 +302,138 @@ mod tests {
         assert_eq!(diags[0].severity, Severity::Warning);
     }
 
+    /// A layer that still holds only `colours.toml` keeps its colors: the file
+    /// loads as the `colors` doc, and a warning asks for the rename.
+    #[test]
+    fn an_old_colours_file_alone_loads_as_colors_with_a_warning() {
+        let desk = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write(
+            desk.path(),
+            "colours.toml",
+            "config_version = 1\n[delta]\nhue = 240\n",
+        );
+        write(
+            user.path(),
+            "colours.toml",
+            "config_version = 1\n[pnl]\ntoken = \"bullish\"\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("colors", "[gamma]\nhue = 30\n").unwrap()],
+            desk: Some(desk.path().to_path_buf()),
+            user: Some(user.path().to_path_buf()),
+        });
+        assert!(config.doc("colours").is_none(), "no doc under the old name");
+        let layers: Vec<Layer> = config
+            .layered_docs("colors")
+            .iter()
+            .map(|d| d.layer)
+            .collect();
+        assert_eq!(layers, vec![Layer::Builtin, Layer::Desk, Layer::User]);
+        for name in ["gamma", "delta", "pnl"] {
+            assert!(config.get("colors", name).is_some(), "{name} merged");
+        }
+        let warned: Vec<(Option<Layer>, &str)> = config
+            .diagnostics
+            .iter()
+            .map(|d| (d.layer, d.message.as_str()))
+            .collect();
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        for d in &config.diagnostics {
+            assert_eq!(d.severity, Severity::Warning);
+            assert!(
+                d.file.as_ref().is_some_and(|f| f.ends_with("colours.toml")),
+                "{d}"
+            );
+            assert!(d.message.contains("colors.toml"), "{d}");
+        }
+    }
+
+    /// Both files in one layer: `colors.toml` is the document, the old file
+    /// contributes nothing, and a warning names the ignored file.
+    #[test]
+    fn colors_wins_over_colours_in_the_same_layer_with_a_warning() {
+        let user = tempfile::tempdir().unwrap();
+        write(
+            user.path(),
+            "colors.toml",
+            "config_version = 1\n[delta]\nhue = 240\n",
+        );
+        write(
+            user.path(),
+            "colours.toml",
+            "config_version = 1\n[delta]\nhue = 10\n[stale]\nhue = 90\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: Vec::new(),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let docs = config.layered_docs("colors");
+        assert_eq!(docs.len(), 1, "one user doc, not two: {docs:?}");
+        assert!(docs[0].file.ends_with("colors.toml"));
+        assert_eq!(
+            config
+                .get("colors", "delta.hue")
+                .and_then(toml::Value::as_integer),
+            Some(240)
+        );
+        assert!(config.get("colors", "stale").is_none());
+        assert!(
+            config.doc("colours").is_none() && config.layered_docs("colours").is_empty(),
+            "the ignored file is dropped, not kept under its old name"
+        );
+        assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
+        let d = &config.diagnostics[0];
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(d.file.as_ref().is_some_and(|f| f.ends_with("colours.toml")));
+        assert!(d.message.starts_with("ignored"), "{d}");
+    }
+
+    /// A broken `colors.toml` is still the current file: its own error stands,
+    /// and the stale `colours.toml` beside it is ignored rather than loaded
+    /// as `colors` (whose advice would be to overwrite the current file).
+    #[test]
+    fn a_broken_colors_file_still_shadows_the_old_colours_file() {
+        let user = tempfile::tempdir().unwrap();
+        write(user.path(), "colors.toml", "config_version = 1\n[delta\n");
+        write(
+            user.path(),
+            "colours.toml",
+            "config_version = 1\n[stale]\nhue = 90\n",
+        );
+        let config = Config::load(&ConfigSources {
+            builtin: Vec::new(),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        assert!(config.get("colors", "stale").is_none(), "{config:?}");
+        assert!(config.layered_docs("colors").is_empty());
+        let errors: Vec<&Diagnostic> = config
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{:?}", config.diagnostics);
+        assert!(
+            errors[0]
+                .file
+                .as_ref()
+                .is_some_and(|f| f.ends_with("colors.toml"))
+        );
+        let ignored: Vec<&Diagnostic> = config
+            .diagnostics
+            .iter()
+            .filter(|d| d.file.as_ref().is_some_and(|f| f.ends_with("colours.toml")))
+            .collect();
+        assert_eq!(ignored.len(), 1, "{:?}", config.diagnostics);
+        assert!(
+            ignored[0].message.starts_with("ignored"),
+            "{}",
+            ignored[0].message
+        );
+    }
+
     /// A user view replaces the desk definition as a whole; presentation then
     /// reorders and hides columns in that effective definition.
     #[test]
@@ -306,11 +484,11 @@ mod tests {
         write(
             dir.path(),
             "views.toml",
-            "config_version = 1\n[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"d\"\nformat = { colour = \"ghost\" }\n",
+            "config_version = 1\n[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"d\"\nformat = { color = \"ghost\" }\n",
         );
         write(
             dir.path(),
-            "colours.toml",
+            "colors.toml",
             "config_version = 1\n[delta]\nhue = 240\n",
         );
         let config = Config::load(&ConfigSources {
@@ -321,7 +499,7 @@ mod tests {
         let (_views, diags) = load_views(&config);
         assert!(
             diags.iter().any(
-                |d| d.path.as_deref() == Some("views.tree.columns.1.format.colour")
+                |d| d.path.as_deref() == Some("views.tree.columns.1.format.color")
                     && d.message.contains("ghost")
             ),
             "{diags:?}"
@@ -338,13 +516,13 @@ mod tests {
         );
         write(
             dir.path(),
-            "colours.toml",
+            "colors.toml",
             "config_version = 1\n[delta]\nhue = 240\n",
         );
         write(
             dir.path(),
             "view_presentation.toml",
-            "config_version = 1\n[tree.columns.npv]\ncolour = \"ghost\"\n",
+            "config_version = 1\n[tree.columns.npv]\ncolor = \"ghost\"\n",
         );
         let config = Config::load(&ConfigSources {
             builtin: vec![],
@@ -354,7 +532,7 @@ mod tests {
         let (_views, diags) = load_views(&config);
         assert!(
             diags.iter().any(|d| d.path.as_deref()
-                == Some("view_presentation.tree.columns.npv.colour")
+                == Some("view_presentation.tree.columns.npv.color")
                 && d.message.contains("ghost")),
             "{diags:?}"
         );
@@ -376,11 +554,11 @@ mod tests {
                 .unwrap(),
                 LayerDoc::builtin(
                     "dataset_presentation",
-                    "[risk.columns.npv]\nwidth = 140\ncolour = \"nope\"\n",
+                    "[risk.columns.npv]\nwidth = 140\ncolor = \"nope\"\n",
                 )
                 .unwrap(),
                 LayerDoc::builtin("view_presentation", "[v.columns.npv]\nwidth = 200\n").unwrap(),
-                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
             ],
             ..ConfigSources::default()
         });
@@ -405,18 +583,18 @@ mod tests {
         let colour_paths: Vec<&str> = diags
             .iter()
             .filter_map(|d| d.path.as_deref())
-            .filter(|p| p.ends_with(".colour"))
+            .filter(|p| p.ends_with(".color"))
             .collect();
         assert_eq!(
             colour_paths,
-            vec!["dataset_presentation.risk.columns.npv.colour"],
+            vec!["dataset_presentation.risk.columns.npv.color"],
             "one mistake, one diagnostic: the dataset-level colour must not \
              also be reported at `views.<v>.columns.<i>.format.colour`, a \
              path into a file that holds no colour key at all"
         );
         let colour_warning = diags
             .iter()
-            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
+            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.color"))
             .expect("the dataset overlay's colour is cross-checked");
         assert!(
             colour_warning.message.contains("nope"),
@@ -425,8 +603,8 @@ mod tests {
         );
     }
 
-    /// A valid dataset colour override must not hide a warning about the
-    /// view definition's own invalid colour.
+    /// A valid dataset color override must not hide a warning about the
+    /// view definition's own invalid color.
     #[test]
     fn the_desk_views_own_colour_check_reads_the_desk_value() {
         let config = Config::load(&ConfigSources {
@@ -438,15 +616,15 @@ mod tests {
                 .unwrap(),
                 LayerDoc::builtin(
                     "views",
-                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\nformat = { colour = \"ghost\" }\n",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n[[v.columns]]\nname = \"npv\"\nkind = \"measure\"\nformat = { color = \"ghost\" }\n",
                 )
                 .unwrap(),
                 LayerDoc::builtin(
                     "dataset_presentation",
-                    "[risk.columns.npv]\ncolour = \"delta\"\n",
+                    "[risk.columns.npv]\ncolor = \"delta\"\n",
                 )
                 .unwrap(),
-                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
             ],
             ..ConfigSources::default()
         });
@@ -461,11 +639,11 @@ mod tests {
         let colour_paths: Vec<&str> = diags
             .iter()
             .filter_map(|d| d.path.as_deref())
-            .filter(|p| p.ends_with(".colour"))
+            .filter(|p| p.ends_with(".color"))
             .collect();
         assert_eq!(
             colour_paths,
-            vec!["views.v.columns.1.format.colour"],
+            vec!["views.v.columns.1.format.color"],
             "the desk's own unknown colour is still warned about, at the \
              views path, even under a valid dataset-level colour"
         );
@@ -477,7 +655,7 @@ mod tests {
 
     #[test]
     fn a_dataset_overlay_colour_is_cross_checked_without_a_view_overlay() {
-        // Omit `view_presentation` to verify that dataset colour warnings do
+        // Omit `view_presentation` to verify that dataset color warnings do
         // not depend on its presence.
         let config = Config::load(&ConfigSources {
             builtin: vec![
@@ -493,10 +671,10 @@ mod tests {
                 .unwrap(),
                 LayerDoc::builtin(
                     "dataset_presentation",
-                    "[risk.columns.npv]\ncolour = \"nope\"\n",
+                    "[risk.columns.npv]\ncolor = \"nope\"\n",
                 )
                 .unwrap(),
-                LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
             ],
             ..ConfigSources::default()
         });
@@ -509,7 +687,7 @@ mod tests {
         );
         let colour_warning = diags
             .iter()
-            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.colour"))
+            .find(|d| d.path.as_deref() == Some("dataset_presentation.risk.columns.npv.color"))
             .expect(
                 "the dataset overlay's colour is cross-checked without a view_presentation doc",
             );

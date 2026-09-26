@@ -191,7 +191,12 @@ pub struct BlotterTile {
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
-    pub error: Option<String>,
+    /// A notice painted in the header, paired with the tone it paints in
+    /// — a dropped sort is a state change the trader caused, not a
+    /// failure, so it carries [`Tone::WarningText`] rather than the
+    /// [`Tone::DangerText`] every other writer here uses. The renderer
+    /// reads the tone from here rather than assuming one.
+    pub error: Option<(String, Tone)>,
     find: Option<FindState>,
     /// An outcome that arrived while the frame's flip barrier (Phase 4
     /// §3.10) still wants this tile's key — held here, not applied, until
@@ -693,7 +698,7 @@ impl BlotterTile {
             // paint on the requery every applied reload already triggers
             // (`Frame::note_config_reloaded`), never a frame behind it.
             let colours = Arc::clone(&self.colours.borrow());
-            self.table.update(cx, |t, cx| {
+            let dropped_sort = self.table.update(cx, |t, cx| {
                 t.delegate_mut().set_colours(colours);
                 // `refresh` re-prepares the column groups from `column()` (the
                 // `on_ui_settings` gotcha), so a plan whose labels or widths
@@ -704,7 +709,16 @@ impl BlotterTile {
                 t.refresh(cx);
                 let row = t.delegate().cursor.row;
                 t.set_selected_row(row, cx);
+                // Taken, not read: a rebuild that carried no drop must not
+                // leave a stale name behind for the next one to repeat.
+                t.delegate_mut().dropped_sort.take()
             });
+            if let Some(name) = dropped_sort {
+                self.error = Some((
+                    format!("sort on '{name}' dropped: the column is no longer in this view"),
+                    Tone::WarningText,
+                ));
+            }
         }
         self.delivered_at = Some(Instant::now());
     }
@@ -716,7 +730,10 @@ impl BlotterTile {
         // otherwise have caught it against.
         self.staged = None;
         let Some(view) = self.view() else {
-            self.error = Some(format!("view '{}' is not configured", self.view_name));
+            self.error = Some((
+                format!("view '{}' is not configured", self.view_name),
+                Tone::DangerText,
+            ));
             cx.notify();
             return;
         };
@@ -762,7 +779,10 @@ impl BlotterTile {
             max_depth,
         });
         if !queued {
-            self.error = Some("query refused: the data service is busy or gone".into());
+            self.error = Some((
+                "query refused: the data service is busy or gone".into(),
+                Tone::DangerText,
+            ));
             self.in_flight = None;
             // A refused submit means nothing is ever coming for these
             // versions (market-data Part 3 Task 6 review, MIN-3, fixed at
@@ -836,7 +856,7 @@ impl BlotterTile {
                 }
             }
             Err(e) => {
-                self.error = Some(e);
+                self.error = Some((e, Tone::DangerText));
                 // A failed outcome still counts as arrival (§3.10): one
                 // broken tile must never hold every other tile open until
                 // the deadline.
@@ -1084,13 +1104,28 @@ impl BlotterTile {
                     if col == 0 {
                         return;
                     }
+                    let Some(name) = d
+                        .plan
+                        .as_ref()
+                        .and_then(|p| p.columns.get(col))
+                        .map(|c| c.name.clone())
+                    else {
+                        return;
+                    };
                     let measure = d.is_measure(col);
-                    let current = d.sort.filter(|s| s.column == col).map(|s| s.order);
+                    let current = d
+                        .sort
+                        .as_ref()
+                        .filter(|s| s.column == name)
+                        .map(|s| s.order);
                     let next = SortOrder::cycle(current, absolute, measure);
                     if next == current {
                         return;
                     }
-                    d.sort = next.map(|order| SortSpec { column: col, order });
+                    d.sort = next.map(|order| SortSpec {
+                        column: name,
+                        order,
+                    });
                     d.reflatten();
                 });
                 self.table.update(cx, |t, cx| {
@@ -1175,16 +1210,14 @@ impl BlotterTile {
             }
             Command::Sort { column, order } => {
                 let found = self.with_delegate(cx, |d| {
-                    let col = d
-                        .plan
-                        .as_ref()?
-                        .columns
-                        .iter()
-                        .position(|c| c.name == column)?;
+                    let col = d.plan.as_ref()?.position_of(&column)?;
                     // A text column has no magnitude: `abs` on it is its
                     // signed direction, in the state as on the screen.
                     let order = order.on_column(d.is_measure(col));
-                    d.sort = Some(SortSpec { column: col, order });
+                    d.sort = Some(SortSpec {
+                        column: column.clone(),
+                        order,
+                    });
                     d.reflatten();
                     Some(())
                 });
@@ -1660,10 +1693,10 @@ impl gpui::Render for BlotterTile {
         {
             header = header.child(div().child("…"));
         }
-        if let Some(e) = &self.error {
+        if let Some((e, tone)) = &self.error {
             header = header.child(
                 div()
-                    .text_color(chip::chip_paint(theme, Tone::DangerText).text)
+                    .text_color(chip::chip_paint(theme, *tone).text)
                     .child(e.clone()),
             );
         }
@@ -2558,7 +2591,11 @@ mod tests {
             (t.table().read(cx).delegate().shown.clone(), t.error.clone())
         });
         assert_eq!(rows, vec![0, 1, 2], "the last good snapshot stays");
-        assert_eq!(error.as_deref(), Some("binder error"));
+        assert_eq!(
+            error,
+            Some(("binder error".to_string(), Tone::DangerText)),
+            "a delivered error still paints danger"
+        );
     }
 
     #[gpui::test]
@@ -2791,7 +2828,7 @@ mod tests {
         let sort = |cx: &mut gpui::VisualTestContext| {
             h.tile.read_with(cx, |t, cx| {
                 let d = t.table().read(cx).delegate();
-                d.sort.map(|s| (s.column, s.order))
+                d.sort.as_ref().map(|s| (s.column.clone(), s.order))
             })
         };
         let header = |cx: &mut gpui::VisualTestContext| {
@@ -2810,18 +2847,27 @@ mod tests {
 
         act(&mut cx, "blotter::right");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Desc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::Desc))
+        );
         act(&mut cx, "blotter::sort_cycle");
         assert_eq!(sort(&mut cx), None);
 
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         assert_eq!(header(&mut cx), "delta01 |x|");
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsAsc))
+        );
         act(&mut cx, "blotter::sort_cycle_abs");
         assert_eq!(sort(&mut cx), None);
         assert_eq!(header(&mut cx), "delta01");
@@ -2830,15 +2876,21 @@ mod tests {
         // from a signed order restarts at abs desc.
         act(&mut cx, "blotter::sort_cycle_abs");
         act(&mut cx, "blotter::sort_cycle");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         act(&mut cx, "blotter::sort_cycle");
         act(&mut cx, "blotter::sort_cycle_abs");
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
 
         h.tile.update(&mut cx, |t, cx| {
             t.command("sort daily_trading_pnl abs asc", cx).unwrap()
         });
-        assert_eq!(sort(&mut cx), Some((2, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("daily_trading_pnl".to_string(), SortOrder::AbsAsc))
+        );
         assert_eq!(
             header(&mut cx),
             "delta01",
@@ -2846,10 +2898,161 @@ mod tests {
         );
         h.tile
             .update(&mut cx, |t, cx| t.command("sort delta01 abs", cx).unwrap());
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         h.tile
             .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
         assert_eq!(sort(&mut cx), None);
+    }
+
+    /// A view edit that drops the sorted column reorders the rows to
+    /// default order regardless (the re-resolving filter in
+    /// `apply_snapshot`); the only question is whether the trader is told
+    /// why. `note_config_reloaded` plus a redelivery is the real route a
+    /// Views-dialog edit reaches a tile through — the same one
+    /// `publication_bursts_query_only_base_and_join_consumers` uses to
+    /// force a plan rebuild.
+    #[gpui::test]
+    fn hiding_the_sorted_column_drops_the_sort_and_says_which(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort delta01", cx).unwrap());
+        assert!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_some()),
+            "precondition: the sort is set before the view edit"
+        );
+
+        // A view edit that hides delta01 shortens the plan.
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "delta01");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snapshot()));
+
+        assert!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().sort.is_none()),
+            "the sorted column is gone, so the sort is gone"
+        );
+        let (notice, tone) = h
+            .tile
+            .read_with(&cx, |t, _| t.error.clone())
+            .expect("a notice names the dropped sort");
+        assert!(
+            notice.contains("delta01"),
+            "the notice names the column whose sort went: {notice}"
+        );
+        assert_eq!(
+            tone,
+            Tone::WarningText,
+            "a dropped sort is a state change the trader caused, not an error"
+        );
+    }
+
+    /// A view edit is not the only reorder path a rebuild takes: it also
+    /// shortens `ColumnPlan::columns` when a column is hidden, and a
+    /// cursor sitting past the hidden column's old slot then keeps an
+    /// in-range index that now names a different column — the same
+    /// failure `move_column`'s own fix prevents for a column drag. Hiding
+    /// a column to the RIGHT of the cursor never moves its index, so only
+    /// a column hidden to its LEFT can tell a real fix from a clamp that
+    /// merely keeps the index in bounds.
+    #[gpui::test]
+    fn hiding_a_column_left_of_the_cursor_carries_it_by_name(cx: &mut gpui::TestAppContext) {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                     [[tree.columns]]\nname = \"model_code\"\nkind = \"dimension\"\n\
+                     [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n\
+                     [[tree.columns]]\nname = \"daily_trading_pnl\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let views = ViewSpec::from_doc(&doc).0;
+        let (h, mut cx) = open_with_views(cx, None, views);
+
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("model_code"),
+                    TestColumn::Dict(vec![None, Some("A".into()), Some("B".into())]),
+                ),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+                (
+                    meta("daily_trading_pnl"),
+                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0)]),
+                ),
+            ],
+            1,
+        ));
+
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snap.clone()));
+
+        // The plan is [tree, model_code, delta01, daily_trading_pnl];
+        // rest the cursor on delta01, in the middle.
+        let delta_ix = h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| {
+                d.plan.as_ref().unwrap().position_of("delta01").unwrap()
+            })
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.with_delegate(cx, |d| d.cursor.col = delta_ix);
+        });
+
+        // Hides model_code, to the LEFT of the cursor: delta01 and
+        // daily_trading_pnl both shift down one slot.
+        h.tile.update(&mut cx, |t, _| {
+            t.views
+                .borrow_mut()
+                .iter_mut()
+                .find(|v| v.name == "tree")
+                .unwrap()
+                .columns
+                .retain(|c| c.name() != "model_code");
+        });
+        h.frame.update(&mut cx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        let p2 = next_query(&h.requests);
+        deliver(&h, &mut cx, p2.tag, Ok(snap));
+
+        let name = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            d.plan.as_ref().unwrap().columns[d.cursor.col].name.clone()
+        });
+        assert_eq!(
+            name, "delta01",
+            "the cursor stays on the column it was on, not the position it held"
+        );
     }
 
     /// A header click reaches every order a measure can show, desc first
@@ -2884,7 +3087,8 @@ mod tests {
                     .read(cx)
                     .delegate()
                     .sort
-                    .map(|s| (s.column, s.order))
+                    .as_ref()
+                    .map(|s| (s.column.clone(), s.order))
             })
         };
         let header = |cx: &mut gpui::VisualTestContext| {
@@ -2926,12 +3130,12 @@ mod tests {
         click(&mut cx, 1);
         assert_eq!(
             sort(&mut cx),
-            Some((1, SortOrder::Desc)),
+            Some(("delta01".to_string(), SortOrder::Desc)),
             "first click: desc"
         );
         assert_eq!(row_of(&mut cx), (3, 2), "desc keeps L1 (5) above L2 (4)");
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(sort(&mut cx), Some(("delta01".to_string(), SortOrder::Asc)));
         assert_eq!(header(&mut cx), "delta01");
         // Asc puts L2 (4) above L1 (5) and its open child: the cursor
         // follows L2 to row 1 by path, and so does the component's
@@ -2944,17 +3148,26 @@ mod tests {
             "the component's highlight followed the cursor"
         );
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsDesc))
+        );
         assert_eq!(header(&mut cx), "delta01 |x|");
         click(&mut cx, 1);
-        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("delta01".to_string(), SortOrder::AbsAsc))
+        );
         click(&mut cx, 1);
         assert_eq!(sort(&mut cx), None);
         assert_eq!(header(&mut cx), "delta01");
         // Another column's click starts its own cycle at desc.
         click(&mut cx, 1);
         click(&mut cx, 2);
-        assert_eq!(sort(&mut cx), Some((2, SortOrder::Desc)));
+        assert_eq!(
+            sort(&mut cx),
+            Some(("daily_trading_pnl".to_string(), SortOrder::Desc))
+        );
     }
 
     /// `:filter` narrows through `tile_scope`, composed into the query's
@@ -4264,7 +4477,10 @@ mod tests {
             "B keeps its last-good snapshot"
         );
         let b_error = h.b.read_with(&vcx, |t, _| t.error.clone());
-        assert_eq!(b_error.as_deref(), Some("binder error"));
+        assert_eq!(
+            b_error,
+            Some(("binder error".to_string(), Tone::DangerText))
+        );
     }
 
     /// A pinned tile ignores a grouping-only change (§4.1: `follows_
@@ -4767,7 +4983,7 @@ mod tests {
     #[gpui::test]
     fn a_delivered_snapshot_hands_the_delegate_the_tiles_colours(cx: &mut gpui::TestAppContext) {
         let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
-                    [[tree.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n";
+                    [[tree.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         let mut colours = NamedColours::default();
         colours.insert(

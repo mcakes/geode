@@ -1,5 +1,5 @@
-//! Adapter for shared named colours: a hue and tone, or a semantic theme token, with
-//! optional sign tinting. All fields write the colour's definition.
+//! Adapter for shared named colors: a hue and tone, or a semantic theme token, with
+//! optional sign tinting. All fields write the color's definition.
 //!
 //! The writer emits only the selected base: a token excludes hue and tone; a hue omits
 //! the default normal tone. Unticked `tint_sign` is omitted. Unmodelled definition keys
@@ -7,7 +7,7 @@
 //! rounded numeric field remains unchanged.
 //!
 //! `none` and `sign` are reserved by column-format syntax and cannot be created as
-//! named colours. Edit swatches resolve the draft's current fields; browse swatches
+//! named colors. Edit swatches resolve the draft's current fields; browse swatches
 //! resolve the saved definitions against the active theme.
 
 use geode_core::colour::{Definition, NamedColours, Token, Tone};
@@ -16,10 +16,10 @@ use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use super::{Destination, Draft, Field, FieldKind};
 
 /// The config doc name (file stem), as `Config::layered_docs` keys it.
-pub const DOC: &str = "colours";
+pub const DOC: &str = geode_core::config::COLORS_DOC;
 
 /// The browse row's muted second line: `Definition::summary`, read
-/// through the very reader that decides what a colour resolves to
+/// through the very reader that decides what a color resolves to
 /// (`NamedColours::from_doc`) rather than a bespoke re-parse of the raw
 /// table — the one-entry-doc trick `sources::summary`'s sibling
 /// adapters use for a domain whose reader already does the validating,
@@ -41,7 +41,7 @@ pub fn summary(value: &toml::Value) -> String {
         .unwrap_or_else(|| "invalid".to_string())
 }
 
-/// The four fields of one colour, or of no colour at all when `object`
+/// The four fields of one color, or of no color at all when `object`
 /// names nothing (`n`'s empty draft, and the schema `n` opens into
 /// before a name is even typed): `hue` defaults to `0`, `tone` to
 /// `normal`, `token` to `none`, `tint_sign` to off — exactly
@@ -131,7 +131,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 }
 
 /// The draft's four fields read back as a [`Definition`] — the same
-/// shape a saved colour resolves to, for `render.rs`'s edit-header
+/// shape a saved color resolves to, for `render.rs`'s edit-header
 /// swatch. `None` only if the draft somehow lacks its `hue` row, which
 /// [`fields`] never produces.
 pub fn definition_of(draft: &Draft) -> Option<Definition> {
@@ -208,10 +208,10 @@ pub fn to_table(draft: &Draft, _dest: Destination) -> toml_edit::Item {
 }
 
 /// Everything wrong with the draft as it stands: the rendered table, parsed back and
-/// read by the very reader that decides what every consumer of a named colour sees
+/// read by the very reader that decides what every consumer of a named color sees
 /// (`NamedColours::from_doc`) — on the object being edited alone, wrapped in a document
 /// of its own, for the reason `sources::validate` and `scopes::validate` both give for
-/// doing the same: validating the whole merged doc would report every other colour's
+/// doing the same: validating the whole merged doc would report every other color's
 /// problems against this one.
 pub fn validate(draft: &Draft, _config: &Config) -> Vec<Diagnostic> {
     let doc = merge_docs(
@@ -250,7 +250,7 @@ pub fn help(key: &str) -> &'static str {
             "Positive numbers shift the hue toward cool, negative toward warm — a hint of sign"
         }
         "token" => {
-            "A theme colour by role — a token replaces the hue in the file; none uses the hue"
+            "A theme color by role — a token replaces the hue in the file; none uses the hue"
         }
         _ => "",
     }
@@ -277,7 +277,7 @@ mod tests {
             "[delta]\nhue = 240\n[gamma]\nhue = 210\ntone = \"light\"\n\
              [pnl]\ntoken = \"chart.bullish\"\n",
         );
-        let draft = Domain::Colours.draft(&config, "gamma");
+        let draft = Domain::Colors.draft(&config, "gamma");
         let by = |k: &str| draft.fields.iter().find(|f| f.key == k).unwrap();
         assert!(matches!(
             by("hue").kind,
@@ -302,7 +302,7 @@ mod tests {
                 && !text.contains("token"),
             "{text}"
         );
-        let draft = Domain::Colours.draft(&config, "pnl");
+        let draft = Domain::Colors.draft(&config, "pnl");
         let text = super::super::object_text("pnl", to_table(&draft, Destination::Doc));
         assert!(
             text.contains("token = \"chart.bullish\"") && !text.contains("hue"),
@@ -316,12 +316,12 @@ mod tests {
         // The mutation `pnl` alone cannot pin: its `source` never held a
         // `hue` in the first place, so a `to_table` that forgot to
         // remove one would still render correctly by sheer absence.
-        // Switching a hue-based colour's own draft to a token — `gamma`,
+        // Switching a hue-based color's own draft to a token — `gamma`,
         // still carrying `hue = 210` and `tone = "light"` in `source` —
         // is the case that actually exercises the removal: without it,
         // the stale `hue`/`tone` from `source` would leak straight
         // through `toml_table_to_edit`, dead beside the new `token`.
-        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let mut draft = Domain::Colors.draft(&config, "gamma");
         let token_field = draft.fields.iter_mut().find(|f| f.key == "token").unwrap();
         if let FieldKind::Choice { options, selected } = &mut token_field.kind {
             *selected = options
@@ -345,7 +345,7 @@ mod tests {
         let config = config_with_colours("[gamma]\nhue = 210.5\n");
 
         // A step of `tone` alone: the hue row was never touched.
-        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let mut draft = Domain::Colors.draft(&config, "gamma");
         let tone = draft.fields.iter_mut().find(|f| f.key == "tone").unwrap();
         if let FieldKind::Choice { options, selected } = &mut tone.kind {
             *selected = options.iter().position(|o| o == "light").unwrap();
@@ -358,7 +358,7 @@ mod tests {
 
         // And a step of the hue itself does write the field's value —
         // the rounded one, since that is what the trader stepped from.
-        let mut draft = Domain::Colours.draft(&config, "gamma");
+        let mut draft = Domain::Colors.draft(&config, "gamma");
         let hue = draft.fields.iter_mut().find(|f| f.key == "hue").unwrap();
         if let FieldKind::Number { value, .. } = &mut hue.kind {
             *value += 15;
@@ -375,17 +375,17 @@ mod tests {
     fn reserved_names_are_taken() {
         let config = config_with_colours("[delta]\nhue = 240\n");
         assert!(
-            Domain::Colours.name_taken(&config, "sign")
-                && Domain::Colours.name_taken(&config, "none")
+            Domain::Colors.name_taken(&config, "sign")
+                && Domain::Colors.name_taken(&config, "none")
         );
         assert!(!Domain::Views.name_taken(&config, "sign"));
-        // `#rrggbb` is an absolute colour where a name is also read, so
-        // the colours domain refuses a `#` name up front — and only it.
-        assert!(Domain::Colours.is_reserved("#ff8800"));
-        assert!(Domain::Colours.name_taken(&config, "#ff8800"));
+        // `#rrggbb` is an absolute color where a name is also read, so
+        // the colors domain refuses a `#` name up front — and only it.
+        assert!(Domain::Colors.is_reserved("#ff8800"));
+        assert!(Domain::Colors.name_taken(&config, "#ff8800"));
         assert!(!Domain::Views.name_taken(&config, "#ff8800"));
-        assert!(!Domain::Colours.is_reserved("a#b"));
-        let draft = Domain::Colours.new_draft(&config, "fresh");
+        assert!(!Domain::Colors.is_reserved("a#b"));
+        let draft = Domain::Colors.new_draft(&config, "fresh");
         assert_eq!(
             definition_of(&draft),
             Some(Definition::hue(0.0, Tone::Normal))
@@ -402,7 +402,7 @@ mod tests {
         let config = config_with_colours(
             "[delta]\nhue = 240\ntint_sign = true\n[pnl]\ntoken = \"chart.3\"\n",
         );
-        let draft = Domain::Colours.draft(&config, "delta");
+        let draft = Domain::Colors.draft(&config, "delta");
         let keys: Vec<&str> = draft.fields.iter().map(|f| f.key.as_str()).collect();
         assert_eq!(keys, vec!["hue", "tone", "token", "tint_sign"]);
         assert!(matches!(
@@ -420,7 +420,7 @@ mod tests {
         );
 
         // Untick: the key leaves the file, the hue stays.
-        let mut draft = Domain::Colours.draft(&config, "delta");
+        let mut draft = Domain::Colors.draft(&config, "delta");
         let row = draft
             .fields
             .iter_mut()
@@ -438,7 +438,7 @@ mod tests {
         );
 
         // Tick on a token: written beside the token, no hue in sight.
-        let mut draft = Domain::Colours.draft(&config, "pnl");
+        let mut draft = Domain::Colors.draft(&config, "pnl");
         assert!(matches!(
             draft
                 .fields

@@ -49,7 +49,7 @@ use crate::vimnav;
 
 use super::super::{SCOPES_KEY, ShellEvent, ShellView};
 // Aliased: `colours` (unqualified, `use super::colours;` above) is the
-// `Domain::Colours` adapter; this is `shell::colours`, the gpui<->pure theme bridge — a
+// `Domain::Colors` adapter; this is `shell::colours`, the gpui<->pure theme bridge — a
 // different module, one directory further out, that the adapter itself never touches.
 use super::super::colours as colour_theme;
 use super::super::control::{self, PointerStates as _};
@@ -768,16 +768,16 @@ fn enter_edit_stage(
 /// list item and view presentation; Schema updates a scratch item and dataset
 /// presentation.
 ///
-/// Read colours and overlay baselines from the pending-aware config. Clear mode, query,
+/// Read colors and overlay baselines from the pending-aware config. Clear mode, query,
 /// confirmation, and viewport for the new stage. If the column cannot be resolved,
 /// discard the prepared context and leave the current stage intact.
 fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
-    // Use pending edits for the named-colour choices and presentation baselines. A
+    // Use pending edits for the named-color choices and presentation baselines. A
     // stage opened during debounce must not overwrite a value it cannot yet see.
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
     let colours: Vec<String> = config
-        .doc("colours")
+        .doc(colours::DOC)
         .map(|doc| {
             geode_core::colour::NamedColours::from_doc(doc)
                 .0
@@ -861,7 +861,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
             )
         }
         // No other domain has a column stage: Groupings, Scopes, Sources
-        // and Colours have no per-column presentation to open, and
+        // and Colors have no per-column presentation to open, and
         // `column_stage_target` never names a row on one.
         _ => return,
     };
@@ -2366,10 +2366,9 @@ fn removal_edits(
     let mut keys: Vec<(&'static str, String)> =
         touched.into_iter().map(|doc| (doc, name.clone())).collect();
     // the sidecar entry rides the same removal — never created just to remove nothing,
-    // hence the `has_override_entry` gate rather than an unconditional key.
+    // hence only the keys the sidecar actually holds rather than an unconditional key.
     if let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) {
-        let okey = super::override_key(domain.doc(), &name);
-        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {
+        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {
             keys.push((super::OVERRIDES_DOC, okey));
         }
     }
@@ -2728,13 +2727,13 @@ fn build(
 
     // the merged `colours.toml` AND the theme's own anchors/tokens, read once for the
     // whole list rather than once per row — every browse row's swatch resolves its own
-    // saved colour against them. `None` for every other domain, so a non-Colours dialog
+    // saved color against them. `None` for every other domain, so a non-Colors dialog
     // never even asks `Config` for a doc it will never read the rest of the row loop
     // for.
     //
     // The pair is hoisted with the doc: `resolve_named` (since deleted — this hoist
     // left it with no caller) read the theme inside itself, so resolving per row cost M
-    // x 28 `Hsla -> Rgb` conversions for a list of M colours. Bounded by colour count
+    // x 28 `Hsla -> Rgb` conversions for a list of M colors. Bounded by color count
     // in a modal rather than by row count on the paint path, so it is tidiness rather
     // than budget — but it is the same shape the blotter's I-1 memo answers, and the
     // list was already hoisting the doc.
@@ -2742,7 +2741,7 @@ fn build(
         geode_core::colour::NamedColours,
         geode_core::colour::Anchors,
         geode_core::colour::Tokens,
-    )> = (state.domain == Domain::Colours).then(|| {
+    )> = (state.domain == Domain::Colors).then(|| {
         let empty = geode_core::config::MergedDoc::default();
         let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
         (
@@ -2863,8 +2862,8 @@ fn build(
             ));
         }
 
-        // a swatch before the label, resolved from this row's own saved colour —
-        // painted only when the colour actually resolves (a dropped or invalid one
+        // a swatch before the label, resolved from this row's own saved color —
+        // painted only when the color actually resolves (a dropped or invalid one
         // paints no swatch, never a fallback that would misrepresent it).
         let swatch = named_colours
             .as_ref()
@@ -3135,14 +3134,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let ticked_states = control::paint(theme, control::Rest::Bare, theme.popover, theme.success);
     let row = target_row(shell);
 
-    // on Colours, the swatch beside the name — resolved from the draft's own live
+    // on Colors, the swatch beside the name — resolved from the draft's own live
     // fields (`colours::definition_of`), not from the saved `colours.toml`, so stepping
     // the hue repaints it before any write lands. `None` (no swatch) only if the draft
-    // somehow lacks a `hue` row, which `colours::fields` never produces. A colour that
+    // somehow lacks a `hue` row, which `colours::fields` never produces. A color that
     // tints by sign paints a triad — negative, base, positive — since the tint is the
     // thing the trader ticked the row to see.
     let name_child = match (state.domain, colours::definition_of(draft)) {
-        (Domain::Colours, Some(def)) => {
+        (Domain::Colors, Some(def)) => {
             let anchors = colour_theme::anchors_from_theme(theme);
             let tokens = colour_theme::tokens_from_theme(theme);
             let variant = |sign: geode_core::colour::Sign| {
@@ -3211,7 +3210,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 ));
             }
             // the same tokens the browse row's own `drifted` badge uses — one
-            // classification, one set of colours.
+            // classification, one set of colors.
             if row.drifted {
                 markers = markers.child(dialog::badge(
                     "drifted",
@@ -3314,7 +3313,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             let is_selected = position == draft.selected;
             // Every row carries the same 2px top border, transparent unless
             // `drag_over` recolours it — reserving the space up front means a
-            // hover only repaints the colour, never reflows the rows below it.
+            // hover only repaints the color, never reflows the rows below it.
             let mut element = h_flex()
                 .w_full()
                 .items_center()
@@ -3658,7 +3657,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // other dragged value passing over the modal must not
                         // land on a column list.
                         .can_drop(|value, _window, _cx| value.downcast_ref::<RowDrag>().is_some())
-                        // Only the colour changes here — the 2px top border
+                        // Only the color changes here — the 2px top border
                         // itself is reserved on every row unconditionally
                         // above, so a hover never reflows the rows below it.
                         .drag_over::<RowDrag>(move |style, _drag, _window, cx| {
@@ -4032,12 +4031,12 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
         ),
         (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
         (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
-        // None of Schema, Sources or Colours has an `OrderedList` field
+        // None of Schema, Sources or Colors has an `OrderedList` field
         // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
         // module docs — every field on any of the three is a plain
         // scalar), so this arm is unreachable for all three; kept only
         // to stay exhaustive as domains are added.
-        (Domain::Schema | Domain::Sources | Domain::Colours, _) => ("", "members"),
+        (Domain::Schema | Domain::Sources | Domain::Colors, _) => ("", "members"),
     }
 }
 
