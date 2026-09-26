@@ -19,7 +19,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `undo` | The tile's bounded, strictly last-in first-out undo/redo stack. |
 | `shorthand`, `template` | Parsing and rendering custom lines and package templates. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
-| `cell` | Cell commit validation, the typeahead vocabularies, and nudging. |
+| `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o`/`shift+o` land, and the entry history. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
@@ -33,7 +33,7 @@ The tile:
 | `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (the store `geode-app` wires: `pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
-| `delegate` | The table delegate: cells, tree column, entry row, editor. |
+| `delegate` | The table delegate: cells, tree column, entry row, editor, expiry date field. |
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead and the `.` action menu. |
 | `session` | The tile's session record. |
@@ -92,8 +92,21 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   its parent if necessary.
 - The grid model is built on change and installed through `install_model`
   only, never in render.
-- Both text inputs blur before they drop, and a click in the grid (a chevron
-  included) cancels an open editor without committing it. `:` and `/` close
+- Every field (entry, text editor, expiry date field) blurs before it drops,
+  and a click in the grid (a chevron included) cancels an open editor without
+  committing it. A date segment's mouse-down stops propagation, so a click
+  aimed into the field selects a segment rather than cancelling it.
+- The expiry always edits in `geode_widgets::datefield`'s pure field; the
+  tile owns its focus handle (what `holds_focus` and the shell's insert
+  predicate read) and routes keys through `datefield::route` in
+  `date_field_key` before they bubble to the shell. The painter and key
+  routing are a local copy of market-data's grid pattern (a module may not
+  depend on a sibling). A tenor seeds from the app clock's today, never
+  `chrono::Local`; `cell::commit_date` answers `Ok(None)` for the line's own
+  date, so an unchanged commit records no undo entry.
+- In-grid fields (`delegate::cell_input`) are `Input::appearance(false)` with
+  no horizontal padding, at the row's height, in the cell's alignment: the
+  cell's cursor border is the only frame. `:` and `/` close
   the menu and any open field first.
 - Model installation resolves an open editor by line ID and column kind,
   updating its plan index and the cursor column together. If the line or

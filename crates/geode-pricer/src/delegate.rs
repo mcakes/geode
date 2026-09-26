@@ -14,14 +14,15 @@ use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
+use geode_widgets::datefield::{self, DateTimeField, SegmentPaint, SegmentText};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, Entity, EventEmitter, SharedString, Stateful, TextAlign,
-    WeakEntity, Window, div, px,
+    App, ClickEvent, Context, Div, Entity, EventEmitter, FocusHandle, SharedString, Stateful,
+    TextAlign, WeakEntity, Window, div, px, relative,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex};
+use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
 
 /// The tree column: pixels, like every width here (the vocabulary's own
@@ -87,8 +88,98 @@ pub(crate) struct EditorPaint {
     pub row: usize,
     /// The plan column (never the tree).
     pub col: usize,
-    pub input: Entity<InputState>,
+    pub field: EditorField,
     pub choice: Option<Rc<ChoicePaint>>,
+}
+
+/// What the open editor paints in its cell: a text `Input` (every text
+/// and typeahead cell), or an expiry's segmented date field — its
+/// prepared segments and the focus handle the painted field tracks, so
+/// the shell's insert-focus predicate and the field's key listener see
+/// the same focus.
+#[derive(Clone)]
+pub(crate) enum EditorField {
+    Text(Entity<InputState>),
+    Date {
+        paint: DateFieldPaint,
+        focus: FocusHandle,
+    },
+}
+
+/// The date field as painted: the segments exactly as
+/// [`DateTimeField::segments`] answers them and the per-tile selector the
+/// painter hangs on each segment, prepared by [`DateFieldPaint::of`]
+/// whenever the field changes — never in render. Cloning is two refcount
+/// bumps (`Rc<[_]>`, `SharedString`), so the delegate's mirror costs no
+/// allocation per frame.
+#[derive(Clone)]
+pub(crate) struct DateFieldPaint {
+    pub segments: Rc<[SegmentText]>,
+    pub selector: SharedString,
+}
+
+impl DateFieldPaint {
+    pub(crate) fn of(field: &DateTimeField, tile_id: u64) -> Self {
+        Self {
+            segments: field.segments().into(),
+            selector: format!("pricer-date-seg-{tile_id}").into(),
+        }
+    }
+}
+
+/// The segmented date field in a grid cell: flush segments, no frame —
+/// the cell's cursor border is the only chrome, as with the text editor.
+/// The row tracks the field's focus handle and routes keys to the tile
+/// (`PricerTile::date_field_key`) before they bubble on; a handled key
+/// stops there, a chord or a key the field does not take bubbles to the
+/// shell. A mouse-down on a segment selects it and stops propagation, so
+/// the table's own cell click (which cancels an open editor) never fires
+/// for a click aimed into the field.
+fn render_date_field(
+    paint: &DateFieldPaint,
+    focus: &FocusHandle,
+    paints: &Paints,
+    theme: &Theme,
+    tile: &Entity<PricerTile>,
+) -> impl IntoElement {
+    let segment_paint = SegmentPaint {
+        rest_text: paints.own,
+        rest_fill: None,
+        active_text: paints.date_active_text,
+        active_fill: theme.primary,
+        typing_text: paints.date_typing_text,
+        typing_fill: theme.accent,
+        separator: paints.muted,
+        suffix: paints.muted,
+        radius: theme.radius_tokens().sm,
+        flush: true,
+    };
+    let keys = tile.clone();
+    let clicks = tile.clone();
+    h_flex()
+        .track_focus(focus)
+        .h_full()
+        .items_center()
+        .font_family(fonts::MONO)
+        // gpui's default line height (phi, ~1.6em) makes a segment's fill
+        // taller than an XSmall row's content box, so the active fill
+        // would clip against the cursor border; 1.25em fits inside it
+        // with the glyphs where the cell's own text sat (both centred).
+        .line_height(relative(1.25))
+        .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+            if keys.update(cx, |t, cx| t.date_field_key(event, window, cx)) {
+                cx.stop_propagation();
+            }
+        })
+        .child(datefield::paint(
+            &paint.segments,
+            None,
+            segment_paint,
+            paint.selector.clone(),
+            move |segment, window, cx| {
+                clicks.update(cx, |t, cx| t.date_segment_clicked(segment, window, cx));
+            },
+        ))
 }
 
 pub struct SheetDelegate {
@@ -215,6 +306,19 @@ impl SheetDelegate {
             }
         }
     }
+}
+
+/// An in-grid text field: no input chrome (background, border, radius,
+/// focus ring) and no horizontal padding, so its text sits exactly where
+/// the cell's own text sat and the cell's cursor border is the only
+/// frame; the row's full height; the cell's own alignment. Default-sized,
+/// so its text is the table's `text_sm`, not a smaller field's.
+fn cell_input(state: &Entity<InputState>, align: TextAlign) -> Input {
+    Input::new(state)
+        .appearance(false)
+        .px_0()
+        .h_full()
+        .text_align(align)
 }
 
 impl TableDelegate for SheetDelegate {
@@ -413,7 +517,14 @@ impl SheetDelegate {
                     Some(input) => el
                         .debug_selector(|| "pricer-entry".into())
                         .child(slot)
-                        .child(div().flex_1().min_w_0().child(Input::new(input).xsmall()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .h_full()
+                                .debug_selector(|| "pricer-entry-field".into())
+                                .child(cell_input(input, TextAlign::Left)),
+                        )
                         .into_any_element(),
                     None => el.into_any_element(),
                 };
@@ -480,12 +591,30 @@ impl SheetDelegate {
                     let tile = self.tile.upgrade()?;
                     Some(render_choice(paint, &tile, cx).into_any_element())
                 });
+                let align = if right {
+                    TextAlign::Right
+                } else {
+                    TextAlign::Left
+                };
+                let field = match &e.field {
+                    EditorField::Text(input) => Some(cell_input(input, align).into_any_element()),
+                    // The field's keys and clicks route through the tile;
+                    // a dropped tile paints an empty cell.
+                    EditorField::Date { paint, focus } => self.tile.upgrade().map(|tile| {
+                        render_date_field(paint, focus, &paints, cx.theme(), &tile)
+                            .into_any_element()
+                    }),
+                };
                 el.child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .when(right, |el| el.justify_end())
                         .debug_selector(|| format!("pricer-editor-{row_ix}-{col_ix}"))
-                        .child(Input::new(&e.input).xsmall()),
+                        .children(field),
                 )
                 .when_some(popup, |el, popup| {
                     el.relative()

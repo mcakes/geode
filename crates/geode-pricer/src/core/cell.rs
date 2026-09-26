@@ -1,17 +1,18 @@
 //! The cell editor's pure half (line-pricer spec §8.4): what an editable
 //! cell opens with, what a commit means as ONE `Edit`, and how an arrow
-//! key nudges the open text. The tile only opens an `InputState` on the
-//! answer and hands the committed text back here.
+//! key nudges the open text. The tile only opens an `InputState` (or, for
+//! an expiry, a segmented date field) on the answer and hands the
+//! committed text or date back here.
 
 use crate::core::columns::ColumnKind;
 use crate::core::edit::Edit;
 use crate::core::sheet::{OwnShifts, Sheet};
 use crate::core::shorthand::{
-    parse_barrier_kind, parse_expiry, parse_strike, render_barrier_kind, render_expiry,
-    render_strike,
+    parse_barrier_kind, parse_expiry, parse_strike, render_barrier_kind, render_strike,
 };
+use chrono::NaiveDate;
 use geode_core::nudge::nudge_text;
-use geode_core::pricing::{Instrument, OptionKind, Vanilla};
+use geode_core::pricing::{Expiry, Instrument, OptionKind, Vanilla};
 use geode_core::schema::ColumnType;
 
 /// The footer's word for a cell that does not edit (spec §8.4).
@@ -31,6 +32,12 @@ pub enum CellEditor {
         current: String,
         free: bool,
     },
+    /// A segmented date field — every expiry, whatever it holds (user
+    /// ruling: "date field always"). `Some` is a date expiry's own date;
+    /// `None` is a tenor, which has no date here: the pricer never
+    /// resolves a tenor (the library's calendar does), so the host seeds
+    /// the field from its clock's today.
+    Date(Option<NaiveDate>),
 }
 
 /// The line's instrument, or `READ_ONLY` for a package (planning decision
@@ -64,7 +71,10 @@ pub fn editor_for(sheet: &Sheet, row: usize, kind: ColumnKind) -> Result<CellEdi
     let i = instrument(sheet, row)?;
     Ok(match kind {
         ColumnKind::Qty => CellEditor::Text(sheet.qty(row).to_string()),
-        ColumnKind::Expiry => CellEditor::Text(render_expiry(i.expiry())),
+        ColumnKind::Expiry => CellEditor::Date(match i.expiry() {
+            Expiry::Date(d) => Some(*d),
+            Expiry::Tenor(_) => None,
+        }),
         ColumnKind::Strike => CellEditor::Text(render_strike(i.strike())),
         ColumnKind::Barrier => CellEditor::Text(plain(barrier(i)?.0)),
         ColumnKind::SpotShift => {
@@ -225,6 +235,19 @@ pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result
     }
 }
 
+/// The one `Edit` a committed expiry date means, `Ok(None)` when the line
+/// already expires on exactly that date (nothing to apply: no undo entry,
+/// no reprice, no save), or the footer's refusal. A tenor line always
+/// changes — committing turns it into a date expiry.
+pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<Edit>, String> {
+    let i = instrument(sheet, row).map_err(String::from)?;
+    let expiry = Expiry::Date(date);
+    if *i.expiry() == expiry {
+        return Ok(None);
+    }
+    Ok(Some(set(row, with_vanilla(i, |v| v.expiry = expiry))))
+}
+
 /// `up`/`down` in an open numeric editor (spec §8.4): `steps` units of the
 /// TEXT's own precision (planning decision 2), a strike's trailing `%`
 /// kept, an empty shift nudged from `0`. A barrier level is absolute
@@ -291,7 +314,10 @@ mod tests {
         );
         assert_eq!(
             editor_for(&s, 0, ColumnKind::Expiry),
-            Ok(CellEditor::Text("Z26".into()))
+            Ok(CellEditor::Date(Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 18).unwrap()
+            ))),
+            "an expiry always edits in a date field, on its own date"
         );
         assert_eq!(
             editor_for(&s, 0, ColumnKind::Strike),
@@ -477,5 +503,68 @@ mod tests {
         assert!(nudge(ColumnKind::Barrier, "95%", 1).is_err());
         let b = barrier_line();
         assert!(commit(&b, 0, ColumnKind::Barrier, "95%").is_err());
+    }
+
+    fn tenor_line() -> Sheet {
+        let mut s = Sheet::new("t");
+        let i = with_vanilla(&spx(5000.0, OptionKind::Call), |v| {
+            v.expiry = Expiry::Tenor("3m".into())
+        });
+        push(&mut s, vec![line(i, 1)]);
+        s
+    }
+
+    fn ymd(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn a_tenor_expiry_opens_a_date_field_with_no_date_of_its_own() {
+        assert_eq!(
+            editor_for(&tenor_line(), 0, ColumnKind::Expiry),
+            Ok(CellEditor::Date(None)),
+            "the pricer never resolves a tenor: the host seeds the field"
+        );
+    }
+
+    #[test]
+    fn a_date_commit_sets_a_date_expiry_and_an_unchanged_one_is_no_edit() {
+        let s = one_line();
+        let Ok(Some(Edit::SetInstrument { row: 0, instrument })) =
+            commit_date(&s, 0, ymd(2027, 3, 19))
+        else {
+            panic!("a changed date is one SetInstrument")
+        };
+        assert_eq!(instrument.expiry(), &Expiry::Date(ymd(2027, 3, 19)));
+        assert_eq!(
+            instrument.strike(),
+            Strike::Absolute(5000.0),
+            "only the expiry"
+        );
+        assert_eq!(
+            commit_date(&s, 0, ymd(2026, 12, 18)),
+            Ok(None),
+            "the line's own date: nothing to apply"
+        );
+    }
+
+    #[test]
+    fn a_date_commit_on_a_tenor_line_always_makes_it_a_date() {
+        let s = tenor_line();
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) = commit_date(&s, 0, ymd(2026, 9, 26))
+        else {
+            panic!("a tenor committed to a date is an edit")
+        };
+        assert_eq!(instrument.expiry(), &Expiry::Date(ymd(2026, 9, 26)));
+    }
+
+    #[test]
+    fn a_date_commit_on_a_package_is_read_only() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        assert_eq!(
+            commit_date(&s, 0, ymd(2026, 9, 26)),
+            Err(READ_ONLY.to_string())
+        );
     }
 }

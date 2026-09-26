@@ -88,6 +88,10 @@ pub struct Paints {
     pub menu_muted: Hsla,
     pub menu_active_text: Hsla,
     pub menu_active_muted: Hsla,
+    /// The expiry date field's active segment text on its `primary` fill,
+    /// and a mid-typing segment's on its `accent` fill.
+    pub date_active_text: Hsla,
+    pub date_typing_text: Hsla,
 }
 
 impl Paints {
@@ -114,6 +118,14 @@ impl Paints {
             menu_muted: floor_toward_pole(theme.muted_foreground, popover),
             menu_active_text: floor_toward_pole(theme.accent_foreground, active),
             menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
+            date_active_text: floor_toward_pole(
+                theme.primary_foreground,
+                over(theme.primary, ground),
+            ),
+            date_typing_text: floor_toward_pole(
+                theme.accent_foreground,
+                over(theme.accent, ground),
+            ),
         }
     }
 
@@ -196,6 +208,18 @@ mod tests {
                     ("menu muted", p.menu_muted, popover),
                     ("menu active text", p.menu_active_text, active),
                     ("menu active muted", p.menu_active_muted, active),
+                    // The date field's segment fills (opaque theme tokens
+                    // composited over the row's own ground).
+                    (
+                        "date active",
+                        p.date_active_text,
+                        over(theme.primary, ground),
+                    ),
+                    (
+                        "date typing",
+                        p.date_typing_text,
+                        over(theme.accent, ground),
+                    ),
                 ]
                 .into_iter()
                 .chain(

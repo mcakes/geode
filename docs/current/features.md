@@ -395,7 +395,7 @@ Normal-mode keys:
 | Keys | Effect |
 |---|---|
 | `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
-| `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries |
+| `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
@@ -429,6 +429,24 @@ changes, moving the cursor with it. If either target disappears, it closes
 without committing and shows `the cell moved; edit refused`. Deferred blur
 uses the editor's opening window and checks current focus before blurring.
 
+The expiry cell always edits in a segmented date field (year, month, day), the
+same pure field the market-data grid uses: `left`/`right` move between
+segments, `up`/`down` (`shift`: ten) step the active one, digits type into it,
+`backspace` clears what was typed, `enter` commits and `escape` cancels. A
+click on a segment selects it. A date expiry opens on its own date. A tenor
+has no date in the pricer (the library's calendar resolves it), so the field
+opens on today by the app clock and the footer says so; committing replaces the
+tenor with that date, and `escape` leaves the tenor untouched. A half-typed
+segment refuses the commit and names itself (`finish the day or backspace`).
+A commit is one undoable edit; committing the line's own date applies nothing
+(no undo entry, no reprice). Text cells still record an edit when their value
+is committed unchanged.
+
+Open editors and the entry field paint no field chrome: no background, border,
+radius, or horizontal padding. Their text sits where the cell's text sat
+(numbers right-aligned, text left) at the row's height, and the cell's cursor
+border is the only frame. The date field's segments are flush.
+
 A grid click cancels an editor or entry field before acting on the painted
 row's identity. Removing an entry placeholder therefore cannot redirect the
 click to a neighboring row. Clicking the placeholder itself only closes it.
@@ -437,8 +455,9 @@ after a click outside the grid; a typeahead closes on an outside click.
 
 An open action menu recomputes availability and views when tile chrome
 rebuilds, retaining its highlighted action or view when still present. Both
-entry and cell editors put the tile in insert mode: bare and shifted letters
-and digits are typed into the field. Insert bindings leave shell chords such
+entry and cell editors, the date field included, put the tile in insert mode:
+bare and shifted letters and digits are typed into the field (the date field
+ignores what it cannot use). Insert bindings leave shell chords such
 as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,

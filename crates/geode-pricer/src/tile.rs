@@ -14,13 +14,14 @@ use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
 use crate::core::shorthand::parse;
+use crate::core::shorthand::render_expiry;
 use crate::core::storage::{from_rows, rows_from_snapshot, to_rows};
 use crate::core::template::Template;
 use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
-use crate::delegate::{ChevronClicked, EditorPaint, SheetDelegate};
+use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
 use crate::grid::{GridModel, GridRowKind};
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
@@ -42,6 +43,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
+use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
@@ -176,6 +178,19 @@ pub(crate) enum Editor {
         /// an untouched highlight is a guess — `HSI` would commit `HSCEI`.
         moved: bool,
     },
+    /// An expiry's segmented date field (every expiry, a tenor included):
+    /// a pure field the tile routes keys into (`date_field_key`), its own
+    /// focus handle — what `holds_focus` answers from and what makes the
+    /// shell read keys as typing — and the segments prepared on every
+    /// change, so paint formats nothing.
+    Date {
+        line: LineId,
+        col: usize,
+        kind: ColumnKind,
+        field: DateTimeField,
+        focus: FocusHandle,
+        paint: DateFieldPaint,
+    },
 }
 
 /// What an `enter` in the cell editor means before the cell parses it.
@@ -188,9 +203,21 @@ enum Choice {
 }
 
 impl Editor {
-    fn input(&self) -> &Entity<InputState> {
+    /// The text field, `None` for the date field.
+    fn input(&self) -> Option<&Entity<InputState>> {
         match self {
-            Editor::Text { input, .. } | Editor::Choice { input, .. } => input,
+            Editor::Text { input, .. } | Editor::Choice { input, .. } => Some(input),
+            Editor::Date { .. } => None,
+        }
+    }
+
+    /// The handle that holds window focus while this editor is open.
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        match self {
+            Editor::Text { input, .. } | Editor::Choice { input, .. } => {
+                input.read(cx).focus_handle(cx)
+            }
+            Editor::Date { focus, .. } => focus.clone(),
         }
     }
 
@@ -201,13 +228,18 @@ impl Editor {
             }
             | Editor::Choice {
                 line, col, kind, ..
+            }
+            | Editor::Date {
+                line, col, kind, ..
             } => (*line, *col, *kind),
         }
     }
 
     fn set_col(&mut self, to: usize) {
         match self {
-            Editor::Text { col, .. } | Editor::Choice { col, .. } => *col = to,
+            Editor::Text { col, .. } | Editor::Choice { col, .. } | Editor::Date { col, .. } => {
+                *col = to
+            }
         }
     }
 }
@@ -617,8 +649,9 @@ impl PricerTile {
         KeyContext::new("pricer").pair("mode", self.mode()).counts()
     }
 
-    /// `insert` while EITHER text field is open — the entry field or the
-    /// cell editor. The shell treats a key as typing only when the focused
+    /// `insert` while EITHER field is open — the entry field or the cell
+    /// editor (the expiry's date field included, though it is no text
+    /// input). The shell treats a key as typing only when the focused
     /// tile holds focus AND its context reads `mode == insert`
     /// (`ShellView::occupant_insert_stack`); any other word lets a bare or
     /// shifted letter reach the shell's own bindings (`shift+d` duplicated
@@ -637,7 +670,7 @@ impl PricerTile {
     }
 
     /// Does one of THIS tile's own fields (the entry field, the cell
-    /// editor or the typeahead's field) hold window focus? Answered from
+    /// editor, the typeahead's field or the date field) hold window focus? Answered from
     /// the focus handles, never from the mode.
     pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
         let entry = self
@@ -647,12 +680,21 @@ impl PricerTile {
         let editor = self
             .editor
             .as_ref()
-            .is_some_and(|e| e.input().read(cx).focus_handle(cx).is_focused(window));
+            .is_some_and(|e| e.focus_handle(cx).is_focused(window));
         let confirm = self
             .confirm
             .as_ref()
             .is_some_and(|c| c.focus.is_focused(window));
         entry || editor || confirm
+    }
+
+    /// The open date field, if the editor is one.
+    #[cfg(test)]
+    pub(crate) fn date_field(&self) -> Option<&DateTimeField> {
+        match &self.editor {
+            Some(Editor::Date { field, .. }) => Some(field),
+            _ => None,
+        }
     }
 
     pub fn title(&self) -> SharedString {
@@ -976,6 +1018,37 @@ impl PricerTile {
                 self.footer = Some(why.into());
                 return;
             }
+            Ok(CellEditor::Date(date)) => {
+                // A tenor has no date here (the library's calendar resolves
+                // it, never the pricer): the field opens on today by the
+                // app clock, and the footer says so — a commit replaces
+                // the tenor with that date.
+                let date = date.unwrap_or_else(|| {
+                    let tenor = self
+                        .sheet
+                        .instrument(row)
+                        .map(|i| render_expiry(i.expiry()))
+                        .unwrap_or_default();
+                    self.footer = Some(
+                        format!("{tenor} is a tenor: opened on today; enter sets a date").into(),
+                    );
+                    app_clock(cx).today(Utc::now())
+                });
+                let field = DateTimeField::open(
+                    date.and_hms_opt(0, 0, 0).expect("midnight exists"),
+                    Precision::Date,
+                    Segment::Day,
+                );
+                let paint = DateFieldPaint::of(&field, self.id.0);
+                Editor::Date {
+                    line,
+                    col,
+                    kind,
+                    field,
+                    focus: cx.focus_handle(),
+                    paint,
+                }
+            }
             Ok(CellEditor::Text(text)) => {
                 let input = cx.new(|cx| InputState::new(window, cx));
                 input.update(cx, |s, cx| s.set_value(text, window, cx));
@@ -1036,7 +1109,7 @@ impl PricerTile {
                 }
             }
         };
-        editor.input().read(cx).focus_handle(cx).focus(window, cx);
+        editor.focus_handle(cx).focus(window, cx);
         self.editor = Some(editor);
         self.editor_window = Some(window.window_handle());
         self.sync_editor(cx);
@@ -1048,15 +1121,22 @@ impl PricerTile {
     /// editor closes (blur first) BEFORE the edit applies, so the rebuild
     /// never paints a dead field.
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.editor, Some(Editor::Date { .. })) {
+            self.commit_date(window, cx);
+            return;
+        }
         // The editor's borrow ends inside this block, before any `self` call.
         let (value, (line, col, kind)) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
-            let text = editor.input().read(cx).value().to_string();
+            let Some(input) = editor.input() else {
+                return;
+            };
+            let text = input.read(cx).value().to_string();
             let target = editor.target();
             let value = match editor {
-                Editor::Text { .. } => Choice::Value(text),
+                Editor::Text { .. } | Editor::Date { .. } => Choice::Value(text),
                 Editor::Choice {
                     list, free, moved, ..
                 } => {
@@ -1101,16 +1181,7 @@ impl PricerTile {
             cx.notify();
             return;
         };
-        let same_column = self
-            .plan
-            .columns
-            .get(col)
-            .is_some_and(|c| c.def.kind == kind);
-        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {
-            self.close_editor(window, cx);
-            self.footer = Some(MOVED.into());
-            self.rebuild_chrome();
-            cx.notify();
+        let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
         match cell::commit(&self.sheet, row, kind, &value) {
@@ -1128,6 +1199,159 @@ impl PricerTile {
                 }
             }
         }
+    }
+
+    /// The sheet row an editor opened on (`line`, `col`, `kind`) still
+    /// commits to, or `None` after closing it with `MOVED`: its line went
+    /// away, or a view switch put another column kind at its index.
+    fn editor_row(
+        &mut self,
+        line: LineId,
+        col: usize,
+        kind: ColumnKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let same_column = self
+            .plan
+            .columns
+            .get(col)
+            .is_some_and(|c| c.def.kind == kind);
+        let row = self.sheet.index_of(line).filter(|_| same_column);
+        if row.is_none() {
+            self.close_editor(window, cx);
+            self.footer = Some(MOVED.into());
+            self.rebuild_chrome();
+            cx.notify();
+        }
+        row
+    }
+
+    /// `enter` in the date field: finish a half-typed segment or refuse
+    /// naming it (the field stays open), re-check the target, then one
+    /// `Edit` through `apply_edit` — or nothing at all when the line
+    /// already expires on that date (no undo entry, no reprice, no save).
+    /// The field closes (blur first) before the edit applies.
+    fn commit_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id.0;
+        let Some(Editor::Date {
+            line,
+            col,
+            kind,
+            field,
+            paint,
+            ..
+        }) = self.editor.as_mut()
+        else {
+            return;
+        };
+        let (line, col, kind) = (*line, *col, *kind);
+        let finished = field.complete_pending();
+        *paint = DateFieldPaint::of(field, id);
+        let date = field.date();
+        if let Err(segment) = finished {
+            self.footer = Some(format!("finish the {} or backspace", segment.name()).into());
+            self.sync_editor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return;
+        }
+        let Some(row) = self.editor_row(line, col, kind, window, cx) else {
+            return;
+        };
+        match cell::commit_date(&self.sheet, row, date) {
+            Err(why) => {
+                self.footer = Some(why.into());
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(None) => {
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(Some(edit)) => {
+                self.close_editor(window, cx);
+                if let Err(e) = self.apply_edit(edit, cx) {
+                    self.footer = Some(e.to_string().into());
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// A key on the focused date field, before it bubbles to the shell.
+    /// `geode_widgets::datefield::route` is the one key table: arrows move
+    /// and step (`shift`: ten), digits type, `backspace` clears the
+    /// segment, `enter` commits, `escape` cancels. A chord, or any key the
+    /// table does not name, answers `false` and bubbles on. A handled key
+    /// retires a standing footer (a refusal, the tenor note).
+    pub(crate) fn date_field_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        let chord = modifiers.control || modifiers.alt || modifiers.platform;
+        let Some(key) = route(event.keystroke.key.as_str(), modifiers.shift, chord) else {
+            return false;
+        };
+        let id = self.id.0;
+        let Some(Editor::Date { field, paint, .. }) = self.editor.as_mut() else {
+            return false;
+        };
+        match key {
+            FieldKey::Commit => {
+                self.footer = None;
+                self.commit_edit(window, cx);
+            }
+            FieldKey::Cancel => {
+                self.footer = None;
+                self.close_editor(window, cx);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            other => {
+                if field.apply(other) {
+                    *paint = DateFieldPaint::of(field, id);
+                    self.sync_editor(cx);
+                }
+                if self.footer.take().is_some() {
+                    self.rebuild_chrome();
+                }
+                cx.notify();
+            }
+        }
+        true
+    }
+
+    /// A mouse-down on a date segment: select it, and take the keyboard
+    /// back if focus had moved off the field while it stayed open.
+    pub(crate) fn date_segment_clicked(
+        &mut self,
+        segment: Segment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.id.0;
+        let Some(Editor::Date {
+            field,
+            paint,
+            focus,
+            ..
+        }) = self.editor.as_mut()
+        else {
+            return;
+        };
+        field.select(segment);
+        *paint = DateFieldPaint::of(field, id);
+        if !focus.is_focused(window) {
+            focus.focus(window, cx);
+        }
+        self.sync_editor(cx);
+        cx.notify();
     }
 
     /// Move the typeahead highlight on pointer hover, notifying only on change. Do not
@@ -1175,7 +1399,7 @@ impl PricerTile {
         let Some(editor) = self.editor.take() else {
             return;
         };
-        if editor.input().read(cx).focus_handle(cx).is_focused(window) {
+        if editor.focus_handle(cx).is_focused(window) {
             window.blur(cx);
         }
         self.sync_editor(cx);
@@ -1186,7 +1410,15 @@ impl PricerTile {
     /// precision (planning decision 2); in a typeahead they move the
     /// highlight.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.id.0;
         let refused = match &mut self.editor {
+            // The date field steps its active segment — the same step its
+            // own `up`/`down` take.
+            Some(Editor::Date { field, paint, .. }) => {
+                field.step(steps);
+                *paint = DateFieldPaint::of(field, id);
+                None
+            }
             Some(Editor::Text { kind, input, .. }) => {
                 let text = input.read(cx).value().to_string();
                 match cell::nudge(*kind, &text, steps) {
@@ -1218,14 +1450,24 @@ impl PricerTile {
         let paint = self.editor.as_ref().and_then(|e| {
             let (line, col, _) = e.target();
             let row = self.model.grid_row_of(line)?;
-            let choice = match e {
-                Editor::Choice { list, .. } => Some(Rc::new(choice_paint(list))),
-                Editor::Text { .. } => None,
+            let (field, choice) = match e {
+                Editor::Choice { list, input, .. } => (
+                    EditorField::Text(input.clone()),
+                    Some(Rc::new(choice_paint(list))),
+                ),
+                Editor::Text { input, .. } => (EditorField::Text(input.clone()), None),
+                Editor::Date { paint, focus, .. } => (
+                    EditorField::Date {
+                        paint: paint.clone(),
+                        focus: focus.clone(),
+                    },
+                    None,
+                ),
             };
             Some(EditorPaint {
                 row,
                 col,
-                input: e.input().clone(),
+                field,
                 choice,
             })
         });
@@ -2750,19 +2992,19 @@ impl PricerTile {
     }
 
     /// Remove an editor whose target disappeared during a rebuild without a Window.
-    /// Retain its Input handle until deferred access to the opening window can blur it.
+    /// Retain its focus handle until deferred access to the opening window can blur it.
     /// Check that it still owns focus so a newer field is not blurred.
     fn drop_orphaned_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };
         self.footer = Some(MOVED.into());
-        let input = editor.input().clone();
+        let focus = editor.focus_handle(cx);
         drop(editor);
         if let Some(handle) = self.editor_window {
             App::defer(cx, move |cx| {
                 let _ = handle.update(cx, |_, window, cx| {
-                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                    if focus.is_focused(window) {
                         window.blur(cx);
                     }
                 });
@@ -3045,8 +3287,10 @@ pub(crate) mod tests {
     use crate::content::{PricerFactory, PricerSettings};
     use crate::core::{Edit, Place, RowSpec, Sheet, Views, parse, to_rows};
     use crate::store::{MemorySheetStore, SheetStore as _};
+    use chrono::Datelike as _;
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::LogLevels;
+    use geode_core::pricing::Expiry;
     use geode_core::pricing::{PriceOutcome, PriceParams, PriceResult};
     use geode_core::query::QueryKey;
     use geode_core::scopes::SavedScopes;
@@ -3056,6 +3300,7 @@ pub(crate) mod tests {
     use geode_shell::frame::Frame;
     use geode_shell::module::{Delivery, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
+    use geode_widgets::datefield::Segment;
     use gpui::{Entity, VisualTestContext};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -4359,7 +4604,7 @@ pub(crate) mod tests {
             Some(Editor::Text { input, .. } | Editor::Choice { input, .. }) => {
                 Some(input.read(cx).value().to_string())
             }
-            None => None,
+            Some(Editor::Date { .. }) | None => None,
         })
     }
 
@@ -4368,7 +4613,7 @@ pub(crate) mod tests {
         vcx.update(|window, cx| {
             let input = match &h.tile.read(cx).editor {
                 Some(Editor::Text { input, .. } | Editor::Choice { input, .. }) => input.clone(),
-                None => panic!("an editor is open"),
+                Some(Editor::Date { .. }) | None => panic!("a text editor is open"),
             };
             // `set_value` emits no `Change` (CLAUDE.md's trap): every commit
             // path must re-read the live text, and this proves it does.
@@ -4658,6 +4903,274 @@ pub(crate) mod tests {
             !focused(&mut vcx),
             "the pick closes the field: blurred, then dropped"
         );
+    }
+
+    /// The in-cell editor paints no field chrome: its text sits flush
+    /// against the cell's own content edge (inside the cursor's 1px
+    /// border), right-aligned in a numeric cell and left-aligned in a
+    /// text one, and inside the row's height. A bordered, padded `Input`
+    /// insets its text by its own padding and border.
+    #[gpui::test]
+    fn the_cell_editor_paints_no_chrome_and_its_text_sits_where_the_cells_did(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let text_bounds = |h: &Harness, vcx: &mut VisualTestContext| {
+            h.draw(vcx);
+            h.tile.read_with(vcx, |t, cx| {
+                let input = t
+                    .editor
+                    .as_ref()
+                    .and_then(|e| e.input())
+                    .expect("a text editor is open")
+                    .clone();
+                input.read(cx).text_bounds().expect("the field was painted")
+            })
+        };
+        // Strike: right-aligned. Table column = plan column + 1.
+        h.dispatch(&mut vcx, "right", Some(3));
+        h.dispatch(&mut vcx, "edit", None);
+        let cell = vcx.debug_bounds("pricer-cell-0-4").expect("strike cell");
+        let text = text_bounds(&h, &mut vcx);
+        let border = gpui::px(1.0);
+        assert!(
+            (text.right() - (cell.right() - border)).abs() < gpui::px(0.5),
+            "right-aligned text ends at the cell's edge: {text:?} in {cell:?}"
+        );
+        assert!(text.top() >= cell.top() && text.bottom() <= cell.bottom());
+        h.dispatch(&mut vcx, "cancel", None);
+        // Underlying: a left-aligned typeahead field.
+        h.dispatch(&mut vcx, "first_col", None);
+        h.dispatch(&mut vcx, "right", None);
+        h.dispatch(&mut vcx, "edit", None);
+        let cell = vcx
+            .debug_bounds("pricer-cell-0-2")
+            .expect("underlying cell");
+        let text = text_bounds(&h, &mut vcx);
+        assert!(
+            (text.left() - (cell.left() + border)).abs() < gpui::px(0.5),
+            "left-aligned text starts at the cell's edge: {text:?} in {cell:?}"
+        );
+    }
+
+    /// The `o` entry line is an in-grid field too: no chrome, its text
+    /// flush with where the row's shorthand will paint.
+    #[gpui::test]
+    fn the_entry_field_paints_no_chrome(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        h.draw(&mut vcx);
+        let slot = vcx
+            .debug_bounds("pricer-entry-field")
+            .expect("the entry field's slot is painted");
+        let text = h.tile.read_with(&vcx, |t, cx| {
+            t.entry
+                .as_ref()
+                .unwrap()
+                .input
+                .read(cx)
+                .text_bounds()
+                .expect("painted")
+        });
+        assert!(
+            (text.left() - slot.left()).abs() < gpui::px(0.5),
+            "{text:?} in {slot:?}"
+        );
+    }
+
+    // ---- the expiry date field ----
+
+    /// A dated line (`Z26` = 2026-12-18) and a tenor line. Expiry is plan
+    /// column 2 (table column 3).
+    const DATED: [&str; 2] = ["SPX Z26 5000 C", "NDX 3m 100% C"];
+
+    fn ymd(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn expiry_of(h: &Harness, vcx: &VisualTestContext, row: usize) -> Expiry {
+        h.tile.read_with(vcx, |t, _| {
+            t.sheet.instrument(row).unwrap().expiry().clone()
+        })
+    }
+
+    /// The open date field's painted segments and active segment.
+    fn date_field(h: &Harness, vcx: &VisualTestContext) -> Option<(Vec<String>, Segment)> {
+        h.tile.read_with(vcx, |t, _| {
+            t.date_field().map(|f| {
+                (
+                    f.segments().iter().map(|s| s.text.to_string()).collect(),
+                    f.segment(),
+                )
+            })
+        })
+    }
+
+    /// Real keystrokes into the focused field.
+    fn keys(h: &Harness, vcx: &mut VisualTestContext, keys: &str) {
+        vcx.simulate_keystrokes(keys);
+        vcx.run_until_parked();
+        h.draw(vcx);
+    }
+
+    fn open_expiry(h: &Harness, vcx: &mut VisualTestContext, row: usize) {
+        if row > 0 {
+            h.dispatch(vcx, "down", Some(row as u32));
+        }
+        h.dispatch(vcx, "right", Some(2));
+        h.dispatch(vcx, "edit", None);
+        h.draw(vcx);
+    }
+
+    fn can_undo(h: &Harness, vcx: &VisualTestContext) -> bool {
+        h.tile.read_with(vcx, |t, _| t.undo.can_undo())
+    }
+
+    #[gpui::test]
+    fn an_expiry_edits_in_a_date_field_and_enter_commits_one_undoable_edit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 0);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(
+            vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the shell's insert-focus predicate sees the date field"
+        );
+        assert_eq!(
+            date_field(&h, &vcx),
+            Some((vec!["2026".into(), "12".into(), "18".into()], Segment::Day)),
+            "seeded from the line's own date, on the day"
+        );
+        keys(&h, &mut vcx, "up");
+        keys(&h, &mut vcx, "left 1 1");
+        assert_eq!(
+            date_field(&h, &vcx),
+            Some((vec!["2026".into(), "11".into(), "19".into()], Segment::Day)),
+            "up stepped the day, two digits typed the month"
+        );
+        keys(&h, &mut vcx, "enter");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 11, 19)));
+        assert!(can_undo(&h, &vcx), "a date commit is one undo entry");
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+    }
+
+    /// A tenor has no date the pricer could seed (it never resolves
+    /// one): the field opens on today by the app clock, says so, and a
+    /// commit turns the line into a date expiry.
+    #[gpui::test]
+    fn a_tenor_opens_on_the_app_clocks_today_and_enter_makes_it_a_date(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        let clock = geode_core::clock::Clock::in_zone_named("Pacific/Kiritimati");
+        vcx.update(|_, cx| cx.set_global(geode_shell::clock::AppClock(clock)));
+        open_expiry(&h, &mut vcx, 1);
+        let today = clock.today(chrono::Utc::now());
+        assert_eq!(
+            date_field(&h, &vcx).map(|(s, _)| s),
+            Some(vec![
+                format!("{:04}", today.year()),
+                format!("{:02}", today.month()),
+                format!("{:02}", today.day()),
+            ])
+        );
+        let footer = h.footer(&vcx).unwrap_or_default();
+        assert!(
+            footer.contains("3m") && footer.contains("today"),
+            "{footer}"
+        );
+        keys(&h, &mut vcx, "enter");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(expiry_of(&h, &vcx, 1), Expiry::Date(today));
+        assert!(can_undo(&h, &vcx));
+        h.dispatch(&mut vcx, "undo", None);
+        assert_eq!(expiry_of(&h, &vcx, 1), Expiry::Tenor("3m".into()));
+    }
+
+    #[gpui::test]
+    fn escape_leaves_a_tenor_untouched_and_blurs_the_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 1);
+        assert!(focused(&mut vcx), "fixture: the field owns focus");
+        keys(&h, &mut vcx, "up");
+        keys(&h, &mut vcx, "escape");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert!(!focused(&mut vcx), "blurred, then dropped");
+        assert_eq!(expiry_of(&h, &vcx, 1), Expiry::Tenor("3m".into()));
+        assert!(!can_undo(&h, &vcx), "nothing was applied");
+    }
+
+    /// A commit that lands on the line's own date applies nothing: no
+    /// undo entry, no reprice.
+    #[gpui::test]
+    fn an_unchanged_date_commit_is_no_edit(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        let _ = h.prices();
+        open_expiry(&h, &mut vcx, 0);
+        keys(&h, &mut vcx, "up");
+        keys(&h, &mut vcx, "down");
+        keys(&h, &mut vcx, "enter");
+        assert_eq!(h.mode(&mut vcx), "normal");
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+        assert!(!can_undo(&h, &vcx), "an unchanged commit records no undo");
+        assert!(h.prices().is_empty(), "and asks for no price");
+    }
+
+    #[gpui::test]
+    fn a_half_typed_segment_refuses_the_commit_and_names_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 0);
+        keys(&h, &mut vcx, "0");
+        keys(&h, &mut vcx, "enter");
+        assert_eq!(h.mode(&mut vcx), "insert", "the field stays open");
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("finish the day or backspace")
+        );
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+    }
+
+    /// The field paints flush in its cell (no chrome), a click on a
+    /// segment selects it and leaves the field open, and a click on
+    /// another cell cancels it like the text editor.
+    #[gpui::test]
+    fn a_segment_click_selects_it_and_a_click_elsewhere_cancels(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &DATED);
+        open_expiry(&h, &mut vcx, 0);
+        let cell = vcx.debug_bounds("pricer-cell-0-3").expect("expiry cell");
+        let year = vcx
+            .debug_bounds("pricer-date-seg-5-0")
+            .expect("the year segment is painted");
+        assert!(
+            (year.left() - (cell.left() + gpui::px(1.0))).abs() < gpui::px(0.5),
+            "flush against the cell's edge: {year:?} in {cell:?}"
+        );
+        assert!(
+            year.top() >= cell.top() && year.bottom() <= cell.bottom(),
+            "{year:?} in {cell:?}"
+        );
+        click_at(&mut vcx, year.center(), 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "insert", "the click did not cancel");
+        assert_eq!(date_field(&h, &vcx).map(|(_, s)| s), Some(Segment::Year));
+        keys(&h, &mut vcx, "up");
+        assert_eq!(
+            date_field(&h, &vcx).map(|(s, _)| s[0].clone()),
+            Some("2027".into())
+        );
+        let at = centre_of(&mut vcx, "pricer-cell-1-4");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "normal", "a click elsewhere cancels");
+        assert!(
+            !vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+            "the field no longer holds focus"
+        );
+        assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
     }
 
     // ---- undo, put, move, group and the menu ----
