@@ -729,6 +729,14 @@ impl PricerTile {
         self.loading
     }
 
+    /// The entry bar's text; `None` with the bar closed.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn entry_text(&self, cx: &App) -> Option<String> {
+        self.entry
+            .as_ref()
+            .map(|e| e.input.read(cx).value().to_string())
+    }
+
     pub fn serialize(&self) -> toml::Table {
         Record {
             sheet: Some(self.sheet.name.clone()),
@@ -892,10 +900,14 @@ impl PricerTile {
     /// `o`: the entry bar under the header, the field focused (entry-bar
     /// spec §4.1). Lines land below the cursor row; a leg place opens
     /// its package so what lands is visible. With the bar already open
-    /// (a palette dispatch) it does nothing: the typed text, focus and
-    /// place stay.
+    /// (a palette dispatch) the typed text and place stay and the field
+    /// takes focus back.
     fn open_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.entry.is_some() {
+        if let Some(entry) = &self.entry {
+            // The palette's commit focuses the shell root before it
+            // dispatches: without this the bar reads `insert` while
+            // holding no focus, and shifted letters reach shell bindings.
+            entry.input.read(cx).focus_handle(cx).focus(window, cx);
             return;
         }
         if self.loading {
@@ -3170,6 +3182,11 @@ impl PricerTile {
     /// the close.
     fn chevron_clicked(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         let line = self.line_at(row);
+        // The chevron stops propagation, so no `SelectCell` hands off for
+        // it: closing the bar moves the table up, and the double-click's
+        // second press must still resolve the package, not the row that
+        // slid up. A press takes any older anchor, as `SelectCell` does.
+        self.click_anchor = self.entry.is_some().then_some(line);
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         if let Some(id) = line {
@@ -4595,8 +4612,10 @@ pub(crate) mod tests {
         assert_eq!(h.footer(&vcx), None, "not in the footer");
         assert!(vcx.debug_bounds("pricer-entry-error").is_some());
         assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX Z26 5000 CX"));
-        typed(&h, &mut vcx, "\u{8}");
+        vcx.simulate_keystrokes("backspace");
+        h.draw(&mut vcx);
         assert_eq!(h.entry_error(&vcx), None, "an edit answers the error");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX Z26 5000 C"));
     }
 
     #[gpui::test]
@@ -4625,6 +4644,22 @@ pub(crate) mod tests {
         assert_eq!(middle, "SPX Z26 5000 C", "between the two legs");
     }
 
+    /// `o` on a closed package opens it: the line lands as its first leg,
+    /// visible, and the cursor names a row the model paints.
+    #[gpui::test]
+    fn o_on_a_closed_package_opens_it_and_lands_on_its_first_leg(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "down", None); // P, closed
+        assert_eq!(h.tree(&vcx).len(), 3, "fixture: P is closed");
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.tree(&vcx).len(), 6, "P is open: its three legs show");
+        let first = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(2));
+        assert_eq!(first, "SPX Z26 5000 C", "P's first leg");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(2), "on the new leg");
+    }
+
     #[gpui::test]
     fn a_package_typed_at_a_leg_place_is_refused_under_the_field(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -4646,7 +4681,7 @@ pub(crate) mod tests {
     }
 
     /// Spec §4.1: `o` (here a palette dispatch) while the bar is open
-    /// does nothing.
+    /// keeps its text and place, and its field keeps focus.
     #[gpui::test]
     fn a_palette_add_while_the_bar_is_open_keeps_it_and_its_text(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
@@ -6444,6 +6479,31 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "insert");
         let expected = ["5000", "4000", "3000"][row];
         assert_eq!(editor_text(&h, &vcx).as_deref(), Some(expected));
+    }
+
+    /// A chevron double-click hands off like a cell's: the first press
+    /// closes the bar and toggles the package, the table moves up under
+    /// the pointer, and the second press keeps the cursor on the package,
+    /// not on the row that slid up.
+    #[gpui::test]
+    fn a_chevron_double_click_while_the_bar_is_open_keeps_the_package(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-chevron-1"); // P
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("pricer-chevron-1")
+                .is_some_and(|b| !b.contains(&at)),
+            "the table moved up under the pointer"
+        );
+        click_at(&mut vcx, at, 2);
+        h.draw(&mut vcx);
+        assert_eq!(h.tree(&vcx).len(), 5, "P toggled open, once");
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "on P");
+        assert!(h.tile.read_with(&vcx, |t, _| t.entry.is_none()));
     }
 
     /// A tree-column double-click opens nothing, but the cursor stays on

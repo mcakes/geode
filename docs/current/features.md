@@ -416,7 +416,8 @@ hover and selected-row grounds.
 The entry bar sits between the header and the column headers. A muted label
 names where `enter` lands (`after <row>`, `into <TEMPLATE>`, `at end`). A
 parse error or a refused insert keeps the text and shows the reason under
-the field in danger text; any edit clears it.
+the field in danger text; any edit clears it. "Add lines…" from the palette
+while the bar is open keeps its text and place and focuses its field again.
 
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
@@ -496,7 +497,9 @@ border is the only frame. The date field's segments are flush.
 A grid click closes an open editor or the entry bar, then acts on the row it
 hit. Closing the bar moves the table up on screen, so a double-click whose
 first press closed it edits the line that press hit, not the row that slid
-under the pointer; the hand-off lasts for the next press only.
+under the pointer; the hand-off lasts for the next press only. A chevron
+press that closes the bar hands off the same way, so the cursor stays on the
+package it toggled.
 Commands and search close open fields and menus. A text editor remains open
 after a click outside the grid; a typeahead closes on an outside click.
 

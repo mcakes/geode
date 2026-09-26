@@ -60,8 +60,10 @@ do not change.
   does its row in the key table.
 - Opening is refused while a sheet load is pending
   (`the sheet is still loading`), as it is today.
-- `o` while the bar is already open does nothing (the field owns typed
-  keys anyway).
+- `o` while the bar is already open (a palette dispatch; the field owns
+  typed keys otherwise) keeps the text and place and gives the field
+  focus back: the palette's commit focuses the shell root before it
+  dispatches.
 - The placeholder hint stays `-5 SPX DEC26 95%/105% CS`.
 
 ### 4.2 Where lines land
@@ -79,8 +81,8 @@ The bar keeps today's `Entry { place, .. }` and the pure half in
 - After each successful `enter`, the place advances by `next_place`,
   exactly as now, so a run of `enter`s builds a block in the order it was
   typed. The cursor moves to each new line.
-- `place_for`'s `below: bool` parameter goes, because every caller passes
-  `true`.
+- `place_for` keeps `below` because `p`/`shift+p`
+  (`core::clip::put_place`) use it; the bar always passes `true`.
 
 Since no placeholder row shows the landing point any more, the bar shows
 it as a muted label in front of the field (`core::entry::target_label`,
@@ -113,7 +115,8 @@ never per frame.
   normally. Closing the bar moves the table up on screen, so a
   double-click's second press uses the line its first press hit rather
   than the row that slid under the pointer; that hand-off lasts for the
-  next press only.
+  next press only. A chevron press that closes the bar hands off the
+  same way.
 - **Any other verb or `:` command** closes the bar first, as today's
   `close_entry` does.
 - The bar's field counts as insert focus to the shell, as today's entry
@@ -126,8 +129,10 @@ never per frame.
 - The delegate's `entry` mirror, the entry arm in `render_td`, the entry
   row fill in `render_tr`, and the entry handling in `number_rows` and
   the gutter count.
-- The tile paths that re-read a clicked row after the entry closes (the
-  chevron, cell and placeholder cases).
+- The placeholder-click path, and the row-equality hand-off that re-read
+  a clicked row after the entry closed.
+- What remains is a one-press double-click hand-off keyed on the bar's
+  close (`click_anchor`), for cells and chevrons.
 
 ## 5. Tests
 

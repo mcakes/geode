@@ -77,6 +77,8 @@ fn describe(sheet: &Sheet, row: usize) -> String {
 /// can never disagree.
 pub fn target_label(sheet: &Sheet, place: Place) -> String {
     match place {
+        // The bar always passes `below = true`, so `Root { at: 0 }`
+        // reaches here only on an empty sheet, where "at end" is true.
         Place::Root { at } if at == 0 || at >= sheet.len() => "at end".to_string(),
         Place::Root { at } => {
             let before = at - 1;
@@ -161,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn the_next_placeholder_follows_what_was_just_inserted() {
+    fn the_next_place_follows_what_was_just_inserted() {
         let one = parse("SPX Z26 5000 C").unwrap();
         let cs = parse("SPX Z26 4800/5200 CS").unwrap();
         assert_eq!(

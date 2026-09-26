@@ -19339,6 +19339,37 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
   '                let Some(c) = SheetDelegate::plan_col(*col) else {' \
   geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
 
+# A chevron stops propagation, so no SelectCell hands off for it: without
+# its own anchor the double-click's second press lands the cursor on the
+# row that slid up under the pointer.
+run_mutation "pricer entry bar: a chevron press that closes the bar hands off nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.click_anchor = self.entry.is_some().then_some(line);' \
+  '' \
+  geode-pricer a_chevron_double_click_while_the_bar_is_open_keeps_the_package
+
+# `o` on a closed package lands the line as its first leg: unopened, the
+# leg is hidden and the cursor names a row the model does not paint.
+run_mutation "pricer entry bar: o on a closed package leaves it closed" \
+  crates/geode-pricer/src/tile.rs \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);
+        if let Place::Leg { package, .. } = place {
+            self.expansion.set(self.sheet.id(package), true);
+        }' \
+  '        let place = place_for(&self.sheet, self.cursor_sheet_row(), true);' \
+  geode-pricer o_on_a_closed_package_opens_it_and_lands_on_its_first_leg
+
+# The palette's commit focuses the shell root before it dispatches
+# "Add lines…": an open bar that only keeps its text reads insert without
+# holding focus, and shift+d duplicates the tile.
+run_mutation "pricer entry bar: a palette add on an open bar leaves it unfocused" \
+  crates/geode-pricer/src/tile.rs \
+  '            // holding no focus, and shifted letters reach shell bindings.
+            entry.input.read(cx).focus_handle(cx).focus(window, cx);' \
+  '            // holding no focus, and shifted letters reach shell bindings.' \
+  geode-app \
+  a_palette_add_on_an_open_bar_keeps_typing_in_its_field
+
 run_mutation "pricer cell: an empty shift commits zero" \
   crates/geode-pricer/src/core/cell.rs \
   '    if t.is_empty() {
