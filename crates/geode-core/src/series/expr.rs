@@ -1,10 +1,9 @@
 //! The expression language (timeseries spec §7, ruling 8): arithmetic
-//! over slots, nothing else. A hand-written recursive-descent parser,
-//! pure; the resolved tree names slots only, so an identity never
-//! reaches the compiler as text.
-
-use super::SeriesSpec;
-use super::SlotKind;
+//! over named series, nothing else. A hand-written recursive-descent
+//! parser, pure; the resolved tree names slots only, so an identity
+//! never reaches the compiler as text. A reference is a series name —
+//! there is no slot handle — so an expression can name only a source
+//! series, never another expression.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -24,29 +23,20 @@ pub enum Ast<R> {
     Bin(Op, Box<Ast<R>>, Box<Ast<R>>),
 }
 
-/// A reference as typed: a slot handle `s3`, or an identity with an
-/// optional `@source`.
+/// A reference as typed: an identity with an optional `@source`. Its
+/// text is contiguous, `identity` then `@source`, so `display().len()`
+/// is its byte length in the source text.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefName {
-    Handle(u8),
-    Identity {
-        identity: String,
-        source: Option<String>,
-    },
+pub struct RefName {
+    pub identity: String,
+    pub source: Option<String>,
 }
 
 impl RefName {
     pub fn display(&self) -> String {
-        match self {
-            RefName::Handle(n) => format!("s{n}"),
-            RefName::Identity {
-                identity,
-                source: None,
-            } => identity.clone(),
-            RefName::Identity {
-                identity,
-                source: Some(s),
-            } => format!("{identity}@{s}"),
+        match &self.source {
+            None => self.identity.clone(),
+            Some(s) => format!("{}@{s}", self.identity),
         }
     }
 }
@@ -178,35 +168,26 @@ fn tokenize(text: &str) -> Result<Vec<(usize, Token)>, ParseError> {
                         message: ARITHMETIC_ONLY.into(),
                     });
                 }
-                let handle = word
-                    .strip_prefix('s')
-                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
-                    .and_then(|rest| rest.parse::<u8>().ok());
-                match handle {
-                    Some(n) => Token::Ref(RefName::Handle(n)),
-                    None => {
-                        let source = if i < bytes.len() && bytes[i] == b'@' {
-                            i += 1;
-                            let s = i;
-                            while i < bytes.len() && is_source_char(bytes[i] as char) {
-                                i += 1;
-                            }
-                            if i == s {
-                                return Err(ParseError {
-                                    position: i,
-                                    message: "a source name must follow '@'".into(),
-                                });
-                            }
-                            Some(text[s..i].to_string())
-                        } else {
-                            None
-                        };
-                        Token::Ref(RefName::Identity {
-                            identity: word.to_string(),
-                            source,
-                        })
+                let source = if i < bytes.len() && bytes[i] == b'@' {
+                    i += 1;
+                    let s = i;
+                    while i < bytes.len() && is_source_char(bytes[i] as char) {
+                        i += 1;
                     }
-                }
+                    if i == s {
+                        return Err(ParseError {
+                            position: i,
+                            message: "a source name must follow '@'".into(),
+                        });
+                    }
+                    Some(text[s..i].to_string())
+                } else {
+                    None
+                };
+                Token::Ref(RefName {
+                    identity: word.to_string(),
+                    source,
+                })
             }
             _ => {
                 return Err(ParseError {
@@ -380,65 +361,35 @@ impl Expr {
     }
 }
 
-/// A topological order over the expression slots of `specs`, operands
-/// first, so the compiler can lower each expression over CTEs that
-/// already exist. `Err(slot)` is a slot on a cycle (a self-reference
-/// included). Source slots are leaves and are not listed.
-/// A reference to a slot absent from `specs` is treated as a leaf
-/// here; the compiler's validation, not this function, refuses it.
-pub fn expression_order(specs: &[SeriesSpec]) -> Result<Vec<u8>, u8> {
-    #[derive(Clone, Copy, PartialEq)]
-    enum Mark {
-        Unseen,
-        Visiting,
-        Done,
-    }
-    let exprs: Vec<(u8, &Expr)> = specs
-        .iter()
-        .filter_map(|s| match &s.kind {
-            SlotKind::Expr(e) => Some((s.slot, e)),
-            SlotKind::Source { .. } => None,
+/// Every reference in `text`, in text order, with its byte span. What a
+/// caller that rewrites names inside an expression walks, so it follows
+/// the tokenizer's word boundaries (`s1.x` is one name, `2s1` is a
+/// number then a name) rather than a guess at them.
+pub fn references(text: &str) -> Result<Vec<(std::ops::Range<usize>, RefName)>, ParseError> {
+    Ok(tokenize(text)?
+        .into_iter()
+        .filter_map(|(start, tok)| match tok {
+            Token::Ref(r) => Some((start..start + r.display().len(), r)),
+            _ => None,
         })
-        .collect();
-    let mut marks = vec![Mark::Unseen; exprs.len()];
-    let mut order = Vec::with_capacity(exprs.len());
-    fn visit(
-        i: usize,
-        exprs: &[(u8, &Expr)],
-        marks: &mut [Mark],
-        order: &mut Vec<u8>,
-    ) -> Result<(), u8> {
-        match marks[i] {
-            Mark::Done => return Ok(()),
-            Mark::Visiting => return Err(exprs[i].0),
-            Mark::Unseen => {}
-        }
-        marks[i] = Mark::Visiting;
-        for dep in exprs[i].1.slots() {
-            if let Some(j) = exprs.iter().position(|(s, _)| *s == dep) {
-                visit(j, exprs, marks, order)?;
-            }
-        }
-        marks[i] = Mark::Done;
-        order.push(exprs[i].0);
-        Ok(())
-    }
-    for i in 0..exprs.len() {
-        visit(i, &exprs, &mut marks, &mut order)?;
-    }
-    Ok(order)
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::series::{BucketRule, SeriesSpec, SlotKind};
 
     fn id(s: &str) -> RefName {
-        RefName::Identity {
+        RefName {
             identity: s.into(),
             source: None,
         }
+    }
+
+    /// Resolves `sN`-shaped identities to slot N: a test's shorthand
+    /// for a tile that happens to hold identities with those names.
+    fn by_s_number(r: &RefName) -> Option<u8> {
+        r.identity.strip_prefix('s')?.parse().ok()
     }
 
     #[test]
@@ -464,13 +415,13 @@ mod tests {
         );
         assert_eq!(ast, expect);
         // left-associative: a - b - c == (a - b) - c
-        let ast = parse("s1 - s2 - s3").unwrap();
+        let ast = parse("A - B - C").unwrap();
         assert!(matches!(ast, Ast::Bin(Op::Sub, ref l, _) if matches!(**l, Ast::Bin(Op::Sub, ..))));
         assert_eq!(
-            parse("-s1 * 2").unwrap(),
+            parse("-A * 2").unwrap(),
             Ast::Bin(
                 Op::Mul,
-                Box::new(Ast::Neg(Box::new(Ast::Ref(RefName::Handle(1))))),
+                Box::new(Ast::Neg(Box::new(Ast::Ref(id("A"))))),
                 Box::new(Ast::Num(2.0))
             ),
             "unary minus binds tighter than *"
@@ -479,15 +430,12 @@ mod tests {
 
     #[test]
     fn unary_minus_parentheses_and_every_reference_form() {
+        assert_eq!(parse("-A").unwrap(), Ast::Neg(Box::new(Ast::Ref(id("A")))));
         assert_eq!(
-            parse("-s1").unwrap(),
-            Ast::Neg(Box::new(Ast::Ref(RefName::Handle(1))))
-        );
-        assert_eq!(
-            parse("-(s1 + 2.5)").unwrap(),
+            parse("-(A + 2.5)").unwrap(),
             Ast::Neg(Box::new(Ast::Bin(
                 Op::Add,
-                Box::new(Ast::Ref(RefName::Handle(1))),
+                Box::new(Ast::Ref(id("A"))),
                 Box::new(Ast::Num(2.5))
             )))
         );
@@ -496,48 +444,60 @@ mod tests {
             parse("SPX.close@kdb_hist / VIX").unwrap(),
             Ast::Bin(
                 Op::Div,
-                Box::new(Ast::Ref(RefName::Identity {
+                Box::new(Ast::Ref(RefName {
                     identity: "SPX.close".into(),
                     source: Some("kdb_hist".into())
                 })),
                 Box::new(Ast::Ref(id("VIX")))
             )
         );
-        assert_eq!(parse("  s12  ").unwrap(), Ast::Ref(RefName::Handle(12)));
+        assert_eq!(parse("spx_1y").unwrap(), Ast::Ref(id("spx_1y")));
+    }
+
+    /// There is no slot handle: `s12` is a name like any other, and may
+    /// carry a source.
+    #[test]
+    fn a_handle_shaped_word_is_an_identity() {
+        assert_eq!(parse("  s12  ").unwrap(), Ast::Ref(id("s12")));
         assert_eq!(
-            parse("spx_1y").unwrap(),
-            Ast::Ref(id("spx_1y")),
-            "an identity may start with s and not be a handle"
-        );
-        assert_eq!(
-            parse("s1x").unwrap(),
-            Ast::Ref(id("s1x")),
-            "a handle is s followed by digits and nothing else"
-        );
-        assert_eq!(
-            parse("s999").unwrap(),
-            Ast::Ref(id("s999")),
-            "a handle past u8 is an identity, not an error"
+            parse("s1@demo_rest").unwrap(),
+            Ast::Ref(RefName {
+                identity: "s1".into(),
+                source: Some("demo_rest".into())
+            })
         );
     }
 
     #[test]
+    fn references_answer_each_name_with_its_byte_span_in_order() {
+        let text = "(SPX.close@kdb - s1) / VIX";
+        let refs = references(text).unwrap();
+        let spans: Vec<(&str, String)> = refs
+            .iter()
+            .map(|(span, r)| (&text[span.clone()], r.display()))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("SPX.close@kdb", "SPX.close@kdb".to_string()),
+                ("s1", "s1".to_string()),
+                ("VIX", "VIX".to_string()),
+            ]
+        );
+        assert_eq!(references("2 * 3").unwrap(), vec![]);
+        assert!(references("A ^ 2").is_err());
+    }
+
+    #[test]
     fn foreign_tokens_are_refused_with_the_arithmetic_only_message() {
-        for text in [
-            "s1 ^ 2",
-            "s1 % 2",
-            "log(s1)",
-            "s1, s2",
-            "s1 & s2",
-            "max(s1, s2)",
-        ] {
+        for text in ["A ^ 2", "A % 2", "log(A)", "A, B", "A & B", "max(A, B)"] {
             let err = parse(text).unwrap_err();
             assert_eq!(err.message, ARITHMETIC_ONLY, "{text}");
         }
-        for text in ["", "s1 +", "(s1", "s1 s2", "1.", "+ s1", "* 2"] {
+        for text in ["", "A +", "(A", "A B", "1.", "+ A", "* 2"] {
             assert!(parse(text).is_err(), "{text:?} must not parse");
         }
-        assert_eq!(parse("s1 ^ 2").unwrap_err().position, 3);
+        assert_eq!(parse("A ^ 2").unwrap_err().position, 2);
         assert_eq!(parse("a@b@c").unwrap_err().message, ARITHMETIC_ONLY);
         assert_eq!(parse("a@b@c").unwrap_err().position, 3);
     }
@@ -547,13 +507,13 @@ mod tests {
         // 100 levels: past `MAX_DEPTH` and inside `MAX_TOKENS`, so the
         // nesting message is the one a trader sees (the token bound is
         // checked first, and a wall of 200 parens would trip that one).
-        let text = "(".repeat(100) + "s1" + &")".repeat(100);
+        let text = "(".repeat(100) + "A" + &")".repeat(100);
         let err = parse(&text).unwrap_err();
         assert_eq!(
             err.message,
             format!("expression nests too deeply (more than {MAX_DEPTH} levels)")
         );
-        let text = "(".repeat(60) + "s1" + &")".repeat(60);
+        let text = "(".repeat(60) + "A" + &")".repeat(60);
         assert!(parse(&text).is_ok(), "60 levels must still parse");
     }
 
@@ -572,86 +532,36 @@ mod tests {
         let text = "s1".to_string() + &" + 1".repeat(100);
         let ast = parse(&text).expect("100 terms are inside the bound");
         let expr = ast
-            .resolve(&mut |r: &RefName| match r {
-                RefName::Handle(n) => Some(*n),
-                _ => None,
-            })
-            .expect("every reference is a handle");
+            .resolve(&mut by_s_number)
+            .expect("every reference resolves");
         assert_eq!(expr.slots(), vec![1]);
     }
 
     #[test]
     fn resolve_maps_references_to_slots_and_names_the_first_miss() {
-        let ast = parse("SPX.close / s2 + VIX@rest").unwrap();
-        let mut lookup = |r: &RefName| match r {
-            RefName::Handle(n) => Some(*n),
-            RefName::Identity { identity, source }
-                if identity == "SPX.close" && source.is_none() =>
-            {
-                Some(1)
-            }
+        let ast = parse("SPX.close / B + VIX@rest").unwrap();
+        let mut lookup = |r: &RefName| match (r.identity.as_str(), r.source.as_deref()) {
+            ("SPX.close", None) => Some(1),
+            ("B", None) => Some(2),
             _ => None,
         };
         let miss = ast.clone().resolve(&mut lookup).unwrap_err();
         assert_eq!(miss.display(), "VIX@rest");
-        let mut lookup = |r: &RefName| match r {
-            RefName::Handle(n) => Some(*n),
-            RefName::Identity { identity, .. } if identity == "SPX.close" => Some(1),
-            RefName::Identity { identity, .. } if identity == "VIX" => Some(3),
+        let mut lookup = |r: &RefName| match r.identity.as_str() {
+            "SPX.close" => Some(1),
+            "B" => Some(2),
+            "VIX" => Some(3),
             _ => None,
         };
         let expr = ast.resolve(&mut lookup).unwrap();
         assert_eq!(expr.slots(), vec![1, 2, 3]);
     }
 
-    fn spec(slot: u8, kind: SlotKind) -> SeriesSpec {
-        SeriesSpec { slot, kind }
-    }
-    fn source(slot: u8) -> SeriesSpec {
-        spec(
-            slot,
-            SlotKind::Source {
-                source: "k".into(),
-                identity: format!("id{slot}"),
-                rule: BucketRule::Last,
-            },
-        )
-    }
-    fn expr_over(slot: u8, text: &str) -> SeriesSpec {
-        let e = parse(text)
-            .unwrap()
-            .resolve(&mut |r: &RefName| match r {
-                RefName::Handle(n) => Some(*n),
-                _ => None,
-            })
-            .unwrap();
-        spec(slot, SlotKind::Expr(e))
-    }
-
-    #[test]
-    fn expression_order_puts_operands_first_and_names_a_cycle() {
-        // s4 = s3 / s1, s3 = s1 - s2: s3 must come before s4 whatever the request order.
-        let specs = vec![
-            source(1),
-            source(2),
-            expr_over(4, "s3 / s1"),
-            expr_over(3, "s1 - s2"),
-        ];
-        assert_eq!(expression_order(&specs).unwrap(), vec![3, 4]);
-        let cyclic = vec![source(1), expr_over(2, "s3 + s1"), expr_over(3, "s2 * 2")];
-        let bad = expression_order(&cyclic).unwrap_err();
-        assert!(bad == 2 || bad == 3);
-        let self_ref = vec![expr_over(2, "s2 + 1")];
-        assert_eq!(expression_order(&self_ref).unwrap_err(), 2);
-        assert_eq!(expression_order(&[source(1)]).unwrap(), Vec::<u8>::new());
-    }
-
     #[test]
     fn display_spells_a_reference_as_typed() {
-        assert_eq!(RefName::Handle(7).display(), "s7");
         assert_eq!(id("VIX").display(), "VIX");
         assert_eq!(
-            RefName::Identity {
+            RefName {
                 identity: "SPX.close".into(),
                 source: Some("kdb_hist".into())
             }

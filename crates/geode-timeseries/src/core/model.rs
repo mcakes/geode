@@ -68,11 +68,11 @@ const ALL: Changed = Changed(15);
 const SETTING: Changed = Changed(1 | 4 | 8); // QUERY | CHROME | SESSION
 const LOOK: Changed = Changed(4 | 8); // CHROME | SESSION
 
-/// A slot's colour. `Palette` and `Named` follow the theme; `Custom` is
+/// A slot's color. `Palette` and `Named` follow the theme; `Custom` is
 /// absolute — painted exactly as picked, with no readability floor, so
 /// it can disappear on a theme it was not picked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Colour {
+pub enum Color {
     Palette(usize),
     Named(String),
     Custom(Rgb8),
@@ -91,10 +91,47 @@ pub struct Slot {
     pub kind: SlotKind,
     /// The expression as typed; `None` for a source slot.
     pub text: Option<String>,
-    pub colour: Colour,
+    pub color: Color,
     pub axis: Axis,
     pub visible: bool,
     pub state: SlotState,
+    /// An expression restored from a session saved when expressions
+    /// named slots by handle, whose text could not be rewritten to
+    /// names. It keeps its original text, is `Failed` with the reason,
+    /// holds no operands and is never sent; the session writes it back
+    /// marked so a later restore tries the rewrite again. An edit
+    /// (`replace_expr`) clears it.
+    pub legacy: bool,
+}
+
+impl Slot {
+    /// The chip/popup label (§9.3), and the name `:` commands and
+    /// expressions use for a source series: the identity, `@source` only
+    /// when the source is not the default. An expression's label is its
+    /// text, cut to `LABEL_MAX` characters ending in `…`.
+    pub fn label(&self, default_source: Option<&str>) -> String {
+        match &self.kind {
+            SlotKind::Source {
+                source, identity, ..
+            } => {
+                if Some(source.as_str()) == default_source {
+                    identity.clone()
+                } else {
+                    format!("{identity}@{source}")
+                }
+            }
+            SlotKind::Expr(_) => {
+                let text = self.text.as_deref().unwrap_or("");
+                if text.chars().count() > LABEL_MAX {
+                    let mut cut: String = text.chars().take(LABEL_MAX - 1).collect();
+                    cut.push('…');
+                    cut
+                } else {
+                    text.to_string()
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -220,30 +257,38 @@ impl Model {
     pub fn header_text(&self) -> String {
         format!("{} · {}", self.range.label(), self.frequency.as_str())
     }
-    /// The chip/popup label (§9.3): the identity, `@source` only when the
-    /// source is not the default; an expression's text, or its handle
-    /// past `LABEL_MAX`.
+    /// The label of the slot at `index` ([`Slot::label`]).
     pub fn label(&self, index: usize, default_source: Option<&str>) -> String {
-        let s = &self.slots[index];
-        match &s.kind {
-            SlotKind::Source {
-                source, identity, ..
-            } => {
-                if Some(source.as_str()) == default_source {
-                    identity.clone()
-                } else {
-                    format!("{identity}@{source}")
-                }
-            }
-            SlotKind::Expr(_) => {
-                let text = s.text.as_deref().unwrap_or("");
-                if text.chars().count() > LABEL_MAX {
-                    format!("s{}", s.number)
-                } else {
-                    text.to_string()
+        self.slots[index].label(default_source)
+    }
+    /// The slot a `:` command acts on: the named source series, or the
+    /// selected slot when no name is given. An expression has no name,
+    /// so it is reachable only by selection.
+    pub fn target(&self, name: Option<&str>, default_source: Option<&str>) -> Result<u8, String> {
+        match name {
+            Some(n) => super::resolve::find_named(n, &self.slots, default_source),
+            None => self
+                .cursor_slot()
+                .map(|s| s.number)
+                .ok_or_else(|| "select a series or name one".into()),
+        }
+    }
+    /// Every source series' label, once each, in slot order: the names
+    /// completion offers where a `:` command takes a series.
+    pub fn series_names(&self, default_source: Option<&str>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in &self.slots {
+            if matches!(s.kind, SlotKind::Source { .. }) {
+                let label = s.label(default_source);
+                if !out.contains(&label) {
+                    out.push(label);
                 }
             }
         }
+        out
+    }
+    fn gone() -> String {
+        "that series is gone".into()
     }
 
     // ---- slots ----
@@ -282,7 +327,7 @@ impl Model {
             ));
         }
         let number = self.take_number()?;
-        let colour = Colour::Palette(self.palette_next());
+        let color = Color::Palette(self.palette_next());
         self.dataset.get_or_insert_with(|| dataset.to_string());
         self.push(Slot {
             number,
@@ -292,10 +337,11 @@ impl Model {
                 rule: BucketRule::Last,
             },
             text: None,
-            colour,
+            color,
             axis: Axis::Left,
             visible: true,
             state: SlotState::Fetching,
+            legacy: false,
         });
         let mut changed = Changed::FETCH | LOOK;
         changed |= self.enforce_density_budget();
@@ -305,55 +351,66 @@ impl Model {
     /// `expr` is already resolved (`core::resolve`); the model only files it.
     pub fn add_expr(&mut self, text: &str, expr: Expr) -> Result<(u8, Changed), String> {
         let number = self.take_number()?;
-        let colour = Colour::Palette(self.palette_next());
+        let color = Color::Palette(self.palette_next());
         self.push(Slot {
             number,
             kind: SlotKind::Expr(expr),
             text: Some(text.into()),
-            colour,
+            color,
             axis: Axis::Left,
             visible: true,
             state: SlotState::Idle,
+            legacy: false,
         });
         Ok((number, SETTING | self.enforce_density_budget()))
     }
 
+    /// For `session::from_table`: a saved expression whose handle text
+    /// could not be rewritten to names ([`Slot::legacy`]). Its kind is a
+    /// reference-free placeholder that `request::params` never sends.
+    pub(crate) fn add_legacy_expr(&mut self, text: &str, why: String) -> Result<u8, String> {
+        let number = self.take_number()?;
+        let color = Color::Palette(self.palette_next());
+        self.push(Slot {
+            number,
+            kind: SlotKind::Expr(Expr::Num(0.0)),
+            text: Some(text.into()),
+            color,
+            axis: Axis::Left,
+            visible: true,
+            state: SlotState::Failed(why),
+            legacy: true,
+        });
+        Ok(number)
+    }
+
     pub fn replace_expr(&mut self, number: u8, text: &str, expr: Expr) -> Result<Changed, String> {
-        let i = self
-            .index_of(number)
-            .ok_or_else(|| format!("no slot s{number}"))?;
-        if !matches!(self.slots[i].kind, SlotKind::Expr(_)) {
-            return Err(format!("s{number} is not an expression"));
+        let i = self.index_of(number).ok_or_else(Self::gone)?;
+        let slot = &mut self.slots[i];
+        if !matches!(slot.kind, SlotKind::Expr(_)) {
+            return Err(format!("{} is not an expression", slot.label(None)));
         }
-        self.slots[i].kind = SlotKind::Expr(expr);
-        self.slots[i].text = Some(text.into());
+        slot.kind = SlotKind::Expr(expr);
+        slot.text = Some(text.into());
+        slot.legacy = false;
+        slot.state = SlotState::Idle;
         Ok(SETTING)
     }
 
-    /// Every slot that references `number`, transitively (§7: "removing
-    /// an operand removes every expression that references it").
+    /// Every expression that references `number` (§7: "removing an
+    /// operand removes every expression that references it"). Only a
+    /// source slot has dependants: an expression names sources only.
     pub fn dependants(&self, number: u8) -> Vec<u8> {
-        let mut out = vec![];
-        let mut frontier = vec![number];
-        while let Some(n) = frontier.pop() {
-            for s in &self.slots {
-                if let SlotKind::Expr(e) = &s.kind
-                    && e.slots().contains(&n)
-                    && !out.contains(&s.number)
-                    && s.number != number
-                {
-                    out.push(s.number);
-                    frontier.push(s.number);
-                }
-            }
-        }
-        out.sort_unstable();
-        out
+        self.slots
+            .iter()
+            .filter(|s| matches!(&s.kind, SlotKind::Expr(e) if e.slots().contains(&number)))
+            .map(|s| s.number)
+            .collect()
     }
 
     pub fn remove(&mut self, number: u8) -> Result<Removal, String> {
         if self.index_of(number).is_none() {
-            return Err(format!("no slot s{number}"));
+            return Err(Self::gone());
         }
         let mut removed = self.dependants(number);
         removed.insert(0, number);
@@ -373,7 +430,7 @@ impl Model {
     }
 
     /// A cleared tile is a fresh tile, numbering included: no slot
-    /// remains for `s1` to collide with, and `take_number`'s own
+    /// remains for slot 1 to collide with, and `take_number`'s own
     /// exhaustion message ("`:clear` starts again") is only true
     /// because of this line.
     pub fn clear(&mut self) -> Changed {
@@ -414,9 +471,7 @@ impl Model {
     /// session restore needs: it replays a recorded `visible` onto a
     /// slot it has just added, with no cursor anywhere near it.
     pub fn set_visible(&mut self, number: u8, visible: bool) -> Result<Changed, String> {
-        let i = self
-            .index_of(number)
-            .ok_or_else(|| format!("no slot s{number}"))?;
+        let i = self.index_of(number).ok_or_else(Self::gone)?;
         self.slots[i].visible = visible;
         Ok(LOOK | self.enforce_density_budget())
     }
@@ -471,29 +526,25 @@ impl Model {
         LOOK
     }
     pub fn set_axis(&mut self, number: u8, axis: Axis) -> Result<Changed, String> {
-        let i = self
-            .index_of(number)
-            .ok_or_else(|| format!("no slot s{number}"))?;
+        let i = self.index_of(number).ok_or_else(Self::gone)?;
         self.slots[i].axis = axis;
         Ok(LOOK)
     }
-    pub fn cycle_colour(&mut self) -> Changed {
+    pub fn cycle_color(&mut self) -> Changed {
         let Some(s) = self.at_cursor() else {
             return Changed::NONE;
         };
-        s.colour = match &s.colour {
-            Colour::Palette(i) => Colour::Palette((i + 1) % Palette::LEN),
-            // `c` steps the palette: off a name or an absolute colour it
+        s.color = match &s.color {
+            Color::Palette(i) => Color::Palette((i + 1) % Palette::LEN),
+            // `c` steps the palette: off a name or an absolute color it
             // starts the palette over.
-            Colour::Named(_) | Colour::Custom(_) => Colour::Palette(0),
+            Color::Named(_) | Color::Custom(_) => Color::Palette(0),
         };
         LOOK
     }
-    pub fn set_colour(&mut self, number: u8, colour: Colour) -> Result<Changed, String> {
-        let i = self
-            .index_of(number)
-            .ok_or_else(|| format!("no slot s{number}"))?;
-        self.slots[i].colour = colour;
+    pub fn set_color(&mut self, number: u8, color: Color) -> Result<Changed, String> {
+        let i = self.index_of(number).ok_or_else(Self::gone)?;
+        self.slots[i].color = color;
         Ok(LOOK)
     }
     pub fn cycle_rule(&mut self) -> Changed {
@@ -509,16 +560,15 @@ impl Model {
         }
     }
     pub fn set_rule(&mut self, number: u8, new: BucketRule) -> Result<Changed, String> {
-        let i = self
-            .index_of(number)
-            .ok_or_else(|| format!("no slot s{number}"))?;
+        let i = self.index_of(number).ok_or_else(Self::gone)?;
         match &mut self.slots[i].kind {
             SlotKind::Source { rule, .. } => {
                 *rule = new;
                 Ok(SETTING)
             }
             SlotKind::Expr(_) => Err(format!(
-                "s{number} is an expression; its rule is its operands'"
+                "{} is an expression; its rule is its operands'",
+                self.slots[i].label(None)
             )),
         }
     }
@@ -821,14 +871,14 @@ mod tests {
         );
         assert_eq!(m.cursor(), Some(0));
         assert!(matches!(m.slots()[0].state, SlotState::Fetching));
-        assert_eq!(m.slots()[0].colour, Colour::Palette(0));
+        assert_eq!(m.slots()[0].color, Color::Palette(0));
         assert_eq!(m.slots()[0].axis, Axis::Left);
         assert_eq!(m.dataset(), Some("series"));
         let (n, _) = m.add_source("VIX", "demo_kdb", "series").unwrap();
         assert_eq!(n, 2);
         assert_eq!(
-            m.slots()[1].colour,
-            Colour::Palette(1),
+            m.slots()[1].color,
+            Color::Palette(1),
             "each new slot takes the next palette colour"
         );
         assert_eq!(m.cursor(), Some(1));
@@ -902,20 +952,20 @@ mod tests {
         );
         m.cycle_axis(false, 1);
         assert_eq!(m.slots()[1].axis, Axis::BottomRight);
-        m.cycle_colour();
-        assert_eq!(m.slots()[1].colour, Colour::Palette(2));
-        m.set_colour(2, Colour::Named("spx".into())).unwrap();
-        m.cycle_colour();
+        m.cycle_color();
+        assert_eq!(m.slots()[1].color, Color::Palette(2));
+        m.set_color(2, Color::Named("spx".into())).unwrap();
+        m.cycle_color();
         assert_eq!(
-            m.slots()[1].colour,
-            Colour::Palette(0),
+            m.slots()[1].color,
+            Color::Palette(0),
             "cycling off a named colour starts the palette over"
         );
-        m.set_colour(2, Colour::Custom(Rgb8([1, 2, 3]))).unwrap();
-        m.cycle_colour();
+        m.set_color(2, Color::Custom(Rgb8([1, 2, 3]))).unwrap();
+        m.cycle_color();
         assert_eq!(
-            m.slots()[1].colour,
-            Colour::Palette(0),
+            m.slots()[1].color,
+            Color::Palette(0),
             "and so does cycling off an absolute one"
         );
         let ch = m.cycle_rule();
@@ -927,7 +977,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(m.set_rule(9, BucketRule::Max).is_err(), "no slot 9");
+        assert!(m.set_rule(9, BucketRule::Max).is_err(), "no such slot");
     }
 
     #[test]
@@ -1122,20 +1172,126 @@ mod tests {
         );
         assert_eq!(m.label(0, None), "SPX.close@demo_kdb");
         let (n, _) = m
-            .add_expr("s1 / s2", geode_core::series::expr::Ast::<u8>::Num(1.0))
+            .add_expr(
+                "SPX.close / VIX",
+                geode_core::series::expr::Ast::<u8>::Num(1.0),
+            )
             .unwrap();
         assert_eq!(n, 3);
-        assert_eq!(m.label(2, Some("demo_kdb")), "s1 / s2");
-        let long = "s1 + s2 + s1 + s2 + s1 + s2 + s1";
-        assert!(long.len() > LABEL_MAX);
-        let (_, _) = m
-            .add_expr(long, geode_core::series::expr::Ast::<u8>::Num(1.0))
+        assert_eq!(m.label(2, Some("demo_kdb")), "SPX.close / VIX");
+        let long = "SPX.close / VIX * 100 - SPX.close";
+        assert!(long.chars().count() > LABEL_MAX);
+        m.add_expr(long, geode_core::series::expr::Ast::<u8>::Num(1.0))
             .unwrap();
+        let label = m.label(3, Some("demo_kdb"));
         assert_eq!(
-            m.label(3, Some("demo_kdb")),
-            "s4",
-            "over LABEL_MAX the handle stands in"
+            label, "SPX.close / VIX * 100 -…",
+            "over LABEL_MAX the text is cut and ends in an ellipsis"
         );
+        assert_eq!(label.chars().count(), LABEL_MAX);
+        let exact = "SPX.close / VIX * 100 - ";
+        assert_eq!(exact.chars().count(), LABEL_MAX);
+        m.add_expr(exact, geode_core::series::expr::Ast::<u8>::Num(1.0))
+            .unwrap();
+        assert_eq!(m.label(4, Some("demo_kdb")), exact, "at LABEL_MAX, uncut");
+    }
+
+    #[test]
+    fn a_command_target_is_the_selection_or_a_source_name() {
+        let mut m = two_sources();
+        m.add_source("VIX", "demo_rest", "series").unwrap(); // 3
+        m.add_expr(
+            "SPX.close / VIX",
+            geode_core::series::expr::Ast::<u8>::Ref(1),
+        )
+        .unwrap(); // 4, selected
+        assert_eq!(m.target(None, Some("demo_kdb")), Ok(4), "the selection");
+        assert_eq!(m.target(Some("SPX.close"), Some("demo_kdb")), Ok(1));
+        assert_eq!(
+            m.target(Some("VIX"), Some("demo_kdb")),
+            Ok(2),
+            "the label wins over another source's same identity"
+        );
+        assert_eq!(m.target(Some("VIX@demo_rest"), Some("demo_kdb")), Ok(3));
+        assert_eq!(
+            m.target(Some("VIX"), Some("other")).unwrap_err(),
+            "'VIX' is ambiguous: VIX@demo_kdb or VIX@demo_rest"
+        );
+        assert_eq!(
+            m.target(Some("SPX.close / VIX"), Some("demo_kdb"))
+                .unwrap_err(),
+            "'SPX.close / VIX' is not loaded — `a` adds it",
+            "an expression is targetable only by selection"
+        );
+        assert_eq!(
+            Model::new().target(None, None).unwrap_err(),
+            "select a series or name one"
+        );
+    }
+
+    #[test]
+    fn series_names_are_the_source_labels_once_each() {
+        let mut m = two_sources();
+        m.add_source("VIX", "demo_rest", "series").unwrap();
+        m.add_source("VIX", "demo_kdb", "series").unwrap();
+        m.add_expr(
+            "SPX.close / VIX",
+            geode_core::series::expr::Ast::<u8>::Ref(1),
+        )
+        .unwrap();
+        assert_eq!(
+            m.series_names(Some("demo_kdb")),
+            vec!["SPX.close", "VIX", "VIX@demo_rest"]
+        );
+    }
+
+    /// A saved expression whose text could not be rewritten keeps its
+    /// slot, failed with the reason, and holds no operands; an edit
+    /// replaces it with a working expression.
+    #[test]
+    fn a_legacy_expression_is_failed_until_an_edit_replaces_it() {
+        let mut m = two_sources();
+        let n = m
+            .add_legacy_expr(
+                "s1 / s9",
+                "it references a series this session no longer holds".into(),
+            )
+            .unwrap();
+        let s = m.slot_by_number(n).unwrap();
+        assert!(s.legacy);
+        assert_eq!(s.text.as_deref(), Some("s1 / s9"));
+        assert!(matches!(&s.state, SlotState::Failed(why) if why.contains("no longer holds")));
+        assert!(m.dependants(1).is_empty(), "it references nothing");
+        m.replace_expr(
+            n,
+            "SPX.close * 2",
+            geode_core::series::expr::Ast::<u8>::Ref(1),
+        )
+        .unwrap();
+        let s = m.slot_by_number(n).unwrap();
+        assert!(!s.legacy);
+        assert_eq!(s.state, SlotState::Idle);
+        assert_eq!(m.dependants(1), vec![n]);
+    }
+
+    #[test]
+    fn refusals_name_a_series_by_label() {
+        let mut m = two_sources();
+        m.add_expr(
+            "SPX.close / VIX",
+            geode_core::series::expr::Ast::<u8>::Ref(1),
+        )
+        .unwrap();
+        assert_eq!(
+            m.set_rule(3, BucketRule::Max).unwrap_err(),
+            "SPX.close / VIX is an expression; its rule is its operands'"
+        );
+        assert_eq!(
+            m.replace_expr(1, "x", geode_core::series::expr::Ast::<u8>::Num(1.0))
+                .unwrap_err(),
+            "SPX.close@demo_kdb is not an expression"
+        );
+        assert_eq!(m.remove(9).unwrap_err(), "that series is gone");
     }
 
     #[test]
@@ -1164,7 +1320,7 @@ mod tests {
         let ch = m.set_visible(2, false).unwrap();
         assert!(!m.slots()[1].visible);
         assert!(ch.chrome());
-        assert!(m.set_visible(9, false).is_err(), "no slot 9");
+        assert!(m.set_visible(9, false).is_err(), "no such slot");
     }
 
     #[test]

@@ -36,7 +36,7 @@ use gpui_component::input::Input;
 use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
 
 use crate::core::Range;
-use crate::core::model::{Colour, Model, SlotState};
+use crate::core::model::{Color, Model, SlotState};
 use crate::popup::ExprField;
 use crate::tile::TimeseriesTile;
 
@@ -82,7 +82,7 @@ pub(crate) struct Chip {
     /// The swatch's own tooltip selector, likewise prepared.
     pub swatch_tip_selector: SharedString,
     /// The slot's colour, already resolved against the theme — see the
-    /// module doc for why this is not a `Colour` the painter resolves.
+    /// module doc for why this is not a `Color` the painter resolves.
     pub swatch: Hsla,
     pub number: u8,
 }
@@ -104,7 +104,7 @@ impl HeaderModel {
     pub(crate) fn prepare(
         model: &Model,
         default_source: Option<&str>,
-        colour_of: &dyn Fn(&Colour) -> Hsla,
+        colour_of: &dyn Fn(&Color) -> Hsla,
     ) -> HeaderModel {
         let cursor = model.cursor();
         let chips = model
@@ -131,7 +131,7 @@ impl HeaderModel {
                     tooltip,
                     tip_selector: format!("tip-timeseries-chip-{}", s.number).into(),
                     swatch_tip_selector: format!("tip-timeseries-swatch-{}", s.number).into(),
-                    swatch: colour_of(&s.colour),
+                    swatch: colour_of(&s.color),
                     number: s.number,
                 }
             })
@@ -223,7 +223,7 @@ pub(crate) struct HeaderPopups {
     pub freq_open: bool,
     /// The open colour picker: the slot number it targets and the
     /// component element, which takes that chip's swatch position.
-    pub colour_picker: Option<(u8, AnyElement)>,
+    pub color_picker: Option<(u8, AnyElement)>,
     /// The range menu or the dates editor, hung under the range trigger.
     pub under_range: Option<AnyElement>,
     /// The frequency menu, hung under the frequency trigger.
@@ -300,7 +300,7 @@ pub(crate) fn render_header(
         menu_open,
         range_open,
         freq_open,
-        mut colour_picker,
+        mut color_picker,
         under_range,
         under_freq,
     } = popups;
@@ -391,7 +391,7 @@ pub(crate) fn render_header(
         let number = chip.number;
         // Replace only the target slot's swatch with an equally sized component
         // trigger. It consumes its press so visibility and chip selection do not also run.
-        let picker = colour_picker
+        let picker = color_picker
             .take_if(|(target, _)| *target == number)
             .map(|(_, el)| el);
         let swatch = match picker {
@@ -632,11 +632,11 @@ mod tests {
     /// A resolver with no theme behind it: the palette index straight
     /// into the hue, so a test can tell one slot's swatch from another's
     /// without a window.
-    fn stub(colour: &Colour) -> gpui::Hsla {
+    fn stub(colour: &Color) -> gpui::Hsla {
         match colour {
-            Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
-            Colour::Named(_) => gpui::black(),
-            Colour::Custom(c) => c.to_hsla(),
+            Color::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
+            Color::Named(_) => gpui::black(),
+            Color::Custom(c) => c.to_hsla(),
         }
     }
 
@@ -661,8 +661,8 @@ mod tests {
             "the source shows when it is not the default"
         );
         assert_eq!(h.chips[0].axis, "L");
-        assert_eq!(h.chips[0].swatch, stub(&Colour::Palette(0)));
-        assert_eq!(h.chips[1].swatch, stub(&Colour::Palette(1)));
+        assert_eq!(h.chips[0].swatch, stub(&Color::Palette(0)));
+        assert_eq!(h.chips[1].swatch, stub(&Color::Palette(1)));
         assert_eq!(h.chips[0].number, 1);
     }
 

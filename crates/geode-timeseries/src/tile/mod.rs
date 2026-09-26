@@ -48,7 +48,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::menu::MenuKind;
-use crate::core::model::{Changed, Colour, Model, SlotState};
+use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{
     Range, Rgb8, chart, colour_from_pick, menu, request, resolve, session, within_a_step,
 };
@@ -79,7 +79,7 @@ struct ChartKey {
     /// a freed result's address to be reused for different points.
     result: u64,
     /// Per slot: everything `chart::build` copies out of it.
-    slots: Vec<(u8, Colour, Axis, bool, Option<String>)>,
+    slots: Vec<(u8, Color, Axis, bool, Option<String>)>,
     frequency: Frequency,
     axis_mode: AxisMode,
     /// Bit pattern, because `f32` is not `Eq` and a split is compared,
@@ -88,12 +88,12 @@ struct ChartKey {
     density: bool,
     /// Read by `Model::label` for a slot whose source is not the default.
     default_source: Option<String>,
-    /// The two inputs to `colour_fn`: a slot's colour is resolved INTO
+    /// The two inputs to `color_fn`: a slot's color is resolved INTO
     /// the chart model, so a theme change or a reloaded `colours.toml`
     /// (a fresh `Arc`, which is what `set_colours` swaps in) is a chart
     /// change.
     theme: [Hsla; 28],
-    colours: usize,
+    colors: usize,
     /// The app clock's offset (`local_offset_secs`): a `[time] zone`
     /// reload moves every displayed time, and `chart::build` bakes the
     /// offset into the model.
@@ -109,7 +109,7 @@ pub struct TimeseriesTile {
     /// `Request::Fetch`, `Request::Series` and `Request::Cancel` go
     /// through it.
     data: DataHandle,
-    colours: Rc<RefCell<Arc<NamedColours>>>,
+    colors: Rc<RefCell<Arc<NamedColours>>>,
     model: Model,
     /// The last good result; the chart model is built from it.
     result: Option<Arc<SeriesResult>>,
@@ -122,7 +122,7 @@ pub struct TimeseriesTile {
     /// chart model only when this differs — see [`ChartKey`].
     last_chart_key: Option<ChartKey>,
     /// Rebuild the chrome on the next render if the theme moved — the
-    /// chips' swatches and the chart model's line colours are both
+    /// chips' swatches and the chart model's line colors are both
     /// resolved against it.
     theme_key: Option<[Hsla; 28]>,
     /// The tag of the request in flight, so a stale answer is dropped.
@@ -162,8 +162,8 @@ pub struct TimeseriesTile {
     /// The pointer gesture in progress, if any (`tile::pointer`).
     drag: Option<Drag>,
     /// Lazily created reusable component state with one set of subscriptions.
-    /// The header renders its trigger while Popup::Colour is active.
-    colour_picker: Option<Entity<ColorPickerState>>,
+    /// The header renders its trigger while Popup::Color is active.
+    color_picker: Option<Entity<ColorPickerState>>,
     /// What the picker's commits are written against; outlives the
     /// popup on purpose (see [`PickContext`]), replaced at each open.
     pick_context: Option<PickContext>,
@@ -176,7 +176,7 @@ impl TimeseriesTile {
         frame: Entity<Frame>,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
-        colours: Rc<RefCell<Arc<NamedColours>>>,
+        colors: Rc<RefCell<Arc<NamedColours>>>,
         restored: Option<&toml::Table>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -292,12 +292,12 @@ impl TimeseriesTile {
         .detach();
 
         // One derivation feeds both the chips' swatches and the chart
-        // model's line colours — they are the same five colours, and
+        // model's line colors — they are the same five colors, and
         // building the wheel twice is the thing `rebuild_chrome` exists
         // to avoid.
-        let colours_ptr = Arc::as_ptr(&colours.borrow()) as usize;
-        let colour_of = colour_fn(Arc::clone(&colours.borrow()), cx.theme());
-        let header = HeaderModel::prepare(&model, settings.default_source.as_deref(), &colour_of);
+        let colors_ptr = Arc::as_ptr(&colors.borrow()) as usize;
+        let color_of = color_fn(Arc::clone(&colors.borrow()), cx.theme());
+        let header = HeaderModel::prepare(&model, settings.default_source.as_deref(), &color_of);
         let title = header::title_text(&model);
         let offset_secs = local_offset_secs(cx);
         let chart = Arc::new(chart::build(
@@ -305,7 +305,7 @@ impl TimeseriesTile {
             &model,
             1,
             offset_secs,
-            &colour_of,
+            &color_of,
             settings.default_source.as_deref(),
         ));
         let last_chart_key = Some(chart_key(
@@ -313,7 +313,7 @@ impl TimeseriesTile {
             0,
             settings.default_source.clone(),
             theme_signature(cx.theme()),
-            colours_ptr,
+            colors_ptr,
             offset_secs,
         ));
         TimeseriesTile {
@@ -321,7 +321,7 @@ impl TimeseriesTile {
             frame,
             diagnostics,
             data,
-            colours,
+            colors,
             model,
             result: None,
             result_seq: 0,
@@ -346,17 +346,17 @@ impl TimeseriesTile {
             footer: header::footer_hints(cx),
             chart_bounds: ChartBounds::default(),
             drag: None,
-            colour_picker: None,
+            color_picker: None,
             pick_context: None,
         }
     }
 
     // ---- what the shell reads ----------------------------------------
 
-    /// Add, expression, dates-editor, and colour editors use insert routing.
+    /// Add, expression, dates-editor, and color editors use insert routing.
     /// Fieldless series/menu lists keep normal mode with their popup pair, and a
     /// menu adds a `menu` pair naming its kind. Actual focus ownership is checked
-    /// separately, including colour-picker descendants.
+    /// separately, including color-picker descendants.
     pub fn key_context(&self) -> KeyContext {
         let mode = if self.popup.as_ref().is_some_and(Popup::is_insert) {
             "insert"
@@ -521,9 +521,9 @@ impl TimeseriesTile {
             "axis_prev" => self.model.cycle_axis(false, n),
             "split_shrink" => self.model.step_split(false, n),
             "split_grow" => self.model.step_split(true, n),
-            "colour" => self.model.cycle_colour(),
+            "colour" => self.model.cycle_color(),
             "rule" => self.model.cycle_rule(),
-            "remove" => self.remove_at_cursor(),
+            "remove" => self.remove_at_cursor(cx),
             "density" => self.model.toggle_density(),
             "percentiles" => self.model.toggle_percentiles(),
             "pan_left" => self.model.pan(-(n as i32)),
@@ -560,7 +560,7 @@ impl TimeseriesTile {
 
     // ---- the `:` line ------------------------------------------------
 
-    /// Commands may remove the colour picker's target. Forward the window so
+    /// Commands may remove the color picker's target. Forward the window so
     /// that orphaned popup can close through the focus-aware closer.
     pub fn command(
         &mut self,
@@ -595,15 +595,15 @@ impl TimeseriesTile {
                     &text,
                     self.model.slots(),
                     settings.default_source.as_deref(),
-                    None,
                 )?;
                 self.model.add_expr(&text, e)?.1
             }
-            Command::Remove(n) => self.remove(n)?,
-            Command::Rule(n, r) => self.model.set_rule(n, r)?,
-            Command::Colour(n, name) => {
-                let colour = self.colour_named(&name)?;
-                self.model.set_colour(n, colour)?
+            Command::Remove(name) => self.remove(self.target(name, &settings)?, cx)?,
+            Command::Rule(name, r) => self.model.set_rule(self.target(name, &settings)?, r)?,
+            Command::Color(name, word) => {
+                let n = self.target(name, &settings)?;
+                let color = self.color_named(&word)?;
+                self.model.set_color(n, color)?
             }
             Command::AxisMode(m) => {
                 let changed = self.model.set_axis_mode(m);
@@ -625,7 +625,7 @@ impl TimeseriesTile {
             Command::Range(r) => self.model.set_range(r, now, &as_of)?,
             Command::Pct(p) => self.model.set_percentiles(p)?,
             Command::Density(d) => self.model.set_density(d)?,
-            Command::YAxis(n, a) => self.model.set_axis(n, a)?,
+            Command::YAxis(name, a) => self.model.set_axis(self.target(name, &settings)?, a)?,
             Command::Split(s) => self.model.set_split(s)?,
             Command::Clear => {
                 let changed = self.model.clear();
@@ -636,25 +636,32 @@ impl TimeseriesTile {
         self.apply_changed(changed, cx);
         // `:remove` and `:clear` can take the slot an open picker was
         // opened for; a pick would then have nowhere to land.
-        self.close_orphaned_colour_picker(window, cx);
+        self.close_orphaned_color_picker(window, cx);
         Ok(())
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
-        let slots: Vec<u8> = self.model.slots().iter().map(|s| s.number).collect();
-        let sources = cx
-            .try_global::<SeriesSettings>()
-            .map(|s| s.names())
-            .unwrap_or_default();
-        let colours: Vec<String> = self.colours.borrow().names().map(str::to_string).collect();
-        commands::completions(line, cursor, &slots, &sources, &colours)
+        let settings = cx.try_global::<SeriesSettings>();
+        let names = self
+            .model
+            .series_names(settings.and_then(|s| s.default_source.as_deref()));
+        let sources = settings.map(|s| s.names()).unwrap_or_default();
+        let colors: Vec<String> = self.colors.borrow().names().map(str::to_string).collect();
+        commands::completions(line, cursor, &names, &sources, &colors)
     }
 
-    /// `1`..`5` is a palette index, `#rrggbb` an absolute colour,
-    /// anything else a `[colours]` name (`commands::colour_arg`).
-    fn colour_named(&self, name: &str) -> Result<Colour, String> {
-        let colours = self.colours.borrow();
-        commands::colour_arg(name, |n| colours.get(n).is_some())
+    /// The slot a series verb acts on: the named source series, else the
+    /// selection (`Model::target`).
+    fn target(&self, name: Option<String>, settings: &SeriesSettings) -> Result<u8, String> {
+        self.model
+            .target(name.as_deref(), settings.default_source.as_deref())
+    }
+
+    /// `1`..`5` is a palette index, `#rrggbb` an absolute color,
+    /// anything else a `[colours]` name (`commands::color_arg`).
+    fn color_named(&self, name: &str) -> Result<Color, String> {
+        let colors = self.colors.borrow();
+        commands::color_arg(name, |n| colors.get(n).is_some())
     }
 
     // ---- the tails ---------------------------------------------------
@@ -707,11 +714,11 @@ impl TimeseriesTile {
         }
     }
 
-    fn remove_at_cursor(&mut self) -> Changed {
+    fn remove_at_cursor(&mut self, cx: &App) -> Changed {
         let Some(number) = self.model.cursor_slot().map(|s| s.number) else {
             return Changed::NONE;
         };
-        match self.remove(number) {
+        match self.remove(number, cx) {
             Ok(changed) => changed,
             Err(e) => {
                 self.notice = Some(e.into());
@@ -722,16 +729,30 @@ impl TimeseriesTile {
 
     /// Shared keyboard/command removal. Remove dependent expressions with their
     /// operand and name the additional removed slots in a notice.
-    fn remove(&mut self, number: u8) -> Result<Changed, String> {
+    fn remove(&mut self, number: u8, cx: &App) -> Result<Changed, String> {
+        // Labelled before the removal: the removed slots are gone after it.
+        let default_source = cx
+            .try_global::<SeriesSettings>()
+            .and_then(|s| s.default_source.clone());
+        let label_of = |n: u8| {
+            self.model
+                .slot_by_number(n)
+                .map(|s| s.label(default_source.as_deref()))
+        };
+        let named = label_of(number);
+        let dependants: Vec<String> = self
+            .model
+            .dependants(number)
+            .into_iter()
+            .filter_map(label_of)
+            .collect();
         let removal = self.model.remove(number)?;
         self.prune_in_flight();
-        if removal.removed.len() > 1 {
-            let rest = removal.removed[1..]
-                .iter()
-                .map(|n| format!("s{n}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            self.notice = Some(format!("removed s{number} and, with it, {rest}").into());
+        if let Some(named) = named
+            && !dependants.is_empty()
+        {
+            self.notice =
+                Some(format!("removed {named} and, with it, {}", dependants.join(", ")).into());
         }
         Ok(removal.changed)
     }
@@ -756,15 +777,15 @@ impl TimeseriesTile {
     /// Prepare header, title, open series-list rows and an open menu's rows.
     /// Rebuild the immutable chart input only when [`ChartKey`] changes, bumping
     /// its version so the chart element invalidates geometry derived from that
-    /// input. Resolve one colour mapping for both chip swatches and chart lines.
+    /// input. Resolve one color mapping for both chip swatches and chart lines.
     fn rebuild_chrome(&mut self, cx: &mut Context<Self>) {
         let default_source = cx
             .try_global::<SeriesSettings>()
             .and_then(|s| s.default_source.clone());
         let theme = theme_signature(cx.theme());
-        let colours_ptr = Arc::as_ptr(&self.colours.borrow()) as usize;
-        let colour_of = colour_fn(Arc::clone(&self.colours.borrow()), cx.theme());
-        self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &colour_of);
+        let colors_ptr = Arc::as_ptr(&self.colors.borrow()) as usize;
+        let color_of = color_fn(Arc::clone(&self.colors.borrow()), cx.theme());
+        self.header = HeaderModel::prepare(&self.model, default_source.as_deref(), &color_of);
         self.title = header::title_text(&self.model);
         // List rows have inputs outside the chart key, including fetch state and
         // provenance. Refresh them even when chart geometry can be reused.
@@ -773,7 +794,7 @@ impl TimeseriesTile {
                 &self.model,
                 self.result.as_deref(),
                 default_source.as_deref(),
-                &colour_of,
+                &color_of,
             );
             self.popup = Some(Popup::Series(rows));
         }
@@ -790,7 +811,7 @@ impl TimeseriesTile {
             self.result_seq,
             default_source.clone(),
             theme,
-            colours_ptr,
+            colors_ptr,
             offset_secs,
         );
         if self.last_chart_key.as_ref() == Some(&key) {
@@ -804,7 +825,7 @@ impl TimeseriesTile {
             &self.model,
             self.chart_version,
             offset_secs,
-            &colour_of,
+            &color_of,
             default_source.as_deref(),
         );
         self.chart = Arc::new(chart);
@@ -988,16 +1009,16 @@ impl TimeseriesTile {
 
 impl Render for TimeseriesTile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Prepared chip and chart colours depend on the full theme signature.
-        // Also check the shared named-colour Arc for reloads. A changed key rebuilds
+        // Prepared chip and chart colors depend on the full theme signature.
+        // Also check the shared named-color Arc for reloads. A changed key rebuilds
         // prepared content here; unchanged renders retain it.
         let signature = theme_signature(cx.theme());
-        let colours_ptr = Arc::as_ptr(&self.colours.borrow()) as usize;
-        let colours_moved = self
+        let colors_ptr = Arc::as_ptr(&self.colors.borrow()) as usize;
+        let colors_moved = self
             .last_chart_key
             .as_ref()
-            .is_none_or(|k| k.colours != colours_ptr);
-        if self.theme_key != Some(signature) || colours_moved {
+            .is_none_or(|k| k.colors != colors_ptr);
+        if self.theme_key != Some(signature) || colors_moved {
             self.theme_key = Some(signature);
             self.rebuild_chrome(cx);
         }
@@ -1042,19 +1063,19 @@ impl Render for TimeseriesTile {
                 Some(render_menu(m, &tile, tile_id, cx))
             }
             // The expression field is not an overlay: it is a strip in
-            // the body, below; the colour picker is drawn in its target
+            // the body, below; the color picker is drawn in its target
             // chip, and the range and frequency popups under their
             // triggers, by the header.
             Some(Popup::Range(_))
             | Some(Popup::Menu(_))
             | Some(Popup::Expr(_))
-            | Some(Popup::Colour(_))
+            | Some(Popup::Color(_))
             | None => None,
         };
         // Render the component trigger in its target chip only while open. State
         // and subscriptions persist on the tile; the popover element state is transient.
-        let colour_picker = match self.popup.as_ref() {
-            Some(Popup::Colour(c)) => {
+        let color_picker = match self.popup.as_ref() {
+            Some(Popup::Color(c)) => {
                 let target = c.target;
                 Some((
                     target,
@@ -1090,7 +1111,7 @@ impl Render for TimeseriesTile {
                     menu_open: open.actions,
                     range_open: open.range,
                     freq_open: open.frequency,
-                    colour_picker,
+                    color_picker,
                     under_range,
                     under_freq,
                 },
@@ -1155,7 +1176,7 @@ fn chart_key(
     result: u64,
     default_source: Option<String>,
     theme: [Hsla; 28],
-    colours: usize,
+    colors: usize,
     offset_secs: i32,
 ) -> ChartKey {
     ChartKey {
@@ -1163,15 +1184,7 @@ fn chart_key(
         slots: model
             .slots()
             .iter()
-            .map(|s| {
-                (
-                    s.number,
-                    s.colour.clone(),
-                    s.axis,
-                    s.visible,
-                    s.text.clone(),
-                )
-            })
+            .map(|s| (s.number, s.color.clone(), s.axis, s.visible, s.text.clone()))
             .collect(),
         frequency: model.frequency(),
         axis_mode: model.axis_mode(),
@@ -1179,21 +1192,21 @@ fn chart_key(
         density: model.density().is_some(),
         default_source,
         theme,
-        colours,
+        colors,
         offset_secs,
     }
 }
 
-/// A slot's colour on this theme: a palette index through the floored
-/// five chart colours, a `[colours]` name through the shared wheel, an
-/// absolute colour as itself, and a name the trader has since deleted
-/// back to the first palette colour rather than an error — a stale name
-/// costs a colour, never a tile.
+/// A slot's color on this theme: a palette index through the floored
+/// five chart colors, a `[colours]` name through the shared wheel, an
+/// absolute color as itself, and a name the trader has since deleted
+/// back to the first palette color rather than an error — a stale name
+/// costs a color, never a tile.
 ///
 /// Takes the definitions by `Arc` and the theme's derived pair by value
 /// so the returned closure borrows NOTHING: `rebuild_chrome` holds
 /// it while it assigns `self.chart`.
-fn colour_fn(colours: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Colour) -> Hsla {
+fn color_fn(colors: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Color) -> Hsla {
     let palette = Palette::from_theme(
         [
             theme.chart_1,
@@ -1207,14 +1220,14 @@ fn colour_fn(colours: Arc<NamedColours>, theme: &Theme) -> impl Fn(&Colour) -> H
     );
     let anchors = anchors_from_theme(theme);
     let tokens = tokens_from_theme(theme);
-    move |colour| match colour {
-        Colour::Palette(i) => palette.colour(*i),
-        Colour::Named(name) => match colours.get(name) {
+    move |color| match color {
+        Color::Palette(i) => palette.colour(*i),
+        Color::Named(name) => match colors.get(name) {
             Some(def) => to_hsla(geode_core::colour::resolve(def, &anchors, &tokens)),
             None => palette.colour(0),
         },
         // Absolute: no theme, no readability floor — what was picked.
-        Colour::Custom(c) => c.to_hsla(),
+        Color::Custom(c) => c.to_hsla(),
     }
 }
 

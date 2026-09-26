@@ -5,7 +5,7 @@
 //! Add/expression inputs, the dates editor's container, and the component
 //! colour picker use insert-mode routing. Series and the menus retain normal
 //! mode with popup-specific context. The shared closer blurs only a popup that
-//! owns focus. Colour-picker ownership includes focused descendants such as its
+//! owns focus. Color-picker ownership includes focused descendants such as its
 //! hex field.
 //!
 //! Series labels, state text, and swatches are prepared alongside header chips.
@@ -36,7 +36,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Theme, ThemeStyled as _, h_flex, v_flex};
 
 use crate::core::menu::{MenuKind, MenuRow, Trailing};
-use crate::core::model::{Colour, Model, SlotState};
+use crate::core::model::{Color, Model, SlotState};
 use crate::tile::TimeseriesTile;
 
 /// Menu-row height in pixels at the design rem, scaled with Geode's UI.
@@ -61,7 +61,7 @@ const RANGE_HINT: &str = "`tab` switches · `enter` applies · `escape` goes bac
 
 /// Mutually exclusive transient state. Series and Menu add their popup pair
 /// to normal-mode context (a menu also its `menu` kind pair). Picker, Expr,
-/// Range (the custom dates editor), and Colour use insert routing; Range and
+/// Range (the custom dates editor), and Color use insert routing; Range and
 /// the component colour picker also own their focused key handlers.
 pub(crate) enum Popup {
     Series(SeriesPopup),
@@ -73,7 +73,7 @@ pub(crate) enum Popup {
     Menu(MenuState),
     /// Component colour picker anchored at one slot's chip. The header renders
     /// its trigger in place of that chip's swatch; the component owns the popover.
-    Colour(ColourPick),
+    Color(ColourPick),
 }
 
 /// Which popup is up, without its state: what a painted popup's outside-press
@@ -86,7 +86,7 @@ pub(crate) enum PopupKind {
     Expr,
     Range,
     Menu(MenuKind),
-    Colour,
+    Color,
 }
 
 /// Header paint state for a colour picker: target slot number, featured swatches
@@ -108,7 +108,7 @@ pub(crate) struct ColourPick {
 #[derive(Clone)]
 pub(crate) struct PickContext {
     pub target: u8,
-    pub featured: Vec<(Hsla, Colour)>,
+    pub featured: Vec<(Hsla, Color)>,
 }
 
 /// A menu's kind, prepared rows and the highlighted index shared by keyboard
@@ -126,10 +126,10 @@ impl Popup {
     pub(crate) fn is_insert(&self) -> bool {
         match self {
             Popup::Series(_) | Popup::Menu(_) => false,
-            // The dates editor owns a focus handle and Colour owns a component
+            // The dates editor owns a focus handle and Color owns a component
             // focus subtree; both require insert routing just as focused text
             // inputs do.
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => true,
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Color(_) => true,
         }
     }
 
@@ -144,7 +144,7 @@ impl Popup {
             // The container owns focus; date fields are pure state.
             Popup::Range(r) => r.focus.is_focused(window),
             // Include descendants: the popover and hex input focus beneath the state handle.
-            Popup::Colour(c) => c
+            Popup::Color(c) => c
                 .picker
                 .read(cx)
                 .focus_handle(cx)
@@ -159,7 +159,7 @@ impl Popup {
         match self {
             Popup::Series(_) => Some("series"),
             Popup::Menu(_) => Some("menu"),
-            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Colour(_) => None,
+            Popup::Picker(_) | Popup::Expr(_) | Popup::Range(_) | Popup::Color(_) => None,
         }
     }
 
@@ -172,7 +172,7 @@ impl Popup {
             Popup::Expr(_) => PopupKind::Expr,
             Popup::Range(_) => PopupKind::Range,
             Popup::Menu(m) => PopupKind::Menu(m.kind),
-            Popup::Colour(_) => PopupKind::Colour,
+            Popup::Color(_) => PopupKind::Color,
         }
     }
 
@@ -449,7 +449,7 @@ impl SeriesPopup {
         model: &Model,
         result: Option<&SeriesResult>,
         default_source: Option<&str>,
-        colour_of: &dyn Fn(&Colour) -> Hsla,
+        colour_of: &dyn Fn(&Color) -> Hsla,
     ) -> SeriesPopup {
         let rows = model
             .slots()
@@ -467,7 +467,7 @@ impl SeriesPopup {
                     source_rule: source_rule.into(),
                     axis: s.axis.letter(),
                     state: state_text(s.number, &s.state, result),
-                    swatch: colour_of(&s.colour),
+                    swatch: colour_of(&s.color),
                     hidden: !s.visible,
                 }
             })
@@ -1008,11 +1008,11 @@ mod tests {
     use geode_core::series::{BucketRule, SlotProvenance, SlotResult};
 
     /// Map palette indices to distinct hues for window-free swatch assertions.
-    fn stub(colour: &Colour) -> Hsla {
+    fn stub(colour: &Color) -> Hsla {
         match colour {
-            Colour::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
-            Colour::Named(_) => gpui::black(),
-            Colour::Custom(c) => c.to_hsla(),
+            Color::Palette(i) => gpui::hsla(*i as f32 / 10.0, 1.0, 0.5, 1.0),
+            Color::Named(_) => gpui::black(),
+            Color::Custom(c) => c.to_hsla(),
         }
     }
 
@@ -1062,8 +1062,8 @@ mod tests {
         );
         assert_eq!(p.rows[2].label.as_ref(), "s1 / s2");
         assert_eq!(p.rows[0].axis, "L");
-        assert_eq!(p.rows[0].swatch, stub(&Colour::Palette(0)));
-        assert_eq!(p.rows[1].swatch, stub(&Colour::Palette(1)));
+        assert_eq!(p.rows[0].swatch, stub(&Color::Palette(0)));
+        assert_eq!(p.rows[1].swatch, stub(&Color::Palette(1)));
         assert!(!p.rows[0].hidden);
     }
 

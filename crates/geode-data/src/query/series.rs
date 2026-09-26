@@ -15,7 +15,7 @@ use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
-use geode_core::series::expr::{Ast, Expr, Op, expression_order};
+use geode_core::series::expr::{Ast, Expr, Op};
 use geode_core::series::{
     BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
     SlotResult,
@@ -94,8 +94,9 @@ fn lower(e: &Expr) -> Result<String, StoreError> {
 
 /// Every refusal the request can earn, in one place and in one order, so
 /// the message a trader reads names the first thing wrong rather than
-/// whichever check happened to run first. Answers the order the compiler
-/// emits its expression CTEs in.
+/// whichever check happened to run first. Answers the expression slots in
+/// request order, the order the compiler emits their CTEs in: every
+/// operand is a source slot, and every source CTE precedes them.
 fn validate(schema: &SchemaSpec, params: &SeriesParams) -> Result<Vec<u8>, StoreError> {
     let ds = schema
         .dataset(&params.dataset)
@@ -151,9 +152,28 @@ fn validate(schema: &SchemaSpec, params: &SeriesParams) -> Result<Vec<u8>, Store
                     s.slot
                 )));
             }
+            // An operand that is an expression would need an order over
+            // expressions and could close a cycle; the language names
+            // source series only, so such a request is malformed.
+            if let Some(nested) = refs.iter().find(|r| {
+                params
+                    .series
+                    .iter()
+                    .any(|o| o.slot == **r && matches!(o.kind, SlotKind::Expr(_)))
+            }) {
+                return Err(refuse(format!(
+                    "slot {} references slot {nested}, which is not a source",
+                    s.slot
+                )));
+            }
         }
     }
-    expression_order(&params.series).map_err(|slot| refuse(format!("slot {slot} is on a cycle")))
+    Ok(params
+        .series
+        .iter()
+        .filter(|s| matches!(s.kind, SlotKind::Expr(_)))
+        .map(|s| s.slot)
+        .collect())
 }
 
 /// The CTE prefix every statement shares, and its bound params in order.
@@ -161,8 +181,9 @@ fn validate(schema: &SchemaSpec, params: &SeriesParams) -> Result<Vec<u8>, Store
 /// Source CTEs come first, in request order, each collapsing the
 /// bitemporal rows to one value per `ts` before bucketing — the inner
 /// `arg_max(value, received_at)` is what makes a corrected point replace
-/// its predecessor rather than join it. Expression CTEs follow in
-/// `expression_order`, so every operand a lowering names already exists.
+/// its predecessor rather than join it. Expression CTEs follow in request
+/// order; their operands are all source CTEs, so every operand a lowering
+/// names already exists.
 fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), StoreError> {
     let table = series_table(&params.dataset);
     let interval = params.frequency.interval_sql();
@@ -247,9 +268,8 @@ pub fn compile_series(
     // The bucket set is the union of the SOURCE slots' buckets alone: an
     // expression is an inner join of its operands and so can only ever
     // narrow, never widen, the rows a request paints. (`validate`
-    // guarantees at least one source slot: an expression whose operands
-    // are all expressions either sits on a cycle or bottoms out in a
-    // reference-free expression, and both are refused above.)
+    // guarantees at least one source slot: every expression references
+    // at least one slot, and every slot it references is a source.)
     let buckets = sources
         .iter()
         .map(|n| format!("select b from s{n}"))
@@ -510,14 +530,14 @@ mod tests {
         }
     }
 
+    /// Resolves `sN`-shaped names to slot N: the tests' shorthand for
+    /// a tile whose series happen to be named so.
+    pub(super) fn by_s_number(r: &RefName) -> Option<u8> {
+        r.identity.strip_prefix('s')?.parse().ok()
+    }
+
     pub(super) fn expr(slot: u8, text: &str) -> SeriesSpec {
-        let e = parse(text)
-            .unwrap()
-            .resolve(&mut |r: &RefName| match r {
-                RefName::Handle(n) => Some(*n),
-                _ => None,
-            })
-            .unwrap();
+        let e = parse(text).unwrap().resolve(&mut by_s_number).unwrap();
         SeriesSpec {
             slot,
             kind: SlotKind::Expr(e),
@@ -671,11 +691,11 @@ mod tests {
     }
 
     #[test]
-    fn expressions_are_emitted_operands_first_whatever_the_request_order() {
+    fn expressions_are_emitted_after_every_source_whatever_the_request_order() {
         let plan = compile_series(
             &schema(),
             &params(vec![
-                expr(4, "s3 - s1"),
+                expr(4, "s2 - s1"),
                 source(1, "A", BucketRule::Last),
                 expr(3, "s1 * 2"),
                 source(2, "B", BucketRule::Mean),
@@ -689,14 +709,14 @@ mod tests {
             sql.find("s3 as (").unwrap(),
             sql.find("s4 as (").unwrap(),
         );
-        assert!(s1 < s3 && s2 < s3 && s3 < s4, "{sql}");
+        assert!(s1 < s4 && s2 < s4 && s1 < s3 && s2 < s3, "{sql}");
         assert!(
             sql.contains("s3 as (\n  select s1.b as b, ((s1.v) * (2.0)) as v\n  from s1\n)"),
             "{sql}"
         );
         assert!(
             sql.contains(
-                "s4 as (\n  select s1.b as b, ((s3.v) - (s1.v)) as v\n  from s1 join s3 on s3.b = s1.b\n)"
+                "s4 as (\n  select s1.b as b, ((s2.v) - (s1.v)) as v\n  from s1 join s2 on s2.b = s1.b\n)"
             ),
             "{sql}"
         );
@@ -812,12 +832,29 @@ mod tests {
         ]));
         assert!(e.contains("slot 2") && e.contains("slot 9"), "{e}");
         assert!(refuse(params(vec![expr(2, "2 + 3")])).contains("reference"));
+    }
+
+    /// An expression names source series only; an operand that is
+    /// itself an expression (a self-reference included) is refused by
+    /// name rather than ordered, so no request can carry a cycle.
+    #[test]
+    fn an_expression_over_an_expression_is_refused() {
+        let s = schema();
+        let refuse = |p: SeriesParams| compile_series(&s, &p).unwrap_err().to_string();
         let e = refuse(params(vec![
             source(1, "A", BucketRule::Last),
-            expr(2, "s3 + s1"),
-            expr(3, "s2"),
+            expr(2, "s1 * 2"),
+            expr(3, "s2 + s1"),
         ]));
-        assert!(e.contains("cycle"), "{e}");
+        assert!(
+            e.contains("slot 3") && e.contains("slot 2") && e.contains("not a source"),
+            "{e}"
+        );
+        let e = refuse(params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "s2 + s1"),
+        ]));
+        assert!(e.contains("slot 2 references slot 2"), "{e}");
     }
 
     /// A literal too big for an `f64` is not a parse error: Rust's own
@@ -834,12 +871,7 @@ mod tests {
             matches!(&ast, Ast::Bin(_, _, r) if matches!(**r, Ast::Num(x) if !x.is_finite())),
             "the literal overflows to inf rather than failing to parse: {ast:?}"
         );
-        let e = ast
-            .resolve(&mut |r: &RefName| match r {
-                RefName::Handle(n) => Some(*n),
-                _ => None,
-            })
-            .unwrap();
+        let e = ast.resolve(&mut by_s_number).unwrap();
         let err = compile_series(
             &schema(),
             &params(vec![

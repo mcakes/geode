@@ -151,7 +151,7 @@ fn toggle(id: &'static str, title: &'static str, on: bool) -> MenuRow {
 /// Build openers, cursor-slot operations, `Frequency…` (the frequency menu's
 /// opener), display toggles, and view reset in fixed order. Empty tiles keep
 /// their slot section disabled. Bucket rules require a source and expression
-/// editing requires an expression; Colour opens a picker while Cycle colour
+/// editing requires an expression; Color opens a picker while Cycle colour
 /// advances through the palette.
 pub fn rows(i: &MenuInputs, default_source: Option<&str>) -> Vec<MenuRow> {
     let m = i.model;

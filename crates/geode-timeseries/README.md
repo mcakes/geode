@@ -40,6 +40,19 @@ cargo bench -p geode-timeseries
   movement.
 - One closer owns every popup and blurs a focused editor before dropping it.
 - `:` remains local to this tile.
+- A series is named by its label (`Slot::label`); slot numbers never reach
+  the screen, a notice, or the `:` vocabulary. `:rule`, `:colour`, `:yaxis`,
+  and `:remove` take an optional series name first and otherwise act on the
+  selection (`Model::target`); an expression is reachable only by selection.
+- Names resolve in one place (`core::resolve::find_source`): an exact pair,
+  else the default source's identity, else a unique identity. A name that
+  fits several series is refused with their labels, never resolved to the
+  first. Expressions reference source series only.
+- `core::session` rewrites a pre-`version = 2` table's `sN` handles to names
+  on restore, inlining an expression operand as `(text)`. A text it cannot
+  rewrite becomes a `legacy` slot: failed, never sent (`request::params`
+  skips it), saved with `legacy = true` so the next restore retries, and
+  replaced by an edit.
 - A menu's rows are built when it opens, on a chrome rebuild, and on a frame
   change while it is up, never in `render`; a frequency the point cap refuses
   is a disabled row whose reason is the model's own refusal, so a pickable row
@@ -96,7 +109,7 @@ clipping of queries.
 The action menu's `Colour…` opens the picker for the selected slot. Palette
 and named featured colours retain their identities when selected; a custom
 colour is opaque RGB8, persists as lowercase `#rrggbb`, and receives no theme
-adaptation or readability adjustment. `:colour s<n> #rrggbb` accepts exactly six
+adaptation or readability adjustment. `:colour [series] #rrggbb` accepts exactly six
 hex digits in either case and stores Custom directly; it does not remap a
 palette-identical hex value to a palette slot. Malformed session hex leaves
 the restored slot's default colour. Cycling colour from a name or Custom

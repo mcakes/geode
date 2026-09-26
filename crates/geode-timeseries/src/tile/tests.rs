@@ -2,7 +2,7 @@ use super::*;
 use crate::commands;
 use crate::content::{ACTIONS, DEFAULT_KEYMAP, TimeseriesFactory};
 use crate::core::model::SlotState;
-use crate::core::{Colour, Model, Preset, Range};
+use crate::core::{Color, Model, Preset, Range};
 use crate::popup::{PickerStage, SeriesRow, Which};
 use geode_chart::{Axis, ChartModel};
 use geode_core::colour::NamedColours;
@@ -169,7 +169,7 @@ impl ModuleFactory for Handle {
 }
 
 /// A `colours.toml` holding one name, `spx`, at `degrees` on the
-/// wheel — what `:colour s1 spx` resolves against, and what a
+/// wheel — what `:colour SPX.close spx` resolves against, and what a
 /// reload redefines.
 /// `n` HOURLY buckets ending an hour before the current hour, one
 /// `SlotResult` per number. Hourly and recent on purpose: every
@@ -666,7 +666,7 @@ impl Harness {
                 .and_then(|p| match p {
                     Popup::Picker(p) => Some(p.input.clone()),
                     Popup::Expr(f) => Some(f.input.clone()),
-                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) | Popup::Colour(_) => None,
+                    Popup::Series(_) | Popup::Range(_) | Popup::Menu(_) | Popup::Color(_) => None,
                 })
                 .expect("a field popup is open");
             input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
@@ -896,7 +896,7 @@ fn normal_mode_verbs_drive_the_model_and_bump_the_chart_version(cx: &mut gpui::T
     assert!(!h.model(&vcx).slots()[0].visible);
     assert!(!h.chart(&vcx).slots[0].visible);
     h.dispatch(&mut vcx, "colour", None);
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(1));
     h.dispatch(&mut vcx, "rule", None);
     assert!(matches!(
         &h.model(&vcx).slots()[0].kind,
@@ -932,15 +932,16 @@ fn d_on_an_operand_removes_the_dependants_with_one_notice(cx: &mut gpui::TestApp
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
-    h.command(&mut vcx, "expr s1 / s2").unwrap();
-    h.command(&mut vcx, "expr s3 * 100").unwrap();
-    h.dispatch(&mut vcx, "prev", Some(2)); // cursor on s2
+    h.command(&mut vcx, "expr SPX.close / VIX").unwrap();
+    h.command(&mut vcx, "expr VIX * 100").unwrap();
+    h.dispatch(&mut vcx, "prev", Some(2)); // cursor on VIX
     h.dispatch(&mut vcx, "remove", None);
     let left: Vec<u8> = h.model(&vcx).slots().iter().map(|s| s.number).collect();
     assert_eq!(left, vec![1]);
     assert_eq!(
         h.notice(&vcx).as_deref(),
-        Some("removed s2 and, with it, s3, s4")
+        Some("removed VIX and, with it, SPX.close / VIX, VIX * 100"),
+        "series are named by label"
     );
 }
 
@@ -949,10 +950,16 @@ fn the_edit_verb_on_a_source_slot_says_so(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.dispatch(&mut vcx, "edit", None);
-    assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("SPX.close is not an expression")
+    );
     // An unhandled list action with no list open preserves the standing notice.
     h.dispatch(&mut vcx, "list_down", None);
-    assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("SPX.close is not an expression")
+    );
     // A handled one takes it away and speaks for itself.
     h.dispatch(&mut vcx, "next", None);
     assert_eq!(h.notice(&vcx), None);
@@ -990,7 +997,7 @@ fn only_a_change_the_chart_model_reads_rebuilds_it(cx: &mut gpui::TestAppContext
 fn a_reloaded_colours_doc_reaches_an_open_tile(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.command(&mut vcx, "colour SPX.close spx").unwrap();
     h.draw(&mut vcx);
     let before = h.swatch(&vcx);
     let version = h.chart(&vcx).version;
@@ -1017,16 +1024,16 @@ fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
     h.command(&mut vcx, "add VIX").unwrap();
     let lines = [
         "add NKY.close",
-        "expr s1 / s2",
-        "remove s3",
-        "rule s1 mean",
-        "colour s1 2",
+        "expr SPX.close / VIX",
+        "remove NKY.close",
+        "rule SPX.close mean",
+        "colour SPX.close 2",
         "axis time",
         "freq 1h",
         "range 6m",
         "pct 10 90",
         "density 20",
-        "yaxis s2 right",
+        "yaxis VIX right",
         "split 0.6",
         "clear",
     ];
@@ -1067,8 +1074,10 @@ fn serialize_and_restore_round_trip_the_model(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX@demo_rest").unwrap();
-    h.command(&mut vcx, "expr s1 / s2").unwrap();
-    h.command(&mut vcx, "yaxis s2 bottomleft").unwrap();
+    h.command(&mut vcx, "expr SPX.close / VIX@demo_rest")
+        .unwrap();
+    h.command(&mut vcx, "yaxis VIX@demo_rest bottomleft")
+        .unwrap();
     h.command(&mut vcx, "range 3m").unwrap();
     h.dispatch(&mut vcx, "zoom_in", None);
     let table = vcx.update(|_, cx| h.content.serialize(cx));
@@ -1081,10 +1090,108 @@ fn serialize_and_restore_round_trip_the_model(cx: &mut gpui::TestAppContext) {
     let m = h2.model(&vcx2);
     assert_eq!(m.slots().len(), 3);
     assert_eq!(m.slots()[1].axis, Axis::BottomLeft);
-    assert_eq!(m.slots()[2].text.as_deref(), Some("s1 / s2"));
+    assert_eq!(
+        m.slots()[2].text.as_deref(),
+        Some("SPX.close / VIX@demo_rest")
+    );
     assert_eq!(m.range(), &Range::Relative(Preset::M3));
     assert_eq!(vcx2.update(|_, cx| h2.content.serialize(cx)), table);
-    assert!(h2.painted_text(&mut vcx2).contains("s1 / s2"));
+    assert!(
+        h2.painted_text(&mut vcx2)
+            .contains("SPX.close / VIX@demo_re…")
+    );
+}
+
+/// A tile saved when expressions named slots by handle opens with the
+/// handles rewritten to names, through the factory's restore door.
+#[gpui::test]
+fn a_handle_session_opens_with_names(cx: &mut gpui::TestAppContext) {
+    let table: toml::Table = toml::from_str(
+        r#"
+        [[slots]]
+        number = 1
+        kind = "source"
+        identity = "SPX.close"
+        source = "demo_kdb"
+        [[slots]]
+        number = 2
+        kind = "source"
+        identity = "VIX"
+        source = "demo_rest"
+        [[slots]]
+        number = 3
+        kind = "expr"
+        text = "s1 / s2"
+        "#,
+    )
+    .unwrap();
+    let (h, mut vcx) = open_with(cx, Some(table));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX@demo_rest")
+    );
+    let painted = h.painted_text(&mut vcx);
+    assert!(painted.contains("SPX.close / VIX@demo_re…"), "{painted}");
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved.get("version").and_then(|v| v.as_integer()), Some(2));
+}
+
+/// `:rule`, `:colour`, `:yaxis` and `:remove` act on the selected series
+/// with no name, or on the series named first; an expression is reached
+/// only by selection, and a name that fits two series is refused.
+#[gpui::test]
+fn series_verbs_act_on_the_selection_or_a_named_series(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    // The cursor is on VIX@demo_rest, the last added.
+    h.command(&mut vcx, "yaxis right").unwrap();
+    h.command(&mut vcx, "rule SPX.close mean").unwrap();
+    h.command(&mut vcx, "colour VIX 4").unwrap();
+    let m = h.model(&vcx);
+    assert_eq!(m.slots()[2].axis, Axis::Right, "the selection");
+    assert!(matches!(
+        m.slots()[0].kind,
+        SlotKind::Source {
+            rule: BucketRule::Mean,
+            ..
+        }
+    ));
+    assert_eq!(
+        m.slots()[1].color,
+        Color::Palette(3),
+        "the default source's VIX, by its label"
+    );
+    assert_eq!(m.slots()[2].color, Color::Palette(2), "untouched");
+    h.command(&mut vcx, "expr SPX.close / VIX").unwrap();
+    h.command(&mut vcx, "yaxis bottomleft").unwrap();
+    assert_eq!(h.model(&vcx).slots()[3].axis, Axis::BottomLeft);
+    assert_eq!(
+        h.command(&mut vcx, "remove SPX.close / VIX").unwrap_err(),
+        "remove [series]",
+        "an expression's text is no name"
+    );
+    h.command(&mut vcx, "remove VIX@demo_rest").unwrap();
+    assert_eq!(h.model(&vcx).slots().len(), 3);
+    h.command(&mut vcx, "clear").unwrap();
+    assert_eq!(
+        h.command(&mut vcx, "colour 2").unwrap_err(),
+        "select a series or name one"
+    );
+}
+
+#[gpui::test]
+fn a_name_two_series_fit_is_refused_with_their_labels(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with_default_source(cx, None);
+    h.command(&mut vcx, "add VIX@demo_kdb").unwrap();
+    h.command(&mut vcx, "add VIX@demo_rest").unwrap();
+    assert_eq!(
+        h.command(&mut vcx, "rule VIX mean").unwrap_err(),
+        "'VIX' is ambiguous: VIX@demo_kdb or VIX@demo_rest"
+    );
+    let names = vcx.update(|_, cx| h.content.completions("remove ", 7, cx));
+    assert_eq!(names, vec!["VIX@demo_kdb", "VIX@demo_rest"]);
 }
 
 // ---- the data flow -----------------------------------------------
@@ -1232,7 +1339,7 @@ fn a_removed_pair_leaves_no_ghost_and_a_re_add_fetches_again(cx: &mut gpui::Test
     h.visible(&mut vcx, true);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.requests();
-    h.command(&mut vcx, "remove s1").unwrap();
+    h.command(&mut vcx, "remove SPX.close").unwrap();
     // Completion clears tracking even for a pair no longer held.
     h.deliver_fetched(&mut vcx, "demo_kdb", "SPX.close", Ok(1));
     h.command(&mut vcx, "add SPX.close").unwrap();
@@ -1522,7 +1629,7 @@ fn shift_l_opens_the_series_popup_whose_cursor_is_the_chips_cursor(cx: &mut gpui
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX@demo_rest").unwrap();
-    h.command(&mut vcx, "rule s2 mean").unwrap();
+    h.command(&mut vcx, "rule mean").unwrap();
     h.dispatch(&mut vcx, "list", None);
     assert!(h.popup_is_series(&vcx));
     assert_eq!(
@@ -1587,7 +1694,7 @@ fn a_chip_click_moves_the_cursor_without_opening_the_popup_and_a_row_click_moves
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.command(&mut vcx, "add VIX").unwrap();
     // The chips are keyed by SLOT NUMBER, not by index: the first
-    // chip is `s1`.
+    // chip is slot 1.
     h.click(&mut vcx, &format!("timeseries-chip-{TILE}-1"));
     assert_eq!(h.model(&vcx).cursor(), Some(0));
     assert!(h.popup_is_none(&vcx));
@@ -1758,7 +1865,7 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
     h.dispatch(&mut vcx, "expr", None);
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
     h.draw(&mut vcx);
-    vcx.simulate_input("s1 ^ s2");
+    vcx.simulate_input("SPX.close ^ VIX");
     assert!(
         !h.dispatch_handled(&mut vcx, "commit", None),
         "a parse error is UNHANDLED, like an inert enter: the field              stays open and `dispatch`'s tail puts a standing notice back"
@@ -1770,35 +1877,38 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
     );
     assert!(h.expr_error(&vcx).unwrap().contains("arithmetic only"));
     assert_eq!(h.model(&vcx).slots().len(), 2);
-    h.set_input_text(&mut vcx, "s1 / s2");
+    h.set_input_text(&mut vcx, "SPX.close / VIX");
     h.dispatch(&mut vcx, "commit", None);
     assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).slots()[2].text.as_deref(), Some("s1 / s2"));
+    assert_eq!(
+        h.model(&vcx).slots()[2].text.as_deref(),
+        Some("SPX.close / VIX")
+    );
     // `e` reopens the cursor's expression prefilled; `escape`
     // discards.
     h.dispatch(&mut vcx, "edit", None);
-    assert_eq!(h.input_text(&vcx), "s1 / s2");
+    assert_eq!(h.input_text(&vcx), "SPX.close / VIX");
     h.draw(&mut vcx);
     vcx.simulate_input(" * 2");
     h.dispatch(&mut vcx, "cancel", None);
     assert_eq!(
         h.model(&vcx).slots()[2].text.as_deref(),
-        Some("s1 / s2"),
+        Some("SPX.close / VIX"),
         "escape discards"
     );
     h.dispatch(&mut vcx, "edit", None);
-    h.set_input_text(&mut vcx, "s1 - s2");
+    h.set_input_text(&mut vcx, "SPX.close - VIX");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(
         h.model(&vcx).slots()[2].text.as_deref(),
-        Some("s1 - s2"),
+        Some("SPX.close - VIX"),
         "replaced in place, same number"
     );
     assert_eq!(h.model(&vcx).slots()[2].number, 3);
     h.dispatch(&mut vcx, "prev", None);
     h.dispatch(&mut vcx, "edit", None);
     assert!(h.popup_is_none(&vcx), "`e` on a source slot does nothing");
-    assert_eq!(h.notice(&vcx).as_deref(), Some("s2 is not an expression"));
+    assert_eq!(h.notice(&vcx).as_deref(), Some("VIX is not an expression"));
 }
 
 /// The palette can dispatch any action over an open field (`ctrl+k`
@@ -1811,7 +1921,7 @@ fn x_opens_the_expression_field_and_enter_adds_or_reports_inline(cx: &mut gpui::
 fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    let before = h.model(&vcx).slots()[0].colour.clone();
+    let before = h.model(&vcx).slots()[0].color.clone();
     h.dispatch(&mut vcx, "add", None);
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
     // The palette's path: an action the picker has no verb for.
@@ -1820,7 +1930,7 @@ fn any_verb_but_the_fields_own_four_closes_an_insert_popup_first(cx: &mut gpui::
     assert_eq!(h.key_context_mode(&mut vcx), "normal");
     assert!(!vcx.update(|w, cx| h.content.holds_focus(w, cx)));
     assert_ne!(
-        h.model(&vcx).slots()[0].colour,
+        h.model(&vcx).slots()[0].color,
         before,
         "and the verb itself ran"
     );
@@ -1859,7 +1969,10 @@ fn a_blank_query_offers_no_add_row_and_an_inert_enter_keeps_the_notice(
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.dispatch(&mut vcx, "edit", None);
-    assert_eq!(h.notice(&vcx).as_deref(), Some("s1 is not an expression"));
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("SPX.close is not an expression")
+    );
     h.dispatch(&mut vcx, "add", None);
     h.draw(&mut vcx);
     vcx.simulate_input("   ");
@@ -2592,7 +2705,7 @@ fn click_at_down(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels
 fn a_drag_on_the_divider_moves_the_split(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_loaded(cx, 20);
     h.command(&mut vcx, "add VIX").unwrap();
-    h.command(&mut vcx, "yaxis s2 bottomleft").unwrap();
+    h.command(&mut vcx, "yaxis VIX bottomleft").unwrap();
     h.requests();
     h.deliver_fetched(&mut vcx, "demo_kdb", "VIX", Ok(1));
     let tag = h.series_request().unwrap().tag;
@@ -2631,7 +2744,7 @@ fn a_drag_on_the_divider_moves_the_split(cx: &mut gpui::TestAppContext) {
     h.draw(&mut vcx);
     assert_eq!(h.drag(&vcx), None);
     // With one pane there is no band at all.
-    h.command(&mut vcx, "yaxis s2 left").unwrap();
+    h.command(&mut vcx, "yaxis VIX left").unwrap();
     h.draw(&mut vcx);
     h.draw(&mut vcx);
     let selector: &'static str = Box::leak(format!("timeseries-divider-{TILE}").into_boxed_str());
@@ -2817,7 +2930,7 @@ fn an_outside_click_closes_the_menu_and_the_menu_follows_the_cursor_slot(
     assert!(h.menu_rows(&vcx).contains(&("[VIX]".to_string(), false)));
     // A `:` line under the open menu moves the cursor slot: the rows
     // follow it.
-    h.command(&mut vcx, "remove s2").unwrap();
+    h.command(&mut vcx, "remove").unwrap();
     assert!(h.popup_is_menu(&vcx), "`:` leaves the menu up");
     let rows = h.menu_rows(&vcx);
     assert!(
@@ -2859,7 +2972,7 @@ impl Harness {
     /// The slot the open colour picker targets, if the picker is up.
     fn colour_target(&self, vcx: &gpui::VisualTestContext) -> Option<u8> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
-            Some(Popup::Colour(c)) => Some(c.target),
+            Some(Popup::Color(c)) => Some(c.target),
             _ => None,
         })
     }
@@ -2867,10 +2980,10 @@ impl Harness {
     fn colour_pick(
         &self,
         vcx: &gpui::VisualTestContext,
-    ) -> (Entity<ColorPickerState>, Vec<(gpui::Hsla, Colour)>) {
+    ) -> (Entity<ColorPickerState>, Vec<(gpui::Hsla, Color)>) {
         self.tile
             .read_with(vcx, |t, _| match (t.popup(), t.pick_context()) {
-                (Some(Popup::Colour(c)), Some(p)) => {
+                (Some(Popup::Color(c)), Some(p)) => {
                     assert_eq!(c.target, p.target);
                     (c.picker.clone(), p.featured.clone())
                 }
@@ -2889,7 +3002,7 @@ impl Harness {
     fn holds_focus(&self, vcx: &mut gpui::VisualTestContext) -> bool {
         vcx.update(|window, cx| self.content.holds_focus(window, cx))
     }
-    /// Open the menu and pick `Colour…` with the menu's own verbs (`j`
+    /// Open the menu and pick `Color…` with the menu's own verbs (`j`
     /// until it is lit, then `enter`).
     fn pick_colour_row_by_keys(&self, vcx: &mut gpui::VisualTestContext) {
         self.dispatch(vcx, "menu", None);
@@ -2934,12 +3047,12 @@ fn the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click(
     assert_eq!(
         featured.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(),
         vec![
-            Colour::Palette(0),
-            Colour::Palette(1),
-            Colour::Palette(2),
-            Colour::Palette(3),
-            Colour::Palette(4),
-            Colour::Named("spx".into()),
+            Color::Palette(0),
+            Color::Palette(1),
+            Color::Palette(2),
+            Color::Palette(3),
+            Color::Palette(4),
+            Color::Named("spx".into()),
         ]
     );
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
@@ -2974,19 +3087,19 @@ fn a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolut
     h.pick_colour_row_by_keys(&mut vcx);
     let (picker, featured) = h.colour_pick(&vcx);
     h.select_colour(&mut vcx, featured[5].0);
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Named("spx".into()));
     assert!(h.popup_is_none(&vcx), "a swatch commit closes the picker");
     assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
     h.pick_colour_row_by_keys(&mut vcx);
     let (_, featured) = h.colour_pick(&vcx);
     h.select_colour(&mut vcx, featured[3].0);
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(3));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(3));
     // Off the featured row: absolute, and the chart paints exactly it.
     h.pick_colour_row_by_keys(&mut vcx);
     let before = h.chart(&vcx).slots[0].colour;
     let green = crate::core::Rgb8([0x00, 0xcc, 0x44]);
     h.select_colour(&mut vcx, green.to_hsla());
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Custom(green));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Custom(green));
     let after = h.chart(&vcx).slots[0].colour;
     assert_ne!(before, after);
     assert_eq!(after, green.to_hsla(), "no floor, no theme");
@@ -3015,8 +3128,8 @@ fn a_pick_lands_on_the_target_slot_even_after_the_cursor_moves(cx: &mut gpui::Te
     let blue = crate::core::Rgb8([0x11, 0x22, 0xee]);
     h.select_colour(&mut vcx, blue.to_hsla());
     let m = h.model(&vcx);
-    assert_eq!(m.slots()[1].colour, Colour::Custom(blue), "the target");
-    assert_eq!(m.slots()[0].colour, Colour::Palette(0), "not the cursor");
+    assert_eq!(m.slots()[1].color, Color::Custom(blue), "the target");
+    assert_eq!(m.slots()[0].color, Color::Palette(0), "not the cursor");
 }
 
 #[gpui::test]
@@ -3030,11 +3143,11 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
     // from the tile's verbs.
     assert!(h.holds_focus(&mut vcx), "the picker holds the keyboard");
     assert_eq!(h.key_context_mode(&mut vcx), "insert");
-    let colour = h.model(&vcx).slots()[0].colour.clone();
+    let colour = h.model(&vcx).slots()[0].color.clone();
     vcx.simulate_keystrokes("escape");
     h.draw(&mut vcx);
     assert!(h.popup_is_none(&vcx), "escape closes");
-    assert_eq!(h.model(&vcx).slots()[0].colour, colour, "unchanged");
+    assert_eq!(h.model(&vcx).slots()[0].color, colour, "unchanged");
     assert!(
         vcx.update(|window, _| root.is_focused(window)),
         "focus is back where it was"
@@ -3043,7 +3156,7 @@ fn escape_closes_the_picker_unchanged_and_gives_the_keyboard_back(cx: &mut gpui:
     assert_eq!(h.key_context_mode(&mut vcx), "normal");
     // The tile's own keys drive it again.
     h.dispatch(&mut vcx, "colour", None);
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(1));
 }
 
 /// The component writes its hex field by TRUNCATING each channel, so
@@ -3065,7 +3178,7 @@ fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAp
     vcx.simulate_keystrokes("enter");
     h.draw(&mut vcx);
     assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(0));
 }
 
 /// A pick that is (to a step) the colour the slot already paints
@@ -3077,7 +3190,7 @@ fn enter_on_the_untouched_hex_field_keeps_the_slots_colour(cx: &mut gpui::TestAp
 fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
-    h.command(&mut vcx, "colour s1 spx").unwrap();
+    h.command(&mut vcx, "colour SPX.close spx").unwrap();
     h.factory.set_colours(NamedColours::default());
     h.draw(&mut vcx);
     let _root = focus_stand_in(&mut vcx);
@@ -3091,7 +3204,7 @@ fn a_pick_of_the_colour_already_painted_is_a_no_op(cx: &mut gpui::TestAppContext
     vcx.simulate_keystrokes("enter");
     h.draw(&mut vcx);
     assert!(h.popup_is_none(&vcx));
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Named("spx".into()));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Named("spx".into()));
 }
 
 #[gpui::test]
@@ -3115,14 +3228,14 @@ fn a_typed_hex_commits_an_absolute_colour_and_hands_focus_back(cx: &mut gpui::Te
     // asserted above; this harness has no shell matcher.)
     vcx.simulate_input("#ffcc00");
     vcx.simulate_keystrokes("backspace backspace backspace backspace 8 8 0 0");
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(0));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(0));
     // `enter` commits AND closes the popover in one keystroke; the
     // commit's `Change` lands after the close and still counts.
     vcx.simulate_keystrokes("enter");
     h.draw(&mut vcx);
     assert_eq!(
-        h.model(&vcx).slots()[0].colour,
-        Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
+        h.model(&vcx).slots()[0].color,
+        Color::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
     );
     assert!(h.popup_is_none(&vcx));
     // That close was the popover's own: it handed focus back.
@@ -3151,7 +3264,7 @@ fn a_swatch_commit_blurs_the_picker_before_dropping_it(cx: &mut gpui::TestAppCon
     let focused_after = vcx.update(|window, cx| window.focused(cx));
     assert!(h.popup_is_none(&vcx));
     assert_eq!(focused_after, None, "blurred before the drop");
-    assert_eq!(h.model(&vcx).slots()[0].colour, Colour::Palette(1));
+    assert_eq!(h.model(&vcx).slots()[0].color, Color::Palette(1));
 }
 
 #[gpui::test]
@@ -3162,9 +3275,9 @@ fn removing_the_target_slot_closes_the_picker(cx: &mut gpui::TestAppContext) {
     h.pick_colour_row_by_keys(&mut vcx);
     let (picker, _) = h.colour_pick(&vcx);
     // Another slot going leaves it up.
-    h.command(&mut vcx, "remove s1").unwrap();
+    h.command(&mut vcx, "remove SPX.close").unwrap();
     assert_eq!(h.colour_target(&vcx), Some(2));
-    h.command(&mut vcx, "remove s2").unwrap();
+    h.command(&mut vcx, "remove VIX").unwrap();
     assert!(h.popup_is_none(&vcx), "its target is gone");
     assert!(!picker.read_with(&vcx, |s, _| s.is_open()));
 }

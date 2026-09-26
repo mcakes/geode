@@ -3,18 +3,38 @@
 //! mode, split, density, percentiles. Not the view, not slot state.
 //! `from_table` heals a hostile table rather than refusing it, like
 //! `Tree::from_parts`; every drop is a notice the tile shows once.
+//!
+//! A table without `version = 2` was saved when expression text named
+//! slots by handle (`s3`). Restoring it rewrites each handle to a name:
+//! a source slot's label, or an expression slot's own text in
+//! parentheses, recursively. A text that cannot be rewritten (a cycle,
+//! a handle to a slot the table no longer holds, a series no name can
+//! pick out) keeps its slot, failed with the reason, and is written
+//! back with `legacy = true` so a later restore tries again.
 
 use geode_chart::{Axis, AxisMode};
+use geode_core::series::expr;
 use geode_core::series::{BucketRule, Frequency, MAX_BINS, MIN_BINS, SlotKind};
 use toml::{Table, Value};
 
-use super::model::{Colour, Model, SlotState};
+use super::model::{Color, Model, SlotState};
 use super::range::Range;
-use super::resolve::resolve;
+use super::resolve::{name_for, resolve};
 use super::rgb::Rgb8;
+
+/// The table format: 2 names series in expression text; absent (1)
+/// names them by slot handle.
+const VERSION: i64 = 2;
+
+/// The longest text a handle rewrite may build. Inlining expressions
+/// into expressions can double the text per level; the parser's token
+/// bound would refuse the result anyway, and this stops the rewrite
+/// before it allocates its way there.
+const REWRITE_MAX: usize = 16 * 1024;
 
 pub fn to_table(model: &Model) -> Table {
     let mut t = Table::new();
+    t.insert("version".into(), Value::Integer(VERSION));
     let slots: Vec<Value> = model
         .slots()
         .iter()
@@ -40,19 +60,22 @@ pub fn to_table(model: &Model) -> Table {
                         "text".into(),
                         Value::String(s.text.clone().unwrap_or_default()),
                     );
+                    if s.legacy {
+                        r.insert("legacy".into(), Value::Boolean(true));
+                    }
                 }
             }
-            match &s.colour {
-                Colour::Palette(i) => {
+            match &s.color {
+                Color::Palette(i) => {
                     r.insert("colour".into(), Value::Integer(*i as i64));
                 }
-                Colour::Named(n) => {
+                Color::Named(n) => {
                     r.insert("colour".into(), Value::String(n.clone()));
                 }
                 // `#rrggbb`: a `[colours]` name can never start with `#`
                 // (`geode_core::colour::RESERVED_PREFIX`), so the string
                 // form stays unambiguous.
-                Colour::Custom(c) => {
+                Color::Custom(c) => {
                     r.insert("colour".into(), Value::String(c.hex()));
                 }
             }
@@ -145,14 +168,16 @@ pub fn from_table(
             .collect();
         let _ = m.set_percentiles(fractions);
     }
-    // Sources first, then expressions in file order, so a handle resolves.
+    // Sources first, then expressions in file order, so every name an
+    // expression uses (and every handle a legacy one rewrites) is loaded.
+    let legacy_file = t.get("version").and_then(Value::as_integer).unwrap_or(1) < VERSION;
     let rows: Vec<&Table> = t
         .get("slots")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_table).collect())
         .unwrap_or_default();
     let mut seen = Vec::new();
-    let mut pending_exprs: Vec<(u8, &Table)> = Vec::new();
+    let mut pending_exprs: Vec<PendingExpr> = Vec::new();
     for r in rows {
         let Some(number) = r
             .get("number")
@@ -160,11 +185,14 @@ pub fn from_table(
             .and_then(|n| u8::try_from(n).ok())
             .filter(|n| *n > 0)
         else {
-            notices.push("a restored slot had no number and was dropped".into());
+            notices.push("a restored series had no slot number and was dropped".into());
             continue;
         };
         if seen.contains(&number) {
-            notices.push(format!("a second slot numbered s{number} was dropped"));
+            notices.push(format!(
+                "{} shared a slot number and was dropped",
+                row_name(r)
+            ));
             continue;
         }
         seen.push(number);
@@ -174,14 +202,14 @@ pub fn from_table(
                     r.get("identity").and_then(Value::as_str),
                     r.get("source").and_then(Value::as_str),
                 ) else {
-                    notices.push(format!(
-                        "s{number} names no identity or source and was dropped"
-                    ));
+                    notices.push(
+                        "a restored series named no identity or source and was dropped".into(),
+                    );
                     continue;
                 };
                 let Some(dataset) = dataset_of(source) else {
                     notices.push(format!(
-                        "s{number}: '{source}' is not a fetch source in this config; {identity}@{source} was dropped"
+                        "'{source}' is not a fetch source in this config; {identity}@{source} was dropped"
                     ));
                     continue;
                 };
@@ -197,26 +225,44 @@ pub fn from_table(
                         }
                         apply_look(&mut m, number, r);
                     }
-                    Err(e) => notices.push(format!("s{number}: {e}")),
+                    Err(e) => notices.push(format!("{identity}@{source}: {e}")),
                 }
             }
-            Some("expr") => pending_exprs.push((number, r)),
-            _ => notices.push(format!("s{number} has an unknown kind and was dropped")),
+            Some("expr") => pending_exprs.push(PendingExpr {
+                number,
+                text: r.get("text").and_then(Value::as_str).unwrap_or(""),
+                legacy: legacy_file || r.get("legacy").and_then(Value::as_bool) == Some(true),
+                row: r,
+            }),
+            _ => notices.push("a restored series of unknown kind was dropped".into()),
         }
     }
-    for (number, r) in pending_exprs {
-        let text = r.get("text").and_then(Value::as_str).unwrap_or("");
-        match resolve(text, m.slots(), default_source, None) {
-            Ok(expr) => {
-                m.set_next_number(number);
-                match m.add_expr(text, expr) {
-                    Ok(_) => apply_look(&mut m, number, r),
-                    Err(e) => {
-                        notices.push(format!("expression s{number} `{text}` was dropped: {e}"))
-                    }
-                }
+    for p in &pending_exprs {
+        let rewritten = if p.legacy {
+            let mut visiting = vec![p.number];
+            rewrite_handles(p.text, &pending_exprs, &m, default_source, &mut visiting)
+                .and_then(|text| resolve(&text, m.slots(), default_source).map(|e| (text, e)))
+                .map_err(|why| format!("could not rewrite this saved expression by name: {why}"))
+        } else {
+            resolve(p.text, m.slots(), default_source)
+                .map(|e| (p.text.to_string(), e))
+                .map_err(|why| format!("expression `{}` was dropped: {why}", p.text))
+        };
+        m.set_next_number(p.number);
+        let added = match rewritten {
+            Ok((text, expr)) => m.add_expr(&text, expr).map(|_| ()),
+            // A legacy text that cannot be rewritten keeps its slot,
+            // failed; a current text that does not resolve is dropped,
+            // as it always was.
+            Err(why) if p.legacy => m.add_legacy_expr(p.text, why).map(|_| ()),
+            Err(why) => {
+                notices.push(why);
+                continue;
             }
-            Err(e) => notices.push(format!("expression s{number} `{text}` was dropped: {e}")),
+        };
+        match added {
+            Ok(()) => apply_look(&mut m, p.number, p.row),
+            Err(e) => notices.push(format!("expression `{}` was dropped: {e}", p.text)),
         }
     }
     if let Some(n) = m.take_notice() {
@@ -229,10 +275,101 @@ pub fn from_table(
             .map_or(1, |n| n.saturating_add(1)),
     );
     for s in m.slots_mut() {
-        s.state = SlotState::Idle;
+        if !s.legacy {
+            s.state = SlotState::Idle;
+        }
     }
     m.set_cursor(0);
     (m, notices)
+}
+
+/// An expression row waiting for the sources to load.
+struct PendingExpr<'a> {
+    number: u8,
+    text: &'a str,
+    /// Its text names slots by handle and must be rewritten.
+    legacy: bool,
+    row: &'a Table,
+}
+
+/// A dropped row's name for a notice: its pair, its text, or a plain
+/// "a restored series".
+fn row_name(r: &Table) -> String {
+    let get = |k: &str| r.get(k).and_then(Value::as_str);
+    match (get("identity"), get("source"), get("text")) {
+        (Some(i), Some(s), _) => format!("{i}@{s}"),
+        (_, _, Some(text)) => format!("expression `{text}`"),
+        _ => "a restored series".into(),
+    }
+}
+
+/// A handle as the old grammar read one: `s` then digits that fit a
+/// `u8`, with no `@source`.
+fn legacy_handle(r: &expr::RefName) -> Option<u8> {
+    if r.source.is_some() {
+        return None;
+    }
+    let digits = r.identity.strip_prefix('s')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// `text` with every handle written as a name: a source slot's name
+/// ([`name_for`]), an expression slot's own text in parentheses (itself
+/// rewritten when it is legacy too). Other names pass through as typed.
+/// `visiting` holds the expressions being inlined, the root first, so a
+/// cycle is an error rather than a recursion that never ends.
+fn rewrite_handles(
+    text: &str,
+    exprs: &[PendingExpr],
+    m: &Model,
+    default_source: Option<&str>,
+    visiting: &mut Vec<u8>,
+) -> Result<String, String> {
+    let refs = expr::references(text).map_err(|e| e.message)?;
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for (span, r) in refs {
+        let Some(n) = legacy_handle(&r) else {
+            continue;
+        };
+        out.push_str(&text[at..span.start]);
+        at = span.end;
+        if matches!(
+            m.slot_by_number(n).map(|s| &s.kind),
+            Some(SlotKind::Source { .. })
+        ) {
+            out.push_str(&name_for(n, m.slots(), default_source)?);
+        } else if let Some(inner) = exprs.iter().find(|p| p.number == n) {
+            if visiting.contains(&n) {
+                return Err(if visiting.first() == Some(&n) {
+                    "it references itself, directly or through another expression".into()
+                } else {
+                    "it references an expression that references itself".into()
+                });
+            }
+            let inlined = if inner.legacy {
+                visiting.push(n);
+                let t = rewrite_handles(inner.text, exprs, m, default_source, visiting)?;
+                visiting.pop();
+                t
+            } else {
+                inner.text.to_string()
+            };
+            out.push('(');
+            out.push_str(&inlined);
+            out.push(')');
+        } else {
+            return Err("it references a series this session no longer holds".into());
+        }
+        if out.len() > REWRITE_MAX {
+            return Err("it is too long once its references are written out".into());
+        }
+    }
+    out.push_str(&text[at..]);
+    Ok(out)
 }
 
 fn apply_look(m: &mut Model, number: u8, r: &Table) {
@@ -240,17 +377,17 @@ fn apply_look(m: &mut Model, number: u8, r: &Table) {
         Some(Value::Integer(i))
             if (0..geode_chart::core::palette::Palette::LEN as i64).contains(i) =>
         {
-            let _ = m.set_colour(number, Colour::Palette(*i as usize));
+            let _ = m.set_color(number, Color::Palette(*i as usize));
         }
         // A malformed `#…` keeps the slot's default colour, as an
         // out-of-range palette index does.
         Some(Value::String(n)) if n.starts_with(geode_core::colour::RESERVED_PREFIX) => {
             if let Some(c) = Rgb8::parse_hex(n) {
-                let _ = m.set_colour(number, Colour::Custom(c));
+                let _ = m.set_color(number, Color::Custom(c));
             }
         }
         Some(Value::String(n)) => {
-            let _ = m.set_colour(number, Colour::Named(n.clone()));
+            let _ = m.set_color(number, Color::Named(n.clone()));
         }
         _ => {}
     }
@@ -265,7 +402,7 @@ fn apply_look(m: &mut Model, number: u8, r: &Table) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Colour, Model, Preset, Range, SlotState};
+    use crate::core::{Color, Model, Preset, Range, SlotState};
     use geode_chart::{Axis, AxisMode};
     use geode_core::series::{BucketRule, Frequency, SlotKind};
 
@@ -280,10 +417,10 @@ mod tests {
         m.add_source("VIX", "demo_rest", "series").unwrap();
         m.set_rule(2, BucketRule::Mean).unwrap();
         m.set_axis(2, Axis::BottomRight).unwrap();
-        m.set_colour(1, Colour::Named("spx".into())).unwrap();
+        m.set_color(1, Color::Named("spx".into())).unwrap();
         m.toggle_visible();
-        let e = crate::core::resolve("s1 / s2", m.slots(), Some("demo_kdb"), None).unwrap();
-        m.add_expr("s1 / s2", e).unwrap();
+        let e = crate::core::resolve("SPX.close / VIX", m.slots(), Some("demo_kdb")).unwrap();
+        m.add_expr("SPX.close / VIX", e).unwrap();
         m.set_range(
             Range::Relative(Preset::M6),
             chrono::Utc::now(),
@@ -301,14 +438,15 @@ mod tests {
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(back.slots().len(), 3);
         assert_eq!(back.slots()[0].number, 1);
-        assert_eq!(back.slots()[0].colour, Colour::Named("spx".into()));
+        assert_eq!(back.slots()[0].color, Color::Named("spx".into()));
         assert!(
             matches!(&back.slots()[1].kind, SlotKind::Source { rule: BucketRule::Mean, source, .. } if source == "demo_rest")
         );
         assert_eq!(back.slots()[1].axis, Axis::BottomRight);
         assert!(!back.slots()[1].visible);
-        assert_eq!(back.slots()[2].text.as_deref(), Some("s1 / s2"));
-        assert!(matches!(back.slots()[2].kind, SlotKind::Expr(_)));
+        assert_eq!(back.slots()[2].text.as_deref(), Some("SPX.close / VIX"));
+        assert!(matches!(&back.slots()[2].kind, SlotKind::Expr(e) if e.slots() == vec![1, 2]));
+        assert_eq!(t.get("version").and_then(|v| v.as_integer()), Some(2));
         assert!(
             back.slots().iter().all(|s| s.state == SlotState::Idle),
             "slot state is not persisted (§9.11)"
@@ -336,7 +474,7 @@ mod tests {
         let mut m = Model::new();
         m.add_source("SPX.close", "demo_kdb", "series").unwrap();
         m.add_source("VIX", "demo_kdb", "series").unwrap();
-        m.set_colour(1, Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00])))
+        m.set_color(1, Color::Custom(crate::core::Rgb8([0xff, 0x88, 0x00])))
             .unwrap();
         let t = to_table(&m);
         let slots = t["slots"].as_array().unwrap();
@@ -346,8 +484,8 @@ mod tests {
         );
         let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
         assert_eq!(
-            back.slots()[0].colour,
-            Colour::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
+            back.slots()[0].color,
+            Color::Custom(crate::core::Rgb8([0xff, 0x88, 0x00]))
         );
         let text = r##"
             [[slots]]
@@ -360,8 +498,8 @@ mod tests {
         let t: toml::Table = toml::from_str(text).unwrap();
         let (back, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
         assert_eq!(
-            back.slots()[0].colour,
-            Colour::Palette(0),
+            back.slots()[0].color,
+            Color::Palette(0),
             "malformed hex is neither a colour nor a name"
         );
     }
@@ -369,6 +507,7 @@ mod tests {
     #[test]
     fn a_hostile_table_heals_rather_than_refuses() {
         let text = r#"
+            version = 2
             frequency = "9h"
             axis = "sideways"
             split = 7.0
@@ -389,11 +528,11 @@ mod tests {
             [[slots]]
             number = 2
             kind = "expr"
-            text = "s1 / s2"
+            text = "SPX.close / VIX"
             [[slots]]
             number = 3
             kind = "expr"
-            text = "s2 * s7"
+            text = "VIX * V2X"
         "#;
         let t: toml::Table = toml::from_str(text).unwrap();
         let (m, notices) = from_table(&t, &dataset_of, Some("demo_kdb"));
@@ -413,13 +552,202 @@ mod tests {
             "unknown source dropped, duplicate number dropped, unresolvable expression dropped"
         );
         assert_eq!(
-            m.slots()[0].colour,
-            Colour::Palette(0),
+            m.slots()[0].color,
+            Color::Palette(0),
             "99 is off the palette"
         );
         assert_eq!(notices.len(), 3, "{notices:?}");
         assert!(notices[0].contains("gone_src"));
-        assert!(notices.iter().any(|n| n.contains("s2 * s7")));
+        assert_eq!(
+            notices[1],
+            "expression `SPX.close / VIX` shared a slot number and was dropped"
+        );
+        assert_eq!(
+            notices[2],
+            "expression `VIX * V2X` was dropped: 'V2X' is not loaded — `a` adds it"
+        );
+    }
+
+    fn slot_text(m: &Model, number: u8) -> Option<&str> {
+        m.slot_by_number(number).and_then(|s| s.text.as_deref())
+    }
+
+    /// A session saved while expressions named slots by handle, shaped
+    /// as the tile wrote it: every handle is rewritten to a name, an
+    /// expression over an expression inlines the inner text, and a
+    /// cycle or a dangling handle keeps its slot, failed. Saved again,
+    /// the rewritten texts are final and the failed ones stay marked.
+    #[test]
+    fn a_handle_session_migrates_to_names() {
+        let text = r#"
+            range = "1y"
+            frequency = "1d"
+            axis = "session"
+            split = 0.7
+            density = 40
+            percentiles = [5.0, 50.0, 95.0]
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            colour = 0
+            [[slots]]
+            number = 2
+            kind = "source"
+            identity = "VIX"
+            source = "demo_rest"
+            colour = 1
+            axis = "right"
+            [[slots]]
+            number = 3
+            kind = "expr"
+            text = "s1 / s2"
+            colour = 2
+            [[slots]]
+            number = 4
+            kind = "expr"
+            text = "-s3*100 - s1"
+            colour = 3
+            axis = "bottomleft"
+            [[slots]]
+            number = 6
+            kind = "expr"
+            text = "s7 + 1"
+            [[slots]]
+            number = 7
+            kind = "expr"
+            text = "s6 * 2"
+            [[slots]]
+            number = 8
+            kind = "expr"
+            text = "s1 + s5"
+            visible = false
+            [[slots]]
+            number = 9
+            kind = "expr"
+            text = "s7 - s1"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, notices) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert!(notices.is_empty(), "{notices:?}");
+        let numbers: Vec<u8> = m.slots().iter().map(|s| s.number).collect();
+        assert_eq!(numbers, vec![1, 2, 3, 4, 6, 7, 8, 9], "every slot is kept");
+
+        assert_eq!(slot_text(&m, 3), Some("SPX.close / VIX@demo_rest"));
+        assert_eq!(
+            slot_text(&m, 4),
+            Some("-(SPX.close / VIX@demo_rest)*100 - SPX.close")
+        );
+        for n in [3, 4] {
+            let s = m.slot_by_number(n).unwrap();
+            assert!(!s.legacy && s.state == SlotState::Idle, "{n}: {s:?}");
+        }
+        assert!(
+            matches!(&m.slot_by_number(4).unwrap().kind, SlotKind::Expr(e) if e.slots() == vec![1, 2])
+        );
+        assert_eq!(m.slot_by_number(4).unwrap().color, Color::Palette(3));
+        assert_eq!(m.slot_by_number(4).unwrap().axis, Axis::BottomLeft);
+
+        let failed = |n: u8| match &m.slot_by_number(n).unwrap().state {
+            SlotState::Failed(why) => why.clone(),
+            other => panic!("{n} is {other:?}"),
+        };
+        for n in [6, 7] {
+            assert_eq!(
+                failed(n),
+                "could not rewrite this saved expression by name: it references itself, directly or through another expression"
+            );
+        }
+        assert_eq!(
+            failed(8),
+            "could not rewrite this saved expression by name: it references a series this session no longer holds"
+        );
+        assert_eq!(
+            failed(9),
+            "could not rewrite this saved expression by name: it references an expression that references itself"
+        );
+        assert_eq!(
+            slot_text(&m, 8),
+            Some("s1 + s5"),
+            "a failed text is kept as saved"
+        );
+        assert!(!m.slot_by_number(8).unwrap().visible);
+        assert_eq!(
+            m.label(m.index_of(8).unwrap(), Some("demo_kdb")),
+            "s1 + s5",
+            "the chip shows the saved text"
+        );
+
+        let again = to_table(&m);
+        let (back, notices) = from_table(&again, &dataset_of, Some("demo_kdb"));
+        assert!(notices.is_empty(), "{notices:?}");
+        assert_eq!(slot_text(&back, 4), slot_text(&m, 4));
+        assert!(
+            back.slot_by_number(8).unwrap().legacy,
+            "still marked, retried on restore"
+        );
+        assert_eq!(to_table(&back), again);
+    }
+
+    /// Only a legacy text is rewritten: in a current table `s1` is a name.
+    #[test]
+    fn a_current_table_reads_a_handle_shaped_name_as_a_name() {
+        let text = r#"
+            version = 2
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "SPX.close"
+            source = "demo_kdb"
+            [[slots]]
+            number = 2
+            kind = "source"
+            identity = "s1"
+            source = "demo_kdb"
+            [[slots]]
+            number = 3
+            kind = "expr"
+            text = "s1 * 2"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, notices) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(
+            matches!(&m.slot_by_number(3).unwrap().kind, SlotKind::Expr(e) if e.slots() == vec![2])
+        );
+    }
+
+    /// A handle to one of two slots holding the same pair has no name
+    /// that picks it out, so the rewrite refuses rather than retarget.
+    #[test]
+    fn a_handle_to_a_pair_loaded_twice_is_not_rewritten() {
+        let text = r#"
+            [[slots]]
+            number = 1
+            kind = "source"
+            identity = "VIX"
+            source = "demo_kdb"
+            [[slots]]
+            number = 2
+            kind = "source"
+            identity = "VIX"
+            source = "demo_kdb"
+            rule = "mean"
+            [[slots]]
+            number = 3
+            kind = "expr"
+            text = "s2 * 2"
+        "#;
+        let t: toml::Table = toml::from_str(text).unwrap();
+        let (m, _) = from_table(&t, &dataset_of, Some("demo_kdb"));
+        let s = m.slot_by_number(3).unwrap();
+        assert!(s.legacy);
+        assert!(
+            matches!(&s.state, SlotState::Failed(why) if why.ends_with("'VIX' is ambiguous: VIX (last) or VIX (mean)")),
+            "{:?}",
+            s.state
+        );
     }
 
     #[test]

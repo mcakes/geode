@@ -5,7 +5,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::series::{SeriesResult, SlotProvenance, SlotResult};
-use geode_timeseries::core::{Colour, Model, chart};
+use geode_timeseries::core::{Color, Model, chart};
 use std::hint::black_box;
 
 fn result(n: usize, slots: u8) -> SeriesResult {
@@ -34,7 +34,7 @@ fn bench(c: &mut Criterion) {
         model.add_source(id, "demo_kdb", "series").unwrap();
     }
     let r = result(500_000, 4);
-    let colour = |_: &Colour| gpui::black();
+    let colour = |_: &Color| gpui::black();
     c.bench_function("chart_model/500k_x_4", |b| {
         b.iter(|| black_box(chart::build(&r, &model, 1, 0, &colour, Some("demo_kdb"))))
     });

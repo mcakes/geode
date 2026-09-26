@@ -181,6 +181,35 @@ updates affected slots. Visible affected tiles requery on every successful
 completion, including zero new rows. Failed requests retain the last good
 chart and report a notice or failed slot.
 
+A series is named by its chip label: its identity, with `@source` only when
+the source is not the configured default. Slot numbers stay internal (session
+keys, request tags, element IDs) and never appear on screen or in anything the
+trader types. `:rule`, `:colour`, `:yaxis`, and `:remove` act on the selected
+series, or on a series named first (`:colour VIX 2`, `:remove
+SPX.close@demo_rest`); the word count tells the two apart, so `:colour spx`
+sets the selected series' color. A bare identity also names a series when it is
+unambiguous; otherwise the command is refused with the matching labels, and
+with no selection and no name it is refused outright. An expression has no
+name, so it is reached only by selection. Completion offers the names where
+one may go.
+
+Expressions reference source series by the same names, and only source
+series: an expression cannot reference another expression, so there is no
+expression ordering and no cycle to refuse. A name that fits more than one
+series, including a pair loaded twice under two rules, is refused rather than
+resolved to either. A long expression's chip label is cut to 24 characters
+ending in `…`.
+
+A tile's session table is written with `version = 2`. A table without it
+names series in expression text by slot handle (`s3`), and restore rewrites
+each handle: a source slot's handle becomes its label, and another
+expression's handle becomes that expression's text in parentheses,
+recursively. An expression that cannot be rewritten (a cycle, a handle to a
+slot the session no longer holds, or a series no name can pick out) keeps its
+slot and saved text, shows as failed with the reason, is never queried, and
+is saved back marked so a later restore tries again; editing it with `e`
+replaces it.
+
 Series queries return aligned points, percentiles, bins, and coverage.
 Expression slots may narrow results to buckets shared by their operands.
 Delivery tags reject superseded queries. Results requested under a pending
@@ -264,8 +293,8 @@ A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an absolu
 no theme or contrast adjustment. Sessions store them as lowercase six-digit
 hex; malformed hex restores the slot's default colour. Colour names beginning
 with `#` are reserved. `c` cycles the palette, starting at colour 1 from a named
-or absolute colour. `:colour s<n> <1..5|name|#rrggbb>` sets the colour directly;
-an explicit hex remains absolute even if it matches a palette colour.
+or absolute colour. `:colour [series] <1..5|name|#rrggbb>` sets the colour
+directly; an explicit hex remains absolute even if it matches a palette colour.
 
 The action menu's `Colour…` row opens a picker at the selected slot's chip.
 Its featured swatches capture the five palette colours and all named colours

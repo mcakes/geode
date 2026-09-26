@@ -7,14 +7,14 @@ use geode_chart::{ChartModel, ChartSlot};
 use geode_core::series::SeriesResult;
 use gpui::Hsla;
 
-use super::model::{Colour, Model};
+use super::model::{Color, Model};
 
 pub fn build(
     result: &SeriesResult,
     model: &Model,
     version: u64,
     offset_secs: i32,
-    colour_of: &dyn Fn(&Colour) -> Hsla,
+    colour_of: &dyn Fn(&Color) -> Hsla,
     default_source: Option<&str>,
 ) -> ChartModel {
     let n = result.buckets.len();
@@ -32,7 +32,7 @@ pub fn build(
                 number: s.number,
                 label: model.label(i, default_source).into(),
                 values,
-                colour: colour_of(&s.colour),
+                colour: colour_of(&s.color),
                 axis: s.axis,
                 visible: s.visible,
                 percentile_labels: percentiles
@@ -59,7 +59,7 @@ pub fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Colour, Model};
+    use crate::core::{Color, Model};
     use geode_chart::Axis;
     use geode_core::series::{SeriesResult, SlotProvenance, SlotResult};
     use gpui::Hsla;
@@ -98,15 +98,15 @@ mod tests {
         m.add_source("VIX", "demo_kdb", "series").unwrap();
         m.cycle_axis(true, 1); // s2 → Right
         m.toggle_visible(); // s2 hidden
-        let colour_of = |c: &Colour| match c {
-            Colour::Palette(i) => Hsla {
+        let colour_of = |c: &Color| match c {
+            Color::Palette(i) => Hsla {
                 h: *i as f32 / 10.0,
                 s: 1.0,
                 l: 0.5,
                 a: 1.0,
             },
-            Colour::Named(_) => gpui::black(),
-            Colour::Custom(c) => c.to_hsla(),
+            Color::Named(_) => gpui::black(),
+            Color::Custom(c) => c.to_hsla(),
         };
         let cm = build(&result(), &m, 9, 3600, &colour_of, Some("demo_kdb"));
         assert_eq!(cm.version, 9);

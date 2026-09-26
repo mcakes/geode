@@ -63,9 +63,11 @@ pub fn params(
         window,
         as_of: as_of.clone(),
         frequency: model.frequency(),
+        // A legacy slot's kind is a placeholder with no operands.
         series: model
             .slots()
             .iter()
+            .filter(|s| !s.legacy)
             .map(|s| SeriesSpec {
                 slot: s.number,
                 kind: s.kind.clone(),
@@ -99,8 +101,8 @@ mod tests {
         let mut m = Model::new();
         m.add_source("SPX.close", "demo_kdb", "series").unwrap();
         m.add_source("VIX", "demo_kdb", "series").unwrap();
-        let e = crate::core::resolve("s1 / s2", m.slots(), Some("demo_kdb"), None).unwrap();
-        m.add_expr("s1 / s2", e).unwrap();
+        let e = crate::core::resolve("SPX.close / VIX", m.slots(), Some("demo_kdb")).unwrap();
+        m.add_expr("SPX.close / VIX", e).unwrap();
         let p = params(&m, QueryKey(7), 3, now(), &AsOf::Live, &[]).unwrap();
         assert_eq!(p.key, QueryKey(7));
         assert_eq!(p.tag, 3);
@@ -123,6 +125,17 @@ mod tests {
             params(&Model::new(), QueryKey(7), 1, now(), &AsOf::Live, &[]).is_none(),
             "nothing to ask"
         );
+    }
+
+    /// A saved expression that could not be rewritten holds no operands;
+    /// sending it would have the compiler refuse the whole request.
+    #[test]
+    fn a_legacy_expression_is_never_sent() {
+        let mut m = Model::new();
+        m.add_source("SPX.close", "demo_kdb", "series").unwrap();
+        m.add_legacy_expr("s1 / s9", "gone".into()).unwrap();
+        let p = params(&m, QueryKey(7), 3, now(), &AsOf::Live, &[]).unwrap();
+        assert_eq!(p.series.iter().map(|s| s.slot).collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]
