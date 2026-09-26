@@ -632,11 +632,14 @@ impl TimeseriesTile {
             return false;
         };
         let mut chars = key.chars();
+        // One character, lower-cased: a shifted unit (`M`, or the
+        // macOS form `m` with shift held) still completes the label.
         let single = match (chars.next(), chars.next()) {
-            (Some(c), None) if !shift => Some(c),
+            (Some(c), None) => Some(c.to_ascii_lowercase()),
             _ => None,
         };
-        if let Some(d) = single.and_then(|c| c.to_digit(10))
+        if !shift
+            && let Some(d) = single.and_then(|c| c.to_digit(10))
             && r.digit_is_preset()
         {
             let d = d as u8;
@@ -664,7 +667,14 @@ impl TimeseriesTile {
         match (single, key) {
             (Some(unit @ ('w' | 'm' | 'y')), _) => match Preset::typed(d, unit) {
                 Some(preset) => {
-                    self.write_range(Range::Relative(preset), window, cx);
+                    // A refusal (the point cap) keeps the popup open on
+                    // its reason; the label was finished, so it is no
+                    // longer pending.
+                    if !self.write_range(Range::Relative(preset), window, cx)
+                        && let Some(Popup::Range(r)) = &mut self.popup
+                    {
+                        r.prefix = None;
+                    }
                 }
                 None => {
                     r.error = Some(format!("no preset {d}{unit} — {}", candidates()).into());
@@ -726,7 +736,7 @@ impl TimeseriesTile {
         }
     }
 
-    /// A click on a preset chip — the mouse form of the digit, and the
+    /// A click on a preset chip — the mouse form of the typed label, and the
     /// same door.
     pub(crate) fn range_preset_clicked(
         &mut self,

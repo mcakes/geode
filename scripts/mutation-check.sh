@@ -17035,10 +17035,8 @@ run_mutation "timeseries: a digit in the range popup starts a preset label" \
 
 run_mutation "timeseries: the unit completes a typed preset label" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '                Some(preset) => {
-                    self.write_range(Range::Relative(preset), window, cx);' \
-  '                Some(preset) => {
-                    let _ = preset;' \
+  '                    if !self.write_range(Range::Relative(preset), window, cx)' \
+  '                    if !{ let _ = preset; false }' \
   geode-timeseries \
   a_digit_lights_its_presets_and_the_unit_commits_the_label
 
@@ -17101,7 +17099,7 @@ run_mutation "timeseries: a no-op key is not an edit" \
   '        self.edited |= moved;' \
   '        self.edited = true;' \
   geode-timeseries \
-  a_key_that_moves_nothing_leaves_the_preset_digits_live
+  a_key_that_moves_nothing_leaves_the_typed_presets_live
 
 # An `Absolute` range seeds the popup from the dates it STORES; only a
 # relative one resolves against now/as-of (Task 10 ruling). Resolved, a

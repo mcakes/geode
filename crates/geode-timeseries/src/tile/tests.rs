@@ -566,8 +566,6 @@ impl Harness {
             })
             .expect("the range popup is open")
     }
-    /// The range popup's inline refusal — a backwards range, an
-    /// unfinished segment or the point cap.
     /// The range popup's chips a pending typed label still lights, in
     /// chip order — empty when no label is pending.
     fn range_candidates(&self, vcx: &gpui::VisualTestContext) -> Vec<&'static str> {
@@ -580,6 +578,8 @@ impl Harness {
             _ => Vec::new(),
         })
     }
+    /// The range popup's inline refusal — a backwards range, an
+    /// unfinished segment or the point cap.
     fn range_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Range(r)) => r.error.as_ref().map(|e| e.to_string()),
@@ -1854,7 +1854,9 @@ fn l_over_an_open_picker_closes_it_and_opens_the_series_list(cx: &mut gpui::Test
 // ---- the range popup (spec §9.8) ---------------------------------
 
 #[gpui::test]
-fn r_opens_the_range_popup_on_from_day_and_a_digit_commits_a_preset(cx: &mut gpui::TestAppContext) {
+fn r_opens_the_range_popup_on_from_day_and_a_typed_label_commits_a_preset(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = open(cx);
     h.command(&mut vcx, "add SPX.close").unwrap();
     h.visible(&mut vcx, true);
@@ -1978,7 +1980,7 @@ fn an_unfinished_segment_is_refused_inline_and_r_reopens_on_a_fresh_seed(
 ///   — pinned here, since nothing else would notice it starting to
 ///   count.
 #[gpui::test]
-fn a_key_that_moves_nothing_leaves_the_preset_digits_live(cx: &mut gpui::TestAppContext) {
+fn a_key_that_moves_nothing_leaves_the_typed_presets_live(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.dispatch(&mut vcx, "range", None);
     h.draw(&mut vcx);
@@ -2018,7 +2020,8 @@ fn a_digit_lights_its_presets_and_the_unit_commits_the_label(cx: &mut gpui::Test
     // A second digit replaces the first.
     vcx.simulate_keystrokes("5");
     assert_eq!(h.range_candidates(&vcx), vec!["5y"]);
-    vcx.simulate_keystrokes("1 y");
+    // A shifted unit completes it too.
+    vcx.simulate_keystrokes("1 shift-y");
     assert!(h.popup_is_none(&vcx));
     assert_eq!(h.model(&vcx).range(), &Range::Relative(Preset::Y1));
 }

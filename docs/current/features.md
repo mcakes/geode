@@ -189,9 +189,11 @@ In the range popup a preset is typed as its chip reads (`3` `m` is `3m`,
 the same spelling as `:range 3m`), until a date is edited. The digit lights
 the chips it could start and waits for `w`, `m` or `y`. A digit no preset
 starts, a unit that makes no preset, and `enter` before the unit are refused
-inline. `backspace` or `escape` drops the pending digit, and any field key
-drops it and acts as usual. Once a date has been moved to or typed into,
-digits belong to the date; `escape` and `r` again return to the presets.
+inline. A shifted unit counts. `backspace` or `escape` drops the pending
+digit, and every other key drops it and then acts as it would anyway. Once
+a date has been edited (a segment moved to with `left`/`right`, stepped, or
+clicked), digits belong to the date; to type a date on a fresh popup, move
+to a segment first. `escape` and `r` again return to the presets.
 
 A slot's colour is a palette index (`1`–`5`), a `[colours]` name, or an
 absolute `#rrggbb`. The first two follow the theme and get its readability

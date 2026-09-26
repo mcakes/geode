@@ -79,9 +79,8 @@ const LABEL_WIDTH: f32 = 32.0;
 /// resolves goes through the shell's matcher, not gpui's).
 pub const RANGE_CONTEXT: &str = "GeodeTimeseriesRange";
 
-/// The range popup's one hint line: the digit shortcut is otherwise
-/// invisible, and the `edited` rule behind it ("until you start editing
-/// a date") is what makes it worth naming.
+/// The range popup's one hint line: that a preset is TYPED as its chip
+/// reads is otherwise invisible, and the example labels show the shape.
 const RANGE_HINT: &str = "type a preset (3m, 1y) · tab switches · enter commits";
 
 /// What the tile currently has open. `Series` is the series list (spec
@@ -344,16 +343,16 @@ impl RangePopup {
     /// Whether a bare digit starts a PRESET label (`3` of `3m`) rather
     /// than typing into the active segment (spec §9.8).
     ///
-    /// Two conditions, and both are load-bearing. `!typing()` is the
-    /// obvious one: a second digit always belongs to the segment being
-    /// typed. `!edited` is what makes both halves of the popup
+    /// `!edited` is what makes both halves of the popup
     /// reachable — every leading preset digit is also a legal first
     /// digit of a year, so a popup that read `1` as a preset AFTER the
     /// trader had moved onto the year segment could never be used to
     /// type `1990`. The rule a trader learns is therefore "a digit is a
     /// preset until you start editing a date, and the date's from then
     /// on" — and `escape`, then `r` again, is how you get back to the
-    /// presets without the mouse.
+    /// presets without the mouse. `!typing()` is a guard only: while
+    /// the popup is unedited no digit reaches a field, so a segment is
+    /// never mid-entry then.
     pub(crate) fn digit_is_preset(&self) -> bool {
         !self.edited && !self.active_field().typing()
     }
@@ -994,18 +993,21 @@ pub(crate) fn render_range(
     // Every chip is filled until a label is being typed; then the
     // presets it could still become stay filled and the rest go bare
     // (the frequency row's pair), so `1` shows 1w, 1m and 1y.
+    // The bare pair is derived only while a label is pending.
     let filled = chip_paint(theme, Tone::Neutral);
     let filled_states = control::for_chip(theme, &filled, theme.popover);
-    let mut bare = chip_paint(theme, Tone::Neutral);
-    bare.fill = None;
-    bare.text = theme.muted_foreground;
-    let bare_states = control::for_chip(theme, &bare, theme.popover);
+    let bare = p.prefix.map(|_| {
+        let mut bare = chip_paint(theme, Tone::Neutral);
+        bare.fill = None;
+        bare.text = theme.muted_foreground;
+        let states = control::for_chip(theme, &bare, theme.popover);
+        (bare, states)
+    });
     for (i, preset) in Preset::ALL.into_iter().enumerate() {
         let word = preset.as_str();
-        let (chip, states) = if p.prefix.is_none() || p.candidate(preset) {
-            (&filled, filled_states)
-        } else {
-            (&bare, bare_states)
+        let (chip, states) = match &bare {
+            Some((bare, bare_states)) if !p.candidate(preset) => (bare, *bare_states),
+            _ => (&filled, filled_states),
         };
         presets = presets.child(
             div()
