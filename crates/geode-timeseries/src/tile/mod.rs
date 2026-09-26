@@ -39,21 +39,24 @@ use geode_shell::vimnav::NavCommand;
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, Focusable as _, Hsla, KeyDownEvent, SharedString, Window, div,
+    App, Context, ElementId, Entity, Focusable as _, Hsla, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ScrollWheelEvent, SharedString, Window, canvas, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
 use crate::core::model::{Changed, Colour, Model, SlotState};
-use crate::core::{Preset, Range, chart, request, resolve, session};
+use crate::core::{Preset, Range, chart, menu, request, resolve, session};
 use crate::header::{self, HeaderModel};
 use crate::popup::{
-    DateFieldPaint, ExprField, PickerStage, PickerState, Popup, RangePopup, SeriesPopup, Which,
-    render_picker, render_range, render_series_popup,
+    DateFieldPaint, ExprField, MenuState, PickerStage, PickerState, Popup, RangePopup, SeriesPopup,
+    Which, render_menu, render_picker, render_range, render_series_popup,
 };
+use crate::tile::pointer::{ChartBounds, Drag};
 
 mod data;
+mod pointer;
 mod popups;
 
 /// Inputs used to decide whether prepared chart data must be rebuilt.
@@ -148,6 +151,10 @@ pub struct TimeseriesTile {
     /// by field transitions rather than formatted during render.
     popup: Option<Popup>,
     footer: SharedString,
+    /// The chart surface's last painted bounds (`tile::pointer`).
+    chart_bounds: ChartBounds,
+    /// The pointer gesture in progress, if any (`tile::pointer`).
+    drag: Option<Drag>,
 }
 
 impl TimeseriesTile {
@@ -317,6 +324,8 @@ impl TimeseriesTile {
             stack: None,
             popup: None,
             footer: header::footer_text(cx),
+            chart_bounds: ChartBounds::default(),
+            drag: None,
         }
     }
 
@@ -431,7 +440,14 @@ impl TimeseriesTile {
             Some(p) if p.is_insert() => {
                 matches!(verb, "commit" | "cancel" | "insert_up" | "insert_down")
             }
-            // The fieldless list can stay open while slot properties change.
+            // Keep the menu only for its own navigation, pick, and toggle actions.
+            // A menu pick closes before dispatching its action; other tile actions also
+            // close it before changing the model.
+            Some(Popup::Menu(_)) => matches!(
+                verb,
+                "menu" | "list_down" | "list_up" | "list_close" | "menu_pick"
+            ),
+            // The fieldless series list stays open while slot properties change.
             Some(_) => matches!(
                 verb,
                 "list"
@@ -495,7 +511,7 @@ impl TimeseriesTile {
             "jump_end" => self.model.jump_end(),
             // Every popup verb, through the one door (`popups.rs`).
             "add" | "expr" | "edit" | "list" | "range" | "list_down" | "list_up" | "list_close"
-            | "commit" | "cancel" | "insert_up" | "insert_down" => {
+            | "commit" | "cancel" | "insert_up" | "insert_down" | "menu" | "menu_pick" => {
                 let handled = self.popup_verb(verb, n, window, cx);
                 // `e` on a source slot sets its own; anything else did
                 // nothing and gives the standing notice back.
@@ -728,6 +744,17 @@ impl TimeseriesTile {
             );
             self.popup = Some(Popup::Series(rows));
         }
+        // The menu's rows read the cursor slot the same way, and a `:`
+        // line runs under an open menu (the menu context leaves `:` to
+        // the tile). The highlight stays on its row where that row is
+        // still an action, else lands on the first enabled one.
+        if matches!(self.popup, Some(Popup::Menu(_))) {
+            let rows = self.menu_rows(cx);
+            if let Some(Popup::Menu(m)) = &mut self.popup {
+                m.highlighted = menu::step(&rows, m.highlighted, 0);
+                m.rows = rows;
+            }
+        }
         let offset_secs = local_offset_secs(cx);
         let key = chart_key(
             &self.model,
@@ -795,6 +822,107 @@ impl TimeseriesTile {
     }
 }
 
+impl TimeseriesTile {
+    /// Render the chart, record its bounds during canvas prepaint, and show a
+    /// divider cursor where two panes meet. During a drag, an occluding catcher
+    /// handles moves and releases over the surface plus releases outside it.
+    fn render_chart_surface(
+        &self,
+        tile: &Entity<TimeseriesTile>,
+        tile_id: u64,
+        window: &Window,
+    ) -> impl IntoElement {
+        let rem_px = window.rem_size().as_f32();
+        let bounds_cell = self.chart_bounds.clone();
+        let divider = self.divider_rect(rem_px);
+        let drag = self.drag;
+        div()
+            .id(ElementId::Name(SharedString::new_static(
+                "ts-chart-surface",
+            )))
+            .debug_selector(move || format!("timeseries-chart-{tile_id}"))
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(ChartElement::new(
+                self.chart.clone(),
+                self.model.view(),
+                rem_px,
+                // Unique per tile: `Buffers` and both path caches
+                // hang off this id, and two charts sharing one serve
+                // each other's paths.
+                ElementId::NamedInteger(SharedString::new_static("ts-chart"), tile_id),
+            ))
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| bounds_cell.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .on_scroll_wheel({
+                let tile = tile.clone();
+                move |event: &ScrollWheelEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.wheel(event, window, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Left, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.chart_pressed(event, window, cx));
+                }
+            })
+            // The divider affordance: no listener of its own — the
+            // surface's press hit-tests the band — just the cursor that
+            // says the gap can be dragged.
+            .when_some(divider, |el, band| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(band.x))
+                        .top(px(band.y))
+                        .w(px(band.w))
+                        .h(px(band.h))
+                        .cursor_row_resize()
+                        .debug_selector(move || format!("timeseries-divider-{tile_id}")),
+                )
+            })
+            .when_some(drag, |el, drag| {
+                el.child(
+                    div()
+                        .id(ElementId::Name(SharedString::new_static("ts-drag-catcher")))
+                        .debug_selector(move || format!("timeseries-drag-catcher-{tile_id}"))
+                        .absolute()
+                        .inset_0()
+                        .occlude()
+                        .map(|el| match drag {
+                            Drag::Pan { .. } => el.cursor_grabbing(),
+                            Drag::Split => el.cursor_row_resize(),
+                        })
+                        .on_mouse_move({
+                            let tile = tile.clone();
+                            move |event: &MouseMoveEvent, window, cx| {
+                                tile.update(cx, |t, cx| t.drag_moved(event, window, cx));
+                            }
+                        })
+                        .on_mouse_up(MouseButton::Left, {
+                            let tile = tile.clone();
+                            move |_, _window, cx| {
+                                tile.update(cx, |t, cx| t.drag_finished(cx));
+                            }
+                        })
+                        .on_mouse_up_out(MouseButton::Left, {
+                            let tile = tile.clone();
+                            move |_, _window, cx| {
+                                tile.update(cx, |t, cx| t.drag_finished(cx));
+                            }
+                        }),
+                )
+            })
+    }
+}
+
 impl Render for TimeseriesTile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Prepared chip and chart colours depend on the full theme signature.
@@ -814,22 +942,12 @@ impl Render for TimeseriesTile {
         let tile = cx.entity();
         let tile_id = self.id.0;
         let body = if self.model.slots().is_empty() {
-            header::render_empty(theme).into_any_element()
+            header::render_empty(theme, &tile, tile_id).into_any_element()
         } else {
-            div()
-                .flex_1()
-                .min_h_0()
-                .child(ChartElement::new(
-                    self.chart.clone(),
-                    self.model.view(),
-                    window.rem_size().as_f32(),
-                    // Unique per tile: `Buffers` and both path caches
-                    // hang off this id, and two charts sharing one serve
-                    // each other's paths.
-                    ElementId::NamedInteger(SharedString::new_static("ts-chart"), tile_id),
-                ))
+            self.render_chart_surface(&tile, tile_id, window)
                 .into_any_element()
         };
+        let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
         // Anchor the deferred popup at the header's right edge. The relative
         // wrapper supplies its positioning context; deferral paints over the chart.
         let popup = match self.popup.as_ref() {
@@ -842,6 +960,7 @@ impl Render for TimeseriesTile {
             )),
             Some(Popup::Picker(p)) => Some(render_picker(p, &tile, tile_id, cx)),
             Some(Popup::Range(r)) => Some(render_range(r, &tile, tile_id, cx)),
+            Some(Popup::Menu(m)) => Some(render_menu(m, &tile, tile_id, cx)),
             // The expression field is not an overlay: it is a strip in
             // the body, below.
             Some(Popup::Expr(_)) | None => None,
@@ -859,6 +978,7 @@ impl Render for TimeseriesTile {
                 &tile,
                 tile_id,
                 self.stack.as_ref(),
+                menu_open,
             ))
             .when_some(popup, |el, popup_el| {
                 el.child(

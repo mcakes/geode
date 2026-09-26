@@ -44,13 +44,14 @@ for capacity, coalescing, and worker shutdown behavior.
 | Module | Holds |
 |---|---|
 | `service` | `DataService`, `DataServiceConfig`, `DataEvent`, and the `HealthTracker` (two lanes per source, `discovery` and `load`; the worse by `severity_rank` wins). |
-| `handle` | `DataHandle` and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities. |
+| `handle` | `DataHandle` and `Request`: queries, distinct values, the catalog, a document by key, a series fetch, identities, an upload. |
 | `source` | Directory discovery, sentinel parsing, and readiness classification. Configuration types are shared with `geode-core`; stable-mtime readiness is accepted by configuration but unsupported at runtime. |
 | `adapter` | Subscription, upload, and fetch capabilities; a registry, bounded message sink, and topic matching. Includes the in-process `ChannelAdapter`; the app can register additional implementations such as its demo series adapter. |
 | `ingest` | The discovery scheduler, the cold-start priority ladder, the per-file load pipeline, the grain split and conflict detector, the ingest runner (one thread, one writer connection, three queues), the subscribed-source receiver, the `Coalescer`, and the fetch worker. |
 | `store` | The DuckDB store: DDL generated from the schema, the per-file publish transaction and backfill guard, document publish, the series family's bitemporal append (`append_series`, the one door series rows enter by), retention, and the freshness catalog in source time. |
 | `query` | The query path: scope to bound SQL, the grain-aware view compiler, the read pool (latest-wins per key, stale results dropped), as-of routing against the archive, the picker's distinct values, the document request, the catalog request. |
 | `documents` | The `DocumentKind` registry the app fills. |
+| `egress` | Startup target resolution, service-thread document serialization, and per-target upload workers with eight waiting jobs. Refusals and completed transport calls emit keyed/tagged upload outcomes. |
 | `health` | Re-export of `geode_core::health::Health`. |
 
 ## Features
@@ -98,3 +99,12 @@ often tripped:
   CSV metadata errors are currently skipped, so an empty poll does not prove
   path accessibility. Adapter queue admission likewise does not acknowledge
   storage publication. See [source discovery and adapters](../../docs/current/data-path.md#source-discovery-and-adapters).
+- Upload channel admission, transport success, and a stored echo are separate
+  events. Service-thread validation/serialization precedes each target's bounded
+  FIFO worker queue. Normal refusal and transport-return paths emit one outcome;
+  startup failure, blocking or panicking implementations, and sink refusal can
+  prevent delivery. Uploads have no keyed cancellation or automatic retry.
+- Adapter resolution and worker creation request separate egress handles.
+  Shutdown closes worker queues and joins after queued jobs run; a stuck
+  transport can block shutdown. See
+  [egress and uploads](../../docs/current/data-path.md#egress-and-uploads).

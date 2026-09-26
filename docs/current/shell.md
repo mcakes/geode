@@ -83,10 +83,12 @@ the focused occupant through `FindEvent`.
 ## Focus
 
 GPUI window focus and the tiling model's focused tile are separate state and
-must be reconciled deliberately. A tile mouse-down and every keyboard command
-that moves structural focus arms `pending_focus_restore`. The shell then
-returns window focus to the appropriate tile surface, except while that same
-occupant intentionally holds an insert-mode input.
+must be reconciled deliberately. Left and right tile presses focus the tile
+and arm `pending_focus_restore`; a right press does not start a drag or a
+double-click gesture. This gives a module's context menu the same tile's key
+context. Keyboard commands that move structural focus also arm restoration.
+The shell returns window focus to the appropriate tile surface, except while
+that occupant intentionally holds an insert-mode input.
 
 An occupant that closes a focused input must blur it before dropping its
 handle. Switching workspaces also restores focus immediately when the old

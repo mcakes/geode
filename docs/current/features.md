@@ -61,8 +61,63 @@ column labels, keeping stable intent across reordered documents. The module
 supports numeric, date, text, and closed-choice cells, row insertion/deletion,
 and kind-specific actions.
 
-Document egress is not built. `:upload` and related actions report that
-limitation rather than pretending to persist a draft upstream.
+Dividend row labels use the ex date and a same-date ordinal (`<date>#n`).
+Rebase drops cell edits and deletions in a same-date group whose row count
+changed, because the old ordinal may identify a different dividend. The draft
+captures group sizes from its painted base before rebase or session save.
+Restored drafts without these saved sizes cannot apply this guard. A reorder
+within an unchanged-size group remains undetectable and can move an edit to
+the wrong dividend.
+
+### Uploads
+
+`:upload [target]` and the action list's `Upload` row send the edited document
+to a configured egress target. Upload requires a complete Editing draft, an
+eligible target, and no other upload in flight from the tile. Both the frame
+and the painted generation must be live. A live frame can still show a
+historical generation while a requery is pending or after it fails; uploading
+that document would overwrite untouched rows with old values.
+
+Arming confirmation assembles the rows and snapshots the draft. The header
+shows the target and counts of changed cells, attributes, added rows, and
+removed rows. Bare unmodified `y` submits that snapshot after rechecking the
+live frame, live painted generation, and full draft equality. Every other key
+cancels and is consumed, including chords. A pointer press on the tile or loss
+of focus also cancels. A delivery that changes the draft or painted generation
+withdraws the prompt.
+
+Transport success marks the draft `sent HH:MM` only if the current draft is
+still Editing and equals the submitted draft, including its base. Failure
+keeps the draft editable and shows `upload failed: <e>`. Service admission,
+transport success, and a stored echo are separate stages; see
+[document uploads](request-delivery.md#document-uploads) for delivery limits.
+
+Upload state belongs to the submitting underlying. Switching underlying gives
+up that draft's echo check and parks it as Editing, even if its upload is
+still in flight. A later outcome for an underlying no longer shown produces a
+notice naming it and leaves the visible draft alone. Session restoration also
+restores nonempty drafts as Editing; upload status and echo tracking are not
+saved.
+
+A Sent draft compares the next delivered generation with a different source
+time against the submitted document. Comparison ignores row order and minted
+row labels, compares attributes, and allows one ULP for floating-point values.
+Matching contents clear the draft and show `sent HH:MM, confirmed HH:MM` until
+the next edit. This is a content match, without an upstream correlation id.
+
+Different contents retain the draft over its base and show `echo differs
+(N rows)`; an attribute mismatch counts as one additional row. An uncomparable
+document shows `echo not comparable: <why>` and is held too. Edits remain
+refused until `:rebase` makes an unsent draft on the held generation or
+`:revert` discards the draft. The ordinary update policy does not apply while
+Sent. Rebase is refused while awaiting an echo with no differing generation
+held.
+
+Uploads replace the whole document with no concurrency check: the last writer
+wins. A generation that arrives upstream after the panel's last delivery can
+be overwritten. An echo delivered before transport success follows the
+ordinary Editing update policy. If that changes the draft, the later success
+cannot mark it Sent.
 
 ## Timeseries
 
@@ -78,6 +133,7 @@ Runtime responsibilities are split by module:
 |---|---|
 | [`tile`](../../crates/geode-timeseries/src/tile/mod.rs) | Entity state, frame observation, actions and local commands, header preparation, chart cache, and rendering |
 | [`tile::data`](../../crates/geode-timeseries/src/tile/data.rs) | Fetch and query submission, delivery freshness, last-good results, and flip-barrier staging and promotion |
+| [`tile::pointer`](../../crates/geode-timeseries/src/tile/pointer.rs) | Chart hit testing, wheel navigation, pan and split drags |
 | [`tile::popups`](../../crates/geode-timeseries/src/tile/popups.rs) | Popup transitions, keyboard handling, commits, cancellation, and focus |
 | [`popup`](../../crates/geode-timeseries/src/popup.rs) | Popup state types and rendering, including shared list-row layout and hit testing |
 
@@ -96,8 +152,8 @@ frame flip are staged until promotion is allowed. This coordinates ready
 results, but the barrier timeout can release them while lagging tiles still
 show older data.
 
-The series list, add picker, expression editor, and range editor share one
-`Popup` owner. The list has no text field; insert popups own their input and
+The series list, add picker, expression editor, range editor, and action menu
+share one `Popup` owner. The list has no text field; insert popups own their input and
 key routing. Closing uses one cleanup path and blurs a focused input before
 releasing it. Series and add-picker rows share geometry, theme treatment,
 identity, and pointer handling, while supplying their own labels, controls,
@@ -105,10 +161,36 @@ and activation behavior. The range editor uses separate date-field rows;
 the expression editor renders inline below the header in the tile body.
 
 `geode-chart` is independent of series and shell concepts. Its pure core owns
-scales, axes, layout, viewport, crosshair, decimation, and palette derivation.
-`ChartElement` paints an immutable `ChartModel` through gpui-component's plot
-surface. Paths and chrome are cached by the values that affect them; cursor
-movement does not rebuild the data model.
+scales, axes, layout, viewport, crosshair, hit-testing, decimation, and palette
+derivation. `ChartElement` paints an immutable `ChartModel` through
+gpui-component's plot surface. Paths and chrome are cached by the values that
+affect them; cursor movement does not rebuild the data model.
+
+The header's `⋯` button, a chip's right-click, and `.` open the action menu.
+It offers popup openers, actions for the selected slot, frequency steps,
+toggles, and view reset. A disabled row can be selected but has no highlight
+fill; choosing it shows its reason and leaves the menu open. Enabled actions
+close the menu before dispatch. Key hints refresh when the menu opens or its
+chrome rebuilds, so an open menu can retain old hints after a keymap reload.
+
+Pointer controls and keyboard actions use the same model operations and
+change processing:
+
+| Pointer action | Effect |
+|---|---|
+| Click a series chip / its swatch | Select the slot / toggle its visibility |
+| Right-click a series chip | Select the slot and open the action menu |
+| Click the range and frequency readout | Toggle the range editor |
+| Click a frequency chip in the range editor | Apply immediately, leaving draft dates unchanged; cancelling the editor does not undo frequency |
+| Wheel over a plot | Dominant vertical motion zooms about the pointer; dominant horizontal motion pans; ties zoom |
+| Drag a plot / the band between panes | Pan / adjust the split |
+| Click Add or Compose in an empty tile | Open the corresponding editor |
+
+Chart drags end on release, including a release outside the chart, or on a
+move with no button held. Movement outside the chart surface is not tracked.
+Modified presses and subsequent presses in a multi-click do not start chart
+drags, leaving those gestures available to the shell. Right presses focus the
+tile before its context menu handles keys.
 
 `geode-widgets` contains the shared segmented `DateTimeField`. Its pure state
 and key routing are separate from a painter that receives presentation values,
@@ -174,11 +256,31 @@ the application roster.
 
 ### The tile
 
-The tile shows one named sheet under a single dense header: the sheet name,
-its view, any sheet-wide shift chips, `N pricing…` while lines are stale, the
-configured pricer's name, and the last priced time, which reads `stale` once
-it is older than the shell's `stale_after`. Lines and packages are rows of one
-table; a package row sums its legs and opens and closes like a tree node
+The tile (titled `Pricer · <sheet>`) shows one named sheet under a single
+dense header: the sheet name with `view <name>`, any sheet-wide shift chips
+(`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
+while lines are stale, `N failed` in danger text while any line's last answer
+was a failure, `pricer <name>`, the last priced time, which reads `stale` once
+it is older than the shell's `stale_after`, and a `⋯` button at the trailing
+edge that opens and closes the action menu (the pointer's `.`). A pending load
+paints `loading…` muted in the header and `Loading sheet…` in the empty table;
+an empty loaded sheet says `No lines — press o to add one`. A pricer this
+binary lacks is named in danger text with its recovery (`set [pricing]
+adapter and restart`).
+
+Column headers are words carrying their unit (`spot %`, `vol pt`, `barrier
+type`, `priced at`), and default widths are checked against labels and representative large
+values (`-1,234,567.8900` for a greek, `-1,234,567.89` for a price) at the
+largest supported font size. These examples do not bound every possible
+value. A view's `label` and `width` override the defaults. Both bundled views end in a `status` column, which says
+`pricing…` on a stale line and a failed line's reason, so neither state is
+shown by colour alone. The tree column reserves a fixed chevron slot on every
+row, so roots share one leading edge and legs sit one step in; the entry row
+opens at the depth it will land at. A long tree label or text cell ends in
+`…`; a number never truncates. Cell text is floored to the readable ratio on
+the row's own ground and on the table's hover and selected-row grounds.
+
+Lines and packages are rows of one table; a package row sums its legs and opens and closes like a tree node
 (`space`/`z a`, `z o`, `z c`, `z shift+r`, `z shift+m`, or its chevron). A
 package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. Package rows are read-only in every
@@ -191,12 +293,18 @@ Normal-mode keys:
 | `o` / `shift+o` | Open a shorthand entry row below / above the cursor; `up`/`down` walk the sheet's own lines as history, `enter` adds the line and opens the next placeholder, `escape` removes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries |
 | `d d` | Delete the row (a package with its legs) |
-| `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out |
+| `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
 | `y y` / `y c` | Copy the row's shorthand (and remember it for `p`) / the column's cells |
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
-| `.` | The action menu: price all, group, ungroup, undo, redo, delete row, and one row per view |
+| `.` | Open the action menu |
+
+The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
+and view selection. Key hints show default bindings and do not reflect
+rebindings. Pointer and keyboard selection skip separators and headings.
+Disabled rows can be selected but have no highlight fill; choosing one shows
+its reason and leaves the menu open.
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for
@@ -211,17 +319,22 @@ click since the query last changed. Otherwise the typed text is committed
 (upper-cased): typing `HSI` with `HSCEI` on the sheet commits `HSI`, and
 typing `hscei` commits `HSCEI`. `enter` on an untouched, empty query keeps the
 cell's value. Type and barrier type accept only their vocabulary, and `enter`
-commits the highlighted option. A commit whose line was deleted, or whose
-column moved under a view change, is refused with a footer message. A click in
-the grid, including a package chevron, cancels an open editor or entry field
-and never commits it. A `:` command or a `/` search closes the menu and any
-open field first. A click outside the grid leaves a plain text editor open
-until the next grid click or verb; the typeahead popup closes on an outside
-click. Both the entry field and the cell editor blur before they
-drop. Their insert-mode bindings leave shell chords available, including
-`ctrl+k` for the palette. Either field puts the tile in insert mode, so bare and shifted letters
-and digits are typed into it and never reach a shell binding (`shift+d` would
-otherwise duplicate the tile).
+commits the highlighted option. An open editor tracks its line id and column kind through model and view
+changes, moving the cursor with it. If either target disappears, it closes
+without committing and shows `the cell moved; edit refused`. Deferred blur
+uses the editor's opening window and checks current focus before blurring.
+
+A grid click cancels an editor or entry field before acting on the painted
+row's identity. Removing an entry placeholder therefore cannot redirect the
+click to a neighboring row. Clicking the placeholder itself only closes it.
+Commands and search close open fields and menus. A text editor remains open
+after a click outside the grid; a typeahead closes on an outside click.
+
+An open action menu recomputes availability and views when tile chrome
+rebuilds, retaining its highlighted action or view when still present. Both
+entry and cell editors put the tile in insert mode: bare and shifted letters
+and digits are typed into the field. Insert bindings leave shell chords such
+as `ctrl+k` available.
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
@@ -239,9 +352,16 @@ An outcome tagged older than the latest submission is dropped whole. A result
 for an older revision is ignored, and the line, still stale, is resubmitted.
 Hiding a tile requests cancellation by key and defers further pricing until
 shown, keeping its stale marks. Cancellation is best effort and cannot retract
-emitted outcomes; matching deliveries can still apply while hidden. A refused
-submission paints a header notice
-and retries after one second.
+emitted outcomes; matching deliveries can still apply while hidden.
+
+A refused submission (a full request queue, or a data service that is gone)
+paints `pricing request refused: …; retrying` over the header notice without
+replacing it, and retries: after one second, then doubling per consecutive
+refusal up to thirty seconds. The first refusal of a streak logs a warning on
+`geode::pricing` with the tile id; the rest of the streak logs nothing. The
+streak ends when a submission is admitted or when nothing is left to ask for
+(its lines were answered or deleted); the notice it covered then shows again,
+and the next refusal starts over at one second. `escape` does not clear it.
 
 The refresh timer marks every line stale and resubmits while the tile is
 visible and the sheet has a line. `[pricing] refresh` sets the default
@@ -265,9 +385,17 @@ answers with an error), the tile shows an empty fallback and the save slot
 reads `sheet 'NAME' did not load (…); edits are not saved`. Nothing is
 published from that tile, so the fallback cannot become the document's latest
 generation. A name with no document is not a failure: it opens empty and saves
-normally. The session record keeps the sheet name, view, refresh setting, cursor line, and
-open packages. A new tile takes the next free `untitled-N` name, and names
-open in another tile are skipped.
+normally.
+
+The pending-load indicator remains until the load answers; `escape` does not
+clear it.
+
+The session record keeps the sheet name, view, refresh setting, cursor line,
+and open packages still present on the sheet. The tile retains deleted or
+ungrouped package ids in memory so undo can reopen them, but omits them from
+session saves. Loading or expanding/collapsing all packages replaces that set.
+A new tile takes the next free `untitled-N` name, skipping names open in
+another tile.
 
 The application uses `MemorySheetStore`, shared by its pricer tiles. Accepted
 saves survive closing and reopening a tile in the same process. They do not

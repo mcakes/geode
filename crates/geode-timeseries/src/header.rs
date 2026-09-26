@@ -16,6 +16,7 @@
 //! theme behind `theme_signature`.
 
 use geode_core::series::SlotKind;
+use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
 use geode_shell::shell::chip::{Tone, chip_paint};
@@ -25,8 +26,9 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
 use gpui::prelude::*;
 use gpui::{App, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div};
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{Theme, h_flex, v_flex};
+use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
 
 use crate::core::model::{Colour, Model, SlotState};
 use crate::popup::ExprField;
@@ -43,6 +45,16 @@ pub(crate) const EMPTY_HINT: &str = "no series — a adds one, x composes";
 
 /// The swatch beside a chip's label, in pixels at the design rem.
 const SWATCH: f32 = 8.0;
+/// Square pointer target around the swatch. Hover fills the surrounding
+/// control so the dot continues to show the series color.
+const SWATCH_TARGET: f32 = 16.0;
+
+/// The empty state's two doors, as the button labels and the actions
+/// they dispatch.
+pub(crate) const EMPTY_ACTIONS: [(&str, &str); 2] = [
+    ("Add series…", "timeseries::add"),
+    ("Compose expression…", "timeseries::expr"),
+];
 
 /// One slot's chip, prepared. `tone` is what the chip MEANS; `filled`
 /// is whether it paints that tone's tint — an idle slot away from the
@@ -60,6 +72,8 @@ pub(crate) struct Chip {
     pub tooltip: Option<SharedString>,
     /// Prepared here rather than `format!`ed in the render closure.
     pub tip_selector: SharedString,
+    /// The swatch's own tooltip selector, likewise prepared.
+    pub swatch_tip_selector: SharedString,
     /// The slot's colour, already resolved against the theme — see the
     /// module doc for why this is not a `Colour` the painter resolves.
     pub swatch: Hsla,
@@ -105,6 +119,7 @@ impl HeaderModel {
                     hidden: !s.visible,
                     tooltip,
                     tip_selector: format!("tip-timeseries-chip-{}", s.number).into(),
+                    swatch_tip_selector: format!("tip-timeseries-swatch-{}", s.number).into(),
                     swatch: colour_of(&s.colour),
                     number: s.number,
                 }
@@ -177,6 +192,7 @@ pub(crate) fn render_header(
     tile: &Entity<TimeseriesTile>,
     tile_id: u64,
     stack: Option<&StackHandle>,
+    menu_open: bool,
 ) -> impl IntoElement {
     let mut row = h_flex()
         .w_full()
@@ -205,12 +221,46 @@ pub(crate) fn render_header(
             .child("Timeseries"),
     );
 
-    // 2. `range · freq`, in the data face.
+    // 2. Range/frequency readout: click to toggle the range editor.
+    // Derive shared bare-control pointer states once for this readout, the swatch
+    // targets, and the menu button, avoiding repeated contrast calculations.
+    let bare_states = control::paint(
+        theme,
+        control::Rest::Bare,
+        theme.background,
+        theme.muted_foreground,
+    );
     row = row.child(
         div()
+            .id(ElementId::Name(SharedString::new_static(
+                "ts-range-readout",
+            )))
+            .px_1()
+            .rounded(theme.radius)
             .font_family(fonts::MONO)
+            .pointer_states(bare_states)
             .child(h.range_freq.clone())
-            .debug_selector(move || format!("timeseries-range-{tile_id}")),
+            .debug_selector(move || format!("timeseries-range-{tile_id}"))
+            .tooltip(tips::tip(
+                "tip-timeseries-range",
+                "Range and frequency",
+                Some("timeseries::range"),
+                None,
+            ))
+            // Capture phase, the `⋯` button's reason (below): an open
+            // range popup's own `on_mouse_down_out` is a capture
+            // listener that would close it before a bubble handler
+            // here could see it open, and the click meant to close
+            // would reopen on a fresh seed instead.
+            .capture_any_mouse_down({
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    tile.update(cx, |t, cx| t.readout_clicked(window, cx));
+                }
+            }),
     );
 
     // 3. One chip per slot.
@@ -249,11 +299,40 @@ pub(crate) fn render_header(
             // A hidden series stays in the strip — `v` is a toggle, and a
             // chip that vanished would leave nothing to press again.
             .when(chip.hidden, |d| d.opacity(0.5).line_through())
+            // The surrounding target toggles visibility after selecting this slot.
+            // Let the event continue through the chip and shell to retain tile focus.
             .child(
                 div()
-                    .size(scale::design(SWATCH))
-                    .rounded_full()
-                    .bg(chip.swatch),
+                    .id(ElementId::NamedInteger(
+                        SharedString::new_static("ts-swatch"),
+                        number as u64,
+                    ))
+                    .debug_selector(move || format!("timeseries-swatch-{tile_id}-{number}"))
+                    .size(scale::design(SWATCH_TARGET))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(theme.radius_tokens().sm)
+                    .pointer_states(bare_states)
+                    .tooltip(tips::tip_with(
+                        chip.swatch_tip_selector.clone(),
+                        SharedString::new_static(if chip.hidden { "Show" } else { "Hide" }),
+                        Some("timeseries::toggle_visible"),
+                        None,
+                    ))
+                    .on_mouse_down(MouseButton::Left, {
+                        let tile = tile.clone();
+                        move |_: &MouseDownEvent, _window, cx| {
+                            tile.update(cx, |t, cx| t.swatch_clicked(index, cx));
+                        }
+                    })
+                    .child(
+                        div()
+                            .size(scale::design(SWATCH))
+                            .rounded_full()
+                            .bg(chip.swatch),
+                    ),
             )
             .child(chip.label.clone())
             .child(
@@ -282,6 +361,13 @@ pub(crate) fn render_header(
                 move |_: &MouseDownEvent, _window, cx| {
                     tile.update(cx, |t, cx| t.chip_clicked(index, cx));
                 }
+            })
+            // Right-click selects this slot and opens its action menu.
+            .on_mouse_down(MouseButton::Right, {
+                let tile = tile.clone();
+                move |_: &MouseDownEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.chip_context_menu(index, window, cx));
+                }
             });
         if let Some(reason) = &chip.tooltip {
             el = el.tooltip(tips::tip_with(
@@ -293,6 +379,40 @@ pub(crate) fn render_header(
         }
         row = row.child(el);
     }
+
+    // 4. Action-menu toggle. Handle the press in capture phase before the open
+    // popup's outside-press listener can close it; otherwise a second click would
+    // reopen it. Keep propagation so the shell focuses the tile receiving the click.
+    let muted = theme.muted_foreground;
+    row = row.child(div().flex_1()).child(
+        div()
+            .id(ElementId::Name(SharedString::new_static("ts-menu-button")))
+            .debug_selector(move || format!("timeseries-menu-button-{tile_id}"))
+            .px_1p5()
+            .rounded(theme.radius_tokens().sm)
+            .border_1()
+            .border_color(theme.border)
+            .when(menu_open, |d| d.bg(theme.secondary))
+            .text_color(muted)
+            // While open, retain the popup-owner fill without additional hover feedback.
+            .when(!menu_open, |d| d.pointer_states(bare_states))
+            .child("⋯")
+            .tooltip(tips::tip(
+                "tip-timeseries-menu",
+                "Actions",
+                Some("timeseries::menu"),
+                None,
+            ))
+            .capture_any_mouse_down({
+                let tile = tile.clone();
+                move |event, window, cx| {
+                    if event.button != MouseButton::Left {
+                        return;
+                    }
+                    tile.update(cx, |t, cx| t.toggle_menu(window, cx))
+                }
+            }),
+    );
     row
 }
 
@@ -341,15 +461,44 @@ pub(crate) fn render_footer(text: SharedString, theme: &Theme) -> impl IntoEleme
         .child(text)
 }
 
-/// The chart's place while the tile holds no slot.
-pub(crate) fn render_empty(theme: &Theme) -> impl IntoElement {
-    h_flex()
+/// Empty-chart guidance with Add and Compose buttons. Each button dispatches
+/// the same action as its keyboard equivalent.
+pub(crate) fn render_empty(
+    theme: &Theme,
+    tile: &Entity<TimeseriesTile>,
+    tile_id: u64,
+) -> impl IntoElement {
+    let mut buttons = h_flex().gap_2();
+    for (i, (label, action)) in EMPTY_ACTIONS.into_iter().enumerate() {
+        let tile = tile.clone();
+        buttons = buttons.child(
+            div()
+                .debug_selector(move || format!("timeseries-empty-{tile_id}-{i}"))
+                .child(
+                    Button::new(ElementId::NamedInteger(
+                        SharedString::new_static("ts-empty"),
+                        i as u64,
+                    ))
+                    .small()
+                    .ghost()
+                    .label(label)
+                    .on_click(move |_event, window, cx| {
+                        tile.update(cx, |t, cx| {
+                            t.dispatch(&ActionId(action.to_string()), None, window, cx);
+                        });
+                    }),
+                ),
+        );
+    }
+    v_flex()
         .flex_1()
         .min_h_0()
         .items_center()
         .justify_center()
+        .gap_2()
         .text_color(theme.muted_foreground)
         .child(EMPTY_HINT)
+        .child(buttons)
 }
 
 #[cfg(test)]

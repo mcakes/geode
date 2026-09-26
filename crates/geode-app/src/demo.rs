@@ -62,6 +62,19 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
+    // The demo layer's own egress target (egress spec §4, §10
+    // amendment 1): `[sophis]` on `demo_bus` — the same adapter the
+    // `[cvi]`/`[dividend]` sources above already subscribe through —
+    // accepting both document kinds this crate builds, at an address per
+    // document key so the demo `ChannelAdapter`'s echo lands back on the
+    // same topic its source subscribes to. No `config_version` header:
+    // builtin docs are exempt from the version check (`config/mod.rs`),
+    // so there is nothing this doc needs the key for (`from_doc` would
+    // skip one, as `sources` does).
+    let egress = "[sophis]\nadapter = \"demo_bus\"\n\
+         [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}\"\n\
+         dividend_schedule = \"marketdata/dividend/{key}\"\n"
+        .to_string();
     let docs = [
         (
             "app",
@@ -75,6 +88,7 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
             "dimensions",
             include_str!("../../../examples/demo-config/dimensions.toml").to_string(),
         ),
+        ("egress", egress),
         (
             "groupings",
             include_str!("../../../examples/demo-config/groupings.toml").to_string(),
@@ -104,6 +118,7 @@ mod tests {
                 "app",
                 "datasets",
                 "dimensions",
+                "egress",
                 "groupings",
                 "sources",
                 "views"
@@ -113,6 +128,60 @@ mod tests {
         let paths = sources.table["demo"]["paths"].as_array().unwrap();
         assert_eq!(paths[0].as_str(), Some("/tmp/geode-demo/100-42/src/*.csv"));
         assert_eq!(sources.table["demo"]["poll_interval"].as_str(), Some("2s"));
+    }
+
+    /// Egress spec §4, §10 amendments 1/2: the demo layer's own
+    /// `[sophis]` egress target parses into two documents via
+    /// `egress_config::from_doc`, with the per-key address shape
+    /// amendment 1 settled on, and survives `egress::resolve` once
+    /// `demo_bus` is registered — the same adapter the demo bus's
+    /// `[cvi]`/`[dividend]` sources already name.
+    #[test]
+    fn the_demo_layers_egress_doc_reads_two_documents_for_sophis_and_resolves_against_demo_bus() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let egress = docs.iter().find(|d| d.name == "egress").unwrap();
+        assert_eq!(egress.table["sophis"]["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(
+            egress.table["sophis"]["documents"]["cvi_params"].as_str(),
+            Some("marketdata/cvi/{key}")
+        );
+        assert_eq!(
+            egress.table["sophis"]["documents"]["dividend_schedule"].as_str(),
+            Some("marketdata/dividend/{key}")
+        );
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (specs, d) =
+            geode_core::egress_config::from_doc(config.doc("egress").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "sophis");
+        assert_eq!(specs[0].adapter, "demo_bus");
+        assert_eq!(
+            specs[0].documents,
+            vec![
+                ("cvi_params".to_string(), "marketdata/cvi/{key}".to_string()),
+                (
+                    "dividend_schedule".to_string(),
+                    "marketdata/dividend/{key}".to_string()
+                ),
+            ],
+            "documents keep TOML order"
+        );
+
+        let mut adapters = geode_data::adapter::AdapterRegistry::default();
+        let (adapter, _feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+        adapters.register(adapter);
+        let (kept, d) = geode_data::egress::resolve(specs, &adapters);
+        assert!(d.is_empty(), "{d:?}");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].name, "sophis");
     }
 
     /// Task 10 (the demo bus): the `[cvi]` source is declared with every
@@ -267,6 +336,28 @@ mod demo_config_integration {
         pricers
     }
 
+    /// A registry holding `demo_bus`, matching what `main.rs` registers
+    /// under `--demo` before calling `data_setup` — without it, the demo
+    /// layer's own `[sophis]` egress target (egress spec §4) would be
+    /// dropped with an "adapter … is not in this build" diagnostic and
+    /// every fixture below asserting `setup.diagnostics.is_empty()` would
+    /// fail on that spurious entry.
+    ///
+    /// Returns the `ChannelFeed` too, and the caller must keep it alive
+    /// through `data_setup`/`egress::resolve`: `ChannelAdapter::egress`
+    /// upgrades a `Weak` reference to the feed's sender, so a feed
+    /// dropped before `resolve` runs answers "has no egress side" —
+    /// exactly the failure this helper exists to avoid.
+    fn test_adapters() -> (
+        geode_data::adapter::AdapterRegistry,
+        geode_data::adapter::ChannelFeed,
+    ) {
+        let mut adapters = geode_data::adapter::AdapterRegistry::default();
+        let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+        adapters.register(adapter);
+        (adapters, feed)
+    }
+
     /// Self-review / headless verification (Task 8): the demo layer's
     /// docs are not just individually well-formed TOML (`layer` already
     /// panics otherwise) — merged through the real `Config` loader and
@@ -290,10 +381,11 @@ mod demo_config_integration {
             ..ConfigSources::default()
         });
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (adapters, _feed) = test_adapters();
         let setup = crate::bridge::data_setup(
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
-            geode_data::adapter::AdapterRegistry::default(),
+            adapters,
             test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");
@@ -312,6 +404,14 @@ mod demo_config_integration {
         // the_demo_layer_declares_the_dividend_source and
         // the_demo_layer_declares_the_two_fetch_sources.
         assert_eq!(setup.config.sources.len(), 5);
+        // The demo layer's own `[sophis]` egress target must reach
+        // `DataServiceConfig.egress` — `data_setup` reads and resolves
+        // `egress.toml` rather than leaving the list empty (this same
+        // fixture's own
+        // the_demo_layers_egress_doc_reads_two_documents_for_sophis_and_resolves_against_demo_bus
+        // pins `from_doc`/`resolve` in isolation; this pins the wiring).
+        assert_eq!(setup.config.egress.len(), 1);
+        assert_eq!(setup.config.egress[0].name, "sophis");
         // The demo schema's own `cvi_params` and `dividend_schedule`
         // datasets must each agree with their built-in kind's column set
         // (spec §6.4) — the same check `DataService::open` runs per
@@ -376,10 +476,11 @@ mod demo_config_integration {
             ..ConfigSources::default()
         });
         assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (adapters, _feed) = test_adapters();
         let setup = crate::bridge::data_setup(
             &config,
             "/tmp/geode-demo/100000-42/geode.duckdb".into(),
-            geode_data::adapter::AdapterRegistry::default(),
+            adapters,
             test_pricers(),
         )
         .expect("datasets + views are both present in the demo layer");

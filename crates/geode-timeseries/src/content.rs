@@ -54,9 +54,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("timeseries::jump_end", "Jump to end"),
     // The popup verbs: registered beside the rest so the fragment
     // below binds them and the palette lists them.
-    ("timeseries::list_down", "Series list: down"),
-    ("timeseries::list_up", "Series list: up"),
-    ("timeseries::list_close", "Series list: close"),
+    ("timeseries::menu", "Actions…"),
+    ("timeseries::list_down", "List: down"),
+    ("timeseries::list_up", "List: up"),
+    ("timeseries::list_close", "List: close"),
+    ("timeseries::menu_pick", "Menu: pick"),
     ("timeseries::commit", "Commit"),
     ("timeseries::cancel", "Cancel"),
     ("timeseries::insert_up", "Up"),
@@ -107,6 +109,7 @@ context = "timeseries && mode == normal"
 "0" = "timeseries::reset_view"
 "g" = "timeseries::jump_start"
 "shift+g" = "timeseries::jump_end"
+"." = "timeseries::menu"
 
 [[bindings]]
 context = "timeseries && mode == normal && popup == series"
@@ -115,6 +118,18 @@ context = "timeseries && mode == normal && popup == series"
 "k" = "timeseries::list_up"
 "enter" = "timeseries::list_close"
 "escape" = "timeseries::list_close"
+
+# The action menu holds no field, so it keeps the tile's own keyboard
+# like the series list does; the same `j`/`k` verbs step its rows and
+# `enter` picks the highlighted one.
+[[bindings]]
+context = "timeseries && mode == normal && popup == menu"
+[bindings.keys]
+"j" = "timeseries::list_down"
+"k" = "timeseries::list_up"
+"enter" = "timeseries::menu_pick"
+"escape" = "timeseries::list_close"
+"." = "timeseries::list_close"
 
 [[bindings]]
 context = "timeseries && mode == insert"
@@ -177,6 +192,8 @@ impl TileContent for TimeseriesContent {
             // This tile asks no view query and prices nothing; either
             // here is a routing bug.
             Delivery::Query(_) | Delivery::Price(_) => {}
+            // This tile never uploads; an outcome addressed here is a routing bug.
+            Delivery::Upload(_) => {}
         }
         let _ = window;
     }

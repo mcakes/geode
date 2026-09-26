@@ -12,13 +12,14 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, and session conversion. |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, and the action menu's rows. |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries, delivery filtering, and flip-barrier staging and promotion. |
-| `tile::popups` | Opening, input routing, commits, cancellation, and focus for the four popups. |
-| `popup` | State and rendering for the series list, add picker, expression editor, and range editor. Series and add-picker rows share layout and hit testing; range fields and the inline expression editor have separate renderers. |
-| `header` | Prepared chips and controls. |
+| `tile::popups` | Opening, input routing, commits, cancellation, focus, and pointer controls for five transient surfaces. |
+| `tile::pointer` | Chart wheel, drag-pan, and split-drag gestures using chart hit testing. |
+| `popup` | State and rendering for the series list, add picker, range editor, and action menu, plus expression-editor state. Series and picker rows share a row shell; menu rows, range fields, and the inline expression editor have separate renderers. |
+| `header` | Prepared chips and controls, the action-menu button, inline expression field, and empty state. |
 | `content` | `TileContent` wrapper, factory, actions, and keymap fragment. |
 
 ## Commands
@@ -39,3 +40,10 @@ cargo bench -p geode-timeseries
   movement.
 - One closer owns every popup and blurs a focused editor before dropping it.
 - `:` remains local to this tile.
+- Menu picks and empty-state buttons dispatch registered actions. Other pointer
+  controls share model operations and change processing with keyboard commands.
+- A chart press and a header control never stop propagation, so the shell's
+  click-to-focus still runs; popup rows do, because they sit on their own
+  occluding surface.
+- A pointer gesture ends at the same tail as its key: pan and zoom at
+  `view_moved`, a split at `apply_changed`.

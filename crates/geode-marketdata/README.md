@@ -3,9 +3,18 @@
 The market-data panel module: one tile per `PanelSpec`, painting one
 document of a document dataset as a grid (pivoted on two axes, or a row
 per document row with the value columns laid flat) with a draft of unsent
-edits over the top. CVI is the one panel spec built; the roster kind is
-the panel's own (`cvi`) while every panel shares the `marketdata` key
-context. Egress is not built; `:upload` reports that limitation.
+edits over the top. CVI and DIVIDEND are the panel specs built; each
+panel's roster kind is its own (`cvi`, `dividend`) while every panel
+shares the `marketdata` key context. `:upload [target]` assembles the entire
+painted document with its draft and asks for confirmation. Bare `y` submits;
+any other key cancels and is consumed. The frame and painted generation must
+both be live, and the tile allows only one outstanding upload.
+
+Transport success marks an unchanged Editing draft Sent. A later document
+generation is compared separately: a matching echo clears the draft, while a
+different echo retains it over its base. Switching underlying gives up that
+draft's echo check; an outstanding outcome for another underlying is only a
+notice. Request admission and transport success do not establish publication.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#market-data-documents).
@@ -14,7 +23,10 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | The pure half, no element, entity or window: `spec` (what a panel is), `matrix` (`MatrixModel::build`, the prepared grid a frame paints from, built once per delivery or edit), `draft` (edits keyed by cell and resolved across generations by row and column label), `cursor`, `menu` (the action list's rows and why each is or is not pickable), `nudge` (arrow-key stepping of an open editor's text), and `datefield` (the segmented date editor). |
+| `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
+| `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. |
+| `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
+| `core::cursor`, `core::menu` | Grid navigation and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |
 | `header` | The header row, prepared once per change by `HeaderModel::prepare` and painted with no formatting of its own. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, stages under the barrier, owns the cursor, the editor, the draft and the parked drafts per underlying. |
@@ -51,8 +63,7 @@ change most often hits:
 - Colours: state lives in the fill, text is `theme.foreground`
   (`cell_paint`); the header chips use `FlooredTones`. Three bundled-theme
   sweeps pin it.
-- `KindAction`s (`cvi_reanchor`, `cvi_recalc_forward`) answer "not built
-  yet". A built one is an egress request, never in-app arithmetic
-  (`docs/PHILOSOPHY.md`: Geode is a lens, not a brain).
+- `cvi_reanchor` and `cvi_recalc_forward` remain unimplemented and refuse.
+  Ordinary document upload uses the adapter path without local recalculation.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.

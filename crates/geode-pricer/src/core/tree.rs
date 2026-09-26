@@ -47,16 +47,26 @@ impl Expansion {
         self.open.clear();
     }
 
-    /// Forget ids that no longer name a package (removed, or ungrouped),
-    /// so the session record never carries dead ids.
+    /// Prune IDs that no longer name packages after replacing a sheet on load. Edits
+    /// retain them because IDs are not reused: undo can restore a package's remembered
+    /// open state.
     pub fn retain_packages(&mut self, sheet: &Sheet) {
-        self.open
-            .retain(|id| sheet.index_of(*id).is_some_and(|r| sheet.is_package(r)));
+        self.open.retain(|id| names_package(sheet, *id));
+    }
+
+    /// Open IDs that currently name packages, used to omit deleted packages from
+    /// serialized session state without changing the retained expansion set.
+    pub fn live_ids<'a>(&'a self, sheet: &'a Sheet) -> impl Iterator<Item = LineId> + 'a {
+        self.ids().filter(|id| names_package(sheet, *id))
     }
 
     pub fn ids(&self) -> impl Iterator<Item = LineId> + '_ {
         self.open.iter().copied()
     }
+}
+
+fn names_package(sheet: &Sheet, id: LineId) -> bool {
+    sheet.index_of(id).is_some_and(|r| sheet.is_package(r))
 }
 
 /// Flat rows in sheet order, a leg shown only under an open package.
@@ -102,6 +112,7 @@ mod tests {
     fn retain_drops_ids_that_are_no_longer_packages() {
         let s = sheet();
         let mut e = Expansion::from_ids([s.id(0), s.id(1), crate::core::LineId(99)]);
+        assert_eq!(e.live_ids(&s).collect::<Vec<_>>(), vec![s.id(1)]);
         e.retain_packages(&s);
         assert_eq!(e.ids().collect::<Vec<_>>(), vec![s.id(1)]);
     }

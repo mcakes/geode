@@ -25,15 +25,35 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Distinct values | `Distinct`, with key, tag, and requested column. |
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
+| Document upload | `Upload`, addressed by tile key and upload tag; target validation, serialization, target-queue refusal, and transport results use the same outcome. |
 | Local publish | Validation rejection produces diagnostics; successful storage produces `Published`. |
 | History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
 Cancellation is itself an ordinary queued request and can be refused. It
-targets query-pool and pricing work by key, does not cancel fetch or ingest
-work, and cannot retract a result already emitted. It has no acknowledgement.
+targets query-pool and pricing work by key, does not cancel uploads, fetch,
+or ingest work, and cannot retract a result already emitted. It has no acknowledgement.
 Receivers still need stale-result checks. See
 [`handle.rs`](../../crates/geode-data/src/handle.rs).
+
+## Document uploads
+
+Upload admission has two stages. `DataHandle::upload` first offers the request
+to the ordinary service queue. A refusal has no outcome. Once serviced,
+`EgressWorkers` resolves the target and document kind, expands the address,
+and serializes the complete document on the service thread. It then offers
+the bytes to the target's eight-entry queue. Each target has one worker that
+runs transport calls serially; serialization can still delay other service
+requests.
+
+Validation, serialization, and target-queue failures emit an error with the
+original tile key and tag. A transport result uses the same outcome path.
+This produces one outcome on normal completion, not a durable delivery
+receipt: startup failure, a blocked or panicking serializer/transport, or a
+closed event sink can prevent delivery. Egress has no automatic retry or
+panic containment. An `Ok` acknowledges transport success, not a new local
+generation; subscription ingestion and the panel's echo check are separate.
+See [document egress](data-path.md) for configuration and worker details.
 
 ## View replacement and shutdown
 
@@ -51,8 +71,9 @@ after dispatching those requests. Dropping the sender prevents an idle receive
 from waiting forever, but does not interrupt service open or running I/O.
 
 The service then stops its workers in dependency order. This is not a storage
-flush: the ingest writer does not drain queued jobs. Fetch calls, discovery,
-and publication can delay joining. Final-handle drop also joins on whichever
+flush: the ingest writer does not drain queued jobs. Egress workers do drain
+already queued uploads before joining, with no transport timeout. Fetch calls,
+discovery, publication, and uploads can therefore delay shutdown. Final-handle drop also joins on whichever
 thread releases it, so the app's quit hook runs explicit shutdown on the
 background executor. See [worker shutdown](data-path.md#queues-and-shutdown).
 
@@ -67,6 +88,7 @@ delivery, not applied to a window.
 | Event | Pending-state rule |
 |---|---|
 | Query, series, distinct, catalog, price | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
+| Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
 | Fetch completion | Success clears an earlier failure for the pair. A later failure retains the earlier success as well, preserving its requery signal. |
 | Loading / load ended | One shared progress entry; later state replaces earlier state. |
@@ -87,7 +109,7 @@ every event through `window.update`. A closed window ends the drain on its
 next event; while idle, the task can remain awaiting the mailbox. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
-Keyed query, series, and pricing results go to the matching shell occupant;
+Keyed query, series, pricing, and upload results go to the matching shell occupant;
 absent occupants are ignored. Fetch completion broadcasts to visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results go to the picker, which checks its current tag, column, and

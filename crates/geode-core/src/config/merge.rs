@@ -24,6 +24,7 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "scopes"
         | "datasets"
         | "sources"
+        | "egress"
         | "dimensions" => Some(1),
         // One complete definition per colour name.
         "colours" => Some(1),
@@ -206,6 +207,30 @@ mod tests {
             "the user's view replaced the desk's whole: {cols:?}"
         );
         assert_eq!(merged.provenance.get("v"), Some(&Layer::User));
+    }
+
+    #[test]
+    fn egress_is_atomic_by_target_name() {
+        // A higher-layer egress target replaces the whole named object, like
+        // `sources`: the user layer's target must not inherit the desk
+        // layer's `documents` table when it names its own.
+        let merged = merge_docs(
+            "egress",
+            &[
+                doc(
+                    Layer::Desk,
+                    "egress",
+                    "[sophis]\nadapter = \"demo_bus\"\n[sophis.documents]\ncvi_params = \"a\"\n",
+                ),
+                doc(Layer::User, "egress", "[sophis]\nadapter = \"other_bus\"\n"),
+            ],
+        );
+        let sophis = merged.value["sophis"].as_table().unwrap();
+        assert_eq!(sophis["adapter"].as_str(), Some("other_bus"));
+        assert!(
+            sophis.get("documents").is_none(),
+            "atomic override must drop the desk-only documents table"
+        );
     }
 
     #[test]

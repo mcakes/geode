@@ -52,6 +52,7 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted and dropped. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
+| Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | Ingest runner | No fixed capacity. Documents and series are FIFO within their queues; files deduplicate by path, size, and source time. |
 
 For queued files, resubmission can promote priority without adding another
@@ -74,9 +75,12 @@ accepted requests and join. Subscription workers unsubscribe, set a stop flag,
 and join without flushing documents still held by their coalescers. Discovery
 stops polling; the ingest runner finishes its current operation and exits
 without draining queued jobs. Submission to the runner itself has no shutdown
-refusal, so producer ordering is required. Shutdown is not a flush guarantee.
-Blocking adapter, parser, or filesystem calls can delay joins; panic
-containment does not cancel them. See
+refusal, so producer ordering is required. Egress workers close their queue
+first (refusing further submissions), then join; jobs already queued still
+run and answer, so shutdown can wait on a slow or stuck transport — see
+[egress and uploads](#egress-and-uploads) below. Shutdown is not a flush
+guarantee. Blocking adapter, parser, or filesystem calls can delay joins;
+panic containment does not cancel them. See
 [`runner.rs`](../../crates/geode-data/src/ingest/runner.rs),
 [`subscribe.rs`](../../crates/geode-data/src/ingest/subscribe.rs), and
 [`fetch.rs`](../../crates/geode-data/src/ingest/fetch.rs).
@@ -180,6 +184,54 @@ Concurrent state notifications have no ordering guarantee, and health
 callbacks must return promptly without panicking. See
 [`adapter/mod.rs`](../../crates/geode-data/src/adapter/mod.rs) and
 [`channel.rs`](../../crates/geode-data/src/adapter/channel.rs).
+
+## Egress and uploads
+
+An upload serializes a whole document and sends it through a configured
+adapter. Targets resolve at startup from
+[`egress.toml`](configuration.md#egress-configuration). Each usable target has
+one worker thread and its own `Egress` handle. Adapter resolution probes
+`Adapter::egress()` once, then worker creation obtains another handle;
+adapters must support repeated capability requests. A worker-start failure
+leaves the target unavailable and later requests receive a named refusal.
+
+There are two admission boundaries. `DataHandle::upload` uses the bounded
+service channel: `false` means nothing was admitted and no outcome is owed.
+Once dispatched, the service validates the target and accepted document name,
+looks up its `DocumentKind`, and calls `write` before submitting bytes to the
+target worker. Serialization runs on the service thread and can delay other
+requests. Transport calls run separately, one at a time in each target's FIFO
+queue, with up to eight waiting jobs behind the running call. A full or stopped
+worker queue is refused without waiting for transport capacity.
+
+Ordinary refusal paths and completed transport calls each emit one
+`DataEvent::Upload`, echoing the requester's key, tag, and target. Errors name
+the target, including unknown targets, unsupported documents, missing writers,
+write errors, unavailable workers, queue refusal, and transport errors.
+This is not an unconditional completion guarantee: service startup can fail
+after channel admission, a transport can block indefinitely, and writer or
+transport panics are not contained by the egress path. Event-sink refusal has
+no retry. Uploads have no timeout, automatic retry, or keyed cancellation.
+
+A successful outcome means the adapter's `upload` call returned successfully;
+the adapter defines what that acknowledges. It does not establish that a
+subscriber received, parsed, or stored the document. `ChannelAdapter`, for
+example, acknowledges admission to its bus queue; downstream subscription
+queues can still refuse delivery. Market-data panels compare later document
+generations separately to confirm a sent draft. The app mailbox retains upload
+outcomes by `(tile key, upload tag)`, so different uploads do not supersede
+one another before UI delivery.
+
+`EgressSpec::address` substitutes key parts joined by `/` for every `{key}` in
+the configured address. It performs literal replacement, without escaping key
+parts. A template with no `{key}` sends all keys of that document to one address.
+
+Shutdown closes every target queue and joins its worker, allowing already
+queued jobs to finish if the transport returns normally. Egress stops before
+subscription workers, but this does not guarantee that an echoed document
+reaches storage: subscriptions and ingest do not flush all pending work.
+Joining can wait indefinitely on transport I/O and belongs off the UI thread.
+See [`egress.rs`](../../crates/geode-data/src/egress.rs).
 
 ## Queries and time travel
 

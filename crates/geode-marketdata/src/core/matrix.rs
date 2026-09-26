@@ -133,6 +133,19 @@ pub struct MatrixModel {
     /// spec's per-slice values rather than the pivot's own ladder — what
     /// lets a row bump skip them and the delegate rule them off.
     pub slice_columns: usize,
+    /// The column axis's own TYPED value per ladder column (parallel to
+    /// `columns[slice_columns..]`), read off the column's first document
+    /// row; empty for the flat shape. What an upload writes into the
+    /// long form's column axis — `columns` is painted text, and parsing
+    /// `-20` back into a number would make the label's spelling the
+    /// wire's value.
+    ///
+    /// A `Snapshot` declares no type, so the value is typed by what the
+    /// column arrived as: an integer column `I64`, any other number
+    /// `F64`, anything else `Utf8`. A dataset declaring a date column
+    /// axis would therefore read `Utf8` here, and the kind's own type
+    /// check refuses the upload by name rather than sending a string.
+    pub column_values: Vec<Value>,
     pub rows: Vec<RowModel>,
     /// Where each pivot cell's value was read from (spec §4.5), so
     /// [`Self::patch_cell`] can re-prepare one cell without re-indexing
@@ -162,6 +175,14 @@ pub struct PivotIndex {
     /// Row-major `rows × ladder`: the snapshot row holding the value for
     /// (grid row, ladder column).
     at: Vec<usize>,
+}
+
+impl PivotIndex {
+    /// The snapshot column the ladder's one value is read from — how an
+    /// upload names the value column it writes the ladder into.
+    pub(crate) fn value_idx(&self) -> usize {
+        self.value_idx
+    }
 }
 
 impl MatrixModel {
@@ -222,17 +243,25 @@ impl MatrixModel {
             .ok_or_else(|| format!("the document has no '{}' column", spec.rows.column))?;
         let key = key_of(snapshot, spec, rows_idx)?;
         let header = header_of(snapshot, spec, draft);
-        let (columns, column_kinds, slice_columns, rows, pivot_index) = match &spec.columns {
-            Columns::Axis(axis) => {
-                let (columns, column_kinds, slice_columns, rows, index) =
-                    pivot(snapshot, spec, draft, rows_idx, axis)?;
-                (columns, column_kinds, slice_columns, rows, Some(index))
-            }
-            Columns::Values(_) => {
-                let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
-                (columns, column_kinds, 0, rows, None)
-            }
-        };
+        let (columns, column_kinds, slice_columns, column_values, rows, pivot_index) =
+            match &spec.columns {
+                Columns::Axis(axis) => {
+                    let (columns, column_kinds, slice_columns, column_values, rows, index) =
+                        pivot(snapshot, spec, draft, rows_idx, axis)?;
+                    (
+                        columns,
+                        column_kinds,
+                        slice_columns,
+                        column_values,
+                        rows,
+                        Some(index),
+                    )
+                }
+                Columns::Values(_) => {
+                    let (columns, column_kinds, rows) = flatten(snapshot, spec, draft, rows_idx)?;
+                    (columns, column_kinds, 0, Vec::new(), rows, None)
+                }
+            };
         let rows = splice_rows(rows, draft, &columns, &column_kinds);
         Ok(MatrixModel {
             key,
@@ -241,6 +270,7 @@ impl MatrixModel {
             columns,
             column_kinds,
             slice_columns,
+            column_values,
             rows,
             pivot_index,
         })
@@ -504,6 +534,9 @@ fn required_label(
 struct Grid {
     rows: Vec<String>,
     columns: Vec<String>,
+    /// Per column label (parallel to `columns`), the first snapshot row
+    /// carrying it — where the column axis's typed value is read.
+    column_first: Vec<usize>,
     at: HashMap<String, HashMap<String, usize>>,
     /// Each snapshot row's index into `rows` — the slice it belongs to,
     /// so a second pass over the document (the slice values) allocates
@@ -525,6 +558,7 @@ fn index_grid(
     let mut grid = Grid {
         rows: Vec::new(),
         columns: Vec::new(),
+        column_first: Vec::new(),
         at: HashMap::new(),
         row_of: Vec::with_capacity(snapshot.rows()),
     };
@@ -546,6 +580,7 @@ fn index_grid(
         grid.row_of.push(ri);
         if seen_cols.insert(col_label.clone(), ()).is_none() {
             grid.columns.push(col_label.clone());
+            grid.column_first.push(row);
         }
         if let Some(previous) = grid
             .at
@@ -592,6 +627,7 @@ type PivotResult = Result<
         Vec<SharedString>,
         Vec<CellKind>,
         usize,
+        Vec<Value>,
         Vec<RowModel>,
         PivotIndex,
     ),
@@ -695,6 +731,11 @@ fn pivot(
         }
     }
     let slice_columns = slices.len();
+    let column_values = grid
+        .column_first
+        .iter()
+        .map(|&row| axis_value(snapshot, col_idx, row))
+        .collect();
 
     // A slice column carries its own format (a forward at two places
     // beside `param`'s four); every ladder column shares the panel's
@@ -763,9 +804,23 @@ fn pivot(
             .collect(),
         column_kinds,
         slice_columns,
+        column_values,
         rows,
         index,
     ))
+}
+
+/// One column-axis value, typed by what the column arrived as (see
+/// [`MatrixModel::column_values`]). `index_grid` has already refused a
+/// blank axis cell, so the text arm always has something to read.
+fn axis_value(snapshot: &Snapshot, idx: usize, row: usize) -> Value {
+    if let Some(v) = snapshot.i64_at(idx, row) {
+        return Value::I64(v);
+    }
+    if let Some(v) = snapshot.f64_at(idx, row) {
+        return Value::F64(v);
+    }
+    Value::Utf8(snapshot.display_at(idx, row).unwrap_or_default())
 }
 
 /// The [`CellKind`] a flat [`ValueColumn`] paints and edits through: a
@@ -788,7 +843,12 @@ fn flat_kind(vc: &ValueColumn) -> CellKind {
 /// `f64_at`/`i64_at` for a number, `display_at` for everything else
 /// (a `Date32` displays as `%Y-%m-%d`, [`label_at`]'s own rule, so the
 /// round trip back into a [`Value::Date`] is exact).
-fn read_flat_value(snapshot: &Snapshot, idx: usize, row: usize, ty: ColumnType) -> Option<Value> {
+pub(crate) fn read_flat_value(
+    snapshot: &Snapshot,
+    idx: usize,
+    row: usize,
+    ty: ColumnType,
+) -> Option<Value> {
     match ty {
         ColumnType::F64 => snapshot.f64_at(idx, row).map(Value::F64),
         ColumnType::I64 => snapshot.i64_at(idx, row).map(Value::I64),
@@ -1607,7 +1667,9 @@ mod tests {
             Value::F64(0.5),
             BASE,
         );
-        draft.state = DraftState::Sent;
+        draft.state = DraftState::Sent {
+            at: "2026-09-12T14:05:00Z".into(),
+        };
         let model = MatrixModel::build(&full_grid(), &CVI, &draft).expect("a complete grid");
         assert!(model.rows[1].cells[3].sent);
         assert!(model.rows[1].cells[3].edited);

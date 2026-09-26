@@ -37,8 +37,9 @@ background data work. It does not depend on the shell or feature modules.
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the
 shell's module contract and may ask the data service through `DataHandle`.
-They do not depend on sibling features. `geode-app` constructs shared services, registers module
-factories, adapters, document kinds, and pricers, and opens the window.
+They do not depend on sibling features. `geode-app` constructs shared
+services, registers module factories, adapters, document kinds, and pricers,
+and opens the window.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
 stateful controls; `geode-chart` holds chart preparation and painting. Wire
@@ -56,12 +57,15 @@ I/O. The main window contains one `ShellView`, wrapped by gpui-component's
 `DataService` runs on its own thread and accepts bounded, nonblocking requests
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool
 owns independent read connections. Source adapters, discovery, subscription,
-fetch, pricing, and logging workers communicate through bounded channels or
-explicit sinks.
+fetch, pricing, egress, and logging workers communicate through bounded
+channels or explicit sinks. Egress serializes documents on the service thread
+before handing bytes to a per-target transport worker.
 
-The boundary rule is simple: a caller either receives an outcome or learns
-that submission was refused. A bounded queue must not turn refusal into an
-indefinite wait, and a slow producer must not block the UI thread.
+Submission reports admission or refusal without waiting for queue space.
+Admission does not guarantee completion: cancellation, supersession, startup
+failure, and worker failure have request-specific effects. Callers handle
+refusal explicitly and check outcome freshness. See
+[requests and UI delivery](request-delivery.md) for these boundaries.
 
 See [the shell](shell.md) and [the data path](data-path.md) for the detailed
 lifecycle and routing contracts.
@@ -106,9 +110,11 @@ migrated when a schema document changes.
 ## Failure boundaries
 
 Expected failures become data: diagnostics, health, refused submissions, or
-per-request errors. Background entry points use a containment boundary so a
-bad source item or adapter call does not normally take down the process.
-Fatal process panics still reach the application panic hook and crash report.
+per-request errors. Read and pricing workers contain panics in their request
+paths; egress transport calls have no equivalent catch boundary. Failure and
+shutdown behavior therefore depend on the worker rather than on a universal
+background-task guarantee. Panics also reach the application panic hook and
+crash report.
 
 Health and freshness describe what the system knows rather than concealing
 degradation. A source can remain queryable while degraded; the UI must retain

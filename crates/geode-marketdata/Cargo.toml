@@ -25,6 +25,7 @@ gpui.workspace = true
 gpui-component.workspace = true
 chrono = "0.4.42"
 toml = "1.1.4"
+tracing.workspace = true
 
 [dev-dependencies]
 geode-core = { workspace = true, features = ["test-support"] }

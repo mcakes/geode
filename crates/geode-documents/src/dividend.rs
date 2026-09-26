@@ -1,22 +1,24 @@
 //! The dividend-schedule kind (design spec §6.2): `marketData/underlying`,
 //! `dividends/currency`, `dividends/scheduleDate` and one
-//! `dividends/dividend` per scheduled dividend, each carrying `id`,
-//! `exDate`, `announcedDate`, `payDate`, `amount` and `status`.
+//! `dividends/dividend` per scheduled dividend, each carrying `exDate`,
+//! `announcedDate`, `payDate`, `amount` and `status`. The wire carries no
+//! row id: Geode mints the `dividend_id` axis itself from `exDate` with
+//! `mint_ids`, once every row of a document has parsed — an inbound
+//! `<id>` is simply an unrecognised element (design spec §5.3 amendment).
 //!
 //! Hand-written as a `quick_xml::Reader` event walk rather than a serde
 //! derive, for the same three reasons `cvi.rs`'s module doc gives: the
 //! unknown-element rule ("skipped and logged once per (source, path)")
 //! needs the *path* of the element that was skipped, which a
 //! deserializer's `deny_unknown_fields` does not hand back and its
-//! default silence hides; the closed `status` vocabulary and the `new-`
-//! reservation (a minted row id, spec §5.3, must never collide with one
-//! the feed really sent) are cross-element invariants serde has no place
-//! to state; and the whole point of the parse is to land in
-//! struct-of-arrays (`DocumentRows`) with nothing allocated per row
-//! beyond the columns themselves (PHILOSOPHY §6), where a derive would
-//! build a `Vec<Dividend>` of row objects first. **The wire tag names
-//! (`TAGS` below) are an assumption until the desk's XSD arrives** — one
-//! table to change, in the mould of CVI's `SLICE_VALUES`.
+//! default silence hides; the closed `status` vocabulary is a
+//! cross-element invariant serde has no place to state; and the whole
+//! point of the parse is to land in struct-of-arrays (`DocumentRows`)
+//! with nothing allocated per row beyond the columns themselves
+//! (PHILOSOPHY §6), where a derive would build a `Vec<Dividend>` of row
+//! objects first. **The wire tag names (`TAGS` below) are an assumption
+//! until the desk's XSD arrives** — one table to change, in the mould of
+//! CVI's `SLICE_VALUES`.
 
 use chrono::NaiveDate;
 use geode_core::document::{
@@ -25,6 +27,7 @@ use geode_core::document::{
 use geode_core::schema::ColumnType;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
+use std::collections::HashMap;
 
 /// The dataset name this kind feeds, and the name a `[sources.<name>]`
 /// spells as its `kind` (spec §6.4 of the market-data documents design).
@@ -59,20 +62,15 @@ const ATTRIBUTES: [&str; 2] = ["currency", "schedule_date"];
 /// know that; this is simply where the truth lives.
 pub const STATUSES: [&str; 4] = ["estimated", "declared", "paid", "cancelled"];
 
-/// The prefix a locally-minted row id carries (design spec §5.3): a
-/// trader's row insert mints `new-<n>` for a `Minted`-axis document
-/// before the id is ever committed upstream. Refusing that prefix on the
-/// way IN is what makes a minted id incapable of colliding with a real
-/// one the feed sends later.
-const MINTED_PREFIX: &str = "new-";
-
-/// The six children of one `<dividend>`, wire tag paired with the column
-/// it lands in (`id` is the axis, the rest are values) — one table for
-/// both directions, in the mould of CVI's `SLICE_VALUES`, so the parser's
-/// recognised set and the writer's emission cannot drift apart. **The tag
-/// names are an assumption until the desk's XSD arrives.**
-const TAGS: [(&str, &str); 6] = [
-    ("id", "dividend_id"),
+/// The five children of one `<dividend>`, wire tag paired with the column
+/// it lands in — one table for both directions, in the mould of CVI's
+/// `SLICE_VALUES`, so the parser's recognised set and the writer's
+/// emission cannot drift apart. **The tag names are an assumption until
+/// the desk's XSD arrives.** The wire carries no `id`: Geode mints the
+/// `dividend_id` axis itself, from `exDate`, with `mint_ids` below — an
+/// inbound `<id>` is simply unrecognised and reported like any other
+/// unknown element.
+const TAGS: [(&str, &str); 5] = [
     ("exDate", "ex_date"),
     ("announcedDate", "announced_date"),
     ("payDate", "pay_date"),
@@ -237,10 +235,9 @@ impl PathStack {
 /// Everything one `<dividend>` accumulates before its `</dividend>`
 /// commits it. Reset with `restart` rather than replaced, in the mould of
 /// CVI's `Slice` — though nothing here carries a buffer worth keeping
-/// across dividends, since all six fields are scalars.
+/// across dividends, since all five fields are scalars.
 #[derive(Default)]
 struct Dividend {
-    id: Option<String>,
     ex_date: Option<NaiveDate>,
     announced_date: Option<NaiveDate>,
     pay_date: Option<NaiveDate>,
@@ -271,7 +268,6 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
     let mut currency: Option<String> = None;
     let mut schedule_date: Option<NaiveDate> = None;
 
-    let mut id_col: Vec<String> = Vec::new();
     let mut ex_date_col: Vec<NaiveDate> = Vec::new();
     let mut announced_date_col: Vec<NaiveDate> = Vec::new();
     let mut pay_date_col: Vec<NaiveDate> = Vec::new();
@@ -358,18 +354,6 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                     Shape::Leaf(Leaf::Field(i)) => {
                         let (tag, _column) = TAGS[i];
                         match tag {
-                            "id" => {
-                                if dividend.id.is_some() {
-                                    return Err(already_filled(tag));
-                                }
-                                if trimmed.starts_with(MINTED_PREFIX) {
-                                    return Err(parse_err(format!(
-                                        "id '{trimmed}' begins with the reserved \
-                                         '{MINTED_PREFIX}' prefix"
-                                    )));
-                                }
-                                dividend.id = Some(trimmed.to_string());
-                            }
                             "exDate" => {
                                 if dividend.ex_date.is_some() {
                                     return Err(already_filled(tag));
@@ -406,32 +390,30 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
                                 }
                                 dividend.status = Some(trimmed.to_string());
                             }
-                            _ => unreachable!("TAGS names only the six recognised children"),
+                            _ => unreachable!("TAGS names only the five recognised children"),
                         }
                     }
                     Shape::Dividend => {
-                        // Every child is required, named by the one it is
-                        // missing from — `id` first, since the other five
-                        // messages name the dividend BY its id.
-                        let id = dividend.id.clone().ok_or_else(|| {
-                            parse_err(format!("dividend {} is missing id", dividends_seen + 1))
-                        })?;
+                        // Every child is required, named by the row's
+                        // 1-based position — there is no id to name it by
+                        // until `mint_ids` runs, after every row has
+                        // committed.
+                        let row = dividends_seen + 1;
                         let ex_date = dividend.ex_date.ok_or_else(|| {
-                            parse_err(format!("dividend '{id}' is missing exDate"))
+                            parse_err(format!("dividend {row} is missing exDate"))
                         })?;
                         let announced_date = dividend.announced_date.ok_or_else(|| {
-                            parse_err(format!("dividend '{id}' is missing announcedDate"))
+                            parse_err(format!("dividend {row} is missing announcedDate"))
                         })?;
                         let pay_date = dividend.pay_date.ok_or_else(|| {
-                            parse_err(format!("dividend '{id}' is missing payDate"))
+                            parse_err(format!("dividend {row} is missing payDate"))
                         })?;
                         let amount = dividend.amount.ok_or_else(|| {
-                            parse_err(format!("dividend '{id}' is missing amount"))
+                            parse_err(format!("dividend {row} is missing amount"))
                         })?;
                         let status = dividend.status.clone().ok_or_else(|| {
-                            parse_err(format!("dividend '{id}' is missing status"))
+                            parse_err(format!("dividend {row} is missing status"))
                         })?;
-                        id_col.push(id);
                         ex_date_col.push(ex_date);
                         announced_date_col.push(announced_date);
                         pay_date_col.push(pay_date);
@@ -493,6 +475,8 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
         return Err(parse_err("dividends is missing or has no dividend"));
     }
 
+    let id_col = mint_ids(&ex_date_col);
+
     Ok(ParsedDocument {
         rows: DocumentRows {
             key: vec![key],
@@ -511,6 +495,27 @@ fn parse(bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
         },
         unknown_paths,
     })
+}
+
+/// Geode's own row identity for a dividend (the wire carries none): the
+/// ex date, and `#n` for the `n`th row sharing it in feed order. Stable
+/// while a row's ex date and its place among same-day rows are
+/// unchanged; `Draft::rebase` refuses edits in a group whose size changed.
+/// Never begins `new-`, so it cannot collide with a draft's minted labels.
+pub fn mint_ids(ex_dates: &[NaiveDate]) -> Vec<String> {
+    let mut seen: HashMap<NaiveDate, usize> = HashMap::new();
+    ex_dates
+        .iter()
+        .map(|d| {
+            let n = seen.entry(*d).or_insert(0);
+            *n += 1;
+            if *n == 1 {
+                d.format(DATE_FORMAT).to_string()
+            } else {
+                format!("{}#{}", d.format(DATE_FORMAT), n)
+            }
+        })
+        .collect()
 }
 
 /// `write` is the parser's exact inverse, so it refuses every shape it
@@ -668,7 +673,9 @@ fn write(rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
     for i in 0..rows_n {
         w.write_event(Event::Start(BytesStart::new("dividend")))
             .map_err(io)?;
-        leaf(&mut w, "id", &ids[i])?;
+        // No `<id>` element: the wire carries none, and Geode's own
+        // `dividend_id` (minted by `mint_ids` at parse) is internal row
+        // identity, never something to publish back upstream.
         date_into(&mut buf, ex_dates[i]);
         leaf(&mut w, "exDate", &buf)?;
         date_into(&mut buf, announced_dates[i]);
@@ -707,7 +714,6 @@ mod tests {
     <currency>USD</currency>
     <scheduleDate>2026-09-19</scheduleDate>
     <dividend>
-      <id>D1</id>
       <exDate>2026-10-01</exDate>
       <announcedDate>2026-08-15</announcedDate>
       <payDate>2026-10-15</payDate>
@@ -715,7 +721,6 @@ mod tests {
       <status>declared</status>
     </dividend>
     <dividend>
-      <id>D2</id>
       <exDate>2027-01-05</exDate>
       <announcedDate>2026-11-01</announcedDate>
       <payDate>2027-01-20</payDate>
@@ -734,7 +739,7 @@ mod tests {
             ],
             axes: vec![(
                 "dividend_id".into(),
-                Column::Utf8(vec!["D1".into(), "D2".into()]),
+                Column::Utf8(vec!["2026-10-01".into(), "2027-01-05".into()]),
             )],
             values: vec![
                 (
@@ -878,7 +883,6 @@ role = "attribute"
     <currency>USD</currency>
     <scheduleDate>2026-09-19</scheduleDate>
     <dividend>
-      <id>D1</id>
       <exDate>2026-10-01</exDate>
       <announcedDate>2026-08-15</announcedDate>
       <payDate>2026-10-15</payDate>
@@ -886,7 +890,6 @@ role = "attribute"
       <status>declared</status>
     </dividend>
     <dividend>
-      <id>D2</id>
       <exDate>2027-01-05</exDate>
       <announcedDate>2026-11-01</announcedDate>
       <payDate>2027-01-20</payDate>
@@ -899,37 +902,69 @@ role = "attribute"
         );
     }
 
-    #[test]
-    fn a_missing_id_is_refused_naming_it() {
-        let doc = DOC.replace("<id>D1</id>", "");
-        let err = DividendKind.parse(doc.as_bytes()).unwrap_err();
-        assert!(err.message.contains("missing id"), "{}", err.message);
+    /// Reads `values[0]` (`ex_date`) back out as plain dates, for a test to
+    /// hand to `mint_ids` and compare against the axis the parser actually
+    /// produced.
+    fn ex_dates_of(rows: &DocumentRows) -> Vec<NaiveDate> {
+        let Column::Date(dates) = &rows.values[0].1 else {
+            panic!("values[0] is ex_date, a date column");
+        };
+        dates.clone()
     }
 
     #[test]
-    fn a_repeated_id_is_refused_naming_it() {
-        let doc = DOC.replace("<id>D1</id>", "<id>D1</id><id>D1b</id>");
-        let err = DividendKind.parse(doc.as_bytes()).unwrap_err();
-        assert!(
-            err.message.contains("id") && err.message.contains("already"),
-            "{}",
-            err.message
+    fn mint_ids_numbers_same_day_rows_in_feed_order() {
+        let d = |s: &str| NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
+        assert_eq!(
+            mint_ids(&[
+                d("2026-09-18"),
+                d("2026-12-18"),
+                d("2026-09-18"),
+                d("2026-09-18")
+            ]),
+            vec!["2026-09-18", "2026-12-18", "2026-09-18#2", "2026-09-18#3"],
         );
     }
 
-    /// `DividendKind::parse` refuses an upstream id beginning `new-`
-    /// (design spec §5.3): that prefix is reserved for a row a trader's
-    /// insert mints locally, and a feed sending one would let a minted
-    /// row collide with a real one.
     #[test]
-    fn a_new_prefixed_id_is_refused() {
-        let doc = DOC.replace("<id>D1</id>", "<id>new-1</id>");
-        let err = DividendKind.parse(doc.as_bytes()).unwrap_err();
+    fn parse_mints_ids_from_ex_dates() {
+        let doc = DividendKind.parse(DOC.as_bytes()).unwrap();
+        let Column::Utf8(ids) = &doc.rows.axes[0].1 else {
+            panic!()
+        };
+        // DOC's two rows: their exDates, in feed order.
+        assert_eq!(ids, &mint_ids(&ex_dates_of(&doc.rows)));
+        assert!(ids.iter().all(|id| !id.starts_with("new-")));
+    }
+
+    #[test]
+    fn an_inbound_id_is_an_unknown_element() {
+        let doc = DOC.replacen("<exDate>", "<id>X</id><exDate>", 1);
+        let parsed = DividendKind.parse(doc.as_bytes()).unwrap();
         assert!(
-            err.message.contains("new-") && err.message.contains("id"),
-            "{}",
-            err.message
+            parsed
+                .unknown_paths
+                .iter()
+                .any(|p| p.ends_with("dividend/id")),
+            "{:?}",
+            parsed.unknown_paths
         );
+    }
+
+    #[test]
+    fn write_emits_no_id_even_for_a_minted_label() {
+        let mut rows = expected();
+        rows.axes[0].1 = Column::Utf8(vec!["new-1".into(), "new-2".into()]);
+        let xml = String::from_utf8(DividendKind.write(&rows).unwrap()).unwrap();
+        assert!(!xml.contains("<id>"), "{xml}");
+    }
+
+    #[test]
+    fn parse_write_parse_is_stable_with_ids_reminted() {
+        let first = DividendKind.parse(DOC.as_bytes()).unwrap().rows;
+        let bytes = DividendKind.write(&first).unwrap();
+        let second = DividendKind.parse(&bytes).unwrap().rows;
+        assert_eq!(first, second);
     }
 
     #[test]
@@ -1022,7 +1057,7 @@ role = "attribute"
             let doc = DOC.replace(needle, "");
             let err = DividendKind.parse(doc.as_bytes()).unwrap_err();
             assert!(
-                err.message.contains("D1") && err.message.contains(what),
+                err.message.contains("dividend 1") && err.message.contains(what),
                 "{what}: {}",
                 err.message
             );

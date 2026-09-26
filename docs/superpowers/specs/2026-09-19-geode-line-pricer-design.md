@@ -1220,6 +1220,11 @@ Part 4 obligations:
 - `keep_generations` for local datasets.
 - Catalogue underlyings for the typeahead, if a source for them exists
   by then.
+- Decide the header precedence of a refusal streak over `loading…`. Once
+  `:e` makes loads happen mid-life, a streak standing when a load starts
+  paints `REFUSED` over `loading…`, and a retry that fires while loading
+  submits nothing and is not re-armed (`loaded` resubmits, which ends or
+  continues the streak, so it self-heals).
 
 Deferred minors, none blocking: `escape` clears `loading…` (or
 `REFUSED`) mid-flight; the 1 s retry is unbounded with no backoff; the
@@ -1229,6 +1234,42 @@ every reload and restarts the timer even when the interval is unchanged;
 change leaves an open editor painted at its old column index (a commit
 still refuses); menu enabled states are not refreshed after a `:`
 command; `redo`'s clear-on-error arm is untested.
+
+Post-merge cleanup (2026-09-24, `worktree-pricer-cleanup`): clicks below
+an open entry resolve their row to a `LineId` before the entry closes
+(a double-click's first press hands its line, or the placeholder, to the
+second); the `pricer::escape` title is "Clear find and dismissible
+notice"; `escape`
+leaves `loading…`; `REFUSED` is its own state over the notice, cleared
+when nothing is left to submit, backing off 1 s → 30 s and logging once
+per streak; a refused `apply_edits` rollback logs and clears the undo
+history; the open set is no longer pruned by edits, so `d d`/`g u` then
+`u` restores a package open, with the cursor on the first restored row.
+Of the deferred minors above this closes three: `escape` clearing
+`loading…`/`REFUSED`, the unbounded 1 s retry, and `dd`/`g u` then `u`
+restoring a package collapsed.
+
+Leftovers (2026-09-24, `worktree-pricer-leftovers`) close the remaining
+four:
+
+- *Config re-read.* The bridge's observer compares
+  `bridge::pricer_config_key` (merged `pricer_views` value, raw
+  `[pricing] refresh`, resolved `stale_after`) with the last one it
+  applied and does nothing when it is equal: no reload, timer restart,
+  warning or diagnostics note. The observer is seeded with the key
+  `start` computed at setup (`Bridge::pricer_key`), so the first
+  unrelated reload of a session is skipped too; `None` lets the first
+  reload through.
+- *Editor column.* Every rebuild re-points an open editor, and the
+  cursor column, at its column kind's new plan index; when the kind left the plan or the line left
+  the grid it closes with `MOVED`, blurred through the window it opened
+  in at the end of the effect cycle (a rebuild has no `Window`).
+- *Menu states.* `rebuild_chrome` recomputes an open menu's rows,
+  keeping the highlight clamped. A grid click closes the menu, and
+  every verb does, so the reachable stale routes were a load answer
+  (menu opened while loading) and a config reload.
+- *Redo clear-on-error.* Pinned by
+  `a_refused_redo_drops_the_rest_of_both_sides` and a harness entry.
 
 Unverified on a real window: the header row, the tree column's indent
 and package ground, stale versus fresh contrast, the entry field over

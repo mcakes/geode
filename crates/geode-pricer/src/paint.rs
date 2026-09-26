@@ -1,25 +1,20 @@
-//! The pricer's text colours (line-pricer spec §8.2), derived once per
-//! theme and floored to `READABLE_RATIO` against the ground each paints
-//! on (planning decision 14): an own value in `foreground`, a stale
-//! result or an inherited shift `muted`, a failed row's cells in
-//! `Tone::DangerText`, and a package row on `secondary` with its own
-//! floored trio. Resolved in `render_td` from the cell's `CellState`; the
-//! `GridModel` stays theme-free. The tile re-derives it when the theme
-//! global changes (an observer, never a per-cell check).
+//! Prepared grid-row and action-menu text colours, recomputed on theme changes.
+//! CellState selects own, muted stale/inherited, or failure text; package rows have a
+//! separate palette. GridModel remains independent of the theme.
 //!
-//! Each floor moves toward whichever of pure black or pure white
-//! contrasts more with the ground it paints on (the market-data
-//! `FlooredTones` idiom, `geode-marketdata/src/tile.rs`) — one pole for
-//! the table ground, one for the package ground — never toward the
-//! colour's own theme anchor (`theme.foreground`). Floored toward its own
-//! anchor, an already-equal pair (`own`/`package_own` against a theme
-//! whose `foreground` already painted its ground, e.g. a monochrome
-//! theme) gives `readable_on` nothing to bisect toward and the floor is a
-//! no-op (review fix, 2026-09-24). Every colour clears `READABLE_RATIO`
-//! against one of the two poles, so this floor always lands.
+//! Row text is adjusted against its base background and the table's hover and selection
+//! backgrounds, which replace that base. Menu text is adjusted against the popover or
+//! enabled-row highlight. The bundled-theme test checks these prepared colours on each
+//! background.
+//!
+//! Adjust toward whichever of black or white has greater contrast with the background.
+//! Using the original text colour as the adjustment endpoint would fail when that
+//! colour already matches its background. The multi-background helper is bounded; it
+//! does not guarantee success for arbitrary combinations of backgrounds that require
+//! opposite endpoints.
 
 use crate::core::columns::CellState;
-use geode_core::colour::{Rgb, contrast_ratio, readable_on};
+use geode_core::colour::{READABLE_RATIO, Rgb, contrast_ratio, readable_on};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::colours::{over, to_hsla, to_rgb};
 use gpui::Hsla;
@@ -53,6 +48,25 @@ fn floor_toward_pole(c: Hsla, bg: Rgb) -> Hsla {
     to_hsla(readable_on(to_rgb(c), bg, pole(bg)))
 }
 
+/// Adjust text against the lowest-contrast failing background on each pass, for at most
+/// grounds.len() passes. Bundled-theme tests check all resulting background pairs;
+/// incompatible backgrounds need not converge within this bound.
+fn floor_on_all(c: Hsla, grounds: &[Rgb]) -> Hsla {
+    let mut c = c;
+    for _ in 0..grounds.len() {
+        let Some(worst) = grounds
+            .iter()
+            .copied()
+            .filter(|g| contrast_ratio(to_rgb(c), *g) < READABLE_RATIO)
+            .min_by(|a, b| contrast_ratio(to_rgb(c), *a).total_cmp(&contrast_ratio(to_rgb(c), *b)))
+        else {
+            break;
+        };
+        c = floor_toward_pole(c, worst);
+    }
+    c
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Paints {
     pub own: Hsla,
@@ -60,9 +74,20 @@ pub struct Paints {
     pub danger: Hsla,
     /// Opaque: `secondary` composited over the table ground.
     pub package_ground: Hsla,
+    /// Opaque: `table_hover` over the table ground — what the table
+    /// paints on a row under the pointer, replacing the row's own ground
+    /// (a package's included). The chevron's only interactive ground.
+    pub row_hover: Hsla,
     pub package_own: Hsla,
     pub package_muted: Hsla,
     pub package_danger: Hsla,
+    /// Action-menu text for the popover and enabled-row accent background. The muted
+    /// variants serve disabled reasons, section headings, and default-key hints.
+    /// Disabled actions never receive the accent fill.
+    pub menu_text: Hsla,
+    pub menu_muted: Hsla,
+    pub menu_active_text: Hsla,
+    pub menu_active_muted: Hsla,
 }
 
 impl Paints {
@@ -70,15 +95,49 @@ impl Paints {
         let ground: Rgb = over(theme.table, to_rgb(theme.background));
         let package: Rgb = over(theme.secondary, ground);
         let danger = chip_paint(theme, Tone::DangerText).text;
+        let (popover, active) = Self::menu_grounds(theme);
+        // A row's text reads on its own ground and on the two the table
+        // paints over it (hover, selected), which replace it.
+        let [hover, selected] = Self::row_grounds(theme);
+        let line = [ground, hover, selected];
+        let pkg = [package, hover, selected];
         Paints {
-            own: floor_toward_pole(theme.foreground, ground),
-            muted: floor_toward_pole(theme.muted_foreground, ground),
-            danger: floor_toward_pole(danger, ground),
+            own: floor_on_all(theme.foreground, &line),
+            muted: floor_on_all(theme.muted_foreground, &line),
+            danger: floor_on_all(danger, &line),
             package_ground: to_hsla(package),
-            package_own: floor_toward_pole(theme.foreground, package),
-            package_muted: floor_toward_pole(theme.muted_foreground, package),
-            package_danger: floor_toward_pole(danger, package),
+            row_hover: to_hsla(hover),
+            package_own: floor_on_all(theme.foreground, &pkg),
+            package_muted: floor_on_all(theme.muted_foreground, &pkg),
+            package_danger: floor_on_all(danger, &pkg),
+            menu_text: floor_toward_pole(theme.popover_foreground, popover),
+            menu_muted: floor_toward_pole(theme.muted_foreground, popover),
+            menu_active_text: floor_toward_pole(theme.accent_foreground, active),
+            menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
         }
+    }
+
+    /// Table hover and selection backgrounds composited over the table base. Selection
+    /// uses table_active when list.active_highlight is enabled, otherwise accent. Both
+    /// replace a package row's own background.
+    pub(crate) fn row_grounds(theme: &Theme) -> [Rgb; 2] {
+        let ground: Rgb = over(theme.table, to_rgb(theme.background));
+        let selected = if theme.list.active_highlight {
+            *theme.tokens.table_active
+        } else {
+            *theme.tokens.accent
+        };
+        [
+            over(*theme.tokens.table_hover, ground),
+            over(selected, ground),
+        ]
+    }
+
+    /// The popover over the window background, and the highlighted row's
+    /// `accent` over that: the two grounds the menu's text paints on.
+    fn menu_grounds(theme: &Theme) -> (Rgb, Rgb) {
+        let popover = over(theme.popover, to_rgb(theme.background));
+        (popover, over(theme.accent, popover))
     }
 
     pub fn text(&self, state: CellState, package: bool) -> Hsla {
@@ -99,6 +158,11 @@ mod tests {
     use geode_core::colour::{READABLE_RATIO, contrast_ratio};
     use gpui_component::{ActiveTheme as _, Theme};
 
+    /// A test-only label with the sweep's `&'static str` type.
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
     /// Spec §8.2: every paint the pricer adds, swept over every bundled
     /// theme with NO exception list — each text colour against the ground
     /// it actually paints on (the table over the window background for a
@@ -117,6 +181,7 @@ mod tests {
                 let p = Paints::derive(theme);
                 let ground = over(theme.table, to_rgb(theme.background));
                 let package = to_rgb(p.package_ground);
+                let (popover, active) = Paints::menu_grounds(theme);
                 for (label, text, bg) in [
                     ("own", p.own, ground),
                     ("muted", p.muted, ground),
@@ -124,7 +189,31 @@ mod tests {
                     ("package own", p.package_own, package),
                     ("package muted", p.package_muted, package),
                     ("package danger", p.package_danger, package),
-                ] {
+                    // Menu text uses its corresponding popover or accent background.
+                    // The row palette is also checked on hover and selection
+                    // backgrounds below.
+                    ("menu text", p.menu_text, popover),
+                    ("menu muted", p.menu_muted, popover),
+                    ("menu active text", p.menu_active_text, active),
+                    ("menu active muted", p.menu_active_muted, active),
+                ]
+                .into_iter()
+                .chain(
+                    Paints::row_grounds(theme)
+                        .into_iter()
+                        .zip(["hover", "selected"])
+                        .flat_map(|(bg, which)| {
+                            [
+                                ("own", p.own),
+                                ("muted", p.muted),
+                                ("danger", p.danger),
+                                ("package own", p.package_own),
+                                ("package muted", p.package_muted),
+                                ("package danger", p.package_danger),
+                            ]
+                            .map(|(label, text)| (leak(format!("{label} on {which}")), text, bg))
+                        }),
+                ) {
                     checked += 1;
                     let ratio = contrast_ratio(to_rgb(text), bg);
                     if ratio < READABLE_RATIO {
@@ -134,7 +223,7 @@ mod tests {
             });
         }
         assert!(
-            checked >= 6 * 40,
+            checked >= 22 * 40,
             "every bundled theme was swept ({checked})"
         );
         assert!(

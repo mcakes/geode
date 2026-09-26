@@ -7,6 +7,7 @@
 //! Shutdown and final-handle drop join the service and can block; run those off
 //! the UI thread. See `docs/current/request-delivery.md`.
 
+use crate::egress::UploadParams;
 use crate::service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, QueryParams,
 };
@@ -44,6 +45,9 @@ pub enum Request {
     Price(PriceParams),
     /// App-authored document for a dataset declared local.
     Publish(LocalPublish),
+    /// Document upload to an egress target, answered with DataEvent::Upload
+    /// from the service thread (a refusal) or the target's worker.
+    Upload(UploadParams),
     /// History fetch. The service subtracts committed coverage and submits gaps
     /// to the source's fetch worker. Completion uses the identity/source pair,
     /// not the requester's key.
@@ -154,6 +158,14 @@ impl DataHandle {
     /// DataEvent::Query shape and preserve the request key/tag.
     pub fn document(&self, params: DocumentParams) -> bool {
         self.send(Request::Document(params))
+    }
+
+    /// Queue an upload. False means no request was admitted and no outcome is
+    /// owed; the caller reports the refusal. Serviced uploads normally emit one
+    /// `DataEvent::Upload`; startup, worker, and event-delivery failures can
+    /// prevent that outcome. Admission does not acknowledge transport success.
+    pub fn upload(&self, params: UploadParams) -> bool {
+        self.send(Request::Upload(params))
     }
 
     /// Queue a series query. False means not queued. Cap and compile failures
@@ -373,6 +385,7 @@ fn serve(
             }
             Request::Price(params) => service.price(params),
             Request::Publish(publish) => service.publish(publish),
+            Request::Upload(params) => service.upload(params),
             Request::Fetch(params) => service.fetch(&params),
             Request::Identities { source } => {
                 if !service.identities(&source) {
@@ -423,6 +436,7 @@ mod tests {
             sources: Vec::new(),
             adapters: crate::adapter::AdapterRegistry::default(),
             documents: crate::documents::DocumentRegistry::default(),
+            egress: Vec::new(),
             pricer: PricerConfig::default(),
         };
         let (tx, outcomes) = channel();
@@ -490,6 +504,128 @@ mod tests {
             ),
             other => panic!("{other:?}"),
         }
+    }
+
+    fn upload_params(tag: u64) -> UploadParams {
+        UploadParams {
+            key: QueryKey(9),
+            tag,
+            target: "sophis".into(),
+            document: "dividend_schedule".into(),
+            rows: geode_core::document::DocumentRows {
+                key: vec!["XYZ".into()],
+                attributes: Vec::new(),
+                axes: Vec::new(),
+                values: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn upload_is_refused_when_the_request_channel_is_full() {
+        let (handle, rx) = DataHandle::for_tests();
+        for _ in 0..REQUEST_BOUND {
+            assert!(handle.cancel(QueryKey(1)));
+        }
+        assert!(!handle.upload(upload_params(1)));
+        assert_eq!(handle.dropped_requests(), 1);
+        // The admitted requests are the cancels; the refused upload left nothing.
+        let queued: Vec<Request> = rx.try_iter().collect();
+        assert_eq!(queued.len(), REQUEST_BOUND);
+        assert!(queued.iter().all(|r| matches!(r, Request::Cancel { .. })));
+    }
+
+    /// The production route: `DataHandle::upload` through the service
+    /// thread's `serve` loop to the target's worker and back as one
+    /// `DataEvent::Upload`, with the bytes on the bus.
+    #[test]
+    fn an_upload_request_is_served_to_its_target_and_answered() {
+        struct KeyKind;
+        impl geode_core::document::DocumentKind for KeyKind {
+            fn name(&self) -> &'static str {
+                "dividend_schedule"
+            }
+            fn columns(&self) -> &[(&'static str, geode_core::schema::ColumnType)] {
+                &[]
+            }
+            fn parse(
+                &self,
+                _bytes: &[u8],
+            ) -> Result<geode_core::document::ParsedDocument, geode_core::document::ParseError>
+            {
+                unreachable!("uploads never parse")
+            }
+            fn write(
+                &self,
+                rows: &geode_core::document::DocumentRows,
+            ) -> Result<Vec<u8>, geode_core::document::WriteError> {
+                Ok(rows.key.join("/").into_bytes())
+            }
+        }
+        use crate::adapter::{Adapter, MessageSink};
+        let (adapter, _feed) = crate::adapter::ChannelAdapter::new("demo_bus");
+        let (bus_sink, bus_rx) = MessageSink::bounded(8);
+        let mut sub = adapter.subscription().unwrap();
+        sub.subscribe(
+            &["marketdata/dividend/>".into()],
+            bus_sink,
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let mut adapters = crate::adapter::AdapterRegistry::default();
+        adapters.register(adapter.clone());
+        let mut documents = crate::documents::DocumentRegistry::default();
+        documents.register(Arc::new(KeyKind));
+        let db = tempfile::tempdir().unwrap();
+        let (tx, events) = channel();
+        let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: db.path().join("geode.duckdb"),
+                schema: geode_core::schema::SchemaSpec::default(),
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters,
+                documents,
+                egress: vec![geode_core::egress_config::EgressSpec {
+                    name: "sophis".into(),
+                    adapter: "demo_bus".into(),
+                    documents: vec![(
+                        "dividend_schedule".into(),
+                        "marketdata/dividend/{key}".into(),
+                    )],
+                }],
+                pricer: PricerConfig::default(),
+            },
+            sink,
+        );
+
+        assert!(handle.upload(upload_params(4)));
+
+        let outcome = loop {
+            match events.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Upload(outcome) => break outcome,
+                DataEvent::Diagnostics(d) => panic!("{d:?}"),
+                _ => {}
+            }
+        };
+        assert_eq!(
+            outcome,
+            crate::egress::UploadOutcome {
+                key: QueryKey(9),
+                tag: 4,
+                target: "sophis".into(),
+                result: Ok(()),
+            }
+        );
+        let m = bus_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            (m.topic.as_str(), m.bytes.as_slice()),
+            ("marketdata/dividend/XYZ", &b"XYZ"[..])
+        );
+        handle.shutdown();
     }
 
     fn distinct_params(key: u64, column: &str) -> DistinctParams {
@@ -643,6 +779,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
@@ -716,6 +853,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
@@ -788,6 +926,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
@@ -829,6 +968,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: Default::default(),
                 documents: Default::default(),
+                egress: Vec::new(),
                 pricer: PricerConfig::missing("vendor"),
             },
             sink,
@@ -897,6 +1037,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
             },
             sink,
@@ -934,6 +1075,7 @@ mod tests {
                 sources: Vec::new(),
                 adapters: crate::adapter::AdapterRegistry::default(),
                 documents: crate::documents::DocumentRegistry::default(),
+                egress: Vec::new(),
                 pricer: crate::pricing::PricerConfig::default(),
             },
             sink,

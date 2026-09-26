@@ -21,7 +21,7 @@ TOML order is preserved throughout the workspace because column and row order
 are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
-`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `dimensions`,
+`layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
 `colours`, `pricer_views`, and `overrides` replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
@@ -48,6 +48,7 @@ The main configuration documents have distinct owners:
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, and local publication |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, and fetch sources with readiness and adapter settings |
+| `egress.toml` | Upload targets: adapter and a per-document address template |
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
@@ -159,6 +160,45 @@ Source and dataset edits require restart to rebuild runtime workers. See
 and [source discovery and adapters](data-path.md#source-discovery-and-adapters)
 for runtime readiness, delivery, and failure behavior.
 
+## Egress configuration
+
+`egress.toml` has one top-level table per upload target, such as
+`[sophis]`. Each target names an `adapter` and a `documents` table mapping a
+document dataset name to an address template:
+
+```toml
+[sophis]
+adapter = "demo_bus"
+[sophis.documents]
+cvi_params = "marketdata/cvi/{key}"
+dividend_schedule = "marketdata/dividend/{key}"
+```
+
+Targets replace whole named objects across layers. An override must repeat
+its adapter and documents; omitted fields do not inherit from a lower layer.
+`{key}` is replaced literally by document-key parts joined with `/`, without
+escaping. A template without `{key}` is a fixed address for every key of that
+document. Empty address strings and unknown placeholder text are not rejected
+by this reader; transport-specific address validation belongs to the adapter.
+
+The typed reader skips non-table targets with a warning. A missing or
+non-string adapter, missing/non-table/empty documents table, non-document
+dataset name, or non-string address produces an error and drops that whole
+target. Diagnostics use `egress.<target>` and a known field or document name.
+Other targets remain usable. The reserved `config_version` entry is skipped.
+
+Startup adapter resolution separately drops targets whose adapter is unknown
+or exposes no egress capability. The app passes the surviving target names and
+accepted documents to panel factories. This does not guarantee that a worker
+starts successfully or a transport accepts an upload. See
+[egress and uploads](data-path.md#egress-and-uploads) and
+[`egress_config.rs`](../../crates/geode-core/src/egress_config.rs).
+
+Egress changes require restart. Reload can update the active configuration
+representation, but running workers and panel target lists retain their startup
+configuration. The restart indicator compares the layered egress document with
+its startup baseline; restoring those inputs clears the indicator.
+
 ## Runtime edits
 
 The application writes only the user layer. Desk configuration is shared and
@@ -235,7 +275,7 @@ Accepted candidates update runtime state according to their inputs:
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colours | Emit `ConfigReloaded` for the app bridge |
-| Sources, datasets, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can

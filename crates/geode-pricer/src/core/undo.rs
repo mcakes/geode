@@ -63,6 +63,16 @@ impl UndoStack {
         }
     }
 
+    /// The entry the next `undo` (or, with `redo`, the next `redo`)
+    /// replays, without replaying it.
+    pub fn peek(&self, redo: bool) -> Option<&Undo> {
+        if redo {
+            self.undone.last()
+        } else {
+            self.done.back()
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.done.is_empty()
     }
@@ -236,5 +246,37 @@ mod tests {
             "the remaining done entry does not survive"
         );
         assert!(!stack.can_redo(), "nor does the earlier redo");
+    }
+
+    /// A refused redo clears both history stacks. This fixture duplicates the next
+    /// Restore target outside the history stack, making that replay invalid while other
+    /// undo and redo entries still exist.
+    #[test]
+    fn a_refused_redo_drops_the_rest_of_both_sides() {
+        let mut s = Sheet::new("t");
+        let mut stack = UndoStack::default();
+        for (at, strike) in [(0, 5000.0), (1, 4000.0), (2, 3000.0)] {
+            apply(
+                &mut stack,
+                &mut s,
+                Edit::Insert {
+                    place: Place::Root { at },
+                    rows: vec![line(spx(strike, OptionKind::Call), 1)],
+                },
+            );
+        }
+        assert_eq!(stack.undo(&mut s), Ok(true));
+        assert_eq!(stack.undo(&mut s), Ok(true));
+        assert_eq!(s.len(), 1);
+        assert!(stack.can_undo(), "fixture: the first insert is still done");
+        // Restore the next redo's target directly so replay must refuse the duplicate.
+        let next = stack.peek(true).expect("two redos wait").inverse[0].clone();
+        s.apply(next).unwrap();
+        assert!(
+            matches!(stack.redo(&mut s), Err(EditError::IdInUse(_))),
+            "the redo's line is already in the sheet"
+        );
+        assert!(!stack.can_redo(), "the second redo does not survive");
+        assert!(!stack.can_undo(), "nor does the done entry");
     }
 }

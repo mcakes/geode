@@ -42,6 +42,10 @@ pub enum Applies {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColumnDef {
     pub name: &'static str,
+    /// Default display label when the view supplies none, including units where needed.
+    /// Labels remain separate from configuration names and are checked against default
+    /// widths at the largest font size.
+    pub label: &'static str,
     pub kind: ColumnKind,
     pub editable: bool,
     pub applies_to: Applies,
@@ -63,8 +67,10 @@ const LEVEL: ColumnFormat = ColumnFormat {
     colour: Colour::None,
     scale: Scale::None,
 };
-/// A shift: one place, signed by `cell_text` itself.
-const SHIFT: ColumnFormat = ColumnFormat {
+/// A shift: one place, signed by `cell_text` itself. The header's shift
+/// chips format through the same constant and [`signed`], so a chip and
+/// a cell spell one value one way.
+pub(crate) const SHIFT: ColumnFormat = ColumnFormat {
     precision: 1,
     thousands: false,
     negative: Negative::Minus,
@@ -73,7 +79,8 @@ const SHIFT: ColumnFormat = ColumnFormat {
 };
 /// A price: the measure default (two places, grouped, sign-coloured).
 const PRICE: ColumnFormat = ColumnFormat::MEASURE;
-/// A greek: four places, grouped, sign-coloured.
+/// Greek format with four decimals, grouping, and sign colouring. Default widths are
+/// checked against representative large values such as -1,234,567.8900.
 const GREEK: ColumnFormat = ColumnFormat {
     precision: 4,
     thousands: true,
@@ -84,6 +91,7 @@ const GREEK: ColumnFormat = ColumnFormat {
 
 const fn def(
     name: &'static str,
+    label: &'static str,
     kind: ColumnKind,
     editable: bool,
     applies_to: Applies,
@@ -92,6 +100,7 @@ const fn def(
 ) -> ColumnDef {
     ColumnDef {
         name,
+        label,
         kind,
         editable,
         applies_to,
@@ -107,19 +116,45 @@ use Applies::{BarrierLines, EveryLine, EveryRow};
 /// type carries a `String` (`Colour::Named`) is not promotable to a
 /// `'static` borrow.
 pub static COLUMNS: [ColumnDef; 17] = [
-    def("qty", ColumnKind::Qty, true, EveryLine, TEXT, 48.0),
+    def("qty", "qty", ColumnKind::Qty, true, EveryLine, TEXT, 56.0),
     def(
+        "underlying",
         "underlying",
         ColumnKind::Underlying,
         true,
         EveryLine,
         TEXT,
-        80.0,
+        88.0,
     ),
-    def("expiry", ColumnKind::Expiry, true, EveryLine, TEXT, 72.0),
-    def("strike", ColumnKind::Strike, true, EveryLine, LEVEL, 88.0),
-    def("type", ColumnKind::Type, true, EveryLine, TEXT, 48.0),
     def(
+        "expiry",
+        "expiry",
+        ColumnKind::Expiry,
+        true,
+        EveryLine,
+        TEXT,
+        72.0,
+    ),
+    def(
+        "strike",
+        "strike",
+        ColumnKind::Strike,
+        true,
+        EveryLine,
+        LEVEL,
+        88.0,
+    ),
+    def(
+        "type",
+        "type",
+        ColumnKind::Type,
+        true,
+        EveryLine,
+        TEXT,
+        48.0,
+    ),
+    def(
+        "barrier",
         "barrier",
         ColumnKind::Barrier,
         true,
@@ -129,14 +164,16 @@ pub static COLUMNS: [ColumnDef; 17] = [
     ),
     def(
         "barrier_type",
+        "barrier type",
         ColumnKind::BarrierType,
         true,
         BarrierLines,
         TEXT,
-        64.0,
+        104.0,
     ),
     def(
         "spot_shift",
+        "spot %",
         ColumnKind::SpotShift,
         true,
         EveryLine,
@@ -145,27 +182,77 @@ pub static COLUMNS: [ColumnDef; 17] = [
     ),
     def(
         "vol_shift",
+        "vol pt",
         ColumnKind::VolShift,
         true,
         EveryLine,
         SHIFT,
         72.0,
     ),
-    def("price", ColumnKind::Price, false, EveryRow, PRICE, 96.0),
-    def("delta", ColumnKind::Delta, false, EveryRow, GREEK, 96.0),
-    def("gamma", ColumnKind::Gamma, false, EveryRow, GREEK, 96.0),
-    def("vega", ColumnKind::Vega, false, EveryRow, GREEK, 96.0),
-    def("theta", ColumnKind::Theta, false, EveryRow, GREEK, 96.0),
-    def("rho", ColumnKind::Rho, false, EveryRow, GREEK, 96.0),
+    def(
+        "price",
+        "price",
+        ColumnKind::Price,
+        false,
+        EveryRow,
+        PRICE,
+        112.0,
+    ),
+    def(
+        "delta",
+        "delta",
+        ColumnKind::Delta,
+        false,
+        EveryRow,
+        GREEK,
+        128.0,
+    ),
+    def(
+        "gamma",
+        "gamma",
+        ColumnKind::Gamma,
+        false,
+        EveryRow,
+        GREEK,
+        128.0,
+    ),
+    def(
+        "vega",
+        "vega",
+        ColumnKind::Vega,
+        false,
+        EveryRow,
+        GREEK,
+        128.0,
+    ),
+    def(
+        "theta",
+        "theta",
+        ColumnKind::Theta,
+        false,
+        EveryRow,
+        GREEK,
+        128.0,
+    ),
+    def("rho", "rho", ColumnKind::Rho, false, EveryRow, GREEK, 128.0),
     def(
         "priced_at",
+        "priced at",
         ColumnKind::PricedAt,
         false,
         EveryRow,
         TEXT,
         80.0,
     ),
-    def("status", ColumnKind::Status, false, EveryRow, TEXT, 160.0),
+    def(
+        "status",
+        "status",
+        ColumnKind::Status,
+        false,
+        EveryRow,
+        TEXT,
+        160.0,
+    ),
 ];
 
 pub fn column(name: &str) -> Option<&'static ColumnDef> {
@@ -207,8 +294,11 @@ fn own(text: impl Into<String>) -> CellText {
 }
 
 /// `+2.0` / `-1.5` at the format's precision: a shift is a delta from
-/// the market, so its sign is the information.
-fn signed(value: f64, format: &ColumnFormat) -> String {
+/// the market, so its sign is the information. The minus is the ASCII
+/// hyphen-minus every other number in the table carries
+/// (`format_number`'s `Negative::Minus`), so one sheet spells a negative
+/// one way — cells, header chips and the yanked text alike.
+pub(crate) fn signed(value: f64, format: &ColumnFormat) -> String {
     let n = format_number(value.abs(), format).text;
     if value < 0.0 {
         format!("-{n}")

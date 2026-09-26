@@ -1,4 +1,5 @@
 pub mod chart;
+pub mod menu;
 pub mod model;
 pub mod range;
 pub mod request;

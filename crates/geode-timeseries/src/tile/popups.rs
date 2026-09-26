@@ -1,6 +1,6 @@
-//! The tile's popups: the series list, the add picker, the expression
-//! field and the range dialog — opened, keyed, committed and cancelled
-//! here, painted by `crate::popup`.
+//! Lifecycle and input routing for the series list, add picker, expression
+//! field, range editor, and action menu. `crate::popup` owns state and popup
+//! painting; the expression field is rendered inline by `crate::header`.
 
 use super::*;
 
@@ -15,7 +15,40 @@ impl TimeseriesTile {
         cx: &mut Context<Self>,
     ) -> bool {
         let series_open = matches!(self.popup, Some(Popup::Series(_)));
+        let menu_open = matches!(self.popup, Some(Popup::Menu(_)));
         match verb {
+            // Keyboard and header button share the action-menu toggle.
+            "menu" => {
+                self.toggle_menu(window, cx);
+                true
+            }
+            // Menu navigation clamps over action rows, including disabled rows, and
+            // skips headings/separators. Enter picks; Escape closes. Series navigation
+            // uses these action names in its own mutually exclusive context.
+            "list_down" | "list_up" if menu_open => {
+                let delta = if verb == "list_down" {
+                    n as isize
+                } else {
+                    -(n as isize)
+                };
+                if let Some(Popup::Menu(m)) = &mut self.popup {
+                    m.highlighted = menu::step(&m.rows, m.highlighted, delta);
+                }
+                cx.notify();
+                true
+            }
+            "list_close" if menu_open => {
+                self.close_popup_with_window(window, cx);
+                true
+            }
+            "menu_pick" if menu_open => {
+                let Some(Popup::Menu(m)) = &self.popup else {
+                    return false;
+                };
+                let index = m.highlighted;
+                self.menu_pick(index, window, cx);
+                true
+            }
             // Toggle the fieldless series list.
             "list" => {
                 if self.popup.is_some() {
@@ -447,6 +480,7 @@ impl TimeseriesTile {
             focus,
             error: None,
             edited: false,
+            frequency: self.model.frequency(),
         }));
         self.notice = None;
         cx.notify();
@@ -621,6 +655,156 @@ impl TimeseriesTile {
                 }
                 cx.notify();
                 false
+            }
+        }
+    }
+
+    // Action-menu lifecycle and pointer controls.
+
+    /// Toggle the menu, closing any other popup through the focus-aware closer.
+    /// Opening prepares rows from the model and binding hints; subsequent chrome
+    /// rebuilds refresh them while the menu remains open.
+    pub(crate) fn toggle_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some(Popup::Menu(_))) {
+            self.close_popup_with_window(window, cx);
+            return;
+        }
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        self.open_menu(cx);
+    }
+
+    /// Build and install the menu over the current model.
+    pub(super) fn open_menu(&mut self, cx: &mut Context<Self>) {
+        let rows = self.menu_rows(cx);
+        let highlighted = menu::first_enabled(&rows);
+        self.popup = Some(Popup::Menu(MenuState { rows, highlighted }));
+        self.notice = None;
+        cx.notify();
+    }
+
+    /// The menu's rows over the model as it is now, every `hint` its
+    /// action's live chord (the footer's own rule). Called at open and
+    /// from `rebuild_chrome` while the menu is up — a `:` line or a
+    /// delivery can move the cursor slot under an open menu, and a row
+    /// must keep its promise (the heading, Hide/Show, the enablement).
+    pub(super) fn menu_rows(&self, cx: &App) -> Vec<menu::MenuRow> {
+        let default_source = cx
+            .try_global::<SeriesSettings>()
+            .and_then(|s| s.default_source.clone());
+        let mut rows = menu::rows(
+            &menu::MenuInputs { model: &self.model },
+            default_source.as_deref(),
+        );
+        let empty = Vec::new();
+        let bindings = cx
+            .try_global::<geode_shell::tips::Chords>()
+            .map(|c| c.0.as_slice())
+            .unwrap_or(&empty);
+        for row in &mut rows {
+            if let menu::MenuRow::Action { id, hint, .. } = row {
+                *hint = geode_shell::tips::chord_for(bindings, &id.0)
+                    .map(|ks| geode_shell::palette::render_binding(&ks).into())
+                    .unwrap_or_default();
+            }
+        }
+        rows
+    }
+
+    /// A click on the `range · freq` readout: opens the range popup
+    /// through `r`'s own path, or CLOSES it when it is already up — a
+    /// second click that reopened would seed fresh fields over dates
+    /// the trader had started typing.
+    pub(crate) fn readout_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.popup, Some(Popup::Range(_))) {
+            self.close_popup_with_window(window, cx);
+            return;
+        }
+        self.dispatch(&ActionId("timeseries::range".into()), None, window, cx);
+    }
+
+    /// A pointer resting on menu row `index`: the mouse form of `j`/`k`.
+    /// Change-only, because gpui fires this on every pointer move over
+    /// the row.
+    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &mut self.popup else {
+            return;
+        };
+        if m.highlighted == index || index >= m.rows.len() {
+            return;
+        }
+        m.highlighted = index;
+        cx.notify();
+    }
+
+    /// `enter` on the highlighted row, or a click on any row: a disabled
+    /// row's reason becomes the notice and the menu stays; an enabled
+    /// one closes the menu and re-enters [`Self::dispatch`] on its own
+    /// action id, so a row, a key and the palette take one path.
+    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Popup::Menu(m)) = &self.popup else {
+            return;
+        };
+        let Some(menu::MenuRow::Action { id, enabled, .. }) = m.rows.get(index) else {
+            return;
+        };
+        match enabled {
+            Err(reason) => {
+                self.notice = Some((*reason).into());
+                cx.notify();
+            }
+            Ok(()) => {
+                let id = id.clone();
+                self.close_popup_with_window(window, cx);
+                self.dispatch(&id, None, window, cx);
+            }
+        }
+    }
+
+    /// Select the clicked slot and replace any open popup with its action menu.
+    pub(crate) fn chip_context_menu(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.model.set_cursor(index);
+        self.apply_changed(changed, cx);
+        if self.popup.is_some() {
+            self.close_popup_with_window(window, cx);
+        }
+        self.open_menu(cx);
+    }
+
+    /// A click on a chip's swatch: the slot becomes the cursor and its
+    /// visibility flips — `v`'s own path, so the fetch-on-show and the
+    /// density budget rules ride along.
+    pub(crate) fn swatch_clicked(&mut self, index: usize, cx: &mut Context<Self>) {
+        let moved = self.model.set_cursor(index);
+        let flipped = self.model.toggle_visible();
+        self.apply_changed(moved | flipped, cx);
+    }
+
+    /// A click on one of the range popup's frequency chips: the
+    /// frequency is written at once and the popup STAYS open (it is a
+    /// setting the popup shows ticked, not a commit of the popup), with
+    /// the cap refusal inline like a backwards range.
+    pub(crate) fn range_freq_clicked(&mut self, f: Frequency, cx: &mut Context<Self>) {
+        let (now, as_of) = self.now_and_as_of(cx);
+        match self.model.set_frequency(f, now, &as_of) {
+            Ok(changed) => {
+                if let Some(Popup::Range(r)) = &mut self.popup {
+                    r.error = None;
+                    r.frequency = f;
+                }
+                self.apply_changed(changed, cx);
+            }
+            Err(e) => {
+                if let Some(Popup::Range(r)) = &mut self.popup {
+                    r.error = Some(e.into());
+                }
+                cx.notify();
             }
         }
     }
