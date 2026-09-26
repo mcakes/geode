@@ -18709,7 +18709,7 @@ if (( anchors_only )); then
   # Non-zero on any finding so this can gate a merge (MIN-2 of its own
   # review); "nothing selected" is reported as such, never as a pass.
   python3 - "$anchors" <<'PY' || exit 1
-import pathlib, re, sys
+import collections, pathlib, re, sys
 
 raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
 fields = raw.split(b"\0")[:-1] if raw else []
@@ -18793,9 +18793,47 @@ for name, file, anchor, pkg, filt in entries:
         loose += 1
         print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
 
+# `replace(…, 1)` mutates the first match, so two entries on one (file,
+# anchor) mean the second defends nothing.
+by_anchor = collections.defaultdict(list)
+for name, file, anchor, _pkg, _filt in entries:
+    by_anchor[(file, anchor)].append(name)
+dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
+dup_entries = sum(len(v) for v in dup_groups.values())
+for (file, _anchor), names in sorted(dup_groups.items()):
+    for shadowed_name in names[1:]:
+        print(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
+
+# An anchor that occurs once but sits inside a longer anchor another entry
+# uses. AMBIG counts occurrences of one anchor and cannot see this.
+anchors_by_file = collections.defaultdict(set)
+for _name, file, anchor, _pkg, _filt in entries:
+    anchors_by_file[file].add(anchor)
+shadowed_anchors = sorted(
+    (file, anchor)
+    for file, anchors in anchors_by_file.items()
+    for anchor in anchors
+    if any(other != anchor and anchor in other for other in anchors)
+)
+example_of = {}
+for name, file, anchor, _pkg, _filt in entries:
+    example_of.setdefault((file, anchor), name)
+for file, anchor in shadowed_anchors:
+    print(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
+
 print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
+warnings = []
 if loose:
-    print(f"  {loose} loose filters (the named test runs, siblings run with it)")
+    warnings.append(f"{loose} loose filters")
+if dup_entries:
+    warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
+if shadowed_anchors:
+    warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
+if warnings:
+    print(f"  {', '.join(warnings)}")
+    print("  (warnings; see the anchor-uniqueness follow-up)")
+# DUP and SHADOW stay warnings until the follow-up re-anchors them; adding
+# them here is the one-line change that makes them a gate.
 sys.exit(1 if stale or ambiguous or bad_filters else 0)
 PY
 fi
