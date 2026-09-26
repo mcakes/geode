@@ -454,15 +454,19 @@ impl BlotterTile {
     }
 
     /// `:filter` narrows the tile's own scope layer, so it must be valid
-    /// against this tile's dataset (spec §10.1) the same way the frame's
-    /// own scope expression is validated in the shell's
-    /// `shell::scope_expr_view` (the `Set scope expression…` dialog; a
-    /// tile's `:scope` word reached a frame-wide version of the same
-    /// check until command-line locality closed that route 2026-09-20)
-    /// — an unknown column or a bad operator on a derived dimension is a
-    /// user error reported at the caret/column, not a silent no-op or a
-    /// compiler error surfaced far downstream. `Ok(())` when the view or
-    /// its dataset isn't resolvable
+    /// against this tile's dataset (spec §10.1) the same way a frame
+    /// expression is checked against the schema when it is entered in the
+    /// shell's expression dialogs (`shell::scope_expr_view`, the `Set
+    /// scope expression…` dialog, and the Scopes object dialog's
+    /// `expression` field) — an unknown column or a bad operator on a
+    /// derived dimension is a user error reported at the caret/column, not
+    /// a silent no-op or a compiler error surfaced far downstream. That
+    /// dialog check runs only when the field is entered; a frame restored
+    /// from a saved session is not re-checked here (a saved scope is
+    /// checked separately, by `Scope::validate`, wherever it is loaded).
+    /// A tile's `:scope` word reached a frame-wide version of the same
+    /// check until command-line locality closed that route 2026-09-20.
+    /// `Ok(())` when the view or its dataset isn't resolvable
     /// (nothing to validate against yet — `requery`'s own "view is not
     /// configured" error already covers that case).
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
