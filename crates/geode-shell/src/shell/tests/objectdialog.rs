@@ -6901,6 +6901,55 @@ fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestApp
     );
 }
 
+/// A column-stage row names the layer its value comes from and no
+/// destination: every field there writes the same overlay, so a per-row
+/// `pres` says nothing. The layer badge sits in a slot of one width, so a
+/// row that gains or lacks a badge keeps its value where every other
+/// row's is.
+#[gpui::test]
+fn the_column_stage_badges_the_layer_in_one_aligned_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[(
+        "dataset_presentation",
+        "[risk_snapshot.columns.npv]\nscale = \"k\"\n",
+    )]);
+    let (_shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-scale")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-provenance-width")
+            .is_none()
+    );
+    for selector in [
+        "objectdialog-dest-label",
+        "objectdialog-dest-width",
+        "objectdialog-dest-scale",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_none(),
+            "{selector}: the column stage paints no destination badge"
+        );
+    }
+    let scale = cx
+        .debug_bounds("objectdialog-value-scale")
+        .expect("scale paints a value");
+    let width = cx
+        .debug_bounds("objectdialog-value-width")
+        .expect("width paints a value");
+    assert_eq!(
+        scale.right(),
+        width.right(),
+        "a badged row's value lines up with an unbadged row's"
+    );
+}
+
 /// Dataset-presentation spec §5: the Views column stage with a layer
 /// under it. All three layers are filled by the door
 /// (`views::column_layers`), so the label a trader sees is the DATASET's

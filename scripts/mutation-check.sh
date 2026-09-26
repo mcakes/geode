@@ -4100,6 +4100,22 @@ run_mutation "objectdialog: a grip press does not open the column stage" \
   '                                .on_mouse_down(MouseButton::Right, |_event, _window, cx| {' \
   geode-shell pressing_a_member_rows_grip_does_not_open_its_column_stage
 
+# The column stage names each row's layer in place of its destination: every
+# field there writes one overlay, so a per-row `pres` badge says nothing.
+run_mutation "objectdialog: the column stage paints no destination badge" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '(dest_badges && provenance_inputs.is_none())' \
+  '(dest_badges)' \
+  geode-shell the_column_stage_badges_the_layer_in_one_aligned_slot
+
+# The layer badge's slot is sized by the widest layer name, so an unbadged
+# row's value lines up with a badged row's.
+run_mutation "objectdialog: the layer slot keeps the values aligned" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .child(sizer)' \
+  '        .child(div())' \
+  geode-shell the_column_stage_badges_the_layer_in_one_aligned_slot
+
 # The column filter must not survive into Values: `set_value` emits no
 # change event, so without this reset the typed column query hides every
 # value of the chosen column.
