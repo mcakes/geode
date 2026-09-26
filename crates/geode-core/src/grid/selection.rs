@@ -186,6 +186,11 @@ impl Accumulator {
     }
 }
 
+/// The footer's mark for a column that does not add up; the footer shows
+/// [`UNSUMMABLE_LEGEND`] whenever a summary carries it.
+pub const UNSUMMABLE_MARK: char = '‡';
+pub const UNSUMMABLE_LEGEND: &str = "‡ this column does not add up";
+
 /// The footer text for one column (spec §3.3), formatted with that
 /// column's own `ColumnFormat`. `extremes` adds `min`/`max` (a selection
 /// covering a single numeric column); an unsummable column always shows
@@ -196,11 +201,6 @@ impl Accumulator {
 /// totalled (the grid marks those cells `†` too), and `‡` for a column
 /// that does not add up at all. `‡` wins: a max column is unsummable
 /// whatever its cells' attribution.
-/// The footer's mark for a column that does not add up; the footer shows
-/// [`UNSUMMABLE_LEGEND`] whenever a summary carries it.
-pub const UNSUMMABLE_MARK: char = '‡';
-pub const UNSUMMABLE_LEGEND: &str = "‡ this column does not add up";
-
 pub fn describe(
     agg: &ColumnAggregate,
     format: &crate::view::ColumnFormat,
