@@ -60,5 +60,8 @@ change most often hits:
 - `KindAction`s (`cvi_reanchor`, `cvi_recalc_forward`) answer "not built
   yet". A built one is an egress request, never in-app arithmetic
   (`docs/PHILOSOPHY.md`: Geode is a lens, not a brain).
+- The line-number gutter (`[ui] line_numbers`) is painted beside the
+  pinned cell, outside its element, and `on_ui_settings` must call
+  `TableState::refresh` because the table caches column widths.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.

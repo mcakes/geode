@@ -61,6 +61,15 @@ column labels, keeping stable intent across reordered documents. The module
 supports numeric, date, text, and closed-choice cells, row insertion/deletion,
 and kind-specific actions.
 
+`[ui] line_numbers` numbers the grid's rows as the blotter numbers its own:
+a gutter in the pinned column (the row label, or the first value column
+when the label is hidden), which widens by the gutter's width. The gutter
+sits beside that cell rather than inside it, so the cursor border, a draft
+state's fill and a deleted row's strike stay on the data. Rows count as
+painted, inserted and deleted rows included. In `rel` mode with the cursor
+in the header strip there is no row to measure from, and the gutter
+numbers absolutely.
+
 A dividend row's label is Geode's own minted id (the ex date, or
 `<date>#n` for the `n`th row sharing that date), not a wire id — same-date
 rows are identified by their ordinal among that date's group. Rebase

@@ -24,9 +24,11 @@ use crate::header;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::{DateFieldPaint, FlooredTones, MarketDataTile};
 use geode_shell::fonts;
+use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div, px,
+    App, Context, Div, Entity, FocusHandle, Hsla, SharedString, TextAlign, WeakEntity, Window, div,
+    px,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
@@ -60,6 +62,12 @@ const CELL_WIDTH: f32 = 84.0;
 /// takes its place, pin included — `MatrixDelegate::label_column` is the
 /// one flag every column arithmetic here reads.
 pub(crate) const LABEL_COL: usize = 0;
+
+/// The table column pinned left — the row-label column, or under a hidden
+/// label the first value column — and so the one the line-number gutter
+/// widens and paints in: the numbers must stay beside the row's identity
+/// however far right the values scroll.
+const PINNED_COL: usize = 0;
 
 /// What the tile's open editor looks like from the delegate: which cell it
 /// sits in (`col: None` is the row-label column, Task 8's row-label
@@ -160,6 +168,18 @@ pub struct MatrixDelegate {
     /// top of `render`: a compare per painted editor, a derivation only
     /// when the theme moved.
     pub(crate) tones: FlooredTones,
+    /// `[ui] line_numbers`, mirrored from the `UiSettings` global by the
+    /// tile (`MarketDataTile::on_ui_settings`), which refreshes the table
+    /// on a change: the pinned column's width includes the gutter.
+    pub(crate) line_numbers: LineNumbers,
+    /// The gutter text per row, rebuilt by `ensure_numbers` only when
+    /// `numbers_stamp` changes, so a paint clones refcounts and never
+    /// formats a number.
+    numbers: Vec<SharedString>,
+    /// What `numbers` was built for: the row count, the cursor row (only
+    /// `rel` reads it, so `on` stamps `usize::MAX` and a `j` rebuilds
+    /// nothing), and the mode.
+    numbers_stamp: Option<(usize, usize, LineNumbers)>,
 }
 
 impl MatrixDelegate {
@@ -179,7 +199,57 @@ impl MatrixDelegate {
             tile,
             tile_id,
             tones,
+            line_numbers: LineNumbers::Off,
+            numbers: Vec::new(),
+            numbers_stamp: None,
         }
+    }
+
+    /// The gutter's width in px — `0` when off. Read by `column` (the
+    /// pinned column widens by it, so its own text keeps its room) and by
+    /// `render_td` (the gutter's own width).
+    pub(crate) fn gutter_px(&self) -> f32 {
+        gutter_px(self.line_numbers, self.model.rows.len())
+    }
+
+    /// Rebuild `numbers` if anything it depends on changed. Numbers count
+    /// the grid's rows as painted — an inserted row and a struck deleted
+    /// one included — 1-based, as `Nj`/`Nk` count them. With the cursor
+    /// in the header strip there is no row for `rel` to measure from, so
+    /// it numbers absolutely until the cursor returns to the grid.
+    fn ensure_numbers(&mut self) {
+        let mode = self.line_numbers;
+        let len = self.model.rows.len();
+        let cursor = match (mode, self.cursor) {
+            (LineNumbers::Relative, Some((row, _))) => row,
+            _ => usize::MAX,
+        };
+        let stamp = (len, cursor, mode);
+        if self.numbers_stamp == Some(stamp) {
+            return;
+        }
+        let mode = match (mode, self.cursor) {
+            (LineNumbers::Relative, None) => LineNumbers::On,
+            _ => mode,
+        };
+        self.numbers.clear();
+        self.numbers.extend((0..len).map(|row| {
+            gutter_number(mode, row, cursor)
+                .map(|n| SharedString::from(n.to_string()))
+                .unwrap_or_default()
+        }));
+        self.numbers_stamp = Some(stamp);
+    }
+
+    /// The gutter text for `row` — `None` when the gutter is off.
+    /// Test-only: production code goes through `render_td`.
+    #[cfg(test)]
+    pub(crate) fn gutter_text(&mut self, row: usize) -> Option<SharedString> {
+        if self.line_numbers == LineNumbers::Off {
+            return None;
+        }
+        self.ensure_numbers();
+        self.numbers.get(row).cloned()
     }
 
     /// The editor to paint in table cell (`row_ix`, `col_ix`), if the
@@ -293,7 +363,7 @@ impl TableDelegate for MatrixDelegate {
                 // narrowing, for the same reason — spec §8.3), and not
                 // movable, since the labels are the grid's identity.
                 sort: None,
-                width: px(LABEL_WIDTH),
+                width: px(LABEL_WIDTH + self.gutter_px()),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
                 // See `LABEL_WIDTH`'s own note: a dragged width has
@@ -318,7 +388,12 @@ impl TableDelegate for MatrixDelegate {
             // field for a delegate to read back.
             align: TextAlign::Right,
             sort: None,
-            width: px(CELL_WIDTH),
+            width: px(CELL_WIDTH
+                + if col_ix == PINNED_COL {
+                    self.gutter_px()
+                } else {
+                    0.0
+                }),
             // Under a hidden label the FIRST value column is what keeps
             // a row identifiable under horizontal scroll, so it takes
             // the pin the label column would have had.
@@ -356,6 +431,50 @@ impl TableDelegate for MatrixDelegate {
             .child(column.name)
     }
 
+    /// One cell, and on the pinned column the line-number gutter beside
+    /// it (`[ui] line_numbers`): the gutter sits OUTSIDE the cell's own
+    /// element, so the cursor border, a draft state's fill and a deleted
+    /// row's strike stay on the data and never reach the number.
+    fn render_td(
+        &mut self,
+        row_ix: usize,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let cell = self.render_cell(row_ix, col_ix, cx);
+        if col_ix != PINNED_COL || self.line_numbers == LineNumbers::Off {
+            return cell;
+        }
+        self.ensure_numbers();
+        let text = self.numbers.get(row_ix).cloned().unwrap_or_default();
+        let theme = cx.theme();
+        let on_cursor_row = self.cursor.is_some_and(|(row, _)| row == row_ix);
+        div()
+            .size_full()
+            .flex()
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .justify_end()
+                    .w(px(self.gutter_px()))
+                    .pr(px(GUTTER_GAP_PX))
+                    .font_family(fonts::MONO)
+                    .text_color(if on_cursor_row {
+                        theme.foreground
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .debug_selector(|| format!("marketdata-gutter-{row_ix}"))
+                    .child(text),
+            )
+            .child(cell.flex_1().min_w_0())
+    }
+}
+
+impl MatrixDelegate {
     /// One prepared cell: its text, or the editor when this is the cell
     /// being edited.
     ///
@@ -364,13 +483,12 @@ impl TableDelegate for MatrixDelegate {
     /// drops unevaluated outside a test/`test-support` build. The text is
     /// a `SharedString` clone (a refcount) out of the model the tile
     /// prepared, and the colours are `Copy` theme reads.
-    fn render_td(
+    fn render_cell(
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
-    ) -> impl IntoElement {
+    ) -> Div {
         let theme = cx.theme();
         let Some(model_col) = self.model_col(col_ix) else {
             // The row-label column: the label in the data face — it is

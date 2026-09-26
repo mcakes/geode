@@ -74,6 +74,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
 use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::scale;
@@ -793,20 +794,23 @@ impl MarketDataTile {
         // tones for that field's active segment.
         let tones = FlooredTones::derive(cx.theme());
         let weak_tile = cx.weak_entity();
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global, read here and observed below (`on_ui_settings`).
+        let line_numbers = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
-            TableState::new(
-                MatrixDelegate::new(spec, weak_tile, id.0, tones),
-                window,
-                cx,
-            )
-            .row_selectable(true)
-            .col_selectable(false)
-            .cell_selectable(true)
-            .row_header(false)
-            .loop_selection(false)
-            .col_resizable(false)
-            .col_movable(false)
-            .sortable(false)
+            let mut delegate = MatrixDelegate::new(spec, weak_tile, id.0, tones);
+            delegate.line_numbers = line_numbers;
+            TableState::new(delegate, window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(true)
+                .row_header(false)
+                .loop_selection(false)
+                .col_resizable(false)
+                .col_movable(false)
+                .sortable(false)
         });
         // The mouse's part in this panel: a click selects a cell — the
         // cursor moves to it, a click on the row-label column moves the
@@ -934,6 +938,8 @@ impl MarketDataTile {
         // freshness/`Behind` text and the `⋯` menu's "Rebase onto …" row
         // all read — then notify, the same shape every other mutation
         // that reaches `rebuild_chrome` follows (`changed`, just above).
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
+            .detach();
         cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
             this.clock = cx
                 .try_global::<geode_shell::clock::AppClock>()
@@ -2168,6 +2174,24 @@ impl MarketDataTile {
     /// in row mode, so ending on the row is what makes the panel read
     /// like the blotter (a highlighted row plus a bordered cursor cell)
     /// rather than painting nothing at all.
+    /// The shell republished `UiSettings`: mirror `line_numbers` into the
+    /// delegate and, if it changed, refresh the table — the pinned
+    /// column's width includes the gutter, and `TableState` caches
+    /// `column()`'s answer until `refresh`.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            if d.line_numbers != mode {
+                d.line_numbers = mode;
+                t.refresh(cx);
+                cx.notify();
+            }
+        });
+    }
+
     fn sync_cursor(&self, cx: &mut Context<Self>) {
         let editor = self.delegate_editor();
         let choice = self.delegate_choice();
@@ -8859,6 +8883,135 @@ deleted = true
             "the field is as wide as the date as plain text ({:?}), not {:?}",
             glyph * 10.,
             day.right() - year.left()
+        );
+    }
+
+    /// `[ui] line_numbers` reaches a live panel through the shell's
+    /// `UiSettings` global: off paints no gutter; publishing `rel` paints
+    /// one per row on the next draw, numbered from the cursor with the
+    /// cursor row showing its absolute number, and widens the pinned
+    /// column by exactly the gutter — BESIDE the row-label cell, which
+    /// keeps its own width, so the cursor border and a row's fill never
+    /// reach the number. A cursor move re-derives the offsets; with the
+    /// cursor in the header strip there is no row to measure from, so
+    /// `rel` numbers absolutely. Off gives the width back.
+    #[gpui::test]
+    fn the_line_numbers_global_paints_a_gutter_beside_the_row_label(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-0").is_none(),
+            "no gutter while the setting is off (the default with no global set)"
+        );
+        let bounds = |vcx: &mut gpui::VisualTestContext, sel: &'static str| {
+            vcx.debug_bounds(sel).expect("painted")
+        };
+        let label = bounds(&mut vcx, "marketdata-cell-0-0");
+        let value = bounds(&mut vcx, "marketdata-cell-0-1");
+
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Relative,
+            })
+        });
+        draw(&mut vcx);
+        let gutter = bounds(&mut vcx, "marketdata-gutter-0");
+        let width = h
+            .tile
+            .read_with(&vcx, |t, cx| t.table().read(cx).delegate().gutter_px());
+        assert!(width > 0.0, "sanity: a live gutter has width");
+        let label_on = bounds(&mut vcx, "marketdata-cell-0-0");
+        let value_on = bounds(&mut vcx, "marketdata-cell-0-1");
+        assert!(
+            (f32::from(value_on.left() - value.left()) - width).abs() < 0.5,
+            "the pinned column widened by the gutter ({width}); `on_ui_settings` \
+             must `refresh` the table, which caches `column()`'s width"
+        );
+        assert!(
+            (label_on.size.width - label.size.width).abs() < gpui::px(0.5),
+            "the label cell keeps its own width"
+        );
+        assert!(
+            gutter.right() <= label_on.left(),
+            "the gutter sits beside the label cell, not inside it: \
+             {gutter:?} then {label_on:?}"
+        );
+
+        let texts = |vcx: &mut gpui::VisualTestContext| -> Vec<String> {
+            h.tile.update(vcx, |t, cx| {
+                t.table().update(cx, |t, _| {
+                    let d = t.delegate_mut();
+                    (0..2)
+                        .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
+                        .collect()
+                })
+            })
+        };
+        assert_eq!(
+            texts(&mut vcx),
+            vec!["1", "1"],
+            "cursor on row 0: its absolute number, then distances"
+        );
+        h.dispatch(&mut vcx, "down", None);
+        assert_eq!(texts(&mut vcx), vec!["1", "2"], "cursor on row 1");
+        h.tile.update(&mut vcx, |t, cx| {
+            t.table().update(cx, |t, _| t.delegate_mut().cursor = None)
+        });
+        assert_eq!(
+            texts(&mut vcx),
+            vec!["1", "2"],
+            "no grid cursor: `rel` numbers absolutely"
+        );
+
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Off,
+            })
+        });
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-0").is_none(),
+            "off again on the next draw"
+        );
+        assert!(
+            (bounds(&mut vcx, "marketdata-cell-0-1").left() - value.left()).abs() < gpui::px(0.5),
+            "and the pinned column gave the width back"
+        );
+    }
+
+    /// Under a hidden row label the first VALUE column is the pinned one,
+    /// so the gutter rides there — beside the value cell, which keeps its
+    /// width and its right-aligned value.
+    #[gpui::test]
+    fn a_hidden_label_panel_paints_its_gutter_beside_the_first_value(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+        h.with_flat_document(&mut vcx);
+        draw(&mut vcx);
+        let first = vcx.debug_bounds("marketdata-cell-0-0").expect("painted");
+        vcx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::On,
+            })
+        });
+        draw(&mut vcx);
+        let gutter = vcx
+            .debug_bounds("marketdata-gutter-0")
+            .expect("the gutter paints in the first value column");
+        let first_on = vcx.debug_bounds("marketdata-cell-0-0").expect("painted");
+        assert!(
+            gutter.right() <= first_on.left(),
+            "{gutter:?} then {first_on:?}"
+        );
+        assert!(
+            (first_on.size.width - first.size.width).abs() < gpui::px(0.5),
+            "the value cell keeps its own width"
+        );
+        assert!(
+            vcx.debug_bounds("marketdata-gutter-1").is_some(),
+            "one gutter per row"
         );
     }
 

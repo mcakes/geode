@@ -18826,6 +18826,48 @@ run_mutation "mdedit: a date cell's segments paint flush" \
   '        flush: false,' \
   geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
 
+# ---- Market-data line numbers (2026-09-26): `[ui] line_numbers` ----
+
+# The tile observes the shell's `UiSettings` global. Mutated to ignore
+# it, a settings-row step never reaches an open panel.
+run_mutation "mdlines: the panel observes UiSettings" \
+  crates/geode-marketdata/src/tile.rs \
+  '        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))' \
+  '        cx.observe_global::<UiSettings>(|_, _| {})' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# A mode change refreshes the table, whose column widths are cached.
+# Mutated to skip it, the gutter paints inside the old width and eats
+# the label's room.
+run_mutation "mdlines: a mode change refreshes the table" \
+  crates/geode-marketdata/src/tile.rs \
+  '                d.line_numbers = mode;
+                t.refresh(cx);' \
+  '                d.line_numbers = mode;' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# The label column widens by the gutter.
+run_mutation "mdlines: the label column widens by the gutter" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                width: px(LABEL_WIDTH + self.gutter_px()),' \
+  '                width: px(LABEL_WIDTH),' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
+# Under a hidden label the first value column widens instead.
+run_mutation "mdlines: a hidden label's first value column widens" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                + if col_ix == PINNED_COL {' \
+  '                + if false {' \
+  geode-marketdata a_hidden_label_panel_paints_its_gutter_beside_the_first_value
+
+# With the cursor in the header strip `rel` numbers absolutely. Mutated
+# to keep `rel`, every row shows its distance from a row that is not there.
+run_mutation "mdlines: rel without a grid cursor numbers absolutely" \
+  crates/geode-marketdata/src/delegate.rs \
+  '            (LineNumbers::Relative, None) => LineNumbers::On,' \
+  '            (LineNumbers::Relative, None) => LineNumbers::Relative,' \
+  geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
+
 # ---- timeseries colour picker: absolute colours and the component bridge ----
 
 # `#rrggbb` is an absolute colour wherever a colour name is accepted, so a
