@@ -1370,8 +1370,13 @@ impl DataService {
         &self.diagnostics
     }
 
-    /// Replace views with the validated subset and return diagnostics for those
-    /// skipped. Valid views take effect even if another view is broken.
+    /// Replace every view and revalidate, returning the diagnostics found.
+    ///
+    /// Nothing is filtered here: a view whose configuration cannot be honoured
+    /// stays registered and is refused by name when queried, so its author can
+    /// still see it in the dialogs and fix it. The refusal set is REPLACED
+    /// rather than merged, or a view just corrected in the configuration would
+    /// stay refused until restart. One broken view never stops the others.
     pub fn replace_views(
         &mut self,
         views: Vec<ViewSpec>,

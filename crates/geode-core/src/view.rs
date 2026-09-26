@@ -2059,10 +2059,11 @@ npv = 120
         assert_eq!(views[0].presentation_of("delta01").width, Some(3.0));
     }
 
-    /// Spec obligation: strictness is only acceptable if what we ship is
-    /// already clean. Every views document in the repo is loaded against its
-    /// own datasets document and must produce no error diagnostic — otherwise
-    /// `--demo` would not open.
+    /// Strictness is only safe if what we ship is already clean: an error
+    /// diagnostic refuses its view, so a shipped view that fails to validate
+    /// is a `--demo` that opens onto a blotter which will not load. Every
+    /// views document in the repo is checked against its own datasets
+    /// document.
     #[test]
     fn every_shipped_views_document_validates_clean() {
         let views_text = include_str!("../../../examples/demo-config/views.toml");
