@@ -30,6 +30,8 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         "colors" => Some(1),
         // One complete definition per pricer view name.
         "pricer_views" => Some(1),
+        // One complete definition per pricer template name.
+        "pricer_templates" => Some(1),
         // One complete override entry per name.
         "overrides" => Some(1),
         _ => None,
@@ -230,6 +232,29 @@ mod tests {
         assert!(
             sophis.get("documents").is_none(),
             "atomic override must drop the desk-only documents table"
+        );
+    }
+
+    #[test]
+    fn a_user_pricer_template_replaces_the_whole_builtin_entry() {
+        let builtin = LayerDoc::builtin(
+            "pricer_templates",
+            "[RR]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+        )
+        .unwrap();
+        let mut user = LayerDoc::builtin(
+            "pricer_templates",
+            "[RR]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = -1, strike = 2, kind = \"C\" } ]\n",
+        )
+        .unwrap();
+        user.layer = Layer::User;
+        let merged = merge_docs("pricer_templates", &[builtin, user]);
+        let legs = merged.value["RR"]["legs"].as_array().unwrap();
+        assert_eq!(legs.len(), 2);
+        assert_eq!(
+            legs[0]["weight"].as_integer(),
+            Some(1),
+            "the user's entry, whole"
         );
     }
 

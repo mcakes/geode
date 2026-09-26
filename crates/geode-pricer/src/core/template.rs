@@ -4,6 +4,7 @@
 //! typed strikes and expiries; the renderer recognises legs that still
 //! match a table and prints the template form back.
 
+use geode_core::config::{Diagnostic, MergedDoc, Severity};
 use geode_core::pricing::OptionKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -123,10 +124,394 @@ impl Template {
     }
 }
 
+pub const PRICER_TEMPLATES_DOC: &str = "pricer_templates";
+
+/// The built-in tables in config form, installed in the builtin layer.
+/// A desk or user entry of the same name replaces the whole entry.
+pub const BUILTIN_TEMPLATES: &str = r#"[CS]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 2, kind = "C" } ]
+
+[PS]
+legs = [ { weight = 1, strike = 1, kind = "P" }, { weight = -1, strike = 2, kind = "P" } ]
+
+[STRD]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = 1, strike = 1, kind = "P" } ]
+
+[STRG]
+legs = [ { weight = 1, strike = 1, kind = "P" }, { weight = 1, strike = 2, kind = "C" } ]
+
+[RR]
+legs = [ { weight = -1, strike = 1, kind = "P" }, { weight = 1, strike = 2, kind = "C" } ]
+
+[FLY]
+legs = [
+  { weight = 1, strike = 1, kind = "C" },
+  { weight = -2, strike = 2, kind = "C" },
+  { weight = 1, strike = 3, kind = "C" },
+]
+
+# +far -near calls on one strike; E1/E2 is near/far.
+[CAL]
+legs = [
+  { weight = 1, strike = 1, expiry = 2, kind = "C" },
+  { weight = -1, strike = 1, expiry = 1, kind = "C" },
+]
+"#;
+
+/// A template as the parser and printer use it: its legs with 0-based
+/// indices, and how many strikes and expiries its shorthand takes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateDef {
+    /// Upper-case.
+    pub name: String,
+    pub legs: Vec<LegSpec>,
+    pub strikes: usize,
+    pub expiries: usize,
+}
+
+/// Every loaded template, in document order.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TemplateSet {
+    defs: Vec<TemplateDef>,
+}
+
+/// A template name as config and storage spell it: 1 to 8 characters, a
+/// letter first, then letters or digits. `C` and `P` are single legs and
+/// `CUSTOM` is the grouped-package marker, so none of the three names a
+/// table. Answers the upper-cased name.
+pub fn check_name(name: &str) -> Result<String, String> {
+    let upper = name.to_ascii_uppercase();
+    let mut chars = upper.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+    if !first_ok || !chars.all(|c| c.is_ascii_alphanumeric()) || upper.len() > 8 {
+        return Err(format!(
+            "'{name}' is not a template name (1 to 8 letters or digits, a letter first)"
+        ));
+    }
+    if matches!(upper.as_str(), "C" | "P" | "CUSTOM") {
+        return Err(format!("'{upper}' is reserved"));
+    }
+    Ok(upper)
+}
+
+impl TemplateSet {
+    /// Each entry is checked alone: a bad one is dropped with an error
+    /// naming its path, the rest load. Unknown keys warn and are ignored,
+    /// so a later key (strike arithmetic) does not make an older binary
+    /// refuse the template.
+    pub fn from_doc(doc: &MergedDoc) -> (TemplateSet, Vec<Diagnostic>) {
+        let mut out = TemplateSet::default();
+        let mut diags = Vec::new();
+        for (name, value) in &doc.value {
+            if name == "config_version" {
+                continue;
+            }
+            let path = |suffix: &str| {
+                if suffix.is_empty() {
+                    format!("{PRICER_TEMPLATES_DOC}.{name}")
+                } else {
+                    format!("{PRICER_TEMPLATES_DOC}.{name}.{suffix}")
+                }
+            };
+            let report = |severity: Severity, suffix: &str, m: String| Diagnostic {
+                severity,
+                layer: None,
+                file: None,
+                message: format!("pricer template '{name}': {m}"),
+                path: Some(path(suffix)),
+            };
+            let upper = match check_name(name) {
+                Ok(u) => u,
+                Err(m) => {
+                    diags.push(report(Severity::Error, "", format!("{m}; dropped")));
+                    continue;
+                }
+            };
+            let Some(table) = value.as_table() else {
+                diags.push(report(Severity::Error, "", "not a table; dropped".into()));
+                continue;
+            };
+            for key in table.keys().filter(|k| *k != "legs") {
+                diags.push(report(
+                    Severity::Warning,
+                    key,
+                    format!("unknown key '{key}' ignored"),
+                ));
+            }
+            let Some(raw) = table.get("legs").and_then(|v| v.as_array()) else {
+                diags.push(report(
+                    Severity::Error,
+                    "legs",
+                    "missing 'legs' array; dropped".into(),
+                ));
+                continue;
+            };
+            let mut legs = Vec::with_capacity(raw.len());
+            let mut bad = false;
+            for (i, leg) in raw.iter().enumerate() {
+                match read_leg(leg) {
+                    Ok((spec, unknown)) => {
+                        for key in unknown {
+                            diags.push(report(
+                                Severity::Warning,
+                                &format!("legs.{i}.{key}"),
+                                format!("unknown key '{key}' ignored"),
+                            ));
+                        }
+                        legs.push(spec);
+                    }
+                    Err((key, m)) => {
+                        let suffix = match key {
+                            Some(k) => format!("legs.{i}.{k}"),
+                            None => format!("legs.{i}"),
+                        };
+                        diags.push(report(Severity::Error, &suffix, format!("{m}; dropped")));
+                        bad = true;
+                        break;
+                    }
+                }
+            }
+            if bad {
+                continue;
+            }
+            if legs.len() < 2 {
+                diags.push(report(
+                    Severity::Error,
+                    "legs",
+                    "needs at least two legs; dropped".into(),
+                ));
+                continue;
+            }
+            let strikes = legs.iter().map(|l| l.strike + 1).max().unwrap_or(0);
+            let expiries = legs.iter().map(|l| l.expiry + 1).max().unwrap_or(0);
+            let covers = |n: usize, used: &dyn Fn(&LegSpec) -> usize| {
+                (0..n).all(|k| legs.iter().any(|l| used(l) == k))
+            };
+            if !covers(strikes, &|l| l.strike) || !covers(expiries, &|l| l.expiry) {
+                diags.push(report(
+                    Severity::Error,
+                    "legs",
+                    "strike and expiry numbers must run 1, 2, … with no gap; dropped".into(),
+                ));
+                continue;
+            }
+            out.defs.push(TemplateDef {
+                name: upper,
+                legs,
+                strikes,
+                expiries,
+            });
+        }
+        (out, diags)
+    }
+
+    /// `BUILTIN_TEMPLATES` parsed; `the_builtin_document_is_exactly_the_seven_tables`
+    /// pins that it loads clean, so the `expect` cannot fire in a shipped build.
+    pub fn builtin() -> TemplateSet {
+        let doc = geode_core::config::LayerDoc::builtin(PRICER_TEMPLATES_DOC, BUILTIN_TEMPLATES)
+            .expect("BUILTIN_TEMPLATES is well-formed TOML");
+        TemplateSet::from_doc(&geode_core::config::merge_docs(
+            PRICER_TEMPLATES_DOC,
+            &[doc],
+        ))
+        .0
+    }
+
+    pub fn resolve(&self, token: &str) -> Option<&TemplateDef> {
+        self.defs
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(token))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &TemplateDef> {
+        self.defs.iter()
+    }
+}
+
+/// The offending key (`None`: the leg itself) and why reading it failed.
+type LegError = (Option<&'static str>, String);
+
+/// One leg: the spec with 0-based indices and the unknown keys, or the
+/// offending key (`None`: the leg itself) and why.
+fn read_leg(v: &toml::Value) -> Result<(LegSpec, Vec<String>), LegError> {
+    let t = v
+        .as_table()
+        .ok_or((None, "a leg must be a table".to_string()))?;
+    let weight = t
+        .get("weight")
+        .and_then(|w| w.as_integer())
+        .ok_or((Some("weight"), "missing or not an integer".to_string()))?;
+    if weight == 0 {
+        return Err((Some("weight"), "must not be zero".into()));
+    }
+    let index = |key: &'static str, default: Option<i64>| -> Result<usize, LegError> {
+        let n = match t.get(key) {
+            Some(v) => v
+                .as_integer()
+                .ok_or((Some(key), "not an integer".to_string()))?,
+            None => default.ok_or((Some(key), "missing".to_string()))?,
+        };
+        if n < 1 {
+            return Err((Some(key), "must be 1 or more".into()));
+        }
+        Ok((n - 1) as usize)
+    };
+    let strike = index("strike", None)?;
+    let expiry = index("expiry", Some(1))?;
+    let kind = match t
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        Some("C") => OptionKind::Call,
+        Some("P") => OptionKind::Put,
+        _ => return Err((Some("kind"), "must be \"C\" or \"P\"".into())),
+    };
+    let unknown = t
+        .keys()
+        .filter(|k| !matches!(k.as_str(), "weight" | "strike" | "expiry" | "kind"))
+        .cloned()
+        .collect();
+    Ok((
+        LegSpec {
+            weight,
+            strike,
+            expiry,
+            kind,
+        },
+        unknown,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use geode_core::pricing::OptionKind;
+
+    fn set(toml: &str) -> (TemplateSet, Vec<geode_core::config::Diagnostic>) {
+        let doc = geode_core::config::LayerDoc::builtin(PRICER_TEMPLATES_DOC, toml).unwrap();
+        TemplateSet::from_doc(&geode_core::config::merge_docs(
+            PRICER_TEMPLATES_DOC,
+            &[doc],
+        ))
+    }
+
+    #[test]
+    fn the_builtin_document_is_exactly_the_seven_tables() {
+        let (s, diags) = set(BUILTIN_TEMPLATES);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(s, TemplateSet::builtin());
+        let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["CS", "PS", "STRD", "STRG", "RR", "FLY", "CAL"]);
+        for t in [
+            Template::CS,
+            Template::PS,
+            Template::STRD,
+            Template::STRG,
+            Template::RR,
+            Template::FLY,
+            Template::CAL,
+        ] {
+            let d = s.resolve(t.token()).unwrap();
+            assert_eq!(d.legs, t.legs(), "{t:?}");
+            assert_eq!(
+                (d.strikes, d.expiries),
+                (t.strikes(), t.expiries()),
+                "{t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_condor_loads_with_one_based_indices_made_zero_based() {
+        let (s, diags) = set(r#"[condor]
+legs = [
+  { weight = 1, strike = 1, kind = "C" },
+  { weight = -1, strike = 2, kind = "c" },
+  { weight = -1, strike = 3, kind = "C" },
+  { weight = 1, strike = 4, kind = "C" },
+]"#);
+        assert!(diags.is_empty(), "{diags:?}");
+        let d = s.resolve("Condor").unwrap();
+        assert_eq!(d.name, "CONDOR");
+        assert_eq!((d.strikes, d.expiries), (4, 1));
+        assert_eq!(
+            d.legs[1],
+            LegSpec {
+                weight: -1,
+                strike: 1,
+                expiry: 0,
+                kind: OptionKind::Call
+            }
+        );
+    }
+
+    #[test]
+    fn each_rule_drops_only_its_own_entry_with_a_path() {
+        let (s, diags) = set(r#"[OK]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 2, kind = "C" } ]
+[C]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 2, kind = "C" } ]
+[TOOLONGNAME]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 2, kind = "C" } ]
+[ONE]
+legs = [ { weight = 1, strike = 1, kind = "C" } ]
+[ZERO]
+legs = [ { weight = 0, strike = 1, kind = "C" }, { weight = 1, strike = 2, kind = "C" } ]
+[GAP]
+legs = [ { weight = 1, strike = 1, kind = "C" }, { weight = -1, strike = 3, kind = "C" } ]
+[EGAP]
+legs = [ { weight = 1, strike = 1, expiry = 2, kind = "C" }, { weight = -1, strike = 1, expiry = 2, kind = "C" } ]
+[KIND]
+legs = [ { weight = 1, strike = 1, kind = "X" }, { weight = -1, strike = 2, kind = "C" } ]
+[NOTTABLE]
+legs = 3
+[LEGBAD]
+legs = [ 1, 2 ]
+"#);
+        let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["OK"]);
+        let paths: Vec<String> = diags.iter().filter_map(|d| d.path.clone()).collect();
+        for want in [
+            "pricer_templates.C",
+            "pricer_templates.TOOLONGNAME",
+            "pricer_templates.ONE.legs",
+            "pricer_templates.ZERO.legs.0.weight",
+            "pricer_templates.GAP.legs",
+            "pricer_templates.EGAP.legs",
+            "pricer_templates.KIND.legs.0.kind",
+            "pricer_templates.NOTTABLE.legs",
+            "pricer_templates.LEGBAD.legs.0",
+        ] {
+            assert!(paths.iter().any(|p| p == want), "{want} in {paths:?}");
+        }
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == geode_core::config::Severity::Error)
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_warns_and_keeps_the_entry() {
+        let (s, diags) = set(r#"[W]
+legs = [ { weight = 1, strike = 1, kind = "C", offset = 5 }, { weight = -1, strike = 2, kind = "C" } ]
+note = "x"
+"#);
+        assert!(s.resolve("W").is_some());
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity == geode_core::config::Severity::Warning)
+        );
+    }
+
+    #[test]
+    fn an_empty_set_resolves_nothing() {
+        assert!(TemplateSet::default().resolve("CS").is_none());
+    }
 
     #[test]
     fn every_template_token_parses_case_insensitively_and_round_trips() {

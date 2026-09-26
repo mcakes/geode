@@ -16685,6 +16685,21 @@ run_mutation "pricer views: an unknown column is only a warning" \
                         format!("unknown column '"'"'{col_name}'"'"'; dropped"),' \
   geode-pricer an_unknown_column_is_an_error_and_dropped
 
+# Strike numbers with a gap make `K1/K2/K3` ambiguous; such a template
+# must be dropped.
+run_mutation "pricer templates: a strike-number gap loads" \
+  crates/geode-pricer/src/core/template.rs \
+  '            if !covers(strikes, &|l| l.strike) || !covers(expiries, &|l| l.expiry) {' \
+  '            if !covers(expiries, &|l| l.expiry) {' \
+  geode-pricer each_rule_drops_only_its_own_entry_with_a_path
+
+# `C`, `P` and `CUSTOM` can never name a table.
+run_mutation "pricer templates: a reserved name loads" \
+  crates/geode-pricer/src/core/template.rs \
+  '    if matches!(upper.as_str(), "C" | "P" | "CUSTOM") {' \
+  '    if false {' \
+  geode-pricer each_rule_drops_only_its_own_entry_with_a_path
+
 run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   crates/geode-pricer/src/core/storage.rs \
   '    if sheet.is_empty() {
