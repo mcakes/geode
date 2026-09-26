@@ -21,8 +21,8 @@ use geode_data::{
 use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_pricer::content::{PricerFactory, PricerSettings};
-use geode_pricer::core::{PRICER_VIEWS_DOC, Views};
-use geode_pricer::store::MemorySheetStore;
+use geode_pricer::core::{PRICER_SHEETS_DATASET, PRICER_VIEWS_DOC, Views};
+use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
@@ -384,11 +384,13 @@ pub fn start(
     let mut pricer_settings = setup.pricer_settings.clone();
     let pricer_key = setup.pricer_key.clone();
     pricer_settings.stale_after = stale_after;
-    // Part 3's store is in-memory (line-pricer Part 3, planning decision
-    // 8): a sheet survives closing and reopening a tile, not a restart.
+    // Sheets live in the local `pricer_sheets` dataset the builtin layer
+    // declares. The store only queues reads and writes; their answers come
+    // back through the drain (a load's as the tile's `Delivery::Query`, a
+    // save's or forget's to the factory by sheet name).
     let pricer = Rc::new(PricerFactory::new(
         handle.clone(),
-        Rc::new(MemorySheetStore::default()),
+        Rc::new(DuckSheetStore::new(handle.clone())),
         setup.pricer_views.clone(),
         pricer_settings,
     ));
@@ -425,6 +427,13 @@ pub fn start(
         local_datasets,
         pricer_key: Some(pricer_key),
     }
+}
+
+/// The sheet a local-write outcome names, when it is one of the pricer's:
+/// `pricer_sheets` is keyed by the sheet name alone, so the outcome's batch
+/// (the joined document key) is that name.
+fn pricer_sheet<'a>(dataset: &str, batch: &'a str) -> Option<&'a str> {
+    (dataset == PRICER_SHEETS_DATASET).then_some(batch)
 }
 
 /// Window-local request lifecycle. The diagnostics entity owns the single
@@ -702,6 +711,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     let catalog_refresh_for_drain = catalog_refresh.clone();
     // Retain local dataset names for the drain task after attach's borrow ends.
     let local_datasets = Rc::clone(&bridge.local_datasets);
+    // The pricer's sheet writes are answered through the drain.
+    let pricer = Rc::clone(&bridge.pricer);
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
@@ -915,32 +926,43 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         });
                     }
                     // Local-write answers (a save stored or refused, a document
-                    // forgotten or not). Not routed to a tile yet: their consumer is
-                    // the line pricer's sheet store, which is wired to the data tier
-                    // separately. Every failure already reached diagnostics as an
-                    // error `Diagnostics` event, and a save's `Published` is handled
-                    // above, so dropping these loses nothing shown today.
-                    DataEvent::LocalPublished { dataset, batch, gen_id } => {
-                        tracing::debug!(
-                            target: "geode::ingest",
-                            "local save of {dataset}/{batch} stored as gen {gen_id} (not routed yet)"
-                        );
+                    // forgotten or not), addressed by dataset and document key.
+                    // Every one for `pricer_sheets` goes to the pricer factory,
+                    // which routes it to the tile that asked: a tile may be
+                    // waiting on it with no timeout (a load deferred behind a
+                    // queued save), so none may be dropped. No other dataset
+                    // has a local writer. Failures also reached diagnostics as
+                    // error `Diagnostics` events.
+                    DataEvent::LocalPublished { dataset, batch, .. } => {
+                        if let Some(sheet) = pricer_sheet(&dataset, &batch) {
+                            pricer.save_answered(sheet, Ok(()), cx);
+                        }
                     }
-                    DataEvent::LocalPublishFailed { dataset, batch, .. }
-                    | DataEvent::ForgetFailed { dataset, batch, .. } => {
-                        tracing::debug!(
-                            target: "geode::ingest",
-                            "local write to {dataset}/{batch} failed (not routed yet; see diagnostics)"
-                        );
+                    DataEvent::LocalPublishFailed {
+                        dataset,
+                        batch,
+                        reason,
+                    } => {
+                        if let Some(sheet) = pricer_sheet(&dataset, &batch) {
+                            pricer.save_answered(sheet, Err(reason), cx);
+                        }
+                    }
+                    DataEvent::ForgetFailed {
+                        dataset,
+                        batch,
+                        reason,
+                    } => {
+                        if let Some(sheet) = pricer_sheet(&dataset, &batch) {
+                            pricer.forget_answered(sheet, Err(reason), cx);
+                        }
                     }
                     // A forget changes what the database holds without a
                     // `Published`, so a watched catalog is refreshed here or it
                     // would keep listing the forgotten document.
                     DataEvent::Forgotten { dataset, batch } => {
-                        tracing::debug!(
-                            target: "geode::ingest",
-                            "forgot {dataset}/{batch} (not routed yet)"
-                        );
+                        if let Some(sheet) = pricer_sheet(&dataset, &batch) {
+                            pricer.forget_answered(sheet, Ok(()), cx);
+                        }
                         diagnostics.update(cx, |d, cx| {
                             d.request_catalog_refresh();
                             if d.pending_catalog_request() {
@@ -973,6 +995,7 @@ mod tests {
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsFactory;
+    use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
@@ -1620,6 +1643,468 @@ role = "key"
             !dispatched("workspace::duplicate_horizontal"),
             "a capital typed into the entry field ran a shell binding"
         );
+    }
+
+    type PricerTiles = Rc<RefCell<Vec<Entity<geode_pricer::tile::PricerTile>>>>;
+
+    /// Forwards to the pricer factory exactly as `main`'s handle does and
+    /// keeps every tile it builds, so a test can read the tile the shell
+    /// hosts (the shell exposes no occupant's view).
+    struct KeepingPricer {
+        factory: Rc<PricerFactory>,
+        tiles: PricerTiles,
+    }
+
+    impl ModuleFactory for KeepingPricer {
+        fn kind(&self) -> &'static str {
+            self.factory.kind()
+        }
+        fn register_actions(&self, registry: &mut ActionRegistry) {
+            self.factory.register_actions(registry)
+        }
+        fn contexts(&self) -> Vec<&'static str> {
+            self.factory.contexts()
+        }
+        fn default_keymap(&self) -> Option<&'static str> {
+            self.factory.default_keymap()
+        }
+        fn create(
+            &self,
+            tile: TileId,
+            restored: Option<&toml::Table>,
+            frame: Entity<geode_shell::frame::Frame>,
+            diagnostics: Entity<Diagnostics>,
+            window: &mut gpui::Window,
+            cx: &mut App,
+        ) -> geode_shell::module::TileOccupant {
+            let o = self
+                .factory
+                .create(tile, restored, frame, diagnostics, window, cx);
+            let view = o.view.clone().downcast().expect("a pricer tile");
+            self.tiles.borrow_mut().push(view);
+            o
+        }
+    }
+
+    /// `services` holding one restored pricer tile on `sheet`, built by
+    /// `factory`, with the roster, actions and keymap fragment wired as
+    /// `main` wires them.
+    fn with_a_pricer_tile_on(
+        mut services: ShellServices,
+        factory: Rc<PricerFactory>,
+        sheet: &str,
+    ) -> (ShellServices, PricerTiles) {
+        let tiles = PricerTiles::default();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(KeepingPricer {
+            factory,
+            tiles: tiles.clone(),
+        }));
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = format!(
+            r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "pricer"
+            [tiles.1.state]
+            sheet = "{sheet}"
+        "#
+        )
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        (services, tiles)
+    }
+
+    /// [`test_bridge`] with `pricer` as its pricer factory, and the sender
+    /// of its mailbox so a test can post data events to the real drain.
+    fn test_bridge_with_pricer(
+        handle: DataHandle,
+        pricer: Rc<PricerFactory>,
+    ) -> (Bridge, crate::events::Sender) {
+        let (tx, rx) = crate::events::channel();
+        let mut bridge = test_bridge(handle);
+        bridge.pricer = pricer;
+        bridge.events = rx;
+        (bridge, tx)
+    }
+
+    /// `o`, a line, `enter` typed through the shell into its focused tile.
+    fn type_a_line(vcx: &mut gpui::VisualTestContext, line: &str) {
+        vcx.simulate_keystrokes("o");
+        vcx.simulate_input(line);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+    }
+
+    /// Run `line` as the tile's `:` command, the route the shell's command
+    /// line takes (`TileContent::command`).
+    fn run_command(
+        vcx: &mut gpui::VisualTestContext,
+        tile: &Entity<geode_pricer::tile::PricerTile>,
+        line: &str,
+    ) {
+        let result = vcx.update(|window, cx| tile.update(cx, |t, cx| t.command(line, window, cx)));
+        assert_eq!(result, Ok(()), ":{line}");
+        vcx.run_until_parked();
+    }
+
+    /// The pricer's sheets are written through local publishes and
+    /// forgets, and a tile may be waiting on any one of their outcomes (a
+    /// load deferred behind a queued save has no timeout). The drain hands
+    /// every `pricer_sheets` outcome — stored, failed, forgotten, forget
+    /// failed — to the pricer factory, and no other dataset's.
+    #[gpui::test]
+    fn every_pricer_sheets_write_outcome_reaches_the_pricer_and_no_other_datasets_does(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_pricer::store::SheetStore as _;
+        const SHEETS: &str = geode_pricer::core::PRICER_SHEETS_DATASET;
+        let (handle, _rx) = DataHandle::for_tests();
+        let store = MemorySheetStore::default();
+        // Names are known only once an outcome confirms them, as in the
+        // app's DuckDB store.
+        store.set_confirming(true);
+        let pricer = Rc::new(PricerFactory::new(
+            handle.clone(),
+            Rc::new(store.clone()),
+            Views::builtin(),
+            PricerSettings::default(),
+        ));
+        let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer.clone(), "a");
+        cx.update(geode_pricer::init);
+        let window = open_test_window(cx, services);
+        let (bridge, tx) = test_bridge_with_pricer(handle, pricer);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let post = |event: DataEvent, vcx: &mut gpui::VisualTestContext| {
+            tx.try_send(event).unwrap();
+            vcx.run_until_parked();
+        };
+
+        // A stored save makes the name known; another dataset's does not.
+        post(
+            DataEvent::LocalPublished {
+                dataset: "sheets".into(),
+                batch: "s1".into(),
+                gen_id: 1,
+            },
+            &mut vcx,
+        );
+        assert!(
+            !store.contains("s1"),
+            "another dataset's save reached the pricer"
+        );
+        post(
+            DataEvent::LocalPublished {
+                dataset: SHEETS.into(),
+                batch: "s1".into(),
+                gen_id: 2,
+            },
+            &mut vcx,
+        );
+        assert!(
+            store.contains("s1"),
+            "the stored save did not reach the pricer"
+        );
+
+        // A forgotten sheet stops being known; another dataset's forget
+        // leaves it.
+        store.set_known(vec!["s2".into()]);
+        post(
+            DataEvent::Forgotten {
+                dataset: "sheets".into(),
+                batch: "s2".into(),
+            },
+            &mut vcx,
+        );
+        assert!(
+            store.contains("s2"),
+            "another dataset's forget reached the pricer"
+        );
+        post(
+            DataEvent::Forgotten {
+                dataset: SHEETS.into(),
+                batch: "s2".into(),
+            },
+            &mut vcx,
+        );
+        assert!(!store.contains("s2"), "the forget did not reach the pricer");
+
+        // A failed save resumes the load deferred behind it: the tile saves
+        // `a`, moves off it, and asks for it back while the save is queued.
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.sheet().len()),
+            1,
+            "fixture: typed"
+        );
+        vcx.executor().advance_clock(Duration::from_secs(2));
+        vcx.run_until_parked();
+        assert!(
+            store.get("a").is_some(),
+            "fixture: the idle save was queued"
+        );
+        run_command(&mut vcx, &tile, "new");
+        run_command(&mut vcx, &tile, "e a");
+        let loads = || store.loads().iter().filter(|(n, _, _)| n == "a").count();
+        let before = loads();
+        assert!(
+            tile.read_with(&vcx, |t, _| t.is_loading()),
+            "fixture: the load waits on the queued save"
+        );
+        post(
+            DataEvent::LocalPublishFailed {
+                dataset: "sheets".into(),
+                batch: "a".into(),
+                reason: "disk full".into(),
+            },
+            &mut vcx,
+        );
+        assert_eq!(
+            loads(),
+            before,
+            "another dataset's failure resumed the load"
+        );
+        post(
+            DataEvent::LocalPublishFailed {
+                dataset: SHEETS.into(),
+                batch: "a".into(),
+                reason: "disk full".into(),
+            },
+            &mut vcx,
+        );
+        assert_eq!(
+            loads(),
+            before + 1,
+            "the failed save did not resume the load"
+        );
+        assert!(!tile.read_with(&vcx, |t, _| t.is_loading()));
+
+        // A failed forget gives the name back: `:rm` withholds it until the
+        // forget is answered.
+        store.set_known(vec!["x".into()]);
+        let offered = |vcx: &gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| t.completions("e ", 2))
+                .contains(&"x".to_string())
+        };
+        assert!(offered(&vcx), "fixture: a known sheet is offered");
+        run_command(&mut vcx, &tile, "rm x");
+        vcx.simulate_keystrokes("y");
+        vcx.run_until_parked();
+        assert_eq!(
+            store.forgets(),
+            vec!["x".to_string()],
+            "fixture: `y` forgets"
+        );
+        assert!(!offered(&vcx), "fixture: a sheet being removed is withheld");
+        post(
+            DataEvent::ForgetFailed {
+                dataset: "sheets".into(),
+                batch: "x".into(),
+                reason: "locked".into(),
+            },
+            &mut vcx,
+        );
+        assert!(
+            !offered(&vcx),
+            "another dataset's forget failure reached the pricer"
+        );
+        post(
+            DataEvent::ForgetFailed {
+                dataset: SHEETS.into(),
+                batch: "x".into(),
+                reason: "locked".into(),
+            },
+            &mut vcx,
+        );
+        assert!(offered(&vcx), "the failed forget did not reach the pricer");
+    }
+
+    /// Drive the test app until `done` holds, letting the data service's
+    /// own threads run in real time between turns.
+    fn wait_until(
+        vcx: &mut gpui::VisualTestContext,
+        what: &str,
+        mut done: impl FnMut(&mut gpui::VisualTestContext) -> bool,
+    ) {
+        for _ in 0..2000 {
+            vcx.run_until_parked();
+            if done(vcx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting until {what}");
+    }
+
+    /// The app as `main` builds it over `config` — the real `data_setup`,
+    /// `start` and a DuckDB file at `db` — with one restored pricer tile
+    /// on `sheet`, attached to its window.
+    fn open_app_with_a_pricer_tile(
+        cx: &mut gpui::TestAppContext,
+        sources: ConfigSources,
+        db: PathBuf,
+        sheet: &str,
+    ) -> (Bridge, WindowHandle<Root>, PricerTiles) {
+        let config = Config::load(&sources);
+        let mut pricers = geode_data::PricerRegistry::default();
+        pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
+        let setup = data_setup(&config, db, AdapterRegistry::default(), pricers)
+            .expect("the demo layer declares datasets and views");
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let (services, tiles) = with_a_pricer_tile_on(
+            test_shell_services_with_sources(sources),
+            bridge.pricer.clone(),
+            sheet,
+        );
+        cx.update(geode_pricer::init);
+        let window = open_test_window(cx, services);
+        cx.update(|cx| attach(&bridge, window, cx));
+        (bridge, window, tiles)
+    }
+
+    /// Sheets persist in DuckDB: a line typed into one tile is saved by
+    /// the idle write-behind, a second tile's `:e` reads it back, and after
+    /// a restart over the same database a tile restoring the sheet loads
+    /// the same line — with the sheet's name known from the catalog. The
+    /// app's real wiring end to end: `builtin_layer`'s `pricer_sheets`,
+    /// `start`'s store, the data service, and the drain's routing of the
+    /// save's outcome and the load's answer.
+    #[gpui::test]
+    fn a_typed_sheet_is_stored_in_duckdb_and_loads_back_in_a_new_tile_and_after_a_restart(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The data service's threads wake the drain from outside the test
+        // scheduler; that is the route under test, not non-determinism.
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        let sources = || ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            desk: None,
+            user: None,
+        };
+        let db = dir.path().join("geode.duckdb");
+        let loaded = |tile: &Entity<geode_pricer::tile::PricerTile>| {
+            let tile = tile.clone();
+            move |vcx: &mut gpui::VisualTestContext| {
+                tile.read_with(vcx, |t, _| !t.is_loading() && t.sheet().len() == 1)
+            }
+        };
+
+        let typed = {
+            let (bridge, window, tiles) =
+                open_app_with_a_pricer_tile(cx, sources(), db.clone(), "book");
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let first = tiles.borrow()[0].clone();
+            wait_until(&mut vcx, "the empty sheet has loaded", |vcx| {
+                first.read_with(vcx, |t, _| !t.is_loading())
+            });
+            type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+            let typed = first.read_with(&vcx, |t, _| t.sheet().shorthand(0));
+            assert_eq!(
+                first.read_with(&vcx, |t, _| t.sheet().len()),
+                1,
+                "fixture: typed"
+            );
+            // The idle save publishes; the first tile then leaves the sheet
+            // so a second one may open it.
+            vcx.executor().advance_clock(Duration::from_secs(2));
+            vcx.run_until_parked();
+            run_command(&mut vcx, &first, "new");
+            let shell = window
+                .read_with(&vcx, |root, _| root.view().clone().downcast::<ShellView>())
+                .unwrap()
+                .unwrap();
+            vcx.update(|window, cx| {
+                shell.update(cx, |s, cx| {
+                    s.add_tile(
+                        "pricer",
+                        geode_shell::defaults::AddPlacement::Split(None),
+                        None,
+                        window,
+                        cx,
+                    )
+                })
+            });
+            vcx.run_until_parked();
+            let second = tiles.borrow().last().unwrap().clone();
+            assert_ne!(second, first, "fixture: a second tile");
+            run_command(&mut vcx, &second, "e book");
+            wait_until(
+                &mut vcx,
+                "the second tile loaded the sheet",
+                loaded(&second),
+            );
+            assert_eq!(second.read_with(&vcx, |t, _| t.sheet().shorthand(0)), typed);
+            // A restart: the window goes and the service stops, releasing
+            // the database file.
+            vcx.update(|window, _| window.remove_window());
+            vcx.run_until_parked();
+            bridge.handle.shutdown();
+            vcx.run_until_parked();
+            typed
+        };
+
+        let (bridge, window, tiles) = open_app_with_a_pricer_tile(cx, sources(), db, "book");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let restored = tiles.borrow()[0].clone();
+        wait_until(
+            &mut vcx,
+            "the restored tile loaded the sheet",
+            loaded(&restored),
+        );
+        assert_eq!(
+            restored.read_with(&vcx, |t, _| t.sheet().shorthand(0)),
+            typed
+        );
+        wait_until(&mut vcx, "the catalog names the stored sheet", |vcx| {
+            restored
+                .read_with(vcx, |t, _| t.completions("e ", 2))
+                .contains(&"book".to_string())
+        });
+        // Stop the service's threads before the app is torn down: an event
+        // they send later would wake the drain and hold its entities.
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        bridge.handle.shutdown();
+        vcx.run_until_parked();
     }
 
     /// Resolve pricing.adapter through the supplied registry. Unknown names must
