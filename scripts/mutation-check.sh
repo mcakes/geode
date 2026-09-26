@@ -4091,6 +4091,15 @@ run_mutation "picker: an empty tick set drops the chip" \
   '        if true {' \
   geode-shell apply_replaces_the_columns_selection_and_an_empty_tick_set_drops_it
 
+# The column filter must not survive into Values: `set_value` emits no
+# change event, so without this reset the typed column query hides every
+# value of the chosen column.
+run_mutation "picker: the column filter carries into the values stage" \
+  crates/geode-shell/src/shell/picker.rs \
+  $'otherwise hide every value.\n        p.query.clear();' \
+  'otherwise hide every value.' \
+  geode-shell a_column_filter_does_not_carry_into_the_values_stage
+
 # The single-value flow. Collapse the untouched branch so an empty tick
 # set always means "select nothing" again — the exact defect this fixed:
 # arrow to a value, press enter, and the modal closes having changed
