@@ -34,7 +34,10 @@ After keeping a filter, a second Enter performs the stage's normal action: Brows
 Column or Values. Other rows retain their ordinary edit instructions.
 
 In Normal mode, Escape clears a remaining query, then returns to the parent
-stage, then closes. Open value fields and Naming handle their keys separately:
+stage, then closes. The title row's Back button, painted in every stage but
+Browse, returns to the parent stage in one click: it first cancels an open
+value field, reverts filtering, and clears the query, and it does nothing
+while a confirmation is pending. Open value fields and Naming handle their keys separately:
 Enter applies or chooses a field value, or validates and creates a name;
 Escape cancels that entry. They do not use the filter snapshot even though
 they focus the same input. Cancelling typed text or reverting a filter does

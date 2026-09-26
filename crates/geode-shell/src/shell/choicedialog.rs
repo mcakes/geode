@@ -8,7 +8,8 @@
 //! commit fills the focused placeholder or splits the focused real tile.
 //!
 //! Log level uses two steps in the same modal: select a target, then a level.
-//! Escape from the level step returns to targets. Escape elsewhere closes.
+//! Escape or the title row's Back button returns from the level step to targets.
+//! Escape elsewhere closes; no other step paints a Back button.
 //! Each open starts fresh; stage transitions clear and refocus the Input.
 
 use std::rc::Rc;
@@ -338,6 +339,44 @@ fn open(
         Some(Rc::new(handle_key)),
         true,
     );
+    dialog::set_back(view, on_level_step, |shell, window, cx| {
+        back_to_targets(shell, window, cx);
+    });
+}
+
+/// Whether the log-level dialog is on its level step, the only step any choice dialog
+/// can go back from.
+fn on_level_step(shell: &ShellView) -> bool {
+    matches!(
+        shell.choice_dialog.as_ref().map(|s| &s.target),
+        Some(Target::LogLevel {
+            chosen: Some(_),
+            ..
+        })
+    )
+}
+
+/// Return the level step to the target list, shared by Escape and the Back button.
+/// Rebuild the targets from current levels, clear the query, and refocus the Input.
+/// Returns `false`, changing nothing, off the level step.
+fn back_to_targets(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    if !on_level_step(shell) {
+        return false;
+    }
+    let state = ChoiceDialogState::log_targets(&shell.diagnostics.read(cx).levels);
+    shell
+        .choice_dialog_scroll
+        .scroll_to_item(state.list.ranked_highlighted());
+    shell.choice_dialog = Some(state);
+    let input = shell.dialog_input.clone();
+    input.update(cx, |i, cx| i.set_value("", window, cx));
+    input.read(cx).focus_handle(cx).focus(window, cx);
+    cx.notify();
+    true
 }
 
 /// Notice for a slot removed after the dialog captured its rows.
@@ -405,25 +444,7 @@ fn handle_key(
             // The level step goes BACK to the target step; every other
             // dialog (and the target step itself) falls through to
             // `handle_key_down`'s modal-closes-on-escape branch.
-            if matches!(
-                shell.choice_dialog.as_ref().map(|s| &s.target),
-                Some(Target::LogLevel {
-                    chosen: Some(_),
-                    ..
-                })
-            ) {
-                let state = ChoiceDialogState::log_targets(&shell.diagnostics.read(cx).levels);
-                shell
-                    .choice_dialog_scroll
-                    .scroll_to_item(state.list.ranked_highlighted());
-                shell.choice_dialog = Some(state);
-                let input = shell.dialog_input.clone();
-                input.update(cx, |i, cx| i.set_value("", window, cx));
-                input.read(cx).focus_handle(cx).focus(window, cx);
-                cx.notify();
-                return true;
-            }
-            return false;
+            return back_to_targets(shell, window, cx);
         }
         Some(ChoiceKey::Pick) => {
             // The field's live text may never have reached the list

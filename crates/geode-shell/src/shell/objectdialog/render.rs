@@ -129,6 +129,40 @@ pub fn open(
             )
             .into_any_element()
     });
+    // Every stage but Browse has a parent screen. The button stays painted under a
+    // pending confirmation; `step_back` ignores its click until the question is answered.
+    dialog::set_back(
+        view,
+        |shell| {
+            shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(ObjectDialogState::has_previous_stage)
+        },
+        |shell, _window, cx| step_back(shell, cx),
+    );
+}
+
+/// The Back button's step: leave exactly one screen through the transition Escape's
+/// back rung runs, after discarding what the earlier Escape rungs would (see
+/// [`ObjectDialogState::abandon_for_back`]). Does nothing while a confirmation is
+/// pending. The modal's click handler synchronizes the shared input afterwards.
+fn step_back(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    if !state.abandon_for_back() {
+        return;
+    }
+    match state.stage {
+        Stage::Naming => state.cancel_naming(),
+        Stage::Values { .. } => leave_values_stage(shell, cx),
+        Stage::Column { .. } => leave_column_stage(shell, cx),
+        Stage::Edit { .. } => leave_edit(shell, cx),
+        Stage::Browse => {}
+    }
+    // The key route settles the edit cursor after every transition; so does this one.
+    settle_edit_cursor(shell);
 }
 
 /// The title-row crumb: a count in browse and naming, the slot's chord in a Groupings

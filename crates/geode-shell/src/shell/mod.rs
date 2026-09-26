@@ -5,6 +5,7 @@
 
 mod add_tile;
 pub mod addfilter;
+pub mod aggregates;
 pub mod asof_rows;
 pub mod asof_view;
 pub mod chip;

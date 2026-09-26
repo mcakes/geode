@@ -1304,10 +1304,12 @@ impl Render for ShellView {
             // exclusive in normal operation.
             .when_some(modal, |el, (title, title_extra, build)| {
                 let extra = title_extra.map(|f| f(self, cx));
+                let show_back = dialog::back_available(self);
                 let content = build(self, window, cx);
                 el.child(dialog::render_modal(
                     title,
                     extra,
+                    show_back,
                     content,
                     width,
                     viewport_height,

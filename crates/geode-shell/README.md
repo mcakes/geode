@@ -42,7 +42,7 @@ GPUI globals or provide rendering helpers.
 
 | Module | Holds |
 |---|---|
-| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the scope expression dialog and its whole/term/add modes (`scope_expr_view`), the toolbar's add-a-filter menu (`addfilter`), the choice dialog, the stack member list, which-key, hot reload, session I/O, the color doors (`chip`, `listrow`, `control`, `colours`, `scale`), and `kbd`, the one door every on-screen key paints through (gpui-component's `Kbd`). Its tests live in `shell/tests/`. |
+| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the scope expression dialog and its whole/term/add modes (`scope_expr_view`), the toolbar's add-a-filter menu (`addfilter`), the choice dialog, the stack member list, which-key, hot reload, session I/O, a grid tile's selection footer strip (`aggregates`, prepared label/text pairs laid out, never formatted, at paint time), the color doors (`chip`, `listrow`, `control`, `colours`, `scale`), and `kbd`, the one door every on-screen key paints through (gpui-component's `Kbd`). Its tests live in `shell/tests/`. |
 | `shell/expr_suggest` | The gpui controller and renderer for `exprcomplete::ExprCompletion`, shared by the frame's expression dialogs and the Scopes object dialog's open `expression` field: re-reads the shared `dialog_input` on any notify (a caret move refreshes it, not only a `Change`), requests categorical values under `shell::EXPR_KEY`, writes an accepted row as a range replace so cmd+z undoes it, and claims tab/shift-tab/up/down/ctrl-p/ctrl-n ahead of the field. `EXPR_KEY = QueryKey(u64::MAX - 4)` is reserved next to `PICKER_KEY`/`DIAGNOSTICS_KEY`/`SCOPES_KEY`; `ShellView::deliver_distinct` routes a reply there before any tile ever sees it. |
 | `module` | The module-hosting contract: `TileContent`, `ModuleFactory`, `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
 | `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced application/persistence. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
@@ -88,6 +88,10 @@ change most often hits:
   `prevent_default` inside that door.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
   the only thing that moves focus or writes the shared `Input`.
+- A multi-screen dialog registers its back step with `dialog::set_back`.
+  The title row paints the Back button only while the step is available, and
+  the step must be the transition Escape's back step runs, so pointer and key
+  cannot leave different screens.
 - Object edit stages select rows with row commands or nested editors through
   `Draft::is_cursor_stop`. Motion uses `move_selection`; resets use
   `settle_selection`. Lists with no eligible row retain the keyboard selection,

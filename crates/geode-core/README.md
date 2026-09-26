@@ -28,6 +28,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
 | `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
+| `grid` | `grid::selection`: a grid selection (whole rows or a cell block) anchored by row and column identity rather than display index, resolved to display ranges against the current order, the top-most-rows rule for summing a group without double-counting its children, and the accumulator and formatter behind a selection's footer summary. Shared by any module hosting a selectable grid; the blotter is its first user. |
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
 | `tree` | The parent/child index of a rollup result, built once on the query worker. |

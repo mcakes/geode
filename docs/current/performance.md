@@ -72,6 +72,7 @@ the measurement log for fixture and hardware details.
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
+| Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |
 | Market-data pivot build | 20 × 30 CVI grid | 285 µs |
 | Market-data flat build | 10,000 × five values | 8.18 ms |
 | Market-data cell patch | 10,000 × five values | 116 ns |

@@ -3230,8 +3230,10 @@ run_mutation "delegate: narrowing invalidates the cache" \
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), cols);
+        self.refresh_selection();
     }' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
@@ -3247,8 +3249,10 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.refresh_selection();
     }' \
   geode-blotter \
   apply_snapshot_invalidates_the_cache_and_refills_it
@@ -3404,9 +3408,11 @@ run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
   '        // same tree, and the window is only ever tens of rows.
         self.invalidate_cells();
+        self.refresh_selection();
         cx.notify();
     }' \
   '        // same tree, and the window is only ever tens of rows.
+        self.refresh_selection();
         cx.notify();
     }' \
   geode-blotter \
@@ -14903,11 +14909,12 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 
 # Spec §20.5 at the blotter tile's own derivation (the final review's
 # I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from the mode. Mutated to always wrap, a bare `j` in
-# visual mode leaps from the last row to row 0 and inverts the selection.
+# what decides it from whether a selection is live (grid selection spec
+# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
+# with a selection live leaps from the last row to row 0 and inverts it.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = matches!(d.mode, Mode::Normal);' \
+  '                    let wrap = d.selection.is_none();' \
   '                    let wrap = true;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
@@ -21161,6 +21168,136 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
+# ---- grid selection (grid selection spec) ---------------------------------
+
+run_mutation "grid selection: an ancestor in the selection hides the row" \
+  crates/geode-core/src/grid/selection.rs \
+  '                    return false;' \
+  '                    return true;' \
+  geode-core \
+  a_group_and_its_children_count_once_as_the_group
+
+run_mutation "grid selection: a non-additive value suppresses the sum" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.unsummable;' \
+  geode-core \
+  a_non_additive_value_suppresses_sum_and_mean_but_not_extremes
+
+run_mutation "grid selection: an unsummable column never totals" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.non_additive;' \
+  geode-core \
+  an_unsummable_column_never_totals_and_always_shows_extremes
+
+run_mutation "grid selection: a lost anchor row resolves to Lost::Row" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let row = find_row(&self.anchor_row).ok_or(Lost::Row)?;' \
+  '        let row = find_row(&self.anchor_row).unwrap_or(0);' \
+  geode-core \
+  resolution_goes_through_identity_and_names_the_lost_anchor
+
+run_mutation "grid selection: a lost anchor column is named as the column" \
+  crates/geode-core/src/grid/selection.rs \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Column)?,' \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Row)?,' \
+  geode-core \
+  resolution_goes_through_identity_and_names_the_lost_anchor
+
+# ---- blotter selection (grid selection spec) -------------------------------
+
+run_mutation "blotter selection: escape clears the selection before find" \
+  crates/geode-blotter/src/tile.rs \
+  '                if self.with_delegate(cx, |d| d.selection.is_some()) {' \
+  '                if false {' \
+  geode-blotter \
+  escape_clears_the_selection_before_find
+
+run_mutation "blotter selection: a lost anchor clears and raises the notice" \
+  crates/geode-blotter/src/delegate.rs \
+  '                self.selection_lost = Some(lost);' \
+  '                self.selection_lost = None;' \
+  geode-blotter \
+  a_selection_whose_anchor_row_vanishes_clears_with_a_notice
+
+run_mutation "blotter selection: a lost anchor column says column" \
+  crates/geode-blotter/src/tile.rs \
+  '                Lost::Column => "selection cleared: anchor column no longer shown",' \
+  '                Lost::Column => "selection cleared: anchor row no longer shown",' \
+  geode-blotter \
+  a_block_whose_anchor_column_is_hidden_clears_with_a_column_notice
+
+run_mutation "blotter selection: summarize goes through top_most" \
+  crates/geode-blotter/src/core/select.rs \
+  '    let rows = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  '    let _ = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  geode-blotter \
+  a_group_with_its_child_sums_the_group_once
+
+run_mutation "blotter selection: only a summable column totals" \
+  crates/geode-blotter/src/core/select.rs \
+  '            let mut acc = if column.summable {' \
+  '            let mut acc = if true {' \
+  geode-blotter \
+  a_max_measure_over_sibling_groups_shows_no_sum
+
+run_mutation "blotter selection: the plan carries the summable mark" \
+  crates/geode-blotter/src/core/plan.rs \
+  '                summable: meta.is_some_and(|m| m.summable),' \
+  '                summable: meta.is_some(),' \
+  geode-blotter \
+  a_derived_column_shows_no_sum
+
+run_mutation "grid selection: only a plain sum measure compiles summable" \
+  crates/geode-data/src/query/compile.rs \
+  '                summable: matches!(' \
+  '                summable: true || matches!(' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
+
+run_mutation "grid selection: the snapshot keeps the compiler's summable mark" \
+  crates/geode-data/src/query/pool.rs \
+  '            summable: c.summable,' \
+  '            summable: true,' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
+
+run_mutation "blotter selection: a press beside the cells is a plain click" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    if d.drag_origin.is_some() {' \
+  '                    if true {' \
+  geode-blotter \
+  a_plain_click_beside_the_cells_clears_the_selection
+
+run_mutation "blotter selection: the retired visual id renames to visual_rows" \
+  crates/geode-blotter/src/content.rs \
+  '            let _ = registry.register_rename(old, new);' \
+  '            let _ = (old, new);' \
+  geode-blotter \
+  a_user_binding_on_the_retired_visual_id_binds_visual_rows
+
+run_mutation "blotter selection: the extent is prepared with the summary" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(r) if self.summary.is_empty() => {' \
+  '            Some(r) if false => {' \
+  geode-blotter \
+  a_selection_without_measures_prepares_its_extent
+
+run_mutation "blotter selection: a shift press starts a selection" \
+  crates/geode-blotter/src/tile.rs \
+  '                } => (row, col, Some(kind_for(gutter))),' \
+  '                } => (row, col, None),' \
+  geode-blotter \
+  shift_click_extends_a_block_from_the_cursor
+
+run_mutation "blotter selection: a drag without a recorded press selects nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '            let Some(started_on_gutter) = d.drag_origin else {' \
+  '            let Some(started_on_gutter) = d.drag_origin.or(Some(gutter)) else {' \
+  geode-blotter \
+  a_drag_that_never_pressed_a_cell_selects_nothing
+
 # ---- timeseries expression field: series-name completion ----
 # The name at the caret follows the expression tokenizer. Dropped, the
 # `@source` part is not part of the name, and a Tab would complete only
@@ -21485,6 +21622,52 @@ run_mutation "expr suggest: a Scopes insertion undoes" \
   '        s.set_value(write.text.clone(), window, cx);' \
   geode-shell \
   the_scopes_expression_field_undoes_an_insertion
+
+# ---- Modal Back button: the pointer route for Escape's back rung
+
+# The shared title row paints the button only while the dialog reports a
+# back step; Browse, Columns, and the log-level targets have none.
+run_mutation "modal back: the button paints only while a back step exists" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                .when(show_back, |row| row.child(back_button(cx)))' \
+  '                .when(true, |row| row.child(back_button(cx)))' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# The object dialog's availability is its stage's parent, not merely an
+# open dialog.
+run_mutation "modal back: the object dialog offers Back only off Browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                .is_some_and(ObjectDialogState::has_previous_stage)' \
+  '                .is_some()' \
+  geode-shell the_back_button_is_absent_in_browse
+
+# One click is one whole screen: an open field is cancelled before the
+# stage is left. Leaving Edit drops the draft and leaving Column drops the
+# entry anyway, so only the pure preparation shows the skipped cancel.
+run_mutation "modal back: a click cancels the open field before leaving" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            draft.cancel_text_entry();
+            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  '            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {' \
+  geode-shell abandon_for_back_cancels_an_open_field
+
+# A kept query is Escape's rung before the stage step; the click clears it.
+run_mutation "modal back: a click clears the kept query" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !self.effective_query().is_empty() {' \
+  '        if false {' \
+  geode-shell abandon_for_back_leaves_the_filter_and_clears_the_query
+
+# A pending confirmation owns input: the click must do nothing.
+run_mutation "modal back: a click is ignored while a confirm is pending" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.confirm.is_some() || !self.has_previous_stage() {' \
+  '        if !self.has_previous_stage() {' \
+  geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
