@@ -677,8 +677,8 @@ run_mutation "enum: a stale value degrades rather than failing the query" \
 
 run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
   crates/geode-core/src/scope/mod.rs \
-  'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
-  'if false {' \
+  '                if dims.get(column).is_some()' \
+  '                if false' \
   geode-core \
   an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry
 
