@@ -1835,9 +1835,22 @@ role = "key"
         (bridge, tx)
     }
 
-    /// `o`, a line, `enter` typed through the shell into its focused tile.
+    /// `o`, a line, `enter` typed through the shell into its focused tile
+    /// (which leaves the next line's entry field open).
     fn type_a_line(vcx: &mut gpui::VisualTestContext, line: &str) {
         vcx.simulate_keystrokes("o");
+        vcx.simulate_input(line);
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+    }
+
+    /// Type `:line⏎` through the shell's command line into the focused
+    /// tile.
+    fn type_command(vcx: &mut gpui::VisualTestContext, line: &str) {
+        vcx.simulate_keystrokes(":");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         vcx.simulate_input(line);
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
@@ -2188,6 +2201,8 @@ role = "key"
             // so a second one may open it.
             vcx.executor().advance_clock(Duration::from_secs(2));
             vcx.run_until_parked();
+            // The first tile still has its next line's entry field open, so
+            // `:` would be typed into it: its command goes by the tile's route.
             run_command(&mut vcx, &first, "new");
             let shell = window
                 .read_with(&vcx, |root, _| root.view().clone().downcast::<ShellView>())
@@ -2207,7 +2222,12 @@ role = "key"
             vcx.run_until_parked();
             let second = tiles.borrow().last().unwrap().clone();
             assert_ne!(second, first, "fixture: a second tile");
-            run_command(&mut vcx, &second, "e book");
+            type_command(&mut vcx, "e book");
+            assert_eq!(
+                second.read_with(&vcx, |t, _| t.sheet().name.clone()),
+                "book",
+                "fixture: `:e book` reached the second tile"
+            );
             wait_until(
                 &mut vcx,
                 "the second tile loaded the sheet",
