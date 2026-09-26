@@ -647,9 +647,19 @@ impl PricerTile {
             click_anchor: None,
             pressed: None,
         };
+        this.adopt_templates();
         this.resolve_plan();
         this.rebuild(cx);
         this
+    }
+
+    /// The factory's current template tables onto the sheet. Called
+    /// wherever a sheet is installed (open, load, new) and on reload, so
+    /// parsing and printing always use the configured set: a sheet built
+    /// by `Sheet::new` or `from_rows` carries only the builtin set.
+    fn adopt_templates(&mut self) {
+        let set = self.shared.templates.borrow().clone();
+        self.sheet.set_templates(set);
     }
 
     // ---- what the shell reads ----------------------------------------
@@ -1935,6 +1945,7 @@ impl PricerTile {
                 Ok(mut s) => {
                     s.mark_all_stale();
                     self.sheet = s;
+                    self.adopt_templates();
                     // The undo stack's inverses were recorded against the
                     // fallback sheet's rows (review finding): once it is
                     // gone, replaying one would either refuse against the
@@ -1976,6 +1987,7 @@ impl PricerTile {
 
     /// A reload reached this tile (planning decision 20).
     pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
+        self.adopt_templates();
         self.resolve_plan();
         self.rebuild(cx);
         self.restart_timer(cx);
@@ -2705,6 +2717,7 @@ impl PricerTile {
         self.tag += 1;
         self.in_flight.clear();
         self.sheet = Sheet::new(&name);
+        self.adopt_templates();
         self.undo.clear();
         self.expansion = Expansion::default();
         self.held_expanded = None;
@@ -3335,7 +3348,7 @@ impl gpui::Render for PricerTile {
 pub(crate) mod tests {
     use super::*;
     use crate::content::{PricerFactory, PricerSettings};
-    use crate::core::{Edit, Place, RowSpec, Sheet, Views, to_rows};
+    use crate::core::{Edit, Place, RowSpec, Sheet, TemplateSet, Views, to_rows};
     use crate::store::{MemorySheetStore, SheetStore as _};
     use chrono::Datelike as _;
     use geode_core::groupings::GroupingSlots;
@@ -3423,6 +3436,31 @@ pub(crate) mod tests {
         store: MemorySheetStore,
         settings: PricerSettings,
     ) -> (Harness, VisualTestContext) {
+        open_configured(cx, restored, store, settings, TemplateSet::builtin())
+    }
+
+    /// An empty tile whose factory holds `templates` instead of the
+    /// builtin set.
+    pub(crate) fn open_with_templates(
+        cx: &mut gpui::TestAppContext,
+        templates: TemplateSet,
+    ) -> (Harness, VisualTestContext) {
+        open_configured(
+            cx,
+            None,
+            MemorySheetStore::default(),
+            PricerSettings::default(),
+            templates,
+        )
+    }
+
+    pub(crate) fn open_configured(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<toml::Table>,
+        store: MemorySheetStore,
+        settings: PricerSettings,
+        templates: TemplateSet,
+    ) -> (Harness, VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
         cx.update(crate::init);
@@ -3431,6 +3469,7 @@ pub(crate) mod tests {
             data.clone(),
             Rc::new(store.clone()),
             Views::builtin(),
+            templates,
             settings,
         ));
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
@@ -3839,8 +3878,13 @@ pub(crate) mod tests {
         let (views, diags) = Views::from_doc(&doc);
         assert!(diags.is_empty());
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, None, std::time::Duration::from_secs(60), cx)
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
         });
         assert_eq!(
             h.columns(&vcx),
@@ -4548,6 +4592,116 @@ pub(crate) mod tests {
         vcx.update(|window, cx| window.focused(cx).is_some())
     }
 
+    /// The builtin set plus a desk `CONDOR`, merged as the app merges it.
+    fn condor_set() -> TemplateSet {
+        let doc = geode_core::config::LayerDoc::builtin(
+            crate::core::PRICER_TEMPLATES_DOC,
+            &format!(
+                "{}\n[CONDOR]\nlegs = [ {{ weight = 1, strike = 1, kind = \"C\" }}, {{ weight = -1, strike = 2, kind = \"C\" }}, {{ weight = -1, strike = 3, kind = \"C\" }}, {{ weight = 1, strike = 4, kind = \"C\" }} ]\n",
+                crate::core::BUILTIN_TEMPLATES
+            ),
+        )
+        .unwrap();
+        TemplateSet::from_doc(&geode_core::config::merge_docs(
+            crate::core::PRICER_TEMPLATES_DOC,
+            &[doc],
+        ))
+        .0
+    }
+
+    #[gpui::test]
+    fn a_config_template_is_typed_in_the_bar_tagged_and_found(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_with_templates(cx, condor_set());
+        h.visible(&mut vcx, true);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 4800/4900/5100/5200 CONDOR");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.entry_error(&vcx), None);
+        assert_eq!(h.sheet_len(&vcx), 5);
+        assert_eq!(h.tags(&vcx)[0], "CONDOR");
+        assert_eq!(h.tree(&vcx)[0], "SPX Z26 4800/4900/5100/5200 CONDOR");
+    }
+
+    /// Every sheet swap builds a sheet on the builtin set; the tile must
+    /// hand it the configured one. `:e other` (missing: `Sheet::new`)
+    /// then `:e book` (loaded: `from_rows`), and the bar still parses a
+    /// config template on each.
+    #[gpui::test]
+    fn a_config_template_still_parses_after_switching_sheets(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&["SPX Z26 5000 C"]);
+        let (h, mut vcx) = open_configured(
+            cx,
+            Some(record),
+            store,
+            PricerSettings::default(),
+            condor_set(),
+        );
+        h.visible(&mut vcx, true);
+        for (sheet, len) in [("other", 5), ("book", 6)] {
+            assert_eq!(h.command(&mut vcx, &format!("e {sheet}")), Ok(()));
+            h.dispatch(&mut vcx, "add_below", None);
+            typed(&h, &mut vcx, "SPX Z26 4800/4900/5100/5200 CONDOR");
+            h.dispatch(&mut vcx, "commit", None);
+            assert_eq!(h.entry_error(&vcx), None, "on {sheet}");
+            assert_eq!(h.sheet_len(&vcx), len, "on {sheet}");
+            h.dispatch(&mut vcx, "cancel", None);
+        }
+    }
+
+    #[gpui::test]
+    fn a_reload_that_redefines_rr_changes_parsing_and_keeps_stored_rr_legs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // A package, then a line: `o` from the line lands a root.
+        let (h, mut vcx) = open_seeded(cx, &["SPX Z26 4800/5200 RR", "SPX Z26 5000 C"]);
+        let flipped = {
+            let builtin = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                crate::core::BUILTIN_TEMPLATES,
+            )
+            .unwrap();
+            let user = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                // Long both legs: no multiple of it is the builtin RR's
+                // short put and long call (a mere sign flip would be,
+                // and the stored package would still print as `-1 … RR`).
+                "[RR]\nlegs = [ { weight = 1, strike = 1, kind = \"P\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+            )
+            .unwrap();
+            TemplateSet::from_doc(&geode_core::config::merge_docs(
+                crate::core::PRICER_TEMPLATES_DOC,
+                &[builtin, user],
+            ))
+            .0
+        };
+        let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, flipped, settings.refresh, settings.stale_after, cx)
+        });
+        h.draw(&mut vcx);
+        assert_eq!(h.tags(&vcx)[0], "RR", "the stored package keeps its name");
+        let stored = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
+        assert!(
+            stored.contains('\n'),
+            "its legs no longer fit the new RR: one per line, got {stored}"
+        );
+        h.dispatch(&mut vcx, "bottom", None); // the line
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 4800/5200 RR");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.entry_error(&vcx), None);
+        let first_leg_qty = h.tile.read_with(&vcx, |t, _| {
+            let p = t
+                .sheet
+                .roots()
+                .nth(2)
+                .expect("the typed package is the third root");
+            t.sheet.qty(p + 1)
+        });
+        assert_eq!(first_leg_qty, 1, "the new RR is long the put");
+    }
+
     /// Entry-bar spec §4: `o`, a line, `enter` adds a row below the
     /// cursor and keeps the bar open; the next `enter` lands below that.
     #[gpui::test]
@@ -5003,8 +5157,13 @@ pub(crate) mod tests {
         set_editor(&h, &mut vcx, "5100");
         let views = slim_views("\"qty\", \"strike\", \"underlying\"");
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, None, std::time::Duration::from_secs(60), cx)
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
         });
         vcx.run_until_parked();
         assert_eq!(h.columns(&vcx), vec!["qty", "strike", "underlying"]);
@@ -5031,8 +5190,13 @@ pub(crate) mod tests {
         assert!(focused(&mut vcx), "fixture: the field owns focus");
         let views = slim_views("\"qty\", \"price\"");
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, None, std::time::Duration::from_secs(60), cx)
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
         });
         vcx.run_until_parked();
         h.draw(&mut vcx);
@@ -5389,8 +5553,13 @@ pub(crate) mod tests {
         assert_eq!(editor_paint_col(&h, &vcx), Some(2), "fixture");
         let views = slim_views("\"expiry\", \"qty\"");
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, None, std::time::Duration::from_secs(60), cx)
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
         });
         vcx.run_until_parked();
         h.draw(&mut vcx);
@@ -5415,8 +5584,13 @@ pub(crate) mod tests {
         assert!(focused(&mut vcx), "fixture: the field owns focus");
         let views = slim_views("\"qty\", \"price\"");
         vcx.update(|_, cx| {
-            h.factory
-                .reload(views, None, std::time::Duration::from_secs(60), cx)
+            h.factory.reload(
+                views,
+                TemplateSet::builtin(),
+                None,
+                std::time::Duration::from_secs(60),
+                cx,
+            )
         });
         vcx.run_until_parked();
         h.draw(&mut vcx);
@@ -5683,6 +5857,7 @@ pub(crate) mod tests {
         vcx.update(|_, cx| {
             h.factory.reload(
                 slim_views("\"qty\", \"price\""),
+                TemplateSet::builtin(),
                 None,
                 std::time::Duration::from_secs(60),
                 cx,
@@ -7118,6 +7293,7 @@ pub(crate) mod tests {
             data,
             store.clone(),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         );
         cx.update(|cx| {
@@ -7273,6 +7449,7 @@ pub(crate) mod tests {
             data,
             Rc::new(store.clone()),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         ));
         let notified = Rc::new(std::cell::Cell::new(0));

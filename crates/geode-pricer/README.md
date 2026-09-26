@@ -17,7 +17,8 @@ The pure core (`core`, no element, entity, window, or data service):
 | `sheet` | Struct-of-arrays rows, packages, inherited shifts, and stable line IDs. |
 | `edit` | The one mutation door and undo records. |
 | `undo` | The tile's bounded, strictly last-in first-out undo/redo stack. |
-| `shorthand`, `template` | Parsing and rendering custom lines and package templates. |
+| `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
+| `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, the entry bar's label, and the entry history. |
@@ -63,9 +64,16 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   apply through the LIFO history. Loading replaces the sheet. Deliveries,
   stale marking, and sheet metadata updates have separate paths.
 - Package rows derive from their legs; they are not independent instruments.
-- Shorthand rendering uses a template only while the legs still match it; the
-  grid keeps it as the row's find key and paints only a package's template
-  token.
+- Shorthand rendering uses a template only while the legs still match its
+  current table; otherwise it prints the legs one per line. The grid keeps
+  the shorthand as the row's find key and paints only a package's template
+  token. A package's template is a name, not a table: loading a sheet never
+  fails on a name the configured set lacks.
+- A sheet built by `Sheet::new` or `from_rows` carries the builtin template
+  set. `PricerTile::adopt_templates` is the only place a tile's sheet gets
+  the factory's configured set; it runs wherever a sheet is installed (open,
+  load, `:e`, `:new`) and on every reload, so the entry bar parses against
+  the configured set.
 - Storage conversion preserves stable ordering and explicit ownership of
   inherited versus row-level shifts.
 - The `pricer_sheets` declaration is frozen: tables are created with

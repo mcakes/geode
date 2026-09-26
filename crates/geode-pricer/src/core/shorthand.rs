@@ -318,10 +318,15 @@ pub fn parse(text: &str, templates: &TemplateSet) -> Result<RowSpec, ParseError>
     }
 
     let def = templates.resolve(&type_upper).ok_or_else(|| {
-        let names: Vec<&str> = templates.iter().map(|d| d.name.as_str()).collect();
+        // `C`, `P`, then the set's names, single-spaced: an empty set
+        // leaves no trailing space.
+        let names: Vec<&str> = ["C", "P"]
+            .into_iter()
+            .chain(templates.iter().map(|d| d.name.as_str()))
+            .collect();
         err(
             type_tok.offset,
-            format!("unknown type '{}': C P {}", type_tok.text, names.join(" ")),
+            format!("unknown type '{}': {}", type_tok.text, names.join(" ")),
         )
     })?;
     let template = Template::named(&def.name);
@@ -771,6 +776,11 @@ mod tests {
         let e = parse_builtin("SPX DEC26 5000 XYZ").unwrap_err();
         assert_eq!(e.offset, 15, "{e:?}");
         assert!(e.message.contains("unknown type"), "{e:?}");
+        let e = parse("SPX DEC26 5000 X", &TemplateSet::default()).unwrap_err();
+        assert_eq!(
+            e.message, "unknown type 'X': C P",
+            "an empty set lists only C and P, with no trailing space"
+        );
 
         let e = parse_builtin("SPX DEC26 95%/105%/110% CS").unwrap_err();
         assert_eq!(e.offset, 10, "the strikes token: {e:?}");

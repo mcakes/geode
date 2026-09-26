@@ -16725,6 +16725,55 @@ run_mutation "pricer templates: the interner leaks a copy per call" \
   '        if let Some(n) = names.iter().find(|_| false) {' \
   geode-pricer a_name_interns_once_and_compares_by_name
 
+# A reload must reach the open sheet's tables, or the bar keeps parsing
+# with the templates the tile opened with.
+run_mutation "pricer templates: a reload leaves the sheet's tables stale" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
+        self.adopt_templates();' \
+  '    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {' \
+  geode-pricer a_reload_that_redefines_rr_changes_parsing_and_keeps_stored_rr_legs
+
+# A new tile's sheet is built on the builtin set; without adopting the
+# factory's, a config template never parses in a fresh tile.
+run_mutation "pricer templates: a new tile keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '        this.adopt_templates();
+        this.resolve_plan();' \
+  '        this.resolve_plan();' \
+  geode-pricer a_config_template_is_typed_in_the_bar_tagged_and_found
+
+# `:e` and `:new` build a fresh sheet on the builtin set.
+run_mutation "pricer templates: a sheet switch keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.sheet = Sheet::new(&name);
+        self.adopt_templates();' \
+  '        self.sheet = Sheet::new(&name);' \
+  geode-pricer a_config_template_still_parses_after_switching_sheets
+
+# A loaded sheet comes from `from_rows` on the builtin set.
+run_mutation "pricer templates: a loaded sheet keeps the builtin set" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.sheet = s;
+                    self.adopt_templates();' \
+  '                    self.sheet = s;' \
+  geode-pricer a_config_template_still_parses_after_switching_sheets
+
+# The unknown-type list is `C P` then the set's names, single-spaced.
+run_mutation "pricer shorthand: the unknown-type list trails a space" \
+  crates/geode-pricer/src/core/shorthand.rs \
+  '            format!("unknown type '"'"'{}'"'"': {}", type_tok.text, names.join(" ")),' \
+  '            format!("unknown type '"'"'{}'"'"': {} ", type_tok.text, names.join(" ")),' \
+  geode-pricer every_error_names_the_offending_offset
+
+# The reload key must see the templates doc, or an edit to it never
+# reaches the pricer.
+run_mutation "pricer config key: templates are not part of the key" \
+  crates/geode-app/src/bridge.rs \
+  '        templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),' \
+  '        templates: None,' \
+  geode-app the_pricer_config_key_changes_only_with_what_the_pricer_reads
+
 run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   crates/geode-pricer/src/core/storage.rs \
   '    if sheet.is_empty() {
@@ -17019,9 +17068,11 @@ run_mutation "pricer sheets: a switch keeps the old sheet's failed-load block" \
 
 run_mutation "pricer sheets: a switch keeps the old sheet's undo" \
   crates/geode-pricer/src/tile.rs \
-  '        self.sheet = Sheet::new(&name);
-        self.undo.clear();' \
-  '        self.sheet = Sheet::new(&name);' \
+  '        self.adopt_templates();
+        self.undo.clear();
+        self.expansion = Expansion::default();' \
+  '        self.adopt_templates();
+        self.expansion = Expansion::default();' \
   geode-pricer colon_new_opens_the_next_untitled_sheet_empty
 
 run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
@@ -19707,8 +19758,8 @@ run_mutation "pricer cell: an empty shift commits zero" \
 
 run_mutation "pricer app: a config reload never reaches the pricer" \
   crates/geode-app/src/bridge.rs \
-  '            pricer.reload(views, refresh, stale_after, cx);' \
-  '            let _ = (views, refresh, stale_after);' \
+  '            pricer.reload(views, templates, refresh, stale_after, cx);' \
+  '            let _ = (views, templates, refresh, stale_after);' \
   geode-app a_config_reload_hands_the_pricer_factory_its_views
 
 # The free underlying typeahead: ranking is a subsequence match, so an

@@ -466,6 +466,23 @@ package created in the session opens so its legs show; a restored tile opens
 the packages its session record names. Package rows are read-only in every
 column.
 
+The shorthand's package types come from the `pricer_templates` configuration
+document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,
+`CAL`) plus any the desk or user layer defines, such as a `CONDOR` (see
+[configuration](configuration.md#pricing)). A layer's entry of a built-in's
+name redefines it. `C` and `P` are single lines, not templates. A type the
+set does not know is a parse error that lists what is accepted, `C` and `P`
+first and then the templates in document order (`unknown type 'X': C P CS PS
+…`). A reload reaches every open tile: the entry bar parses against the new
+set at once.
+
+A stored package keeps its template's name whatever the configuration later
+says. When that template is removed, or redefined so the package's legs no
+longer fit its table, the package still loads with its name as its tag, and
+its shorthand (for `y y` and find) prints its legs one per line instead of
+the template form. Its legs, quantities, and prices are unchanged; only a
+package typed after the change uses the new table.
+
 Normal-mode keys:
 
 | Keys | Effect |

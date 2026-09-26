@@ -22,7 +22,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `pricer_views`, and `overrides` replace whole named objects.
+`colors`, `pricer_views`, `pricer_templates`, and `overrides` replace whole
+named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -389,6 +390,48 @@ it.
 carries the two bundled views; like other named objects, a desk or user entry
 replaces a whole view. A reload reaches open pricer tiles, and a tile whose
 view disappeared shows the first defined view with a header notice.
+
+`pricer_templates` holds the package templates the pricer's shorthand
+accepts. The builtin layer carries seven: `CS`, `PS`, `STRD`, `STRG`, `RR`,
+`FLY`, and `CAL`. Each entry is a table of legs; a leg names its signed
+`weight`, which typed `strike` it takes, which typed `expiry` it takes, and
+its option `kind`:
+
+```toml
+[CONDOR]
+legs = [
+  { weight = 1, strike = 1, kind = "C" },
+  { weight = -1, strike = 2, kind = "C" },
+  { weight = -1, strike = 3, kind = "C" },
+  { weight = 1, strike = 4, kind = "C" },
+]
+```
+
+`SPX Z26 4800/4900/5100/5200 CONDOR` then prices those four legs. `strike`
+and `expiry` are 1-based indices into the strikes and expiries typed in the
+shorthand; `expiry` defaults to 1, so only a multi-expiry template such as
+`CAL` names it. The number of strikes and expiries a template takes is the
+highest index its legs use.
+
+A name is 1 to 8 letters or digits, a letter first, and is case-insensitive:
+`condor` and `CONDOR` are the same template. `C`, `P`, and `CUSTOM` are
+reserved. Each entry is validated alone, and a bad one is dropped with an
+error diagnostic at its path while the rest load. An entry is bad when its
+name is invalid or reserved, it is not a table, `legs` is missing or has
+fewer than two legs, a leg is not a table, a `weight` is zero or not an
+integer, a `strike` or `expiry` is below 1 or above the number of legs,
+`kind` is not `"C"` or `"P"`, or the strike or expiry numbers skip one (a
+template using strikes 1 and 3 has no strike 2). Unknown keys, on the entry
+or on a leg, warn and are ignored. Two spellings of one name in the same
+merged document keep the later entry, in the earlier one's position, with a
+warning.
+
+Like other named objects, an entry in a higher layer replaces a lower-layer
+entry of the same name, including a built-in: a desk `RR` redefines the risk
+reversal for every sheet. A reload reaches open pricer tiles without a
+restart. Rows already on a sheet keep their legs and prices; see
+[the pricer](features.md) for how a package prints once its template is
+removed or redefined.
 
 ## Maintaining configuration
 

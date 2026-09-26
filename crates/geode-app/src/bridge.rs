@@ -22,7 +22,8 @@ use geode_marketdata::MarketDataFactory;
 use geode_marketdata::core::{CVI, DIVIDEND};
 use geode_pricer::content::{PricerFactory, PricerSettings};
 use geode_pricer::core::{
-    PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_VIEWS_DOC, Views,
+    PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC,
+    TemplateSet, Views,
 };
 use geode_pricer::store::DuckSheetStore;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, SourceSummary};
@@ -51,8 +52,10 @@ pub struct DataSetup {
     /// Datasets declared local. Their publications update diagnostics but skip
     /// frame publication history and revisions, preventing autosave invalidation.
     pub local_datasets: HashSet<String>,
-    /// The pricer's views and settings; `stale_after` is filled by `start`.
+    /// The pricer's views, template tables and settings; `stale_after` is
+    /// filled by `start`.
     pub pricer_views: Views,
+    pub pricer_templates: TemplateSet,
     pub pricer_settings: PricerSettings,
     /// What the pricer read out of this config (`pricer_config_key`), so
     /// the reload observer can tell a reload that changed none of it.
@@ -134,6 +137,8 @@ pub fn data_setup(
     };
     let (pricer_views, view_diags) = pricer_views_from_config(config);
     diagnostics.extend(view_diags);
+    let (pricer_templates, template_diags) = pricer_templates_from_config(config);
+    diagnostics.extend(template_diags);
     let (refresh, refresh_diag) = pricing_refresh_from_config(config);
     diagnostics.extend(refresh_diag);
     let pricer_settings = PricerSettings {
@@ -173,6 +178,7 @@ pub fn data_setup(
         diagnostics,
         local_datasets,
         pricer_views,
+        pricer_templates,
         pricer_settings,
         pricer_key: pricer_config_key(config),
     })
@@ -305,8 +311,17 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
     }
 }
 
+/// The `pricer_templates` doc, or the built-in set when no layer has one
+/// (the builtin layer always does in the app; a test config may not).
+pub fn pricer_templates_from_config(config: &Config) -> (TemplateSet, Vec<Diagnostic>) {
+    match config.doc(PRICER_TEMPLATES_DOC) {
+        Some(doc) => TemplateSet::from_doc(doc),
+        None => (TemplateSet::builtin(), Vec::new()),
+    }
+}
+
 /// Exactly what the pricer reads out of a config: the merged
-/// `pricer_views` doc, the raw `[pricing] refresh` value and the resolved
+/// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh` value and the resolved
 /// stale threshold. Two equal keys resolve to the same views and settings,
 /// so the reload observer skips a reload whose key is unchanged — a theme
 /// or keymap edit must not restart every tile's refresh timer or repeat a
@@ -314,6 +329,7 @@ pub fn pricer_views_from_config(config: &Config) -> (Views, Vec<Diagnostic>) {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
+    templates: Option<toml::Table>,
     refresh: Option<toml::Value>,
     stale_after: Duration,
 }
@@ -321,6 +337,7 @@ pub struct PricerConfigKey {
 pub fn pricer_config_key(config: &Config) -> PricerConfigKey {
     PricerConfigKey {
         views: config.doc(PRICER_VIEWS_DOC).map(|d| d.value.clone()),
+        templates: config.doc(PRICER_TEMPLATES_DOC).map(|d| d.value.clone()),
         refresh: config.get("app", "pricing.refresh").cloned(),
         stale_after: stale_after_from_config(config),
     }
@@ -447,6 +464,7 @@ pub fn start(
         handle.clone(),
         Rc::new(DuckSheetStore::new(handle.clone())),
         setup.pricer_views.clone(),
+        setup.pricer_templates.clone(),
         pricer_settings,
     ));
     Bridge {
@@ -758,7 +776,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             last.set(now);
             // Read everything out of the config before the factory takes
             // `cx` mutably.
-            let (views, mut diags, refresh, stale_after) = {
+            let (views, templates, mut diags, refresh, stale_after) = {
                 let config = shell.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
@@ -767,11 +785,19 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 *last_key.borrow_mut() = Some(key);
                 let (views, diags) = pricer_views_from_config(config);
                 let (refresh, refresh_diag) = pricing_refresh_from_config(config);
+                let (templates, template_diags) = pricer_templates_from_config(config);
                 let mut diags = diags;
+                diags.extend(template_diags);
                 diags.extend(refresh_diag);
-                (views, diags, refresh, stale_after_from_config(config))
+                (
+                    views,
+                    templates,
+                    diags,
+                    refresh,
+                    stale_after_from_config(config),
+                )
             };
-            pricer.reload(views, refresh, stale_after, cx);
+            pricer.reload(views, templates, refresh, stale_after, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
             }
@@ -1389,6 +1415,7 @@ role = "key"
             handle.clone(),
             Rc::new(MemorySheetStore::default()),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         ))
     }
@@ -1458,15 +1485,16 @@ role = "key"
         assert_eq!(diag.path.as_deref(), Some("app.pricing.refresh"));
     }
 
-    /// The reload gate's key moves with exactly the three things the
+    /// The reload gate's key moves with exactly the four things the
     /// pricer reads and with nothing else.
     #[test]
     fn the_pricer_config_key_changes_only_with_what_the_pricer_reads() {
-        let config = |app: &str, views: &str| {
+        let config = |app: &str, views: &str, templates: &str| {
             Config::load(&ConfigSources {
                 builtin: vec![
                     LayerDoc::builtin("app", app).unwrap(),
                     LayerDoc::builtin("pricer_views", views).unwrap(),
+                    LayerDoc::builtin(PRICER_TEMPLATES_DOC, templates).unwrap(),
                 ],
                 desk: None,
                 user: None,
@@ -1475,32 +1503,83 @@ role = "key"
         let app = "[theme]\nname = \"a\"\n[log]\nlevel = \"info\"\n\
                    [pricing]\nrefresh = \"10s\"\n[blotter]\nstale_after = \"5m\"\n";
         let views = "[slim]\ncolumns = [\"qty\", \"price\"]\n";
-        let base = pricer_config_key(&config(app, views));
+        let templates = "[RR]\nlegs = [ { weight = -1, strike = 1, kind = \"P\" }, \
+                         { weight = 1, strike = 2, kind = \"C\" } ]\n";
+        let base = pricer_config_key(&config(app, views, templates));
         assert_eq!(
-            pricer_config_key(&config(&app.replace("\"a\"", "\"b\""), views)),
+            pricer_config_key(&config(&app.replace("\"a\"", "\"b\""), views, templates)),
             base,
             "a [theme] edit"
         );
         assert_eq!(
-            pricer_config_key(&config(&app.replace("\"info\"", "\"debug\""), views)),
+            pricer_config_key(&config(
+                &app.replace("\"info\"", "\"debug\""),
+                views,
+                templates
+            )),
             base,
             "a [log] edit"
         );
         assert_ne!(
-            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""))),
+            pricer_config_key(&config(app, &views.replace("\"qty\", ", ""), templates)),
             base,
             "a pricer_views edit"
         );
         assert_ne!(
-            pricer_config_key(&config(&app.replace("\"10s\"", "\"off\""), views)),
+            pricer_config_key(&config(app, views, &templates.replace("-1", "-2"))),
+            base,
+            "a pricer_templates edit"
+        );
+        assert_ne!(
+            pricer_config_key(&config(
+                &app.replace("\"10s\"", "\"off\""),
+                views,
+                templates
+            )),
             base,
             "a [pricing] refresh edit"
         );
         assert_ne!(
-            pricer_config_key(&config(&app.replace("\"5m\"", "\"6m\""), views)),
+            pricer_config_key(&config(&app.replace("\"5m\"", "\"6m\""), views, templates)),
             base,
             "a stale_after edit"
         );
+    }
+
+    #[test]
+    fn pricer_templates_from_config_falls_back_to_the_builtin_set_without_a_doc() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![],
+            desk: None,
+            user: None,
+        });
+        let (set, diags) = pricer_templates_from_config(&config);
+        assert!(diags.is_empty());
+        assert_eq!(set, TemplateSet::builtin());
+        assert_eq!(set.iter().count(), 7, "the seven built-ins");
+    }
+
+    /// With a doc, the merged layers decide: a user `CONDOR` joins the
+    /// built-ins, and a bad entry is dropped with a diagnostic.
+    #[test]
+    fn pricer_templates_from_config_reads_the_merged_doc() {
+        let config = Config::from_docs(vec![
+            LayerDoc::builtin(PRICER_TEMPLATES_DOC, geode_pricer::core::BUILTIN_TEMPLATES).unwrap(),
+            LayerDoc::builtin(
+                PRICER_TEMPLATES_DOC,
+                "[CONDOR]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, \
+                 { weight = -1, strike = 2, kind = \"C\" }, \
+                 { weight = -1, strike = 3, kind = \"C\" }, \
+                 { weight = 1, strike = 4, kind = \"C\" } ]\n\
+                 [BAD]\nlegs = []\n",
+            )
+            .unwrap(),
+        ]);
+        let (set, diags) = pricer_templates_from_config(&config);
+        assert!(set.resolve("CONDOR").is_some());
+        assert!(set.resolve("RR").is_some(), "the built-ins stay");
+        assert!(set.resolve("BAD").is_none());
+        assert!(!diags.is_empty(), "the bad entry is reported");
     }
 
     #[test]
@@ -1605,9 +1684,13 @@ role = "key"
             "fixture: the first reload hands over the configured views"
         );
         vcx.update(|_, cx| {
-            bridge
-                .pricer
-                .reload(Views::builtin(), None, Duration::from_secs(1), cx)
+            bridge.pricer.reload(
+                Views::builtin(),
+                TemplateSet::builtin(),
+                None,
+                Duration::from_secs(1),
+                cx,
+            )
         });
         bump(&mut vcx);
         assert_eq!(
@@ -1674,6 +1757,7 @@ role = "key"
             handle,
             Rc::new(MemorySheetStore::default()),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         )));
         roster.register_actions(&mut services.registry);
@@ -1915,6 +1999,7 @@ role = "key"
             handle,
             Rc::new(store.clone()),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         ));
         let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer, "a");
@@ -2127,6 +2212,7 @@ role = "key"
             handle.clone(),
             Rc::new(store.clone()),
             Views::builtin(),
+            TemplateSet::builtin(),
             PricerSettings::default(),
         ));
         let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer.clone(), "a");
