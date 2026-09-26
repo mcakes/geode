@@ -123,7 +123,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `:e`/`:new` flush the outgoing sheet (a refused flush keeps the tile on
   it), release its name, cancel its pricing and retire its pricing tag (line
   ids restart per sheet), and reset undo, expansion, cursor and every
-  per-sheet save state. `:name` forgets the old name only after a save under
+  per-sheet save state. `:e` of the tile's own name is a no-op except on a
+  `save_blocked` sheet, which it reloads. `:name` forgets the old name only after a save under
   the new one is confirmed, and is refused on a sheet whose load failed (its
   fallback would replace the real document). `:rm` refuses every open name.
 - The `:rm` confirm is market-data's upload confirm: a focused prompt in the
@@ -131,7 +132,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   tile in `insert` mode while armed, cancelled by focus leaving or a pointer
   press, blurred before it drops.
 - Known names are the store's (`set_known` from the diagnostics catalog,
-  which only adds; confirmed saves; less confirmed forgets) plus
+  which only adds and never re-adds a name confirmed forgotten until a
+  save of it is confirmed; confirmed saves; less confirmed forgets) plus
   `Shared::pending_saves` — names with a save queued and not yet answered,
   counted per name (one per admitted save, less one per outcome; exact
   because every admitted local publish answers once and every answer is
@@ -139,7 +141,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   pending-save name waits (`load_waiting`, no request) until the name's last
   queued save has answered: reads and saves are on unordered lanes.
   `Shared::retiring` reserves a name from `:name`/`:rm` until its forget is
-  answered; `:e`, `:name`, `:rm` and a restore refuse it, and a rename's
+  answered; `:e`, `:name`, `:rm`, a restore and the `:rm` confirm's `y`
+  (which re-checks `open` too) refuse it, and a rename's
   confirmed save never forgets a name a tile holds. Save outcomes route to
   `Shared::save_origins` (the queuing tile), never by current holder; a
   failure of a `:name`'s old-name save is not painted (the edits travel under

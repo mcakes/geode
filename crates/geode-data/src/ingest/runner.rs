@@ -10,8 +10,12 @@
 //! refusal, or fixed capacity. Upstream coalescing does not bound these queues.
 //!
 //! Loads use fixed staging-table names, so concurrent file loads on the same
-//! store are unsafe. Shutdown joins running work but does not drain queued
-//! jobs. See `docs/current/data-path.md` for delivery and health contracts.
+//! store are unsafe. Shutdown finishes the running operation, then runs the
+//! queued local document work (`local`-source publishes and forgets) in
+//! queue order, each answering as usual, and drops the rest: feed
+//! documents, series and files are resent by their sources after a
+//! restart. See `docs/current/data-path.md` for delivery and health
+//! contracts.
 
 use crate::adapter::SeriesRows;
 use crate::health::Health;

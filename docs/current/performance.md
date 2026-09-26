@@ -111,9 +111,15 @@ changes still rebuild.
   expensive.
 - Series append deduplication reads every stored version for the pair. Large
   historical pairs may need a narrower live-value index.
-- Measure and document live/archive retention has no production scheduler;
-  the sweep API is exercised by tests. Their archives can grow without that
-  automatic bound. Series retention runs during append.
+- Measure and feed-document live/archive retention has no production
+  scheduler; the sweep API is exercised by tests. Their archives can grow
+  without that automatic bound. Local documents (pricer sheets) are swept to
+  200 archived generations; series retention runs during append.
+- While a diagnostics tile is visible, every publication (each sheet autosave
+  included) rebuilds the catalog on the service thread, listing every
+  generation of every sheet (up to 201 each), and the diagnostics entity
+  compares the new snapshot whole on the UI thread. Unmeasured; with hundreds of sheets it may need
+  a narrower catalog read.
 - Diagnostics perf rows sample requery and catalog resource metrics on their
   next rebuild; those inputs have no dedicated perf invalidation. Histogram
   copying compares sample count and maximum, so idle-only changes and a

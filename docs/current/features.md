@@ -335,7 +335,9 @@ tile holds:
   the generation before the save. A restored tile waits the same way. Undo history, open packages,
   the cursor, and the save state stay with the sheet left behind, and pricing
   in flight for it is cancelled. A sheet open in another tile is refused
-  (`sheet 'x' is open in another tile`); the tile's own name does nothing.
+  (`sheet 'x' is open in another tile`). The tile's own name does nothing,
+  unless its load failed (`did not load`): then `:e` of it asks again,
+  which is the way to retry a refused or failed load in place.
 - `:new` does the same into the next free `untitled-N`, empty, with no load.
 - `:name <sheet>` is refused if the name is open, is a known document, or has
   a save still queued (`sheet 'x' already exists`), and while the sheet is
@@ -357,7 +359,10 @@ tile holds:
   the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
   keyboard (the tile is in insert mode). Bare `y` removes the document and its
   whole history; any other key, a pointer press on the tile, or focus leaving
-  it answers no (`sheet not removed` in the footer). A removal that fails says
+  it answers no (`sheet not removed` in the footer). `y` checks the name
+  again: if a tile opened it, or a `:name` began retiring it, while the
+  question stood, nothing is removed (`sheet 'x' not removed: it is open in
+  another tile` / `…: it is being removed`). A removal that fails says
   so in the header. The name is reserved, as for `:name`, until the removal
   is answered.
 
@@ -377,7 +382,10 @@ diagnostic.
 `:e` and `:rm` complete from the known sheet names: the diagnostics catalog's
 `pricer_sheets` documents (the factory asks for a catalog when it is created
 without one), plus this session's confirmed saves, less its confirmed
-removals. A later catalog adds names and never drops one. A name whose save is
+removals. A later catalog adds names and never drops one, and never brings
+back a name this session removed, until a save under that name is
+confirmed: the catalog the diagnostics entity holds is refreshed only while
+a diagnostics tile is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
 
@@ -468,9 +476,7 @@ saved). A new tile takes the next free `untitled-N` name, skipping names open
 in another tile, known documents, and names with a save still queued.
 **Known limitation:** before the first catalog arrives a new tile can pick an
 `untitled-N` that already has a document this session has not seen; its first
-save adds a generation to that document (history is kept, nothing is lost). A
-catalog read before a removal landed can make a removed name known again, so
-its `:e` opens empty.
+save adds a generation to that document (history is kept, nothing is lost).
 
 **Known limitations** of storage:
 

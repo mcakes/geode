@@ -261,9 +261,9 @@ pub struct PricerTile {
     /// The latest queued save's outcome was a failure: the document does
     /// not hold what this tile last queued, so the next save (a burst, or
     /// the close) must write it again. Save outcomes carry no link to the
-    /// save that produced them and coalesce latest-wins, so each one is
-    /// read as describing the LATEST queued save — never counted: a
-    /// later `Ok` clears this, a later `Err` sets it.
+    /// save that produced them; every one is delivered, in the writer's
+    /// order, so the last to arrive is the latest queued save's — a later
+    /// `Ok` clears this, a later `Err` sets it.
     pub(crate) save_failed: bool,
     /// The latest save attempt was refused admission (`NOT_SAVED`): an
     /// `Ok` arriving afterwards confirms an earlier save, not this one,
@@ -1270,6 +1270,17 @@ impl PricerTile {
         }));
     }
 
+    /// Save now what the idle timer would have saved, or what a failed
+    /// save left unsaved, and drop the timer. A close and the app's quit
+    /// both come here: neither may leave edits behind a timer that will
+    /// never fire.
+    pub(crate) fn flush_save(&mut self) {
+        self.save_task = None;
+        if self.dirty || self.save_failed {
+            let _ = self.save_now();
+        }
+    }
+
     /// The whole sheet, once. An empty sheet publishes nothing (the last
     /// non-empty generation stays as history, spec §7.2); a refusal paints
     /// the save slot and stays `dirty`, so the next burst or the close
@@ -1284,17 +1295,6 @@ impl PricerTile {
     /// `false` only when the store refused the save — the sheet is still
     /// unsaved; a blocked or empty sheet has nothing to write and answers
     /// `true`.
-    /// Save now what the idle timer would have saved, or what a failed
-    /// save left unsaved, and drop the timer. A close and the app's quit
-    /// both come here: neither may leave edits behind a timer that will
-    /// never fire.
-    pub(crate) fn flush_save(&mut self) {
-        self.save_task = None;
-        if self.dirty || self.save_failed {
-            let _ = self.save_now();
-        }
-    }
-
     pub(crate) fn save_now(&mut self) -> bool {
         if self.save_blocked {
             return true;
@@ -2367,13 +2367,19 @@ impl PricerTile {
 
     /// `:e <sheet>` (planning decision 13): refused when another tile
     /// holds `name` (two writers would race) or its document is being
-    /// removed; the tile's own name is a no-op. A name with a save queued
+    /// removed; the tile's own name is a no-op, unless its load failed
+    /// (`save_blocked`): then it reloads, the in-place retry of a refused
+    /// or failed load (nothing on a blocked sheet was ever saved, so
+    /// nothing is lost). A name with a save queued
     /// and not yet answered is claimed at once but its load waits for
     /// that answer (`start_load`): reads run on the query pool and saves
     /// on the ingest writer, unordered, so a read now could return the
     /// generation before the save.
     fn edit_sheet(&mut self, name: String, cx: &mut Context<Self>) -> Result<(), String> {
         if name == self.sheet.name {
+            if self.save_blocked {
+                return self.switch_sheet(name, true, cx);
+            }
             return Ok(());
         }
         self.shared.refuse_retiring(&name)?;
@@ -2600,7 +2606,19 @@ impl PricerTile {
         let Some(pending) = self.disarm_remove(window, cx) else {
             return;
         };
-        if self.shared.store.forget(&pending.sheet) {
+        // The name was checked when the question was armed; a tile may
+        // have opened it, or a `:name` begun retiring it, since. Forgetting
+        // then would delete a sheet in use or race that rename's forget.
+        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {
+            Some("it is open in another tile")
+        } else if self.shared.retiring.borrow().contains(&pending.sheet) {
+            Some("it is being removed")
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            self.footer = Some(format!("sheet '{}' not removed: {why}", pending.sheet).into());
+        } else if self.shared.store.forget(&pending.sheet) {
             // Reserved until the forget is answered.
             self.shared
                 .retiring
@@ -6133,8 +6151,8 @@ pub(crate) mod tests {
         assert_eq!(h.store.save_count(), base + 3, "the next burst retried");
         assert_eq!(stored(&h).qty(0), 5);
 
-        // Outcomes coalesce latest-wins: each describes the latest queued
-        // save, so ok → fail → ok ends clean.
+        // Outcomes arrive in the writer's order, the last describing the
+        // latest queued save, so ok → fail → ok ends clean.
         save_answered(&h, &mut vcx, "book", Ok(()));
         save_answered(&h, &mut vcx, "book", Err("blip".into()));
         save_answered(&h, &mut vcx, "book", Ok(()));
@@ -6186,8 +6204,8 @@ pub(crate) mod tests {
     }
 
     /// The tile that queued `book`'s save leaves it and comes back; the
-    /// load behind that save fails. A later outcome of the same save (two
-    /// coalesced answers) reaches the tile as the sheet's own, and must
+    /// load behind that save fails. A later outcome for the same name
+    /// reaches the tile as the sheet's own, and must
     /// not clear the failed load's block.
     #[gpui::test]
     fn a_save_answer_never_clears_a_failed_loads_block(cx: &mut gpui::TestAppContext) {
@@ -6791,6 +6809,98 @@ pub(crate) mod tests {
         vcx.update(|_, cx| h.factory.forget_answered("old", Ok(()), cx));
         assert!(!h.store.contains("old"));
         assert!(!completions(&h, &mut vcx, "e ").contains(&"old".to_string()));
+    }
+
+    /// A removed sheet stays removed when the catalog the diagnostics
+    /// entity holds is stale: with the diagnostics tile closed, nothing
+    /// refreshes it after the forget, and any later publish (another
+    /// sheet's autosave, a feed) re-reads it. Only a confirmed save of the
+    /// name makes it known again.
+    #[gpui::test]
+    fn a_removed_sheet_is_not_revived_by_a_stale_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = rm_fixture(cx);
+        h.store.set_confirming(true);
+        set_catalog(&h, &mut vcx, &["gone"]);
+        assert!(h.store.contains("gone"), "fixture: the catalog lists it");
+        h.command(&mut vcx, "rm gone").unwrap();
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("y");
+        assert_eq!(h.store.forgets(), vec!["gone".to_string()]);
+        vcx.update(|_, cx| h.factory.forget_answered("gone", Ok(()), cx));
+        let publish = |vcx: &mut VisualTestContext| {
+            h.diagnostics.update(vcx, |d, cx| {
+                d.note_published("cvi_params");
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+        publish(&mut vcx);
+        assert!(!h.store.contains("gone"), "the stale catalog revived it");
+        assert!(!completions(&h, &mut vcx, "e ").contains(&"gone".to_string()));
+        assert_eq!(
+            h.command(&mut vcx, "rm gone"),
+            Err("no sheet 'gone'".into())
+        );
+        // A confirmed save of the name makes it a document again.
+        assert_eq!(h.command(&mut vcx, "name gone"), Ok(()));
+        save_answered(&h, &mut vcx, "gone", Ok(()));
+        publish(&mut vcx);
+        assert!(h.store.contains("gone"));
+    }
+
+    /// `y` re-checks the name: a sheet another tile opened, or one another
+    /// tile's `:name` is retiring, while the question stood is not removed.
+    #[gpui::test]
+    fn y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, second) = rm_fixture(cx);
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        assert_eq!(command_on(&*second, &mut vcx, "e old"), Ok(()));
+        assert!(prompt(&h, &vcx).is_some(), "fixture: the question stands");
+        vcx.simulate_keystrokes("y");
+        assert!(h.store.forgets().is_empty());
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'old' not removed: it is open in another tile")
+        );
+
+        // The second tile moves on, freeing `old`; the question is asked
+        // again, and meanwhile the second tile opens `old` and renames it
+        // away, so `old` is retiring and open nowhere.
+        assert!(
+            h.store
+                .save("mine", sheet_rows("mine", &["NKY Z26 30000 C"]))
+        );
+        assert_eq!(command_on(&*second, &mut vcx, "e mine"), Ok(()));
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        assert_eq!(command_on(&*second, &mut vcx, "e old"), Ok(()));
+        assert_eq!(command_on(&*second, &mut vcx, "name renamed"), Ok(()));
+        assert!(prompt(&h, &vcx).is_some(), "fixture: the question stands");
+        vcx.simulate_keystrokes("y");
+        assert!(h.store.forgets().is_empty());
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'old' not removed: it is being removed")
+        );
+    }
+
+    /// A sheet whose load failed (here, refused at submission) is retried
+    /// in place by `:e` of its own name; nothing on it was ever saved.
+    #[gpui::test]
+    fn colon_e_of_a_blocked_sheets_own_name_reloads_it(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
+        h.store.set_load_refused(true);
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        assert!(h.tile.read_with(&vcx, |t, _| t.save_blocked), "the premise");
+        h.store.set_load_refused(false);
+        let before = loads_of(&h.store, "book");
+        assert_eq!(h.command(&mut vcx, "e book"), Ok(()));
+        assert_eq!(loads_of(&h.store, "book"), before + 1, "asked again");
+        assert!(!h.tile.read_with(&vcx, |t, _| t.save_blocked));
+        assert_eq!(h.save_notice(&vcx), None);
+        assert_eq!(h.sheet_len(&vcx), 5);
     }
 
     #[gpui::test]

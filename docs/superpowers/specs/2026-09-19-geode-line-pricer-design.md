@@ -1393,6 +1393,21 @@ Deviations and rulings:
   `Subscription` leaked entities at teardown once app-held callbacks
   captured the factory; the observer is detached over `Weak<Shared>`, a
   no-op once the factory is gone.
+- **Forgotten names stay forgotten (final review).** The seed re-reads
+  the held catalog on every data-version bump, which every publication
+  causes, but the held catalog is refreshed only while a diagnostics tile
+  is watched. So with diagnostics closed, a removed or renamed-away sheet
+  became known again on the next publish of anything. Both stores now keep
+  a forgotten-names set: `note_forgotten` inserts, `note_saved` removes,
+  and `set_known` skips it. This also closes the stale-catalog race the
+  first draft of this section parked.
+- **`y` re-checks.** The `:rm` confirm's `y` refuses, in the footer, a name
+  that a tile opened or a `:name` began retiring while the question stood,
+  instead of relying on focus routing to have cancelled the confirm.
+- **`:e` of a blocked sheet's own name reloads it.** A load refused at
+  submission (a full request channel) or failed had no in-place retry;
+  `:e` of the tile's own name, otherwise a no-op, now reloads a
+  `save_blocked` sheet (nothing on it was ever saved).
 - **Test accessors.** `PricerTile::sheet`/`is_loading` sit behind the
   crate's new `test-support` feature.
 - **Fixture init order.** The app's pricer test fixtures ran
@@ -1426,8 +1441,6 @@ Parked (minor, deferred):
   database stays consistent).
 - `:e`/`:new` (or closing the tile) after an unconfirmed `:name` gives up
   the old name's removal, so both documents remain.
-- A catalog read before a forget landed can re-add the removed name
-  (catalog names only add); its `:e` then opens empty.
 - A `Published` for a sheet can be delivered after its `Forgotten`
   (separate mailbox keys); harmless for a local dataset.
 - `load_cancelled` can stay set after an answer that raced past the

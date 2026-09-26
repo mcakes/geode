@@ -4,8 +4,9 @@
 //! stored (spec §1.2): a reopened sheet reprices.
 //!
 //! Values have no NULL, so every optional is a flag plus a value or a
-//! kind plus a value. Part 4 wires the dataset into the builtin layer and
-//! the `SheetStore` around `DataHandle`; this module is the pure pair.
+//! kind plus a value. `geode-app` declares the dataset in its builtin
+//! layer and the tile's `DuckSheetStore` reads and writes it over
+//! `DataHandle`; this module is the pure conversion both ways.
 
 use crate::core::sheet::{LineId, LineState, OwnShifts, Refresh, RowKind, RowRecord, Sheet};
 use crate::core::template::Template;

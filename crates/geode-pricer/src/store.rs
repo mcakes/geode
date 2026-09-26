@@ -1,18 +1,19 @@
 //! Where a sheet lives between tiles (line-pricer spec §7.1): the tile
 //! never holds a document request of its own, only this seam.
 //!
-//! **The shape is Part 3's** (planning decision 7): `load` answers at
-//! once when it can and `Pending` when the answer is on its way — Part
-//! 4's [`DuckSheetStore`] answers `Pending` and delivers the rows through
-//! the tile's `loaded`, reached from its `Delivery::Query` arm. `save` is
-//! one whole-sheet publish; `false` is a refusal the tile shows and
-//! retries on the next edit burst (spec §7.3). A zero-row sheet is never
-//! saved (`to_rows` answers `None`; spec §7.2). `forget` deletes the
-//! whole document, live and archived (spec §7.4's `:rm`).
+//! `load` answers at once when it can, `Pending` when the answer is on its
+//! way, and `Refused` when the request was never submitted.
+//! [`DuckSheetStore`] answers `Pending` and the rows arrive through the
+//! tile's `Delivery::Query` arm into `loaded`. `save` is one whole-sheet
+//! publish and `forget` deletes the whole document, live and archived
+//! (`:rm`, or `:name` retiring the old name); both only queue the write
+//! (`false` is a refusal the tile shows and retries), and the confirmed
+//! outcome reaches the tile separately, by sheet name. A zero-row sheet is
+//! never saved (`to_rows` answers `None`).
 //!
-//! [`MemorySheetStore`] is the tests' fake and the app's store until Part
-//! 4 wires [`DuckSheetStore`] in. A sheet in it lives for the process,
-//! not across a restart.
+//! [`DuckSheetStore`] is the store the app wires. [`MemorySheetStore`] is
+//! the tests' fake: a sheet in it lives for the process, not across a
+//! restart.
 
 use crate::core::storage::PRICER_SHEETS_DATASET;
 use geode_core::document::DocumentRows;
@@ -67,11 +68,13 @@ pub trait SheetStore {
     fn note_forgotten(&self, name: &str) {
         let _ = name;
     }
-    /// Names a catalog of the store's documents holds (planning decision
-    /// 12). They are ADDED: a catalog never drops a name this store
-    /// learned from its own confirmed saves, which a catalog read before
-    /// that save landed would not carry yet. A store that answers `names`
-    /// from its own contents has nothing to do.
+    /// Names a catalog of the store's documents holds. They are ADDED: a
+    /// catalog never drops a name this store learned from its own
+    /// confirmed saves, which a catalog read before that save landed would
+    /// not carry yet. A name confirmed forgotten (and not saved since) is
+    /// skipped: a catalog read before the forget would otherwise revive
+    /// it. A store that answers `names` from its own contents has nothing
+    /// to do.
     fn set_known(&self, names: Vec<String>) {
         let _ = names;
     }
@@ -92,6 +95,9 @@ pub trait SheetStore {
 pub struct MemorySheetStore {
     sheets: Rc<RefCell<BTreeMap<String, DocumentRows>>>,
     known: Rc<RefCell<BTreeSet<String>>>,
+    /// Confirmed forgotten and not saved since: `set_known` skips them, as
+    /// [`DuckSheetStore`] does.
+    forgotten: Rc<RefCell<BTreeSet<String>>>,
     confirming: Rc<Cell<bool>>,
     forgets: Rc<RefCell<Vec<String>>>,
     saves: Rc<Cell<usize>>,
@@ -187,6 +193,7 @@ impl SheetStore for MemorySheetStore {
     }
 
     fn note_saved(&self, name: &str) {
+        self.forgotten.borrow_mut().remove(name);
         if self.confirming.get() {
             self.known.borrow_mut().insert(name.to_string());
         }
@@ -194,10 +201,14 @@ impl SheetStore for MemorySheetStore {
 
     fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
+        self.forgotten.borrow_mut().insert(name.to_string());
     }
 
     fn set_known(&self, names: Vec<String>) {
-        self.known.borrow_mut().extend(names);
+        let forgotten = self.forgotten.borrow();
+        self.known
+            .borrow_mut()
+            .extend(names.into_iter().filter(|n| !forgotten.contains(n)));
     }
 }
 
@@ -220,6 +231,12 @@ impl SheetStore for MemorySheetStore {
 pub struct DuckSheetStore {
     data: DataHandle,
     known: Rc<RefCell<BTreeSet<String>>>,
+    /// Names confirmed forgotten and not saved since. The catalog the
+    /// diagnostics entity holds is refreshed only while a diagnostics tile
+    /// watches it, so a catalog read before a forget can be re-read long
+    /// after it: without this, it would make the forgotten name known
+    /// again.
+    forgotten: Rc<RefCell<BTreeSet<String>>>,
 }
 
 impl DuckSheetStore {
@@ -227,6 +244,7 @@ impl DuckSheetStore {
         DuckSheetStore {
             data,
             known: Rc::new(RefCell::new(BTreeSet::new())),
+            forgotten: Rc::new(RefCell::new(BTreeSet::new())),
         }
     }
 }
@@ -273,21 +291,29 @@ impl SheetStore for DuckSheetStore {
         self.known.borrow().contains(name)
     }
 
-    /// A confirmed save: `name` is now a known document.
+    /// A confirmed save: `name` is now a known document, and a catalog
+    /// may name it again.
     fn note_saved(&self, name: &str) {
+        self.forgotten.borrow_mut().remove(name);
         self.known.borrow_mut().insert(name.to_string());
     }
 
-    /// A confirmed forget: `name` is no longer a known document.
+    /// A confirmed forget: `name` is no longer a known document, and no
+    /// catalog brings it back until a save of it is confirmed.
     fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
+        self.forgotten.borrow_mut().insert(name.to_string());
     }
 
-    /// Add names from a fresh catalog snapshot; nothing already known is
-    /// removed by this (a name this store learned from its own writes
-    /// stays even if a catalog it is passed does not carry it yet).
+    /// Add names from a catalog snapshot, skipping every name this store
+    /// saw forgotten; nothing already known is removed (a name this store
+    /// learned from its own writes stays even if a catalog it is passed
+    /// does not carry it yet).
     fn set_known(&self, names: Vec<String>) {
-        self.known.borrow_mut().extend(names);
+        let forgotten = self.forgotten.borrow();
+        self.known
+            .borrow_mut()
+            .extend(names.into_iter().filter(|n| !forgotten.contains(n)));
     }
 }
 
@@ -451,6 +477,21 @@ mod tests {
                 }
                 other => panic!("expected a Forget request, got {other:?}"),
             }
+        }
+
+        /// A catalog read before a forget never revives the name; a
+        /// confirmed save of it does.
+        #[test]
+        fn a_catalog_never_revives_a_forgotten_name_until_it_is_saved() {
+            let (handle, _rx) = DataHandle::for_tests();
+            let store = DuckSheetStore::new(handle);
+            store.set_known(vec!["gone".to_string()]);
+            store.note_forgotten("gone");
+            store.set_known(vec!["gone".to_string(), "other".to_string()]);
+            assert!(!store.contains("gone"));
+            assert!(store.contains("other"));
+            store.note_saved("gone");
+            assert!(store.contains("gone"));
         }
 
         #[test]
