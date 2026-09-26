@@ -50,6 +50,15 @@ focus cannot point at a hidden member. The shell sends each occupant a
 `StackHandle`; modules paint its marker through the shared builder and use it
 to open the shell-owned member list.
 
+A fullscreen tile paints with the same chrome as a workspace's only tile,
+so the status bar marks it instead. While a main-tree tile is
+fullscreen, a muted segment reads `fullscreen · N hidden` (just
+`fullscreen` when it hides nothing). N comes from
+`Workspace::fullscreen_hidden`. The segment's tooltip names the
+`workspace::fullscreen_tile` key, resolved on hover. Clicking the segment
+dispatches that action and restores the layout. Dock trees cannot be
+fullscreen, so a dock never shows the segment.
+
 Tile occupants are created through the app-supplied `ModuleRoster`. A new
 occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
