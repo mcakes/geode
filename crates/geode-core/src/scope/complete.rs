@@ -301,6 +301,197 @@ pub fn context_at(text: &str, caret: usize) -> Context {
     }
 }
 
+use crate::dimensions::DerivedDimensions;
+use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
+
+/// What a column can hold, as far as suggestions care.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValueKind {
+    /// Text with a dictionary: values are listed from the data.
+    Categorical,
+    /// Text without one (keys, free text): typed, not listed.
+    Text,
+    Number,
+    Bool,
+    Date,
+    Timestamp,
+    /// A derived dimension's labels, sorted.
+    Derived(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VocabColumn {
+    pub name: String,
+    /// `dimension`, `key`, `measure`, `attribute`, `axis`, `value` or `derived`.
+    pub role: &'static str,
+    pub kind: ValueKind,
+}
+
+impl VocabColumn {
+    /// The row detail: role and type, or `derived`.
+    pub fn detail(&self) -> String {
+        let ty = match self.kind {
+            ValueKind::Derived(_) => return "derived".to_string(),
+            ValueKind::Categorical | ValueKind::Text => "text",
+            ValueKind::Number => "number",
+            ValueKind::Bool => "bool",
+            ValueKind::Date => "date",
+            ValueKind::Timestamp => "timestamp",
+        };
+        format!("{} · {ty}", self.role)
+    }
+}
+
+/// Every column an expression may name, across all datasets, then every
+/// derived dimension. The first dataset to declare a column decides its
+/// role and kind.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExprVocab {
+    columns: Vec<VocabColumn>,
+}
+
+impl ExprVocab {
+    pub fn new(schema: &SchemaSpec, dims: &DerivedDimensions) -> Self {
+        let mut columns: Vec<VocabColumn> = Vec::new();
+        for dataset in &schema.datasets {
+            for c in &dataset.columns {
+                if columns.iter().any(|v| v.name == c.name) {
+                    continue;
+                }
+                let role = match c.role {
+                    ColumnRole::Key => "key",
+                    ColumnRole::Dimension { .. } => "dimension",
+                    ColumnRole::Measure { .. } => "measure",
+                    ColumnRole::Attribute { .. } => "attribute",
+                    ColumnRole::Axis => "axis",
+                    ColumnRole::Value => "value",
+                };
+                let kind = match c.ty {
+                    ColumnType::Utf8 if c.categorical => ValueKind::Categorical,
+                    ColumnType::Utf8 => ValueKind::Text,
+                    ColumnType::F64 | ColumnType::I64 => ValueKind::Number,
+                    ColumnType::Bool => ValueKind::Bool,
+                    ColumnType::Date => ValueKind::Date,
+                    ColumnType::Timestamp => ValueKind::Timestamp,
+                };
+                columns.push(VocabColumn {
+                    name: c.name.clone(),
+                    role,
+                    kind,
+                });
+            }
+        }
+        for d in dims.all() {
+            if columns.iter().any(|v| v.name == d.name) {
+                continue;
+            }
+            let labels: std::collections::BTreeSet<&String> = d.values.values().collect();
+            columns.push(VocabColumn {
+                name: d.name.clone(),
+                role: "derived",
+                kind: ValueKind::Derived(labels.into_iter().cloned().collect()),
+            });
+        }
+        Self { columns }
+    }
+
+    pub fn columns(&self) -> &[VocabColumn] {
+        &self.columns
+    }
+
+    pub fn get(&self, name: &str) -> Option<&VocabColumn> {
+        self.columns.iter().find(|c| c.name == name)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// The closest column name within two edits, ignoring case. On a tie,
+    /// the earliest column wins.
+    pub fn nearest(&self, name: &str) -> Option<&str> {
+        let name = name.to_lowercase();
+        self.columns
+            .iter()
+            .map(|c| {
+                (
+                    edit_distance(&name, &c.name.to_lowercase()),
+                    c.name.as_str(),
+                )
+            })
+            .filter(|(d, _)| *d <= 2)
+            .min_by_key(|(d, _)| *d)
+            .map(|(_, n)| n)
+    }
+}
+
+/// Levenshtein distance over chars.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// A schema problem in expression text, with the byte range it concerns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Warning {
+    pub span: Range<usize>,
+    pub message: String,
+}
+
+/// Schema problems in `text`, in text order: unknown columns (with a
+/// did-you-mean suggestion) and ordering or `like` on a derived dimension.
+/// With `caret`, a problem whose range touches the caret is left out,
+/// because that word is still being typed. An empty vocab checks nothing.
+/// The walk stops where the text stops being a valid prefix, so a syntax
+/// error hides later warnings, and Enter reports the syntax error first.
+pub fn check(text: &str, vocab: &ExprVocab, caret: Option<usize>) -> Vec<Warning> {
+    if vocab.is_empty() {
+        return Vec::new();
+    }
+    let tokens = lex(text);
+    let mut out = Vec::new();
+    walk(
+        text,
+        &tokens,
+        &mut |term: Term| match vocab.get(&term.column) {
+            None => out.push(Warning {
+                span: term.column_span.clone(),
+                message: match vocab.nearest(&term.column) {
+                    Some(near) => {
+                        format!("unknown column '{}'; did you mean '{near}'?", term.column)
+                    }
+                    None => format!("unknown column '{}'", term.column),
+                },
+            }),
+            Some(VocabColumn {
+                kind: ValueKind::Derived(_),
+                ..
+            }) => {
+                if let Some((op, span)) = &term.op
+                    && let Some(message) = crate::scope::derived_op_error(&term.column, op)
+                {
+                    out.push(Warning {
+                        span: span.clone(),
+                        message,
+                    });
+                }
+            }
+            Some(_) => {}
+        },
+    );
+    out.retain(|w| caret.is_none_or(|c| !(w.span.start <= c && c <= w.span.end)));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +674,105 @@ mod tests {
                 );
             }
         }
+    }
+
+    use crate::config::{LayerDoc, merge_docs};
+    use crate::dimensions::DerivedDimensions;
+    use crate::schema::SchemaSpec;
+
+    // `live` and `expiry` are declared as `attribute` (grain "position",
+    // matching `npv`), not a bare `dimension`: a bare dimension must be a
+    // built-in grain-key column (schema/mod.rs's `bare_outside_key` check),
+    // and neither name is one, so a `role = "dimension"` declaration would
+    // be dropped before `ExprVocab` ever saw it. The attribute role keeps
+    // both columns present with their declared `ValueKind` unchanged.
+    fn vocab() -> ExprVocab {
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+             [risk.columns.live]\ntype = \"bool\"\nrole = \"attribute\"\ngrain = \"position\"\n\
+             [risk.columns.expiry]\ntype = \"date\"\nrole = \"attribute\"\ngrain = \"position\"\n",
+        )
+        .unwrap();
+        let dims = LayerDoc::builtin(
+            "dimensions",
+            "[desk]\nfrom = \"book\"\n[desk.values]\nEQ = [\"BK000\"]\nRATES = [\"BK001\", \"BK002\"]\n",
+        )
+        .unwrap();
+        let (schema, diags) = SchemaSpec::from_doc(&merge_docs("datasets", &[datasets]));
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.severity != crate::config::Severity::Error),
+            "the fixture must not lose columns to a schema error: {diags:?}"
+        );
+        let (dims, _) = DerivedDimensions::from_doc(&merge_docs("dimensions", &[dims]));
+        ExprVocab::new(&schema, &dims)
+    }
+
+    #[test]
+    fn the_vocab_reads_role_and_kind_from_the_schema_then_derived_labels() {
+        let v = vocab();
+        let names: Vec<&str> = v.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["book", "position_ref", "npv", "live", "expiry", "desk"]
+        );
+        assert_eq!(v.get("book").unwrap().kind, ValueKind::Categorical);
+        assert_eq!(
+            v.get("position_ref").unwrap().kind,
+            ValueKind::Text,
+            "keys have no dictionary"
+        );
+        assert_eq!(v.get("npv").unwrap().detail(), "measure · number");
+        assert_eq!(v.get("live").unwrap().kind, ValueKind::Bool);
+        assert_eq!(v.get("expiry").unwrap().kind, ValueKind::Date);
+        assert_eq!(
+            v.get("desk").unwrap().kind,
+            ValueKind::Derived(vec!["EQ".into(), "RATES".into()])
+        );
+        assert_eq!(v.get("desk").unwrap().detail(), "derived");
+    }
+
+    #[test]
+    fn did_you_mean_proposes_only_within_two_edits() {
+        let v = vocab();
+        assert_eq!(v.nearest("bokk"), Some("book"));
+        assert_eq!(v.nearest("BOOK"), Some("book"));
+        assert_eq!(v.nearest("zzzzzz"), None);
+    }
+
+    #[test]
+    fn check_flags_unknown_columns_and_derived_ordering() {
+        let v = vocab();
+        let w = check("bokk = 'A' and desk < 'EQ'", &v, None);
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].span, 0..4);
+        assert_eq!(w[0].message, "unknown column 'bokk'; did you mean 'book'?");
+        assert!(
+            w[1].message
+                .starts_with("'desk' is a derived dimension, so '<'"),
+            "{}",
+            w[1].message
+        );
+        assert!(check("book = 'A' and desk in ('EQ')", &v, None).is_empty());
+    }
+
+    #[test]
+    fn check_stays_quiet_about_the_word_under_the_caret() {
+        let v = vocab();
+        assert!(check("bok", &v, Some(3)).is_empty(), "still typing");
+        assert_eq!(
+            check("bok = 'A'", &v, Some(9)).len(),
+            1,
+            "caret has left it"
+        );
+    }
+
+    #[test]
+    fn an_empty_vocab_checks_nothing() {
+        assert!(check("anything = 1", &ExprVocab::default(), None).is_empty());
     }
 }

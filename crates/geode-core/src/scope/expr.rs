@@ -31,6 +31,18 @@ impl CompareOp {
     }
 }
 
+/// The refusal for `op` (its grammar text) on derived dimension `column`,
+/// or `None` when the operator is allowed. Derived dimensions are mapped
+/// labels, so only `=`, `!=` and `in` mean anything on them. Both
+/// `Scope::validate` and the expression dialogs' live check use this.
+pub fn derived_op_error(column: &str, op: &str) -> Option<String> {
+    (!matches!(op, "=" | "!=" | "<>")).then(|| {
+        format!(
+            "'{column}' is a derived dimension, so '{op}' has no meaning on it; use =, != or in"
+        )
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Literal {
     Str(String),
@@ -127,8 +139,9 @@ impl CompareOp {
     /// The grammar's own spelling — distinct from [`CompareOp::sql`], which
     /// is the SQL text the compiler emits (`Ne` as `<>`, `Like` as
     /// `ilike`). `parse_op` accepts both `!=` and `<>` for `Ne`; either
-    /// round-trips, so `Display` just picks one.
-    fn grammar(self) -> &'static str {
+    /// round-trips, so `Display` just picks one. Visible to `scope::mod`,
+    /// whose `validate` reports refusals in this spelling too.
+    pub(crate) fn grammar(self) -> &'static str {
         match self {
             CompareOp::Eq => "=",
             CompareOp::Ne => "!=",

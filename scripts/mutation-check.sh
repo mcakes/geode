@@ -21369,6 +21369,15 @@ run_mutation "expr suggest: after an operator comes a value" \
   geode-core \
   context_agrees_with_the_parser_on_every_prefix
 
+# A derived dimension refuses ordering; accepting it would let `desk < 'EQ'`
+# through to a query the compiler then rejects.
+run_mutation "expr suggest: derived ordering is flagged" \
+  crates/geode-core/src/scope/expr.rs \
+  '    (!matches!(op, "=" | "!=" | "<>")).then(|| {' \
+  '    (false).then(|| {' \
+  geode-core \
+  check_flags_unknown_columns_and_derived_ordering
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
