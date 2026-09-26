@@ -19507,14 +19507,8 @@ run_mutation "pricer: flush_all flushes no tile" \
 # A deferred load starts only after the LAST queued save of its sheet.
 run_mutation "pricer: the first save outcome releases the name" \
   crates/geode-pricer/src/content.rs \
-  '            Some(n) if *n > 1 => {' \
-  '            Some(n) if *n > 1000 => {' \
-  geode-pricer a_load_behind_two_queued_saves_waits_for_both_answers
-
-run_mutation "pricer: a save outcome resumes a load with saves still queued" \
-  crates/geode-pricer/src/content.rs \
-  '        if !settled {' \
-  '        if false {' \
+  '            Some(n) if *n > 1 => *n -= 1,' \
+  '            Some(n) if *n > 1000 => *n -= 1,' \
   geode-pricer a_load_behind_two_queued_saves_waits_for_both_answers
 
 run_mutation "pricer: a save refused at submission is counted as queued" \

@@ -322,18 +322,15 @@ impl Shared {
             .or_default() += 1;
     }
 
-    /// One queued save of `name` answered; `true` when none is left. An
-    /// answer with none counted (nothing this app queued) leaves none.
-    pub(crate) fn save_settled(&self, name: &str) -> bool {
+    /// One queued save of `name` answered; the name leaves the set with its
+    /// last. An answer with none counted (nothing this app queued) leaves
+    /// none.
+    pub(crate) fn save_settled(&self, name: &str) {
         let mut pending = self.pending_saves.borrow_mut();
         match pending.get_mut(name) {
-            Some(n) if *n > 1 => {
-                *n -= 1;
-                false
-            }
+            Some(n) if *n > 1 => *n -= 1,
             _ => {
                 pending.remove(name);
-                true
             }
         }
     }
@@ -536,7 +533,7 @@ impl PricerFactory {
     /// record of a failure). Once no save of `sheet` is left queued, any
     /// tile waiting to load it starts its load.
     pub fn save_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
-        let settled = self.shared.save_settled(sheet);
+        self.shared.save_settled(sheet);
         if answer.is_ok() {
             self.shared.store.note_saved(sheet);
         }
@@ -551,9 +548,8 @@ impl PricerFactory {
                 }
             });
         }
-        if !settled {
-            return;
-        }
+        // A waiting tile re-checks: with a save of `sheet` still queued it
+        // keeps waiting (`start_load` defers again).
         for tile in tiles {
             tile.update(cx, |t, cx| {
                 if t.load_waiting && t.sheet.name == sheet {
