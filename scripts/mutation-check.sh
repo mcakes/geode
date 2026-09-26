@@ -16708,6 +16708,23 @@ run_mutation "pricer templates: a case-insensitive repeat is kept as two entries
   '            if let Some((idx, earlier)) = None::<&(usize, String)> {' \
   geode-pricer a_case_insensitive_repeat_replaces_the_earlier_entry_in_place
 
+# A stored package whose template name is gone must still load; the
+# old code refused the whole sheet.
+run_mutation "pricer storage: an unknown template refuses the load" \
+  crates/geode-pricer/src/core/storage.rs \
+  '                RowKind::Package {
+                    template: Template::named(name),
+                }' \
+  '                return Err(format!("unknown template {name}"));' \
+  geode-pricer a_package_whose_template_is_unknown_loads_and_prints_its_legs
+
+# The interner must hand back the same name, or every parse leaks.
+run_mutation "pricer templates: the interner leaks a copy per call" \
+  crates/geode-pricer/src/core/template.rs \
+  '        if let Some(n) = names.iter().find(|n| **n == upper) {' \
+  '        if let Some(n) = names.iter().find(|_| false) {' \
+  geode-pricer a_name_interns_once_and_compares_by_name
+
 run_mutation "pricer storage: an empty sheet publishes a zero-row document" \
   crates/geode-pricer/src/core/storage.rs \
   '    if sheet.is_empty() {

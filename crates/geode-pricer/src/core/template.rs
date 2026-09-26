@@ -1,24 +1,81 @@
-//! The seven package templates (line-pricer spec §6.3): a template is a
-//! TABLE — for each leg, its weight, which strike and expiry index it
-//! takes and its option kind. The parser expands a template over the
-//! typed strikes and expiries; the renderer recognises legs that still
-//! match a table and prints the template form back.
+//! Package templates (line-pricer spec §6.3): a template is a TABLE — for
+//! each leg, its weight, which strike and expiry index it takes and its
+//! option kind. The tables load from the `pricer_templates` document (the
+//! seven built-ins live in its builtin layer); a package names its
+//! template, and a `TemplateSet` resolves the name to its table. The
+//! parser expands a table over the typed strikes and expiries; the
+//! renderer recognises legs that still match a table and prints the
+//! template form back. A name no table resolves still names the package:
+//! it prints its legs one per line.
 
 use geode_core::config::{Diagnostic, MergedDoc, Severity};
 use geode_core::pricing::OptionKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Template {
-    /// A `Group` over a run of roots, or a package whose legs no longer
-    /// match any table.
-    Custom,
-    CS,
-    PS,
-    STRD,
-    STRG,
-    RR,
-    FLY,
-    CAL,
+/// A package's template, by name. `Copy` so `RowKind` stays `Copy`; the
+/// name is interned, so each distinct name is allocated once for the
+/// process (names come from config and stored sheets and are few).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Template(&'static str);
+
+impl std::fmt::Debug for Template {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl Template {
+    /// A `Group` over a run of roots; never a table.
+    pub const CUSTOM: Template = Template("CUSTOM");
+    pub const CS: Template = Template("CS");
+    pub const PS: Template = Template("PS");
+    pub const STRD: Template = Template("STRD");
+    pub const STRG: Template = Template("STRG");
+    pub const RR: Template = Template("RR");
+    pub const FLY: Template = Template("FLY");
+    pub const CAL: Template = Template("CAL");
+
+    /// Upper-cased and interned; the built-in names allocate nothing.
+    pub fn named(name: &str) -> Template {
+        use std::sync::{Mutex, OnceLock};
+        const KNOWN: [Template; 8] = [
+            Template::CUSTOM,
+            Template::CS,
+            Template::PS,
+            Template::STRD,
+            Template::STRG,
+            Template::RR,
+            Template::FLY,
+            Template::CAL,
+        ];
+        if let Some(t) = KNOWN.iter().find(|t| t.0.eq_ignore_ascii_case(name)) {
+            return *t;
+        }
+        static NAMES: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
+        let upper = name.to_ascii_uppercase();
+        let mut names = NAMES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("the interner never panics while held");
+        if let Some(n) = names.iter().find(|n| **n == upper) {
+            return Template(n);
+        }
+        let leaked: &'static str = Box::leak(upper.into_boxed_str());
+        names.push(leaked);
+        Template(leaked)
+    }
+
+    pub fn token(self) -> &'static str {
+        self.0
+    }
+
+    /// The lower-case spelling `pricer_sheets.template` stores.
+    pub fn storage_name(self) -> String {
+        self.0.to_ascii_lowercase()
+    }
+
+    pub fn is_custom(self) -> bool {
+        self == Template::CUSTOM
+    }
 }
 
 /// One leg of a template.
@@ -31,97 +88,6 @@ pub struct LegSpec {
     /// Index into the typed expiries (`0` on every table but `CAL`).
     pub expiry: usize,
     pub kind: OptionKind,
-}
-
-const fn leg(weight: i64, strike: usize, expiry: usize, kind: OptionKind) -> LegSpec {
-    LegSpec {
-        weight,
-        strike,
-        expiry,
-        kind,
-    }
-}
-
-use OptionKind::{Call, Put};
-
-const CS: [LegSpec; 2] = [leg(1, 0, 0, Call), leg(-1, 1, 0, Call)];
-const PS: [LegSpec; 2] = [leg(1, 0, 0, Put), leg(-1, 1, 0, Put)];
-const STRD: [LegSpec; 2] = [leg(1, 0, 0, Call), leg(1, 0, 0, Put)];
-const STRG: [LegSpec; 2] = [leg(1, 0, 0, Put), leg(1, 1, 0, Call)];
-const RR: [LegSpec; 2] = [leg(-1, 0, 0, Put), leg(1, 1, 0, Call)];
-const FLY: [LegSpec; 3] = [leg(1, 0, 0, Call), leg(-2, 1, 0, Call), leg(1, 2, 0, Call)];
-/// `+far −near` calls on one strike; the shorthand's `E1/E2` is
-/// near/far, so the far expiry is index 1.
-const CAL: [LegSpec; 2] = [leg(1, 0, 1, Call), leg(-1, 0, 0, Call)];
-
-impl Template {
-    pub const ALL: [Template; 8] = [
-        Template::Custom,
-        Template::CS,
-        Template::PS,
-        Template::STRD,
-        Template::STRG,
-        Template::RR,
-        Template::FLY,
-        Template::CAL,
-    ];
-
-    /// Case-insensitive. `None` for anything that is not a template
-    /// token (`C` and `P` are single legs, not templates).
-    pub fn parse(token: &str) -> Option<Template> {
-        let upper = token.to_ascii_uppercase();
-        Template::ALL.into_iter().find(|t| t.token() == upper)
-    }
-
-    pub fn token(self) -> &'static str {
-        match self {
-            Template::Custom => "CUSTOM",
-            Template::CS => "CS",
-            Template::PS => "PS",
-            Template::STRD => "STRD",
-            Template::STRG => "STRG",
-            Template::RR => "RR",
-            Template::FLY => "FLY",
-            Template::CAL => "CAL",
-        }
-    }
-
-    /// The lower-case spelling `pricer_sheets.template` stores (spec §7.2).
-    pub fn storage_name(self) -> &'static str {
-        match self {
-            Template::Custom => "custom",
-            Template::CS => "cs",
-            Template::PS => "ps",
-            Template::STRD => "strd",
-            Template::STRG => "strg",
-            Template::RR => "rr",
-            Template::FLY => "fly",
-            Template::CAL => "cal",
-        }
-    }
-
-    pub fn legs(self) -> &'static [LegSpec] {
-        match self {
-            Template::Custom => &[],
-            Template::CS => &CS,
-            Template::PS => &PS,
-            Template::STRD => &STRD,
-            Template::STRG => &STRG,
-            Template::RR => &RR,
-            Template::FLY => &FLY,
-            Template::CAL => &CAL,
-        }
-    }
-
-    /// How many strikes the shorthand takes: one more than the largest
-    /// strike index any leg names.
-    pub fn strikes(self) -> usize {
-        self.legs().iter().map(|l| l.strike + 1).max().unwrap_or(0)
-    }
-
-    pub fn expiries(self) -> usize {
-        self.legs().iter().map(|l| l.expiry + 1).max().unwrap_or(0)
-    }
 }
 
 pub const PRICER_TEMPLATES_DOC: &str = "pricer_templates";
@@ -420,6 +386,15 @@ mod tests {
     use super::*;
     use geode_core::pricing::OptionKind;
 
+    fn leg(weight: i64, strike: usize, expiry: usize, kind: OptionKind) -> LegSpec {
+        LegSpec {
+            weight,
+            strike,
+            expiry,
+            kind,
+        }
+    }
+
     fn set(toml: &str) -> (TemplateSet, Vec<geode_core::config::Diagnostic>) {
         let doc = geode_core::config::LayerDoc::builtin(PRICER_TEMPLATES_DOC, toml).unwrap();
         TemplateSet::from_doc(&geode_core::config::merge_docs(
@@ -435,22 +410,26 @@ mod tests {
         assert_eq!(s, TemplateSet::builtin());
         let names: Vec<&str> = s.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["CS", "PS", "STRD", "STRG", "RR", "FLY", "CAL"]);
-        for t in [
-            Template::CS,
-            Template::PS,
-            Template::STRD,
-            Template::STRG,
-            Template::RR,
-            Template::FLY,
-            Template::CAL,
-        ] {
-            let d = s.resolve(t.token()).unwrap();
-            assert_eq!(d.legs, t.legs(), "{t:?}");
-            assert_eq!(
-                (d.strikes, d.expiries),
-                (t.strikes(), t.expiries()),
-                "{t:?}"
-            );
+        // The pre-config tables, literally: (name, legs, strikes, expiries).
+        use OptionKind::{Call, Put};
+        let want: [(&str, Vec<LegSpec>, usize, usize); 7] = [
+            ("CS", vec![leg(1, 0, 0, Call), leg(-1, 1, 0, Call)], 2, 1),
+            ("PS", vec![leg(1, 0, 0, Put), leg(-1, 1, 0, Put)], 2, 1),
+            ("STRD", vec![leg(1, 0, 0, Call), leg(1, 0, 0, Put)], 1, 1),
+            ("STRG", vec![leg(1, 0, 0, Put), leg(1, 1, 0, Call)], 2, 1),
+            ("RR", vec![leg(-1, 0, 0, Put), leg(1, 1, 0, Call)], 2, 1),
+            (
+                "FLY",
+                vec![leg(1, 0, 0, Call), leg(-2, 1, 0, Call), leg(1, 2, 0, Call)],
+                3,
+                1,
+            ),
+            ("CAL", vec![leg(1, 0, 1, Call), leg(-1, 0, 0, Call)], 1, 2),
+        ];
+        for (name, legs, strikes, expiries) in want {
+            let d = s.resolve(name).unwrap();
+            assert_eq!(d.legs, legs, "{name}");
+            assert_eq!((d.strikes, d.expiries), (strikes, expiries), "{name}");
         }
     }
 
@@ -584,19 +563,48 @@ note = "x"
     }
 
     #[test]
+    fn a_name_interns_once_and_compares_by_name() {
+        let a = Template::named("condor");
+        let b = Template::named("CONDOR");
+        assert_eq!(a, b);
+        assert!(
+            std::ptr::eq(a.token(), b.token()),
+            "interned: one allocation per name"
+        );
+        assert_eq!(a.token(), "CONDOR");
+        assert_eq!(a.storage_name(), "condor");
+        assert_eq!(Template::named("cs"), Template::CS);
+        assert!(Template::named("custom").is_custom());
+    }
+
+    #[test]
     fn every_template_token_parses_case_insensitively_and_round_trips() {
-        for t in Template::ALL {
-            assert_eq!(Template::parse(t.token()), Some(t), "{t:?}");
-            assert_eq!(Template::parse(&t.token().to_lowercase()), Some(t), "{t:?}");
+        let builtin = TemplateSet::builtin();
+        for d in builtin.iter() {
+            let t = Template::named(&d.name);
+            assert_eq!(Template::named(&d.name.to_lowercase()), t, "{t:?}");
+            assert_eq!(t.token(), d.name, "{t:?}");
             assert_eq!(t.storage_name(), t.token().to_lowercase());
+            assert_eq!(builtin.resolve(t.token()), Some(d), "{t:?}");
+            assert_eq!(builtin.resolve(&t.storage_name()), Some(d), "{t:?}");
+            assert!(!t.is_custom());
         }
-        assert_eq!(Template::parse("C"), None, "a single leg is not a template");
-        assert_eq!(Template::parse("BUTTERFLY"), None);
+        assert!(
+            builtin.resolve("C").is_none(),
+            "a single leg is not a template"
+        );
+        assert!(builtin.resolve("BUTTERFLY").is_none());
+        assert!(
+            builtin.resolve("CUSTOM").is_none(),
+            "CUSTOM is never a table"
+        );
     }
 
     #[test]
     fn the_seven_tables_have_the_documented_legs() {
-        let cs = Template::CS.legs();
+        let b = TemplateSet::builtin();
+        let legs = |n: &str| b.resolve(n).unwrap().legs.clone();
+        let cs = legs("CS");
         assert_eq!(cs.len(), 2);
         assert_eq!(
             (cs[0].weight, cs[0].strike, cs[0].kind),
@@ -606,17 +614,17 @@ note = "x"
             (cs[1].weight, cs[1].strike, cs[1].kind),
             (-1, 1, OptionKind::Call)
         );
-        let ps = Template::PS.legs();
+        let ps = legs("PS");
         assert_eq!((ps[0].weight, ps[0].kind), (1, OptionKind::Put));
         assert_eq!((ps[1].weight, ps[1].kind), (-1, OptionKind::Put));
-        let strd = Template::STRD.legs();
+        let strd = legs("STRD");
         assert_eq!(strd.len(), 2);
         assert!(strd.iter().all(|l| l.weight == 1 && l.strike == 0));
         assert_eq!(
             (strd[0].kind, strd[1].kind),
             (OptionKind::Call, OptionKind::Put)
         );
-        let strg = Template::STRG.legs();
+        let strg = legs("STRG");
         assert_eq!(
             (strg[0].weight, strg[0].strike, strg[0].kind),
             (1, 0, OptionKind::Put)
@@ -625,7 +633,7 @@ note = "x"
             (strg[1].weight, strg[1].strike, strg[1].kind),
             (1, 1, OptionKind::Call)
         );
-        let rr = Template::RR.legs();
+        let rr = legs("RR");
         assert_eq!(
             (rr[0].weight, rr[0].strike, rr[0].kind),
             (-1, 0, OptionKind::Put)
@@ -634,7 +642,7 @@ note = "x"
             (rr[1].weight, rr[1].strike, rr[1].kind),
             (1, 1, OptionKind::Call)
         );
-        let fly = Template::FLY.legs();
+        let fly = legs("FLY");
         assert_eq!(
             fly.iter().map(|l| l.weight).collect::<Vec<_>>(),
             vec![1, -2, 1]
@@ -645,7 +653,7 @@ note = "x"
         );
         assert!(fly.iter().all(|l| l.kind == OptionKind::Call));
         // CAL: +far −near calls on one strike; the far expiry is index 1.
-        let cal = Template::CAL.legs();
+        let cal = legs("CAL");
         assert_eq!(
             (cal[0].weight, cal[0].expiry, cal[0].kind),
             (1, 1, OptionKind::Call)
@@ -659,30 +667,25 @@ note = "x"
 
     #[test]
     fn strike_and_expiry_counts_follow_the_tables() {
-        assert_eq!((Template::CS.strikes(), Template::CS.expiries()), (2, 1));
-        assert_eq!((Template::PS.strikes(), Template::PS.expiries()), (2, 1));
-        assert_eq!(
-            (Template::STRD.strikes(), Template::STRD.expiries()),
-            (1, 1)
-        );
-        assert_eq!(
-            (Template::STRG.strikes(), Template::STRG.expiries()),
-            (2, 1)
-        );
-        assert_eq!((Template::RR.strikes(), Template::RR.expiries()), (2, 1));
-        assert_eq!((Template::FLY.strikes(), Template::FLY.expiries()), (3, 1));
-        assert_eq!((Template::CAL.strikes(), Template::CAL.expiries()), (1, 2));
-        assert_eq!(
-            (Template::Custom.strikes(), Template::Custom.expiries()),
-            (0, 0)
-        );
-        assert!(Template::Custom.legs().is_empty());
+        let b = TemplateSet::builtin();
+        let counts = |n: &str| {
+            let d = b.resolve(n).unwrap();
+            (d.strikes, d.expiries)
+        };
+        assert_eq!(counts("CS"), (2, 1));
+        assert_eq!(counts("PS"), (2, 1));
+        assert_eq!(counts("STRD"), (1, 1));
+        assert_eq!(counts("STRG"), (2, 1));
+        assert_eq!(counts("RR"), (2, 1));
+        assert_eq!(counts("FLY"), (3, 1));
+        assert_eq!(counts("CAL"), (1, 2));
+        assert!(b.resolve(Template::CUSTOM.token()).is_none());
         // Every table's indices are in range of its own counts.
-        for t in Template::ALL {
-            for l in t.legs() {
-                assert!(l.strike < t.strikes(), "{t:?}");
-                assert!(l.expiry < t.expiries(), "{t:?}");
-                assert_ne!(l.weight, 0, "{t:?}");
+        for d in b.iter() {
+            for l in &d.legs {
+                assert!(l.strike < d.strikes, "{}", d.name);
+                assert!(l.expiry < d.expiries, "{}", d.name);
+                assert_ne!(l.weight, 0, "{}", d.name);
             }
         }
     }

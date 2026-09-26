@@ -26,9 +26,9 @@ use gpui_component::{ActiveTheme as _, Theme, h_flex};
 use std::rc::Rc;
 
 /// The tree column: a leg's indent, the chevron slot and the widest
-/// template token at the largest font size (checked below), in pixels
-/// like every width here; not resizable.
-const TREE_WIDTH: f32 = 88.0;
+/// allowed template name, 8 characters, at the largest font size (checked
+/// below), in pixels like every width here; not resizable.
+const TREE_WIDTH: f32 = 100.0;
 /// One depth step, and the chevron slot every row reserves
 /// (empty on a line or leg), both on the rem scale: roots share one
 /// leading edge whether or not they carry a chevron, and a leg sits
@@ -719,16 +719,12 @@ mod width_tests {
     #[test]
     fn the_tree_column_fits_the_widest_tag() {
         use super::{CHEVRON_SLOT, INDENT, TREE_WIDTH};
-        use crate::core::template::Template;
         let rem = FontSize::Large.rem_px();
         let advance = rem * TABLE_TEXT_REM * MONO_ADVANCE_EM;
         let pad = Size::XSmall.table_cell_padding();
         let padding = f32::from(pad.left) + f32::from(pad.right);
-        let widest = Template::ALL
-            .iter()
-            .map(|t| t.token().chars().count())
-            .max()
-            .unwrap();
+        // The longest name `check_name` allows.
+        let widest = 8;
         let need = (INDENT + CHEVRON_SLOT) * rem / geode_shell::shell::scale::DESIGN_REM
             + widest as f32 * advance
             + padding;

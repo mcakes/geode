@@ -944,7 +944,7 @@ impl PricerTile {
             return;
         };
         let text = entry.input.read(cx).value().to_string();
-        let spec = match parse(&text) {
+        let spec = match parse(&text, self.sheet.templates()) {
             Ok(spec) => spec,
             Err(e) => {
                 entry.error = Some(format!("{} (column {})", e.message, e.offset + 1).into());
@@ -2290,7 +2290,7 @@ impl PricerTile {
             Edit::Group {
                 first,
                 count,
-                template: Template::Custom,
+                template: Template::CUSTOM,
                 id: None,
             },
             cx,
@@ -3335,7 +3335,7 @@ impl gpui::Render for PricerTile {
 pub(crate) mod tests {
     use super::*;
     use crate::content::{PricerFactory, PricerSettings};
-    use crate::core::{Edit, Place, RowSpec, Sheet, Views, parse, to_rows};
+    use crate::core::{Edit, Place, RowSpec, Sheet, Views, to_rows};
     use crate::store::{MemorySheetStore, SheetStore as _};
     use chrono::Datelike as _;
     use geode_core::groupings::GroupingSlots;
@@ -3382,7 +3382,10 @@ pub(crate) mod tests {
     /// and the session record that restores it.
     pub(crate) fn seeded(lines: &[&str]) -> (MemorySheetStore, toml::Table) {
         let mut s = Sheet::new("book");
-        let rows: Vec<RowSpec> = lines.iter().map(|l| parse(l).unwrap()).collect();
+        let rows: Vec<RowSpec> = lines
+            .iter()
+            .map(|l| crate::core::shorthand::parse_builtin(l).unwrap())
+            .collect();
         s.apply(Edit::Insert {
             place: Place::Root { at: 0 },
             rows,
@@ -7156,7 +7159,10 @@ pub(crate) mod tests {
         let mut s = Sheet::new(name);
         s.apply(Edit::Insert {
             place: Place::Root { at: 0 },
-            rows: lines.iter().map(|l| parse(l).unwrap()).collect(),
+            rows: lines
+                .iter()
+                .map(|l| crate::core::shorthand::parse_builtin(l).unwrap())
+                .collect(),
         })
         .unwrap();
         to_rows(&s).unwrap()
@@ -7336,7 +7342,7 @@ pub(crate) mod tests {
             &mut vcx,
             Edit::Insert {
                 place: Place::Root { at: 0 },
-                rows: vec![parse("SPX Z26 5000 C").unwrap()],
+                rows: vec![crate::core::shorthand::parse_builtin("SPX Z26 5000 C").unwrap()],
             },
         );
         settle(&mut vcx, SAVE_IDLE);
@@ -7382,7 +7388,7 @@ pub(crate) mod tests {
             &mut vcx,
             Edit::Insert {
                 place: Place::Root { at: 0 },
-                rows: vec![parse("SPX Z26 5000 C").unwrap()],
+                rows: vec![crate::core::shorthand::parse_builtin("SPX Z26 5000 C").unwrap()],
             },
         );
         settle(&mut vcx, SAVE_IDLE);
@@ -7484,7 +7490,7 @@ pub(crate) mod tests {
             &mut vcx,
             Edit::Insert {
                 place: Place::Root { at: 0 },
-                rows: vec![parse("SPX Z26 5000 C").unwrap()],
+                rows: vec![crate::core::shorthand::parse_builtin("SPX Z26 5000 C").unwrap()],
             },
         );
         settle(&mut vcx, SAVE_IDLE);
