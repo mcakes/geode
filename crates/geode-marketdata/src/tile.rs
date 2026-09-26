@@ -10686,7 +10686,11 @@ edits = [["2099-01-01", "-1", 1.0]]
         let (h, mut vcx) = open(cx);
         h.with_document(&mut vcx);
         h.dispatch(&mut vcx, "menu", None);
-        h.dispatch(&mut vcx, "menu_down", None); // Upload (greyed: a clean draft)
+        // Upload is greyed on a clean draft, so `j` steps over it; the
+        // pointer is the one way the highlight rests there.
+        let row = centre_of(&mut vcx, &format!("marketdata-menu-row-{TILE}-1"));
+        move_to(&mut vcx, row);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_highlighted()), Some(1));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert_eq!(h.mode(&vcx), "menu");
         assert_eq!(
@@ -12190,9 +12194,9 @@ auto = "discard"
 
     /// The menu's `On new document` section ticks the policy in force,
     /// and picking another row sets it and closes the menu — through the
-    /// ordinary `menu_pick` path, four `j`s down from the first row on a
-    /// clean draft (`Load`, `Upload`, `Revert`, `hold edits`, `rebase
-    /// edits`).
+    /// ordinary `menu_pick` path, two `j`s down from the first row on a
+    /// clean draft (`Load`, then `hold edits` — the greyed `Upload` and
+    /// `Revert` are stepped over — then `rebase edits`).
     #[gpui::test]
     fn the_menu_ticks_the_policy_and_a_pick_sets_it(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -12211,7 +12215,7 @@ auto = "discard"
             "{checks:?}"
         );
 
-        for _ in 0..4 {
+        for _ in 0..2 {
             h.dispatch(&mut vcx, "menu_down", None);
         }
         assert_eq!(

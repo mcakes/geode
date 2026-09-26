@@ -161,7 +161,9 @@ Every verb has a pointer route beside its key, and both take the tile's one
 `dispatch` path. The header's `⋯` button and a right-click on a chip open an
 action menu (`.` from the keyboard) listing the openers, the cursor slot's
 verbs, the frequency steps, the two toggles with their state, and the view
-reset; a disabled row names its reason as the notice. A chip click selects
+reset; a disabled row names its reason as the notice. `j`/`k` step over
+disabled rows as they do over separators and section headings (in every
+tile's action menu); only the pointer rests on a disabled row. A chip click selects
 its slot, a click on its swatch shows or hides it, and the `range · freq`
 readout opens the range popup, which also carries a frequency row whose chips
 write at once and leave the popup open. Over the chart, a wheel zooms about
@@ -279,7 +281,7 @@ Normal-mode keys:
 | `p` / `shift+p` | Put the remembered row below / above; a package always lands at a root boundary |
 | `shift+j` / `shift+k` | Move the row within its parent |
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
-| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer and skips separators and section headers; a disabled row takes no fill, and `enter` or a click there names the reason. Key hints are the default bindings; a rebind is not reflected |
+| `.` | The action menu: `Reprice all lines`; `Group into package` / `Ungroup package`; `Undo` / `Redo`; `Delete row` on its own; then a `View` section with a tick on the current view. Each row names its default key, or on a disabled row the reason; the highlight follows the pointer, and `j`/`k` skip separators, section headers and disabled rows; a disabled row takes no fill, and `enter` or a click there (reached by the pointer) names the reason. Key hints are the default bindings; a rebind is not reflected |
 
 `y` alone is unbound: the key matcher dispatches an exact match at once, so a
 binding on `y` would make `y y` and `y c` unreachable. `g` alone is unbound for

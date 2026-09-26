@@ -97,7 +97,8 @@ cargo bench -p geode-pricer
   ground (which replace it).
 - A disabled menu row never takes the highlight fill (market-data's rule).
 - A menu command's title is its palette title (`content::action_title`); the
-  menu's highlight never rests on a separator or section header.
+  menu's keyboard highlight never rests on a separator, section header or
+  disabled row (`popup::step`); only the pointer lands on a disabled row.
 - Default column labels and widths fit a worst-case value at the largest font
   size (`delegate`'s fit test): a right-aligned cell that overflows loses its
   leading digits.

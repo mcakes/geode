@@ -14516,6 +14516,32 @@ run_mutation "mdauto: exactly one policy row is checked" \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
 
+# `j` steps over a disabled row as over a separator (user report
+# 2026-09-25); mutated, a downward step lands on greyed `Upload`.
+run_mutation "mdmenu: stepping skips disabled rows" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-marketdata \
+  navigation_skips_disabled_rows
+
+# The same mutation seen through the tile's `menu_down` route: two steps
+# from `Load underlying…` no longer reach `rebase edits`.
+run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-marketdata \
+  the_menu_ticks_the_policy_and_a_pick_sets_it
+
+# Stepping never lands on a separator or a section heading.
+run_mutation "mdmenu: stepping skips separators and sections" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).next()' \
+  geode-marketdata \
+  navigation_skips_separators_and_starts_on_the_first_enabled_row
+
 # The picker no longer refuses while the draft has edits (per-underlying
 # drafts, 2026-09-19): a switch parks the draft. Mutated back to the old
 # refusal, `u` on a dirty panel answers a notice and opens nothing.
@@ -18442,9 +18468,17 @@ run_mutation "timeseries mouse: an empty tile disables the slot rows" \
 # Stepping never lands on a separator or a section heading.
 run_mutation "timeseries mouse: menu stepping skips non-rows" \
   crates/geode-timeseries/src/core/menu.rs \
-  '        .filter_map(|(i, r)| matches!(r, MenuRow::Action { .. }).then_some(i))' \
-  '        .map(|(i, _)| i)' \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).next()' \
   geode-timeseries stepping_skips_separators_and_sections_and_clamps
+
+# Nor on a disabled row (user report 2026-09-25): mutated, `j` from
+# `Range…` on an empty tile lands on the greyed `Hide`.
+run_mutation "timeseries menu: stepping skips disabled rows" \
+  crates/geode-timeseries/src/core/menu.rs \
+  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  geode-timeseries stepping_skips_disabled_rows
 
 # The ⋯ button toggles in the CAPTURE phase, ahead of the open menu's
 # own `on_mouse_down_out`; in the bubble phase a second click reopens.
@@ -18626,9 +18660,17 @@ run_mutation "pricer tile: a re-checked menu clamps its highlight" \
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
   crates/geode-pricer/src/popup.rs \
-  '        .filter_map(|(i, r)| r.pickable().then_some(i))' \
-  '        .filter_map(|(i, _r)| Some(i))' \
+  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
+  '            (at + 1..items.len()).next()' \
   geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
+
+# Nor on a disabled row (user report 2026-09-25): mutated, `j` from
+# Group lands on the greyed Ungroup instead of Delete row.
+run_mutation "pricer popup: menu steps skip disabled rows" \
+  crates/geode-pricer/src/popup.rs \
+  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
+  '            (at + 1..items.len()).find(|&i| items[i].pickable())' \
+  geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # The empty table says "Loading sheet…" only while the tile is loading:
 # the delegate's mirror is the one path that flag reaches the paint.
