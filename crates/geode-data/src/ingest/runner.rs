@@ -286,6 +286,8 @@ impl IngestHandle {
         cvar.notify_all();
     }
 
+    /// Stop the runner and join it. Queued local writes (app publishes and
+    /// forgets) still run first; every other queued item is dropped.
     pub fn shutdown(&self) {
         {
             let (lock, cvar) = &*self.queue;
@@ -350,6 +352,18 @@ enum Work {
     Document(DocumentWork),
     Series(SeriesJob),
     File(WorkItem),
+}
+
+/// The queued local writes — `LOCAL_SOURCE` publishes and every forget
+/// (forgets are local-only) — in queue order, leaving nothing queued.
+fn take_local_writes(q: &mut Queue) -> Vec<DocumentWork> {
+    q.documents
+        .drain(..)
+        .filter(|work| match work {
+            DocumentWork::Publish(job) => job.source == LOCAL_SOURCE,
+            DocumentWork::Forget(_) => true,
+        })
+        .collect()
 }
 
 /// Takes the next unit of work, **documents first, then series** (module
@@ -713,6 +727,28 @@ fn run(
             let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if q.shutdown {
+                    let local = take_local_writes(&mut q);
+                    drop(q);
+                    // The app's own writes still queued are its user's last
+                    // edits (a save flushed at quit, a `:rm` just confirmed):
+                    // run them, in order, each answering as usual, before
+                    // stopping. Feed documents, series and files are dropped;
+                    // their sources resend them after a restart.
+                    for work in local {
+                        match work {
+                            DocumentWork::Forget(job) => {
+                                forget_one_document(&store, &schema, &sink, &refusal_logged, job)
+                            }
+                            DocumentWork::Publish(job) => publish_one_document(
+                                &store,
+                                &schema,
+                                &sink,
+                                publish,
+                                &refusal_logged,
+                                job,
+                            ),
+                        }
+                    }
                     return;
                 }
                 // Documents first, then series, then files; `None` means
@@ -2070,6 +2106,53 @@ mod tests {
             IngestRunner::spawn_with(store, schema, sink, load_file, publish),
             rx,
         )
+    }
+
+    /// A publish slow enough that a shutdown lands while it runs.
+    fn slow_publish(
+        store: &Store,
+        req: &DocumentPublishRequest,
+    ) -> Result<DocumentPublished, crate::store::StoreError> {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        publish_document(store, req)
+    }
+
+    /// A shutdown runs the local writes still queued (saves and forgets,
+    /// in order, each answering as usual) before the runner stops; a feed's
+    /// queued document is still dropped, as files and series are.
+    #[test]
+    fn shutdown_runs_queued_local_writes_and_drops_the_rest() {
+        let (_dir, path, store, schema) = local_store();
+        let (handle, rx) = spawn_channel_with_publish(store, schema, slow_publish);
+        let at = ts("2026-09-12T14:00:00Z");
+        handle.submit_document(local_job("a", &[1], at));
+        handle.submit_document(job("cvi_params", spx()));
+        handle.submit_document(local_job("b", &[1, 2], at));
+        handle.submit_document(local_job("c", &[1, 2, 3], at));
+        handle.submit_forget(ForgetJob {
+            dataset: "sheets".into(),
+            batch: "b".into(),
+        });
+        // Lands while `a` is publishing.
+        handle.shutdown();
+        let answered: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                IngestEvent::Published { batch, .. } => Some(format!("published {batch}")),
+                IngestEvent::Forgotten { batch, .. } => Some(format!("forgot {batch}")),
+                IngestEvent::Failed { batch, reason, .. } => panic!("{batch}: {reason}"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            answered,
+            ["published a", "published b", "published c", "forgot b"],
+            "the feed's document is dropped, the local writes all run"
+        );
+        assert_eq!(
+            count_in(&path, "select count(*) from sheets_document_live"),
+            1 + 3
+        );
     }
 
     fn boom_publish(

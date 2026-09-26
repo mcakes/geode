@@ -1024,6 +1024,14 @@ mod tests {
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
         let dir = tempfile::tempdir().unwrap();
+        let (handle, rx) = local_handle_at(dir.path());
+        (dir, handle, rx)
+    }
+
+    /// [`local_handle`] over an existing directory: a restart.
+    fn local_handle_at(
+        dir: &std::path::Path,
+    ) -> (DataHandle, std::sync::mpsc::Receiver<DataEvent>) {
         let mut schema = geode_core::schema::SchemaSpec::default();
         schema.datasets.push(local_dataset());
         schema.datasets.push(cvi_dataset());
@@ -1031,7 +1039,7 @@ mod tests {
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
         let handle = DataService::spawn(
             DataServiceConfig {
-                db_path: dir.path().join("geode.duckdb"),
+                db_path: dir.join("geode.duckdb"),
                 schema,
                 views: Vec::new(),
                 dimensions: DerivedDimensions::default(),
@@ -1044,7 +1052,50 @@ mod tests {
             },
             sink,
         );
-        (dir, handle, rx)
+        (handle, rx)
+    }
+
+    /// Local writes still queued when the app quits are the user's last
+    /// edits: shutting the service down runs them before it stops, so a
+    /// restart over the same database holds every one of them (and none
+    /// of a forgotten one).
+    #[test]
+    fn local_writes_queued_at_shutdown_are_stored_before_the_service_stops() {
+        let (dir, handle, _rx) = local_handle();
+        let sheets: Vec<String> = (0..30).map(|i| format!("s{i}")).collect();
+        for sheet in &sheets {
+            assert!(handle.publish(LocalPublish {
+                dataset: "sheets".into(),
+                rows: sheet_rows(sheet, &[1, 2]),
+            }));
+        }
+        assert!(handle.forget(crate::service::LocalForget {
+            dataset: "sheets".into(),
+            key: vec!["s0".into()],
+        }));
+        handle.shutdown();
+
+        let (handle, rx) = local_handle_at(dir.path());
+        for (tag, sheet) in sheets.iter().enumerate() {
+            assert!(handle.document(DocumentParams {
+                key: QueryKey(9),
+                tag: tag as u64,
+                submitted: Instant::now(),
+                dataset: "sheets".into(),
+                document_key: vec![sheet.clone()],
+                as_of: AsOf::Live,
+            }));
+            let rows = loop {
+                if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                    if o.tag == tag as u64 {
+                        break o.snapshot.unwrap().rows();
+                    }
+                }
+            };
+            let expected = if sheet == "s0" { 0 } else { 2 };
+            assert_eq!(rows, expected, "{sheet} after the restart");
+        }
+        handle.shutdown();
     }
 
     #[test]
