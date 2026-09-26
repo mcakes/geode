@@ -57,6 +57,20 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
+A multi-screen dialog registers its back step with `dialog::set_back`: a
+predicate over its current state and the transition Escape's final back step
+runs. While the predicate holds, the shared title row paints a ghost Back
+button left of the title, with a tooltip naming Escape. A click leaves exactly
+one screen: it discards whatever Escape's earlier steps would discard, then
+takes that same transition, and synchronizes the shared input as every
+pointer transition does. The object dialog shows Back in Naming, Edit, Column,
+and Values; the dimension picker in Values; the log-level choice in its level
+step. Browse, Columns, the log-level targets, and one-step dialogs paint none.
+In the object dialog one click cancels an open value field with its typed
+text, reverts filtering, and clears a kept query before leaving; while a y/n
+confirmation is pending the button stays painted and its click does nothing.
+The as-of dialog's Custom field and timeseries popups have no Back button.
+
 Normal/Filter dialogs use the [shared filter contract](shell.md#dialog-filtering):
 Escape restores the entry query, bare Enter keeps the typed query, and neither
 exit activates a row. Value fields, naming, Settings choices, and keybinding
@@ -246,9 +260,10 @@ current frame scope, preserving its other fields:
 
 Enter is not gated on loading, success, or a nonempty filtered list. While
 loading or after a query failure it can still apply pre-ticks or remove the
-column when no fallback exists. Escape from Values discards the stage's query,
-results, and ticks and returns to the previous column. Escape from Columns
-closes the dialog. Neither Escape step applies the draft.
+column when no fallback exists. Escape or the title row's Back button from
+Values discards the stage's query, results, and ticks and returns to the
+previous column. Escape from Columns closes the dialog. Neither step applies
+the draft.
 
 ## As-of selector
 
@@ -287,7 +302,7 @@ level stage.
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
-| Log level | Choose a logging target, then its level. Escape from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
+| Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 
 Closing and reopening creates fresh dialog state. These pickers apply on
 Enter; they do not use Normal/Filter mode's keep-query Enter.

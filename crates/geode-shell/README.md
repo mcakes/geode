@@ -86,6 +86,10 @@ change most often hits:
   `prevent_default` inside that door.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text` is
   the only thing that moves focus or writes the shared `Input`.
+- A multi-screen dialog registers its back step with `dialog::set_back`.
+  The title row paints the Back button only while the step is available, and
+  the step must be the transition Escape's back step runs, so pointer and key
+  cannot leave different screens.
 - Object edit stages select rows with row commands or nested editors through
   `Draft::is_cursor_stop`. Motion uses `move_selection`; resets use
   `settle_selection`. Lists with no eligible row retain the keyboard selection,
