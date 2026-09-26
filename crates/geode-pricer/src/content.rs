@@ -4,9 +4,11 @@
 //! settings, the sheet store and the set of sheet names open across its
 //! tiles (spec §7.4) — the shell sees none of them.
 
+use crate::core::storage::PRICER_SHEETS_DATASET;
 use crate::core::views::Views;
 use crate::store::SheetStore;
 use crate::tile::PricerTile;
+use geode_core::document::split_key;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
@@ -17,8 +19,8 @@ use geode_shell::module::{
 };
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
-use gpui::{App, Entity, SharedString, WeakEntity, Window};
-use std::cell::RefCell;
+use gpui::{App, Entity, SharedString, Subscription, WeakEntity, Window};
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::time::Duration;
@@ -199,8 +201,16 @@ pub(crate) struct Shared {
     pub(crate) settings: RefCell<PricerSettings>,
     pub(crate) store: Rc<dyn SheetStore>,
     /// Sheet names open in some tile (spec §7.4): `untitled-N` skips them,
-    /// and Part 4's `:e` refuses them, so two writers never race.
+    /// and `:e`/`:name`/`:rm` refuse them, so two writers never race.
     pub(crate) open: RefCell<BTreeSet<String>>,
+    /// Names with a save queued and not yet answered. The document will
+    /// exist, but the store does not know it until the save is confirmed
+    /// — so `untitled-N` and `:name` treat these as taken (a closed
+    /// tile's queued save must not have its name handed to a new sheet,
+    /// whose first save would land on top of it). Added when `save`
+    /// answers `true`, removed by either outcome (`save_answered`):
+    /// outcomes coalesce latest-wins, so they are never counted.
+    pub(crate) pending_saves: RefCell<BTreeSet<String>>,
     /// So a reload reaches every open tile (planning decision 20).
     pub(crate) tiles: RefCell<Vec<WeakEntity<PricerTile>>>,
 }
@@ -270,9 +280,48 @@ impl TileContent for PricerContent {
     }
 }
 
+impl Shared {
+    /// Whether a document under `name` exists or is about to: known to
+    /// the store, or with a save queued and unconfirmed.
+    pub(crate) fn taken(&self, name: &str) -> bool {
+        self.store.contains(name) || self.pending_saves.borrow().contains(name)
+    }
+
+    /// The known sheet names, sorted — the `:e`/`:rm` vocabulary. A
+    /// queued save's name is included: its document is on its way.
+    pub(crate) fn sheet_names(&self) -> Vec<String> {
+        let mut names: BTreeSet<String> = self.store.names().into_iter().collect();
+        names.extend(self.pending_saves.borrow().iter().cloned());
+        names.into_iter().collect()
+    }
+}
+
+/// The sheet names the diagnostics catalog holds: one `pricer_sheets`
+/// partition per document, its batch the joined one-part key.
+fn catalog_sheets(d: &Diagnostics) -> Vec<String> {
+    d.catalog
+        .as_ref()
+        .and_then(|c| {
+            c.datasets
+                .iter()
+                .find(|ds| ds.name == PRICER_SHEETS_DATASET)
+        })
+        .map(|ds| {
+            ds.partitions
+                .iter()
+                .filter_map(|p| split_key(&p.batch).into_iter().next())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct PricerFactory {
     data: DataHandle,
     shared: Rc<Shared>,
+    /// The diagnostics observer seeding the store's known names (planning
+    /// decision 12), made by the first `create` — every tile is handed
+    /// the one app-wide `Diagnostics`.
+    catalog_watch: RefCell<Option<Subscription>>,
 }
 
 impl PricerFactory {
@@ -289,9 +338,50 @@ impl PricerFactory {
                 settings: RefCell::new(settings),
                 store,
                 open: RefCell::new(BTreeSet::new()),
+                pending_saves: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
             }),
+            catalog_watch: RefCell::new(None),
         }
+    }
+
+    /// Seed the store's known names from `diagnostics`' catalog now and on
+    /// every later catalog, and ask for one when none is held. Once per
+    /// factory. A later catalog only ADDS names (`SheetStore::set_known`):
+    /// this app writes its own sheets, and a catalog read before a save
+    /// landed must not drop that save's name. The observer fires on every
+    /// diagnostics notification, so it compares the data version first.
+    fn watch_catalog(&self, diagnostics: &Entity<Diagnostics>, cx: &mut App) {
+        if self.catalog_watch.borrow().is_some() {
+            return;
+        }
+        let seen = Rc::new(Cell::new(None::<u64>));
+        let seed = {
+            let shared = self.shared.clone();
+            let seen = seen.clone();
+            move |d: &Diagnostics| {
+                let version = d.versions().data;
+                if seen.get() == Some(version) {
+                    return;
+                }
+                seen.set(Some(version));
+                let names = catalog_sheets(d);
+                if !names.is_empty() {
+                    shared.store.set_known(names);
+                }
+            }
+        };
+        seed(diagnostics.read(cx));
+        if diagnostics.read(cx).catalog.is_none() {
+            // `request_catalog` bumps no version: the notify in this same
+            // update is what wakes the bridge's drain to submit it.
+            diagnostics.update(cx, |d, cx| {
+                d.request_catalog();
+                cx.notify();
+            });
+        }
+        let watch = cx.observe(diagnostics, move |d, cx| seed(d.read(cx)));
+        *self.catalog_watch.borrow_mut() = Some(watch);
     }
 
     /// A reload (planning decision 20): the new views and the live pricing
@@ -355,6 +445,7 @@ impl PricerFactory {
     /// save; an answer for a name no tile holds (a closed tile's flush)
     /// reaches the store alone.
     pub fn save_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
+        self.shared.pending_saves.borrow_mut().remove(sheet);
         if answer.is_ok() {
             self.shared.store.note_saved(sheet);
         }
@@ -366,16 +457,26 @@ impl PricerFactory {
     /// A forget of `sheet` landed or failed. Only a confirmed forget drops
     /// the name from the store's known names; a failure changes nothing
     /// (the document is still there) and is logged — the data tier has
-    /// already reported it as an error diagnostic.
+    /// already reported it as an error diagnostic. The tile that asked
+    /// (`:rm`, or a `:name` retiring its old name) paints the outcome.
     pub fn forget_answered(&self, sheet: &str, answer: Result<(), String>, cx: &mut App) {
-        let _ = cx;
-        match answer {
+        match &answer {
             Ok(()) => self.shared.store.note_forgotten(sheet),
             Err(reason) => tracing::warn!(
                 target: "geode::pricer",
                 sheet, reason = %reason,
                 "sheet forget failed"
             ),
+        }
+        let tiles: Vec<Entity<PricerTile>> = self
+            .shared
+            .tiles
+            .borrow()
+            .iter()
+            .filter_map(WeakEntity::upgrade)
+            .collect();
+        for tile in tiles {
+            tile.update(cx, |t, cx| t.forget_answered(sheet, &answer, cx));
         }
     }
 }
@@ -408,8 +509,7 @@ impl ModuleFactory for PricerFactory {
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
-        // The pricer reads no catalogue in Part 3 (planning decision 17).
-        let _ = diagnostics;
+        self.watch_catalog(&diagnostics, cx);
         let entity = cx.new(|cx| {
             PricerTile::new(
                 tile,

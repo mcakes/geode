@@ -67,15 +67,33 @@ pub trait SheetStore {
     fn note_forgotten(&self, name: &str) {
         let _ = name;
     }
+    /// Names a catalog of the store's documents holds (planning decision
+    /// 12). They are ADDED: a catalog never drops a name this store
+    /// learned from its own confirmed saves, which a catalog read before
+    /// that save landed would not carry yet. A store that answers `names`
+    /// from its own contents has nothing to do.
+    fn set_known(&self, names: Vec<String>) {
+        let _ = names;
+    }
 }
 
 /// The process-lifetime store. Clones share one map, so the factory and
 /// every tile it builds see the same sheets. The knobs exist for the
 /// tile's tests (a refused save, a pending or refused load, a save count,
-/// the loads asked for); the app never turns them.
+/// the loads asked for, names known only once confirmed); the app never
+/// turns them.
+///
+/// `names`/`contains` answer the map's names plus any `set_known` ones.
+/// Under `set_confirming(true)` they answer only what was confirmed —
+/// `set_known`, `note_saved`, less `note_forgotten` — the way
+/// [`DuckSheetStore`] does, so a test can hold a save queued and
+/// unconfirmed.
 #[derive(Clone, Default)]
 pub struct MemorySheetStore {
     sheets: Rc<RefCell<BTreeMap<String, DocumentRows>>>,
+    known: Rc<RefCell<BTreeSet<String>>>,
+    confirming: Rc<Cell<bool>>,
+    forgets: Rc<RefCell<Vec<String>>>,
     saves: Rc<Cell<usize>>,
     refusing: Rc<Cell<bool>>,
     pending: Rc<Cell<bool>>,
@@ -110,6 +128,16 @@ impl MemorySheetStore {
     pub fn loads(&self) -> Vec<(String, QueryKey, u64)> {
         self.loads.borrow().clone()
     }
+
+    /// Names are known only once confirmed (see the type's doc).
+    pub fn set_confirming(&self, confirming: bool) {
+        self.confirming.set(confirming);
+    }
+
+    /// Every `forget` asked so far, in order.
+    pub fn forgets(&self) -> Vec<String> {
+        self.forgets.borrow().clone()
+    }
 }
 
 impl SheetStore for MemorySheetStore {
@@ -137,16 +165,39 @@ impl SheetStore for MemorySheetStore {
     }
 
     fn forget(&self, name: &str) -> bool {
+        self.forgets.borrow_mut().push(name.to_string());
         self.sheets.borrow_mut().remove(name);
+        if !self.confirming.get() {
+            self.known.borrow_mut().remove(name);
+        }
         true
     }
 
     fn names(&self) -> Vec<String> {
-        self.sheets.borrow().keys().cloned().collect()
+        let mut names = self.known.borrow().clone();
+        if !self.confirming.get() {
+            names.extend(self.sheets.borrow().keys().cloned());
+        }
+        names.into_iter().collect()
     }
 
     fn contains(&self, name: &str) -> bool {
-        self.sheets.borrow().contains_key(name)
+        self.known.borrow().contains(name)
+            || (!self.confirming.get() && self.sheets.borrow().contains_key(name))
+    }
+
+    fn note_saved(&self, name: &str) {
+        if self.confirming.get() {
+            self.known.borrow_mut().insert(name.to_string());
+        }
+    }
+
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
+    }
+
+    fn set_known(&self, names: Vec<String>) {
+        self.known.borrow_mut().extend(names);
     }
 }
 
@@ -177,13 +228,6 @@ impl DuckSheetStore {
             data,
             known: Rc::new(RefCell::new(BTreeSet::new())),
         }
-    }
-
-    /// Add names from a fresh catalog snapshot; nothing already known is
-    /// removed by this (a name this store learned from its own writes
-    /// stays even if a catalog it is passed does not carry it yet).
-    pub fn set_known(&self, names: impl IntoIterator<Item = String>) {
-        self.known.borrow_mut().extend(names);
     }
 }
 
@@ -237,6 +281,13 @@ impl SheetStore for DuckSheetStore {
     /// A confirmed forget: `name` is no longer a known document.
     fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
+    }
+
+    /// Add names from a fresh catalog snapshot; nothing already known is
+    /// removed by this (a name this store learned from its own writes
+    /// stays even if a catalog it is passed does not carry it yet).
+    fn set_known(&self, names: Vec<String>) {
+        self.known.borrow_mut().extend(names);
     }
 }
 
@@ -296,6 +347,24 @@ mod tests {
         assert!(store.names().is_empty());
         // Forgetting an absent name is still accepted: nothing to undo.
         assert!(store.forget("book"));
+    }
+
+    #[test]
+    fn a_confirming_store_knows_a_name_only_once_confirmed() {
+        let store = MemorySheetStore::default();
+        store.set_confirming(true);
+        assert!(store.save("book", rows()));
+        assert!(!store.contains("book"), "queued, not confirmed");
+        assert!(store.names().is_empty());
+        store.note_saved("book");
+        assert!(store.contains("book"));
+        store.set_known(vec!["alpha".into()]);
+        assert_eq!(store.names(), vec!["alpha".to_string(), "book".to_string()]);
+        assert!(store.forget("book"));
+        assert!(store.contains("book"), "a forget is known once confirmed");
+        store.note_forgotten("book");
+        assert_eq!(store.names(), vec!["alpha".to_string()]);
+        assert_eq!(store.forgets(), vec!["book".to_string()]);
     }
 
     #[test]
@@ -388,7 +457,7 @@ mod tests {
         fn names_and_contains_are_known_union_saved_minus_forgotten() {
             let (handle, _rx) = DataHandle::for_tests();
             let store = DuckSheetStore::new(handle);
-            store.set_known(["alpha".to_string(), "beta".to_string()]);
+            store.set_known(vec!["alpha".to_string(), "beta".to_string()]);
             store.note_saved("gamma");
             assert!(store.contains("alpha"));
             assert!(store.contains("beta"));

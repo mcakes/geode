@@ -111,6 +111,22 @@ cargo bench -p geode-pricer
   resolve. `save`/`forget` only queue a write — `true` means admitted,
   not written — and the confirmed outcome reaches the tile separately, by
   sheet name.
+- `:e`/`:new` flush the outgoing sheet (a refused flush keeps the tile on
+  it), release its name, cancel its pricing and retire its pricing tag (line
+  ids restart per sheet), and reset undo, expansion, cursor and every
+  per-sheet save state. `:name` forgets the old name only after a save under
+  the new one is confirmed, and is refused on a sheet whose load failed (its
+  fallback would replace the real document). `:rm` refuses every open name.
+- The `:rm` confirm is market-data's upload confirm: a focused prompt in the
+  header whose `on_key_down` consumes every key (bare `y` confirms), the
+  tile in `insert` mode while armed, cancelled by focus leaving or a pointer
+  press, blurred before it drops.
+- Known names are the store's (`set_known` from the diagnostics catalog,
+  which only adds; confirmed saves; less confirmed forgets) plus
+  `Shared::pending_saves` — names with a save queued and not yet answered.
+  `untitled-N` and `:name` treat both as taken. The factory observes the one
+  `Diagnostics` entity from its first `create`, comparing the data version,
+  and asks for a catalog (with a notify) when none is held.
 - In the free underlying typeahead, `enter` takes the highlighted option only
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as

@@ -16136,24 +16136,25 @@ run_mutation "pricer store: DuckSheetStore.forget names the wrong dataset" \
 
 run_mutation "pricer store: note_forgotten leaves a forgotten name known" \
   crates/geode-pricer/src/store.rs \
-  '    fn note_forgotten(&self, name: &str) {
+  '    /// A confirmed forget: `name` is no longer a known document.
+    fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
     }' \
-  '    fn note_forgotten(&self, name: &str) {
+  '    /// A confirmed forget: `name` is no longer a known document.
+    fn note_forgotten(&self, name: &str) {
         let _ = name;
     }' \
   geode-pricer names_and_contains_are_known_union_saved_minus_forgotten
 
 run_mutation "pricer store: MemorySheetStore.forget keeps the sheet" \
   crates/geode-pricer/src/store.rs \
-  '    fn forget(&self, name: &str) -> bool {
-        self.sheets.borrow_mut().remove(name);
-        true
-    }' \
-  '    fn forget(&self, name: &str) -> bool {
-        let _ = name;
-        true
-    }' \
+  '        self.sheets.borrow_mut().remove(name);
+        if !self.confirming.get() {
+            self.known.borrow_mut().remove(name);
+        }' \
+  '        if false {
+            self.known.borrow_mut().remove(name);
+        }' \
   geode-pricer forget_removes_the_entry_and_drops_it_from_names
 
 run_mutation "pricer load: an answer under an older load tag installs" \
@@ -16221,6 +16222,289 @@ run_mutation "pricer save: an unconfirmed save makes its name known" \
   '        if true {
             self.shared.store.note_saved(sheet);' \
   geode-pricer confirmed_outcomes_update_the_stores_known_names
+
+# Line pricer Part 4 Task 5: known names, `:e`, `:new`, `:name`, `:rm`
+# and its confirm (planning decisions 12-15).
+run_mutation "pricer save: an Ok for an earlier save clears a later refusal's notice" \
+  crates/geode-pricer/src/tile.rs \
+  '                if !self.save_refused {
+                    self.save_notice = None;
+                }' \
+  '                if true {
+                    self.save_notice = None;
+                }' \
+  geode-pricer an_ok_for_an_earlier_save_keeps_a_later_refusals_notice
+
+run_mutation "pricer save: a save answer reaches a sheet whose load failed" \
+  crates/geode-pricer/src/tile.rs \
+  '    pub(crate) fn save_answered(&mut self, answer: Result<(), String>, cx: &mut Context<Self>) {
+        if self.save_blocked {
+            return;
+        }' \
+  '    pub(crate) fn save_answered(&mut self, answer: Result<(), String>, cx: &mut Context<Self>) {' \
+  geode-pricer a_save_answer_never_clears_a_failed_loads_block
+
+run_mutation "pricer names: untitled-N ignores a queued unconfirmed save" \
+  crates/geode-pricer/src/tile.rs \
+  '        .find(|name| !shared.open.borrow().contains(name) && !shared.taken(name))' \
+  '        .find(|name| !shared.open.borrow().contains(name) && !shared.store.contains(name))' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: a queued save is not recorded as pending" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.shared
+                .pending_saves
+                .borrow_mut()
+                .insert(self.sheet.name.clone());' \
+  '' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: an answered save stays pending forever" \
+  crates/geode-pricer/src/content.rs \
+  '        self.shared.pending_saves.borrow_mut().remove(sheet);' \
+  '' \
+  geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
+
+run_mutation "pricer names: the catalog's sheets never reach the store" \
+  crates/geode-pricer/src/content.rs \
+  '                if !names.is_empty() {
+                    shared.store.set_known(names);
+                }' \
+  '                let _ = names;' \
+  geode-pricer the_catalog_seeds_the_known_names_and_a_later_one_adds
+
+run_mutation "pricer names: another dataset's partitions read as sheets" \
+  crates/geode-pricer/src/content.rs \
+  '                .find(|ds| ds.name == PRICER_SHEETS_DATASET)' \
+  '                .last()' \
+  geode-pricer the_catalog_seeds_the_known_names_and_a_later_one_adds
+
+run_mutation "pricer names: a factory with no catalog never asks for one" \
+  crates/geode-pricer/src/content.rs \
+  '                d.request_catalog();
+                cx.notify();' \
+  '                let _ = d;
+                cx.notify();' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer names: the catalog request wakes nothing" \
+  crates/geode-pricer/src/content.rs \
+  '                d.request_catalog();
+                cx.notify();' \
+  '                d.request_catalog();
+                let _ = cx;' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer names: every tile asks for a catalog" \
+  crates/geode-pricer/src/content.rs \
+  '        if self.catalog_watch.borrow().is_some() {
+            return;
+        }' \
+  '' \
+  geode-pricer a_factory_with_no_catalog_asks_for_one_exactly_once
+
+run_mutation "pricer sheets: :e takes a sheet another tile holds" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));
+        }
+        self.switch_sheet(name, true, cx)' \
+  '        self.switch_sheet(name, true, cx)' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: :e of the current name reloads it" \
+  crates/geode-pricer/src/tile.rs \
+  '        if name == self.sheet.name {
+            return Ok(());
+        }
+        if self.shared.open.borrow().contains(&name) {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+  '        if self.shared.open.borrow().contains(&name) && name != self.sheet.name {
+            return Err(format!("sheet '"'"'{name}'"'"' is open in another tile"));' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: a switch drops the unsaved sheet it leaves" \
+  crates/geode-pricer/src/tile.rs \
+  '        if (self.dirty || self.save_failed) && !self.save_now() {' \
+  '        if false {' \
+  geode-pricer colon_e_saves_the_sheet_it_leaves_and_loads_the_other
+
+run_mutation "pricer sheets: a switch past a refused flush loses the edits" \
+  crates/geode-pricer/src/tile.rs \
+  '        if (self.dirty || self.save_failed) && !self.save_now() {' \
+  '        if (self.dirty || self.save_failed) && !self.save_now() && false {' \
+  geode-pricer colon_e_stays_when_the_sheet_it_leaves_cannot_be_saved
+
+run_mutation "pricer sheets: a switch keeps the old sheet's failed-load block" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.save_notice = None;
+        self.save_blocked = false;
+        self.rename_from = None;' \
+  '        self.save_notice = None;
+        self.rename_from = None;' \
+  geode-pricer a_switch_starts_the_save_state_over
+
+run_mutation "pricer sheets: a switch keeps the old sheet's undo" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.sheet = Sheet::new(&name);
+        self.undo.clear();' \
+  '        self.sheet = Sheet::new(&name);' \
+  geode-pricer colon_new_opens_the_next_untitled_sheet_empty
+
+run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.data.cancel(QueryKey(self.id.0));
+        self.tag += 1;
+        self.in_flight.clear();
+        self.sheet = Sheet::new(&name);' \
+  '        self.data.cancel(QueryKey(self.id.0));
+        self.in_flight.clear();
+        self.sheet = Sheet::new(&name);' \
+  geode-pricer an_old_sheets_pricing_answer_never_lands_on_the_new_one
+
+run_mutation "pricer load: a load starting leaves a refusal streak standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        self.loading = true;
+        self.end_refusals();' \
+  '        self.loading = true;' \
+  geode-pricer a_load_starting_clears_a_refusal_streak
+
+run_mutation "pricer sheets: :name forgets the old name before the save lands" \
+  crates/geode-pricer/src/tile.rs \
+  '            self.rename_from = Some(old);' \
+  '            let _ = self.shared.store.forget(&old);' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: a confirmed save after :name never retires the old name" \
+  crates/geode-pricer/src/tile.rs \
+  '                if let Some(old) = self.rename_from.take() {
+                    if self.shared.store.forget(&old) {' \
+  '                if let Some(old) = self.rename_from.take().filter(|_| false) {
+                    if self.shared.store.forget(&old) {' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: a failed save after :name forgets the old document" \
+  crates/geode-pricer/src/tile.rs \
+  '            Err(reason) => {
+                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  '            Err(reason) => {
+                if let Some(old) = self.rename_from.take() {
+                    let _ = self.shared.store.forget(&old);
+                }
+                self.save_failed = true;
+                self.save_notice = Some(not_saved(&reason));' \
+  geode-pricer a_failed_save_after_colon_name_keeps_the_new_name_and_the_old_document
+
+run_mutation "pricer sheets: :name renames a sheet whose load failed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_blocked {
+            // The sheet shown is the fallback' \
+  '        if false {
+            // The sheet shown is the fallback' \
+  geode-pricer colon_name_refuses_a_sheet_that_did_not_load
+
+run_mutation "pricer sheets: :name takes a known name" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
+  '        if self.shared.open.borrow().contains(&name) {' \
+  geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
+
+run_mutation "pricer sheets: :name takes a name with a queued save" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
+  '        if self.shared.open.borrow().contains(&name) || self.shared.store.contains(&name) {' \
+  geode-pricer colon_name_refuses_a_name_with_a_queued_save
+
+run_mutation "pricer rm: the tile's own sheet can be removed" \
+  crates/geode-pricer/src/tile.rs \
+  '        if name == self.sheet.name {
+            return Err(format!(
+                "sheet '"'"'{name}'"'"' is open here: close it or `:e` another sheet first"
+            ));
+        }' \
+  '' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+run_mutation "pricer rm: an unknown name arms the confirm" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.shared.taken(&name) {
+            return Err(format!("no sheet '"'"'{name}'"'"'"));
+        }' \
+  '' \
+  geode-pricer colon_rm_refuses_open_and_unknown_sheets
+
+run_mutation "pricer rm: any key confirms" \
+  crates/geode-pricer/src/tile.rs \
+  '        if ks.key == "y" && !ks.modifiers.modified() {
+            self.submit_remove(window, cx);' \
+  '        if true {
+            self.submit_remove(window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: a modified y confirms" \
+  crates/geode-pricer/src/tile.rs \
+  '        if ks.key == "y" && !ks.modifiers.modified() {
+            self.submit_remove(window, cx);' \
+  '        if ks.key == "y" {
+            self.submit_remove(window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: y forgets nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.shared.store.forget(&pending.sheet) {
+            self.forgetting.push(pending.sheet);' \
+  '        if false {
+            self.forgetting.push(pending.sheet);' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "pricer rm: the confirm is not insert mode" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.entry.is_some() || self.editor.is_some() {' \
+  geode-pricer colon_rm_asks_and_y_forgets
+
+run_mutation "pricer rm: focus leaving leaves the question standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
+            if this.confirm.is_some() {
+                this.cancel_remove(window, cx);
+            }
+        });' \
+  '        let blur = cx.on_blur(&focus, window, |_, _, _| {});' \
+  geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
+
+run_mutation "pricer rm: a pointer press leaves the question standing" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() {
+            self.cancel_remove(window, cx);
+        }
+    }
+
+    /// Drop the armed confirm' \
+  '        let _ = (window, cx);
+    }
+
+    /// Drop the armed confirm' \
+  geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
+
+run_mutation "pricer rm: the confirm drops still focused" \
+  crates/geode-pricer/src/tile.rs \
+  '        let pending = self.confirm.take()?;
+        if pending.focus.is_focused(window) {
+            window.blur(cx);
+        }' \
+  '        let pending = self.confirm.take()?;
+        let _ = (window, cx);' \
+  geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
+
+run_mutation "pricer rm: a failed forget is painted nowhere" \
+  crates/geode-pricer/src/tile.rs \
+  '        if let Err(reason) = answer {
+            self.notice = Some(format!("sheet '"'"'{sheet}'"'"' not removed: {reason}").into());' \
+  '        if let Err(reason) = answer {
+            let _ = reason;' \
+  geode-pricer a_failed_forget_is_painted_on_the_tile_that_asked
 
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
@@ -16296,11 +16580,11 @@ run_mutation "pricer commands: refresh accepts a zero duration" \
   '        ["refresh", d] => parse_duration(d)' \
   geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
 
-run_mutation "pricer commands: a Part 4 verb answers 'unknown command' instead of naming itself" \
+run_mutation "pricer commands: a sheet name may hold the key separator" \
   crates/geode-pricer/src/core/commands.rs \
-  '        [verb, ..] if NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
-  '        [verb, ..] if false && NOT_BUILT.contains(verb) => Err(format!(":{verb} is not built yet")),' \
-  geode-pricer bad_arguments_answer_the_usage_and_part_4_verbs_refuse_by_name
+  '    if name.chars().any(char::is_control) {' \
+  '    if false {' \
+  geode-pricer bad_arguments_answer_the_usage
 
 run_mutation "pricer commands: completions offer the word under the cursor as a choice" \
   crates/geode-pricer/src/core/commands.rs \
@@ -18205,7 +18489,7 @@ run_mutation "pricer tile: a refused save is silent" \
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
   '            if this.dirty || this.save_failed {
-                this.save_now();
+                let _ = this.save_now();
             }' \
   '            let _ = (this.dirty, this.save_failed);' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
@@ -18323,7 +18607,7 @@ run_mutation "pricer tile: the free typeahead commits an unmoved subsequence gue
 run_mutation "pricer tile: a failed load's fallback is saved over the document" \
   crates/geode-pricer/src/tile.rs \
   '        if self.save_blocked {
-            return;
+            return true;
         }
         let Some(rows) = to_rows(&self.sheet) else {' \
   '        let Some(rows) = to_rows(&self.sheet) else {' \
@@ -18418,8 +18702,8 @@ run_mutation "objectdialog: a click lands on a row the keyboard cannot reach" \
 # the tile, 2026-09-24).
 run_mutation "pricer tile: the entry field is not insert mode" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.entry.is_some() || self.editor.is_some() {' \
-  '        if self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.editor.is_some() {' \
   geode-app \
   typing_into_the_pricer_entry_field_fires_no_shell_binding
 

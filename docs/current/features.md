@@ -319,10 +319,43 @@ binding (`shift+d` would otherwise duplicate the tile).
 
 The `:` verbs change only this tile: `view <name>`, `shift spot|vol <n>|clear`,
 `spot <underlying> <level>|clear`, `price`, `refresh <duration>|off|default`,
-`group [n]`, and `ungroup`. `e`, `name`, `new`, and `rm` parse and refuse as
-not built yet. `view`, `refresh`, `shift`, `spot`, `group`, and `ungroup` (and
-the menu's view rows) are refused while the sheet is still loading, because the
+`group [n]`, `ungroup`, `e <sheet>`, `new`, `name <sheet>`, and `rm <sheet>`.
+`view`, `refresh`, `shift`, `spot`, `group`, `ungroup`, and `name` (and the
+menu's view rows) are refused while the sheet is still loading, because the
 loaded document would replace what they set.
+
+The sheet verbs work on this tile's own sheet, or, for `rm`, on a sheet no
+tile holds:
+
+- `:e <sheet>` saves the current sheet first when it has unsaved changes
+  (a refused save keeps the tile where it is), gives its name back, and loads
+  the other sheet (`loading…` until it answers). Undo history, open packages,
+  the cursor, and the save state stay with the sheet left behind, and pricing
+  in flight for it is cancelled. A sheet open in another tile is refused
+  (`sheet 'x' is open in another tile`); the tile's own name does nothing.
+- `:new` does the same into the next free `untitled-N`, empty, with no load.
+- `:name <sheet>` is refused if the name is open, is a known document, or has
+  a save still queued (`sheet 'x' already exists`), and while the sheet is
+  loading or after its load failed. Otherwise the tile takes the new name at
+  once and saves under it; the old name's document is removed only after a
+  save under the new name is confirmed. If that save fails, the tile keeps the
+  new name, the save slot shows the reason, and the old document stays until a
+  later save under the new name is confirmed. An empty sheet saves nothing, so
+  its old document stays.
+- `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
+  `:e` another sheet first) and for a name that is not a document. Otherwise
+  the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
+  keyboard (the tile is in insert mode). Bare `y` removes the document and its
+  whole history; any other key, a pointer press on the tile, or focus leaving
+  it answers no (`sheet not removed` in the footer). A removal that fails says
+  so in the header.
+
+`:e` and `:rm` complete from the known sheet names: the diagnostics catalog's
+`pricer_sheets` documents (the factory asks for a catalog when it is created
+without one), plus this session's confirmed saves, less its confirmed
+removals. A later catalog adds names and never drops one. A name whose save is
+queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
+`:name` skip it.
 
 ### Repricing
 
@@ -383,8 +416,13 @@ The session record keeps the sheet name, view, refresh setting, cursor line,
 and open packages (only those still on the sheet: a deleted or ungrouped
 package's id stays in the tile's open set until a load or `z shift+r` /
 `z shift+m` replaces the set, so an undo reinstates it open, but it is never
-saved). A new tile takes the next free `untitled-N` name, and names open in
-another tile are skipped.
+saved). A new tile takes the next free `untitled-N` name, skipping names open
+in another tile, known documents, and names with a save still queued.
+**Known limitation:** before the first catalog arrives a new tile can pick an
+`untitled-N` that already has a document this session has not seen; its first
+save adds a generation to that document (history is kept, nothing is lost). A
+catalog read before a removal landed can make a removed name known again, so
+its `:e` opens empty.
 
 **Known limitation:** the sheet store is in memory until the DuckDB store
 lands. A sheet survives closing and reopening its tile within one run, not a
