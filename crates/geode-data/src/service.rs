@@ -137,7 +137,8 @@ pub enum DataEvent {
         gen_id: i64,
     },
     /// A local publish that stored nothing, with the reason. Sent beside the
-    /// error `Diagnostics` the failure also produces.
+    /// error `Diagnostics` the failure also produces, including a publish
+    /// refused at the service before it reached the writer.
     LocalPublishFailed {
         dataset: String,
         batch: String,
@@ -151,8 +152,8 @@ pub enum DataEvent {
     },
     /// A local forget that deleted nothing, with the reason; beside an error
     /// `Diagnostics`. A forget refused at the service (a dataset that is not
-    /// local, a key of the wrong arity) answers only the diagnostic: it never
-    /// reached the writer and names no document.
+    /// local, a key of the wrong arity) answers this too, with its joined
+    /// key as the batch, though it never reached the writer.
     ForgetFailed {
         dataset: String,
         batch: String,
@@ -1520,6 +1521,10 @@ impl DataService {
     /// through the ingest runner's document lane exactly as a
     /// subscribed document does — same validation, same `contained`
     /// boundary, same `Published` event — stamped `LOCAL_SOURCE`.
+    ///
+    /// A refusal also answers `LocalPublishFailed`: every admitted publish
+    /// answers its writer exactly as one the runner failed would, so a
+    /// writer waiting on the outcome is never left waiting.
     pub fn publish(&self, publish: LocalPublish) {
         let local = self
             .config
@@ -1542,6 +1547,11 @@ impl DataService {
                 ),
                 path: None,
             }]));
+            let _ = (self.sink)(DataEvent::LocalPublishFailed {
+                batch: geode_core::document::join_key(&publish.rows.key),
+                dataset: publish.dataset,
+                reason: "not a local dataset".to_string(),
+            });
             return;
         }
         let now = chrono::Utc::now();
@@ -1557,9 +1567,10 @@ impl DataService {
 
     /// Forget one document of a local dataset. Anything else — a dataset not
     /// declared `local = true`, or a key whose arity is not the dataset's —
-    /// is refused with an error diagnostic and nothing is queued. Accepted,
-    /// the forget joins the ingest runner's documents FIFO behind every
-    /// publish already queued, and answers `Forgotten` or `ForgetFailed`.
+    /// is refused with an error diagnostic and a `ForgetFailed`, and nothing
+    /// is queued. Accepted, the forget joins the ingest runner's documents
+    /// FIFO behind every publish already queued, and answers `Forgotten` or
+    /// `ForgetFailed`. Either way every admitted forget answers its asker.
     pub fn forget(&self, forget: LocalForget) {
         let refusal = match self.config.schema.dataset(&forget.dataset) {
             Some(ds) if !ds.local => Some("not a local dataset".to_string()),
@@ -1584,6 +1595,11 @@ impl DataService {
                 message: format!("refused a forget in '{}': {why}", forget.dataset),
                 path: None,
             }]));
+            let _ = (self.sink)(DataEvent::ForgetFailed {
+                batch: geode_core::document::join_key(&forget.key),
+                dataset: forget.dataset,
+                reason: why,
+            });
             return;
         }
         self.ingest.submit_forget(ForgetJob {
@@ -2209,6 +2225,33 @@ mod tests {
         let (dataset, batch, reason) = failed.unwrap();
         assert_eq!((dataset.as_str(), batch.as_str()), ("sheets", "s"));
         assert!(reason.contains("document has no rows"), "{reason}");
+    }
+
+    /// A publish refused at the service still answers its writer: the
+    /// writer may be waiting on this outcome (a sheet load deferred behind
+    /// its save has no timeout), and a refusal that sent only a diagnostic
+    /// would leave it waiting forever. The batch is the rows' joined key,
+    /// as a publish that reached the runner would name it.
+    #[test]
+    fn a_publish_refused_at_the_service_answers_local_publish_failed() {
+        let (_d, service, rx) = local_service();
+        for dataset in ["cvi_params", "undeclared"] {
+            service.publish(LocalPublish {
+                dataset: dataset.into(),
+                rows: cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+            });
+            let (failed, batch, reason) = until(&rx, |e| match e {
+                DataEvent::LocalPublishFailed {
+                    dataset,
+                    batch,
+                    reason,
+                } => Some((dataset, batch, reason)),
+                DataEvent::LocalPublished { dataset, .. } => panic!("stored: {dataset}"),
+                _ => None,
+            });
+            assert_eq!((failed.as_str(), batch.as_str()), (dataset, "SPX.Z"));
+            assert!(reason.contains("not a local dataset"), "{reason}");
+        }
     }
 
     #[test]

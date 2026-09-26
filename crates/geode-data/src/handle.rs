@@ -191,16 +191,19 @@ impl DataHandle {
 
     /// Queue local publication. False means no admission. After admission the
     /// service validates local-dataset permission and reports rejection through
-    /// Diagnostics; true does not mean the document has been stored.
+    /// Diagnostics and LocalPublishFailed; otherwise the writer answers
+    /// LocalPublished or LocalPublishFailed. True does not mean the document
+    /// has been stored.
     pub fn publish(&self, publish: LocalPublish) -> bool {
         self.send(Request::Publish(publish))
     }
 
     /// Queue forgetting one local document. False means no admission. After
     /// admission the service refuses a dataset that is not local (or a key of
-    /// the wrong arity) with an error Diagnostics and runs nothing; otherwise
-    /// the forget runs on the writer after every publish queued before it and
-    /// answers Forgotten or ForgetFailed. True does not mean it has run.
+    /// the wrong arity) with an error Diagnostics and ForgetFailed and runs
+    /// nothing; otherwise the forget runs on the writer after every publish
+    /// queued before it and answers Forgotten or ForgetFailed. True does not
+    /// mean it has run.
     pub fn forget(&self, forget: LocalForget) -> bool {
         self.send(Request::Forget(forget))
     }
@@ -1083,10 +1086,12 @@ mod tests {
     }
 
     /// A forget to a dataset that is not local, or with a key of the wrong
-    /// arity, is refused at the service with an error diagnostic and never
+    /// arity, is refused at the service with an error diagnostic and one
+    /// `ForgetFailed` (its asker may be waiting on an outcome), and never
     /// reaches the writer. The proof it never ran: the documents lane is
-    /// FIFO, so a forget that had been queued would answer (`Forgotten` or
-    /// `ForgetFailed`) before the publish submitted after it.
+    /// FIFO, so a forget that had been queued would answer a second time
+    /// (`Forgotten` or the writer's own `ForgetFailed`) before the publish
+    /// submitted after it.
     #[test]
     fn a_forget_to_a_non_local_dataset_is_a_diagnostic_and_runs_nothing() {
         let (_dir, handle, rx) = local_handle();
@@ -1107,8 +1112,14 @@ mod tests {
             ),
         ];
         for (forget, expected) in refusals {
+            let (dataset, batch) = (
+                forget.dataset.clone(),
+                geode_core::document::join_key(&forget.key),
+            );
             assert!(handle.forget(forget), "admitted; the service refuses it");
-            loop {
+            let mut diagnosed = false;
+            let mut answered = false;
+            while !(diagnosed && answered) {
                 match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                     DataEvent::Diagnostics(d) => {
                         assert!(
@@ -1117,7 +1128,16 @@ mod tests {
                                     && d.message.contains(expected)),
                             "{d:?}"
                         );
-                        break;
+                        diagnosed = true;
+                    }
+                    DataEvent::ForgetFailed {
+                        dataset: d,
+                        batch: b,
+                        reason,
+                    } if !answered => {
+                        assert_eq!((d.as_str(), b.as_str()), (dataset.as_str(), batch.as_str()));
+                        assert!(reason.contains(expected), "{reason}");
+                        answered = true;
                     }
                     DataEvent::Forgotten { .. } | DataEvent::ForgetFailed { .. } => {
                         panic!("the refused forget reached the writer")
