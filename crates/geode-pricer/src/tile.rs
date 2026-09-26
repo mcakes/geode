@@ -648,14 +648,16 @@ impl PricerTile {
         self.title.clone()
     }
 
-    /// The sheet as this tile holds it, read-only: a host observes what a
-    /// load installed without reaching into the tile's state.
+    /// The sheet as this tile holds it, read-only: a host's tests observe
+    /// what a load installed without reaching into the tile's state.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn sheet(&self) -> &Sheet {
         &self.sheet
     }
 
     /// Whether the tile is waiting for its sheet's load (painted
     /// `loading…`), including a load deferred behind a queued save.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_loading(&self) -> bool {
         self.loading
     }
