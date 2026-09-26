@@ -20131,6 +20131,62 @@ run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
   '        let stamp = (len, entry, None, mode);' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
+# A tenor line's date commit replaces the tenor with that date. Mutated,
+# a tenor commit applies nothing and the line keeps its tenor.
+run_mutation "pricer date field: a tenor commits as a date" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    Ok(Some(set(row, with_vanilla(i, |v| v.expiry = expiry))))' \
+  '    Ok(match i.expiry() { Expiry::Tenor(_) => None, Expiry::Date(_) => Some(set(row, with_vanilla(i, |v| v.expiry = expiry))) })' \
+  geode-pricer a_tenor_opens_on_the_app_clocks_today_and_enter_makes_it_a_date
+
+# Committing the line's own date is no edit. Mutated, it applies an
+# identical instrument and records an undo entry.
+run_mutation "pricer date field: an unchanged commit records no undo" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    if *i.expiry() == expiry {' \
+  '    if false {' \
+  geode-pricer an_unchanged_date_commit_is_no_edit
+
+# `escape` in the date field cancels. Mutated, it commits the stepped
+# date and the tenor is lost.
+run_mutation "pricer date field: escape leaves the tenor" \
+  crates/geode-pricer/src/tile.rs \
+  '            FieldKey::Commit => {' \
+  '            FieldKey::Commit | FieldKey::Cancel => {' \
+  geode-pricer escape_leaves_a_tenor_untouched_and_blurs_the_field
+
+# An open date field puts the tile in `mode == insert`. Mutated, only a
+# text field does, and a letter typed into the date field reaches the
+# shell's bindings.
+run_mutation "pricer date field: insert mode while it is open" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.as_ref().is_some_and(|e| e.input().is_some()) {' \
+  geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
+
+# The date field's own focus handle counts as the tile holding focus
+# (the shell's other insert condition). Mutated, only a text input's does.
+run_mutation "pricer date field: its focus is the tile's" \
+  crates/geode-pricer/src/tile.rs \
+  '            .is_some_and(|e| e.focus_handle(cx).is_focused(window));' \
+  '            .is_some_and(|e| e.input().is_some_and(|i| i.read(cx).focus_handle(cx).is_focused(window)));' \
+  geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
+
+# A click on a date segment selects it. Mutated, the click is swallowed.
+run_mutation "pricer date field: a segment click selects it" \
+  crates/geode-pricer/src/tile.rs \
+  '        field.select(segment);' \
+  '        let _ = segment;' \
+  geode-pricer a_segment_click_selects_it_and_a_click_elsewhere_cancels
+
+# In-grid fields paint no chrome. Mutated, the input's border and fill
+# come back and its text moves off the cell's own edge.
+run_mutation "pricer editor: in-grid fields paint no chrome" \
+  crates/geode-pricer/src/delegate.rs \
+  '        .appearance(false)' \
+  '        .appearance(true)' \
+  geode-pricer the_cell_editor_paints_no_chrome_and_its_text_sits_where_the_cells_did
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
