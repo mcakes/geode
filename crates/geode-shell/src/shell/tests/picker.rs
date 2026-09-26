@@ -855,3 +855,44 @@ fn keyboard_navigation_past_visible_rows_scrolls_the_selection_into_view(
          left above/below it with only its index having changed"
     );
 }
+
+/// A query typed at the Columns stage narrows columns only. `enter`
+/// clears the shared Input with `set_value`, which emits no change event,
+/// so the transition must reset the mirrored query itself; otherwise the
+/// column filter text filters the new column's values and hides them.
+#[gpui::test]
+fn a_column_filter_does_not_carry_into_the_values_stage(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+
+    dispatch_action(&shell, "frame::pick", &mut vcx);
+    vcx.run_until_parked();
+    vcx.simulate_input("bo");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().query.clone()),
+        "bo",
+        "the typed filter must reach the picker"
+    );
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().query.clone()),
+        "",
+        "entering Values must start with an empty query"
+    );
+
+    let tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 1), ("XX".into(), 2)]),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("picker-value-BK000").is_some());
+    assert!(vcx.debug_bounds("picker-value-XX").is_some());
+}
