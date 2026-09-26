@@ -16944,16 +16944,15 @@ run_mutation "expr: precedence is flat" \
   geode-core \
   precedence_and_associativity
 
-# A slot whose expression reaches itself is a cycle, and the compiler's
-# emission order depends on there being none: a cycle reported as Ok
-# leaves the CTE list short an operand and DuckDB answers with a missing
-# table rather than the spec's message.
-run_mutation "expr: a cycle is not detected" \
+# A reference span covers the whole name, `@source` included: the
+# session rewrite splices a name into the text by this span, and a span
+# one source short leaves `@kdb` dangling after the replacement.
+run_mutation "expr: a reference span stops before its source" \
   crates/geode-core/src/series/expr.rs \
-  '            Mark::Visiting => return Err(exprs[i].0),' \
-  '            Mark::Visiting => return Ok(()),' \
+  '            Token::Ref(r) => Some((start..start + r.display().len(), r)),' \
+  '            Token::Ref(r) => Some((start..start + r.identity.len(), r)),' \
   geode-core \
-  expression_order_puts_operands_first_and_names_a_cycle
+  references_answer_each_name_with_its_byte_span_in_order
 
 # `max(s1, s2)` is not arithmetic, and the `(` right after a word is the
 # only place the tokenizer can say so in the trader's own words. Without
@@ -16985,22 +16984,16 @@ run_mutation "expr: the token bound is off" \
   geode-core \
   a_long_chain_is_refused_by_the_token_bound
 
-# A handle is `s` followed by digits and NOTHING else: `spx_1y` is an
-# identity a desk really uses, and `s999` is an identity too (past u8).
-# Take the filter away and every word beginning with s becomes a slot
-# handle — `spx_1y` would resolve to slot 0 and read some other pane's
-# series under the trader's own name.
-run_mutation "expr: the s-prefix filter accepts any word" \
-  crates/geode-core/src/series/expr.rs \
-  '                let handle = word
-                    .strip_prefix('"'"'s'"'"')
-                    .filter(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
-                    .and_then(|rest| rest.parse::<u8>().ok());' \
-  '                let handle = word
-                    .strip_prefix('"'"'s'"'"')
-                    .map(|rest| rest.parse::<u8>().unwrap_or(0));' \
-  geode-core \
-  unary_minus_parentheses_and_every_reference_form
+# An expression names source series only. An operand that is itself an
+# expression would need an emission order the compiler no longer has:
+# accepted, its CTE can precede the operand's and DuckDB answers with a
+# missing table instead of the refusal.
+run_mutation "series compile: an expression over an expression is accepted" \
+  crates/geode-data/src/query/series.rs \
+  '                    .any(|o| o.slot == **r && matches!(o.kind, SlotKind::Expr(_)))' \
+  '                    .any(|o| o.slot == **r && false)' \
+  geode-data \
+  an_expression_over_an_expression_is_refused
 
 # The pool's second payload kind (spec §6.1): a series work item runs
 # `run_series`, not the view path. The arm answering an error is the
@@ -17323,43 +17316,121 @@ run_mutation "chart: the density bound is not enforced" \
 # one test expected to catch it.
 # ---------------------------------------------------------------------
 
-# Removing a source takes every expression that reads it — and every
-# expression that reads THOSE. Without the frontier push the walk is one
-# level deep, which looks right in every two-slot fixture and silently
-# leaves `s6 = s5 * 100` behind when s5's own operand goes.
-run_mutation "timeseries: dependant removal is transitive" \
+# Removing a source takes every expression that reads it. Kept, an
+# expression keeps a CTE whose operand the request no longer carries,
+# and the compiler refuses the whole tile.
+run_mutation "timeseries: dependant removal leaves the expressions" \
   crates/geode-timeseries/src/core/model.rs \
-  '                    frontier.push(s.number);' \
-  '                    let _ = s.number;' \
+  '            .filter(|s| matches!(&s.kind, SlotKind::Expr(e) if e.slots().contains(&number)))' \
+  '            .filter(|_| false)' \
   geode-timeseries \
-  removing_an_operand_removes_its_dependants_transitively
+  removing_an_operand_removes_its_dependants
 
 # A bare `VIX` under two loaded sources is ambiguous — unless one of them
 # is the desk's default, which is the whole point of `[timeseries]
-# default_source` (§7). Dropped, a two-source tile can never name a
-# series without an explicit `@source`.
+# default_source` (§7) and what makes a chip label a name. Dropped, a
+# two-source tile can never name a series without an explicit `@source`.
 run_mutation "timeseries: a bare identity prefers the default source" \
   crates/geode-timeseries/src/core/resolve.rs \
-  '            if let Some(d) = default_source
-                && let Some((n, _, _)) = matches.iter().find(|(_, s, _)| *s == d)
-            {
-                return Ok(*n);
-            }
-' \
+  '        matches.retain(|s| matches!(&s.kind, SlotKind::Source { source, .. } if source == d));' \
   '' \
   geode-timeseries \
-  ambiguity_and_absence_are_named_errors
+  ambiguity_and_absence_are_named_errors_that_name_series_by_label
 
 # …and with no default, two matches are a REFUSAL naming both, never a
 # silent pick of the first. Picking one would plot a different series
 # from the one the trader typed, with nothing on screen to say so.
 run_mutation "timeseries: an ambiguous identity is refused" \
   crates/geode-timeseries/src/core/resolve.rs \
-  '                many => Err(format!(' \
-  '                [(n, _, _), ..] => Ok(*n),
-                many => Err(format!(' \
+  '        many => {' \
+  '        [one, ..] => Ok(one.number),
+        many => {' \
   geode-timeseries \
-  ambiguity_and_absence_are_named_errors
+  ambiguity_and_absence_are_named_errors_that_name_series_by_label
+
+# A series verb with a name acts on that series, not the selection.
+# Ignored, `:colour VIX 2` recolors whatever the cursor rests on.
+run_mutation "timeseries: a named command target falls back to the selection" \
+  crates/geode-timeseries/src/core/model.rs \
+  '            Some(n) => super::resolve::find_named(n, &self.slots, default_source),' \
+  '            Some(_) => self.cursor_slot().map(|s| s.number).ok_or_else(String::new),' \
+  geode-timeseries \
+  a_command_target_is_the_selection_or_a_source_name
+
+# The word count tells a name from a value: one word after `:colour` is
+# the color for the selection. Read as a name, `:colour spx` looks for
+# a series called spx.
+run_mutation "timeseries: a lone value word is read as a series name" \
+  crates/geode-timeseries/src/commands.rs \
+  '        ([v], true) => Ok((None, v)),' \
+  '        ([v], true) => Ok((Some((*v).to_string()), v)),' \
+  geode-timeseries \
+  every_verb_parses_to_its_command
+
+# Completion offers series names where one may go.
+run_mutation "timeseries: completion offers no series names" \
+  crates/geode-timeseries/src/commands.rs \
+  '        (1, "remove") => names.to_vec(),' \
+  '        (1, "remove") => Vec::new(),' \
+  geode-timeseries \
+  completions_are_the_bare_word_per_position
+
+# A long expression label is cut with an ellipsis; uncut, one expression
+# chip pushes every other chip off the header.
+run_mutation "timeseries: a long expression label is not cut" \
+  crates/geode-timeseries/src/core/model.rs \
+  '                if text.chars().count() > LABEL_MAX {' \
+  '                if false {' \
+  geode-timeseries \
+  labels_follow_the_spec
+
+# A legacy slot's kind is an operand-free placeholder. Sent, the
+# compiler refuses the whole request as a reference-free expression and
+# the tile plots nothing.
+run_mutation "timeseries: a legacy expression is sent" \
+  crates/geode-timeseries/src/core/request.rs \
+  '            .filter(|s| !s.legacy)' \
+  '            .filter(|_| true)' \
+  geode-timeseries \
+  a_legacy_expression_is_never_sent
+
+# A table without `version = 2` names slots by handle. Read as current,
+# `s1 / s2` resolves as names, fails, and the expression is dropped.
+run_mutation "timeseries session: a handle table is read as names" \
+  crates/geode-timeseries/src/core/session.rs \
+  '    let legacy_file = t.get("version").and_then(Value::as_integer).unwrap_or(1) < VERSION;' \
+  '    let legacy_file = false;' \
+  geode-timeseries \
+  a_handle_session_migrates_to_names
+
+# An inlined expression keeps its parentheses, so `-s3*100` stays the
+# negation of the whole ratio. Without the opening one the text no
+# longer parses and a migratable expression is left failed.
+run_mutation "timeseries session: an inlined expression loses its parentheses" \
+  crates/geode-timeseries/src/core/session.rs \
+  '            out.push_str(&inlined);' \
+  '            out.pop();
+            out.push_str(&inlined);' \
+  geode-timeseries \
+  a_handle_session_migrates_to_names
+
+# A legacy text that cannot be rewritten keeps its slot, failed. Dropped
+# instead, a restore silently loses a series the trader saved.
+run_mutation "timeseries session: an unrewritable expression is dropped" \
+  crates/geode-timeseries/src/core/session.rs \
+  '            Err(why) if p.legacy => m.add_legacy_expr(p.text, why).map(|_| ()),' \
+  '' \
+  geode-timeseries \
+  a_handle_session_migrates_to_names
+
+# A legacy slot is written back marked. Unmarked, the next restore reads
+# its handle text as names and drops it.
+run_mutation "timeseries session: a legacy slot is saved unmarked" \
+  crates/geode-timeseries/src/core/session.rs \
+  '                    if s.legacy {' \
+  '                    if false {' \
+  geode-timeseries \
+  a_handle_session_migrates_to_names
 
 # The frequency menu, `:freq` and `:range` refuse in place against the same 500,000-point cap
 # the service enforces (controller decision 4), so a step that would
@@ -17722,12 +17793,12 @@ run_mutation "timeseries: a chrome change bumps the chart version" \
 run_mutation "timeseries: a colours reload reaches an open tile" \
   crates/geode-timeseries/src/tile/mod.rs \
   '        theme,
-        colours,
+        colors,
         offset_secs,
     }
 }' \
   '        theme,
-        colours: 0,
+        colors: 0,
         offset_secs,
     }
 }' \
@@ -19990,8 +20061,8 @@ run_mutation "timeseries colour picker: a featured match keeps its palette or na
 # Anything off the featured row is absolute, not the nearest featured one.
 run_mutation "timeseries colour picker: a non-featured pick is Custom" \
   crates/geode-timeseries/src/core/rgb.rs \
-  '        None => Colour::Custom(picked),' \
-  '        None => Colour::Palette(0),' \
+  '        None => Color::Custom(picked),' \
+  '        None => Color::Palette(0),' \
   geode-timeseries a_featured_pick_is_that_entrys_own_colour_and_anything_else_is_custom
 
 # The component's hex field truncates: a featured colour read back one
@@ -20054,40 +20125,40 @@ run_mutation "timeseries colour picker: a session #rrggbb reads back as Custom" 
   '        Some(Value::String(n)) if false => {' \
   geode-timeseries a_custom_colour_round_trips_as_hex
 
-# `:colour s1 #…` is parsed as hex before any name lookup, and a malformed
+# `:colour [series] #…` is parsed as hex before any name lookup, and a malformed
 # one names the form.
 run_mutation "timeseries colour picker: :colour reads a # word as hex" \
   crates/geode-timeseries/src/commands.rs \
   '    if word.starts_with(geode_core::colour::RESERVED_PREFIX) {' \
   '    if false {' \
-  geode-timeseries a_colour_word_is_an_index_a_hex_or_a_known_name
+  geode-timeseries a_color_word_is_an_index_a_hex_or_a_known_name
 
 # An absolute colour paints as itself — no theme, no floor.
 run_mutation "timeseries colour picker: a Custom colour resolves to itself" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '        Colour::Custom(c) => c.to_hsla(),' \
-  '        Colour::Custom(_) => palette.colour(0),' \
+  '        Color::Custom(c) => c.to_hsla(),' \
+  '        Color::Custom(_) => palette.colour(0),' \
   geode-timeseries a_featured_pick_keeps_the_theme_following_colour_and_anything_else_is_absolute
 
 # The Colour… row's verb opens the picker.
 run_mutation "timeseries colour picker: the menu row opens the picker" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            "pick_colour" => self.open_colour_picker(window, cx),' \
+  '            "pick_colour" => self.open_color_picker(window, cx),' \
   '            "pick_colour" => false,' \
   geode-timeseries the_colour_row_opens_the_picker_on_the_cursor_slot_by_keys_and_by_click
 
 # A pick lands on the slot the picker was opened for, not the cursor.
 run_mutation "timeseries colour picker: a Change applies to the target slot" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '        if let Ok(changed) = self.model.set_colour(pick.target, colour) {' \
-  '        if let Ok(changed) = self.model.set_colour(self.model.cursor_slot().map_or(0, |s| s.number), colour) {' \
+  '        if let Ok(changed) = self.model.set_color(pick.target, color) {' \
+  '        if let Ok(changed) = self.model.set_color(self.model.cursor_slot().map_or(0, |s| s.number), color) {' \
   geode-timeseries a_pick_lands_on_the_target_slot_even_after_the_cursor_moves
 
 # A close the component makes itself (escape, click-out, a commit) closes
 # the tile's popup and its insert mode.
 run_mutation "timeseries colour picker: the component's close closes the popup" \
   crates/geode-timeseries/src/tile/popups.rs \
-  '            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Colour(_))) {' \
+  '            if !picker.read(cx).is_open() && matches!(this.popup, Some(Popup::Color(_))) {' \
   '            if false {' \
   geode-timeseries escape_closes_the_picker_unchanged_and_gives_the_keyboard_back
 
@@ -20103,7 +20174,7 @@ run_mutation "timeseries colour picker: the popover's focus is the tile's" \
 # A `:remove` of the picker's target closes it.
 run_mutation "timeseries colour picker: removing the target closes the picker" \
   crates/geode-timeseries/src/tile/mod.rs \
-  '        self.close_orphaned_colour_picker(window, cx);' \
+  '        self.close_orphaned_color_picker(window, cx);' \
   '' \
   geode-timeseries removing_the_target_slot_closes_the_picker
 
