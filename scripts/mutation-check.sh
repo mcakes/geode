@@ -18797,6 +18797,25 @@ run_mutation "mdedit: the value editor keeps the cell's alignment" \
   '                    .text_align(TextAlign::Left)' \
   geode-marketdata the_editor_keeps_the_value_right_aligned
 
+# A date cell's field paints unframed. Mutated to the strip's frame, a
+# second rounded border sits inside the cursor's and the padding pushes
+# the day off the cell's right edge.
+run_mutation "mdedit: a date cell's field paints without the strip's frame" \
+  crates/geode-marketdata/src/delegate.rs \
+  '                            self.tile_id,
+                            false,' \
+  '                            self.tile_id,
+                            true,' \
+  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# ...and with flush segments. Mutated to padded ones, the digits spread
+# apart and the field outgrows the plain date, clipping the year.
+run_mutation "mdedit: a date cell's segments paint flush" \
+  crates/geode-marketdata/src/header.rs \
+  '        flush: !framed,' \
+  '        flush: false,' \
+  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
 # ---- timeseries colour picker: absolute colours and the component bridge ----
 
 # `#rrggbb` is an absolute colour wherever a colour name is accepted, so a

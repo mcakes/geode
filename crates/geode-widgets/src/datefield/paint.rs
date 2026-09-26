@@ -12,8 +12,8 @@ use gpui_component::h_flex;
 
 use super::{Segment, SegmentText};
 
-/// Every colour the painter uses. `Copy`, derived once by the host and
-/// handed in per paint.
+/// Every colour the painter uses, and whether segments are padded.
+/// `Copy`, derived once by the host and handed in per paint.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SegmentPaint {
     pub rest_text: Hsla,
@@ -25,6 +25,11 @@ pub struct SegmentPaint {
     pub separator: Hsla,
     pub suffix: Hsla,
     pub radius: Pixels,
+    /// Segments paint with no horizontal padding, so the field is exactly
+    /// as wide as the date as plain text — for a host painting it in
+    /// place of that text (a grid cell), where padded segments spread
+    /// the digits apart and widen the field past its slot.
+    pub flush: bool,
 }
 
 /// The separator painted BEFORE segment `i`: none before the year, `-`
@@ -77,7 +82,7 @@ pub fn paint(
         let sel = selector.clone();
         row = row.child(
             div()
-                .px_0p5()
+                .when(!paint.flush, |d| d.px_0p5())
                 .rounded(paint.radius)
                 .text_color(text)
                 .when_some(fill, |d, f| d.bg(f))
@@ -154,6 +159,7 @@ mod tests {
                 separator: hsla(0., 0., 0.5, 1.),
                 suffix: hsla(0., 0., 0.5, 1.),
                 radius: px(3.),
+                flush: false,
             };
             div().child(super::paint(
                 &segments,

@@ -8817,6 +8817,51 @@ deleted = true
         assert_eq!(painted, (after, "2.5000".to_string()));
     }
 
+    /// A date cell's field sits where the cell's date stood: ending at
+    /// the cell's right edge and exactly as wide as the plain date — the
+    /// strip's padded, bordered frame and padded segments widened it past
+    /// the cell, which clipped its left, and drew a second border inside
+    /// the cursor's. (Whether the date fits the cell at all depends on
+    /// the face's metrics, which the test text system does not share.)
+    #[gpui::test]
+    fn a_date_cells_field_is_right_aligned_inside_its_cell(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document(&mut vcx);
+        h.dispatch(&mut vcx, "edit", None);
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("marketdata-editor-0-1").is_some(),
+            "the field paints in the cursor cell (row 0, table column 1)"
+        );
+        // The cell's own bounds, not the editor slot's: a slot grows to
+        // fit what it holds, so an oversized field widens the slot with it.
+        let cell = vcx
+            .debug_bounds("marketdata-cell-0-1")
+            .expect("the cell is painted");
+        let segment = |vcx: &mut gpui::VisualTestContext, i: usize| {
+            vcx.debug_bounds(Box::leak(
+                format!("marketdata-date-seg-{TILE}-{i}").into_boxed_str(),
+            ))
+            .expect("every segment is painted")
+        };
+        let (year, day) = (segment(&mut vcx, 0), segment(&mut vcx, 2));
+        assert!(
+            (cell.right() - day.right()).abs() <= gpui::px(1.),
+            "the day segment ends at the cell's right edge ({:?}), not at {:?}",
+            cell.right(),
+            day.right()
+        );
+        // The data face is monospaced, so the date as plain text is ten
+        // cells of the year's quarter-width; a padded segment widens it.
+        let glyph = year.size.width / 4.;
+        assert!(
+            ((day.right() - year.left()) - glyph * 10.).abs() <= gpui::px(1.),
+            "the field is as wide as the date as plain text ({:?}), not {:?}",
+            glyph * 10.,
+            day.right() - year.left()
+        );
+    }
+
     /// The delegate mirrors a date CELL's field exactly as it mirrors the
     /// text editor: the cell, and the field's own paint and focus handle,
     /// so `render_td` can paint the segments in the cell.

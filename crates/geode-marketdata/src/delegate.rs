@@ -198,12 +198,14 @@ impl MatrixDelegate {
     /// has been dropped paints nothing — the caller falls back to the
     /// cell's own text — since there is nothing left to route a key to.
     ///
-    /// The text `Input` paints without its own chrome and aligned as the
+    /// Both editors paint without a frame of their own and aligned as the
     /// cell's text is (`align`), so opening an editor leaves the value
-    /// where it stood: the component's default is a left-aligned field
-    /// inset by its own padding and border over its own background, which
-    /// jumped a right-aligned number across the cell and hid the cell's
-    /// draft fill. The cursor border already frames the cell being edited.
+    /// where it stood: the `Input`'s default is a left-aligned field inset
+    /// by its own padding and border over its own background, which jumped
+    /// a right-aligned number across the cell and hid the cell's draft
+    /// fill, and the date field's strip frame drew a second, rounded
+    /// border inside the cursor border. The cursor border already frames
+    /// the cell being edited.
     fn render_editor(
         &mut self,
         editor: &DelegateEditor,
@@ -222,15 +224,19 @@ impl MatrixDelegate {
                 let tile = self.tile.upgrade()?;
                 self.tones.refresh(theme);
                 Some(
-                    header::render_date_field(
-                        paint,
-                        focus,
-                        theme,
-                        &self.tones,
-                        &tile,
-                        self.tile_id,
-                    )
-                    .into_any_element(),
+                    div()
+                        .flex()
+                        .when(matches!(align, TextAlign::Right), |el| el.justify_end())
+                        .child(header::render_date_field(
+                            paint,
+                            focus,
+                            theme,
+                            &self.tones,
+                            &tile,
+                            self.tile_id,
+                            false,
+                        ))
+                        .into_any_element(),
                 )
             }
         }

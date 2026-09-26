@@ -875,6 +875,7 @@ fn segment_paint(theme: &Theme, live: bool) -> SegmentPaint {
         separator: muted,
         suffix: muted,
         radius: theme.radius_tokens().sm,
+        flush: false,
     }
 }
 
