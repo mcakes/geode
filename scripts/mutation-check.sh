@@ -16136,14 +16136,13 @@ run_mutation "pricer store: DuckSheetStore.forget names the wrong dataset" \
 
 run_mutation "pricer store: note_forgotten leaves a forgotten name known" \
   crates/geode-pricer/src/store.rs \
-  '    /// A confirmed forget: `name` is no longer a known document.
+  '    /// catalog brings it back until a save of it is confirmed.
     fn note_forgotten(&self, name: &str) {
         self.known.borrow_mut().remove(name);
-    }' \
-  '    /// A confirmed forget: `name` is no longer a known document.
+' \
+  '    /// catalog brings it back until a save of it is confirmed.
     fn note_forgotten(&self, name: &str) {
-        let _ = name;
-    }' \
+' \
   geode-pricer names_and_contains_are_known_union_saved_minus_forgotten
 
 run_mutation "pricer store: MemorySheetStore.forget keeps the sheet" \
@@ -16312,6 +16311,9 @@ run_mutation "pricer sheets: :e takes a sheet another tile holds" \
 run_mutation "pricer sheets: :e of the current name reloads it" \
   crates/geode-pricer/src/tile.rs \
   '        if name == self.sheet.name {
+            if self.save_blocked {
+                return self.switch_sheet(name, true, cx);
+            }
             return Ok(());
         }
         self.shared.refuse_retiring(&name)?;
@@ -16451,9 +16453,9 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '        if self.shared.store.forget(&pending.sheet) {
+  '        } else if self.shared.store.forget(&pending.sheet) {
             // Reserved until the forget is answered.' \
-  '        if false {
+  '        } else if false {
             // Reserved until the forget is answered.' \
   geode-pricer colon_rm_asks_and_y_forgets
 
@@ -19614,6 +19616,50 @@ run_mutation "pricer save: a failed load's block hides the lost-edits notice" \
   '            Some(lost) => format!("{blocked}; {lost}").into(),' \
   '            Some(_lost) => blocked,' \
   geode-pricer a_waiting_loads_failure_keeps_the_lost_edits_notice
+
+# A name confirmed forgotten is never revived by a catalog read before the
+# forget; the held catalog is re-read on every publish.
+run_mutation "pricer store: a catalog revives a forgotten sheet" \
+  crates/geode-pricer/src/store.rs \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
+        self.forgotten.borrow_mut().insert(name.to_string());' \
+  '    /// catalog brings it back until a save of it is confirmed.
+    fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);' \
+  geode-pricer a_catalog_never_revives_a_forgotten_name_until_it_is_saved
+
+run_mutation "pricer names: a stale catalog revives a removed sheet" \
+  crates/geode-pricer/src/store.rs \
+  '        self.forgotten.borrow_mut().insert(name.to_string());
+    }
+
+    fn set_known' \
+  '    }
+
+    fn set_known' \
+  geode-pricer a_removed_sheet_is_not_revived_by_a_stale_catalog
+
+run_mutation "pricer rm: y forgets a sheet opened since the question" \
+  crates/geode-pricer/src/tile.rs \
+  '        let refusal = if self.shared.open.borrow().contains(&pending.sheet) {' \
+  '        let refusal = if false {' \
+  geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
+
+run_mutation "pricer rm: y forgets a sheet retiring since the question" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if self.shared.retiring.borrow().contains(&pending.sheet) {' \
+  '        } else if false {' \
+  geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
+
+run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.save_blocked {
+                return self.switch_sheet(name, true, cx);' \
+  '            if false {
+                return self.switch_sheet(name, true, cx);' \
+  geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
