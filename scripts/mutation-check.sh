@@ -18691,8 +18691,8 @@ run_mutation "pricer tile: the entry field is dropped unblurred" \
 
 run_mutation "pricer tile: the cell editor is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
-  '        if editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
-  '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if editor.focus_handle(cx).is_focused(window) {' \
+  '        if false && editor.focus_handle(cx).is_focused(window) {' \
   geode-pricer the_editor_gives_up_focus_before_it_is_dropped
 
 # No test covers this contract today: the mutation makes a commit whose
@@ -18702,8 +18702,8 @@ run_mutation "pricer tile: the cell editor is dropped unblurred" \
 # honest verdict, not a stale filter.
 run_mutation "pricer tile: a commit ignores that its line went away" \
   crates/geode-pricer/src/tile.rs \
-  '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
-  '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
+  '        let row = self.sheet.index_of(line).filter(|_| same_column);' \
+  '        let row = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column);' \
   geode-pricer an_editor_whose_line_went_away_closes_with_moved
 
 run_mutation "pricer tile: a refused save is silent" \
@@ -19415,12 +19415,12 @@ run_mutation "pricer tile: an editor whose column left the plan closes" \
 # The window-less close still blurs before the field drops.
 run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
   crates/geode-pricer/src/tile.rs \
-  '                    if input.read(cx).focus_handle(cx).is_focused(window) {
+  '                    if focus.is_focused(window) {
                         window.blur(cx);
                     }
                 });
             });' \
-  '                    let _ = (input, window);
+  '                    let _ = (focus, window);
                 });
             });' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
