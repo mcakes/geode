@@ -21405,6 +21405,18 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
   '        if !self.has_previous_stage() {' \
   geode-shell the_back_button_is_ignored_while_a_confirm_is_pending
 
+run_mutation "launch: a restored tile is launched" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            let from_add = matched.is_none() && pending_factory.is_some();' \
+  '            let from_add = true;' \
+  geode-shell a_restored_tile_is_not_launched
+
+run_mutation "launch: an unfocused add is launched" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            if active.contains(&id) && focused_tile == Some(id) {' \
+  '            if active.contains(&id) {' \
+  geode-shell an_add_that_is_not_focused_on_its_first_render_is_not_launched
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
