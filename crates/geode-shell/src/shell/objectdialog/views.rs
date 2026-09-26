@@ -131,7 +131,15 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .doc("datasets")
         .map(|doc| SchemaSpec::from_doc(doc).0)
         .unwrap_or_default();
-    let mut options: Vec<String> = schema.datasets.iter().map(|d| d.name.clone()).collect();
+    // A local dataset holds the app's own documents (pricer sheets): no
+    // view reads one, so it is not offered. A view already naming one keeps
+    // it below, as any value is kept.
+    let mut options: Vec<String> = schema
+        .datasets
+        .iter()
+        .filter(|d| !d.local)
+        .map(|d| d.name.clone())
+        .collect();
     options.sort();
     let current = match view {
         Some(v) => v.dataset.clone(),
@@ -1212,6 +1220,39 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    /// A local dataset (the app's own documents, such as pricer sheets) is
+    /// not something a view reads, so the dataset choice does not offer it.
+    #[test]
+    fn the_dataset_choice_offers_no_local_dataset() {
+        let datasets = format!(
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n{}",
+            r#"[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+textual = true
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#
+        );
+        let config = config_from(&[(Layer::Builtin, "datasets", &datasets)]);
+        let fields = fields(&config, None);
+        let dataset = fields.iter().find(|f| f.key == "dataset").unwrap();
+        assert!(
+            matches!(&dataset.kind, FieldKind::Choice { options, .. } if options == &["risk"]),
+            "{:?}",
+            dataset.kind
+        );
     }
 
     /// A `views` doc of `views_text` verbatim, over a `risk` dataset

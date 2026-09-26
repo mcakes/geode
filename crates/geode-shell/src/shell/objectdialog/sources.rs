@@ -104,7 +104,14 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .doc("datasets")
         .map(|doc| SchemaSpec::from_doc(doc).0)
         .unwrap_or_default();
-    let mut datasets: Vec<&str> = schema.datasets.iter().map(|d| d.name.as_str()).collect();
+    // A local dataset is written by the app and never fed by a source (the
+    // source reader refuses one), so it is not offered.
+    let mut datasets: Vec<&str> = schema
+        .datasets
+        .iter()
+        .filter(|d| !d.local)
+        .map(|d| d.name.as_str())
+        .collect();
     datasets.sort_unstable();
     // The object's own dataset is always an option (Views' rule): a
     // `Choice` that cannot show its value would step silently.
@@ -487,6 +494,50 @@ mod tests {
         assert_eq!(summary(&value), "2 paths · latest_other");
         assert_eq!(prefix(&value).as_deref(), Some("risk"));
     }
+
+    /// A local dataset is written by the app, never fed by a source (the
+    /// source reader refuses one), so the dataset choice does not offer it.
+    #[test]
+    fn the_dataset_choice_offers_no_local_dataset() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    &format!(
+                        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n{}",
+                        LOCAL_DATASET
+                    ),
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let fields = fields(&config, None);
+        let dataset = fields.iter().find(|f| f.key == "dataset").unwrap();
+        assert!(
+            matches!(&dataset.kind, FieldKind::Choice { options, .. } if options == &["risk"]),
+            "{:?}",
+            dataset.kind
+        );
+    }
+
+    const LOCAL_DATASET: &str = r#"[sheets]
+family = "document"
+local = true
+key = ["sheet"]
+axes = ["line"]
+[sheets.columns.sheet]
+type = "utf8"
+role = "dimension"
+textual = true
+[sheets.columns.line]
+type = "i64"
+role = "axis"
+[sheets.columns.qty]
+type = "i64"
+role = "value"
+"#;
 
     #[test]
     fn fields_spell_every_key_and_default_the_absent_ones() {
