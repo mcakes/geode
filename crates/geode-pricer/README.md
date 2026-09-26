@@ -30,7 +30,7 @@ The tile:
 
 | Module | Holds |
 |---|---|
-| `store` | The `SheetStore` seam and the in-memory store. |
+| `store` | The `SheetStore` seam, addressed by key/tag with `Loaded::Refused` for a load that never went out; `MemorySheetStore` (in-memory, the tests' fake) and `DuckSheetStore` (`pricer_sheets` document reads/writes over `DataHandle`, with a `known`-names cache fed from the diagnostics catalog and the store's own confirmed writes). |
 | `grid` | The prepared `GridModel`, rebuilt on change. |
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, tree column, entry row, editor. |
@@ -94,6 +94,13 @@ cargo bench -p geode-pricer
   (`save_blocked`); a change not yet accepted by the store (`dirty`) is saved
   when the tile closes. The save state has its own header slot, which pricing
   notices and `escape` never touch.
+- `SheetStore::load` is addressed by the caller's `QueryKey`/tag so a
+  DuckDB-backed answer can be routed back; a load the store never
+  submitted answers `Loaded::Refused`, which the tile treats as a failed
+  load (`save_blocked`), never as a `Pending` that will silently never
+  resolve. `save`/`forget` only queue a write — `true` means admitted,
+  not written — and the confirmed outcome reaches the tile separately, by
+  sheet name.
 - In the free underlying typeahead, `enter` takes the highlighted option only
   when the query equals it case-insensitively or the highlight was moved with
   a key or a click; a pointer hover moves the highlight but does not count as

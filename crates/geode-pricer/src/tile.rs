@@ -346,7 +346,12 @@ impl PricerTile {
             None => untitled(&shared),
         };
         shared.open.borrow_mut().insert(name.clone());
-        let (sheet, loading) = match shared.store.load(&name) {
+        // Tag 0: this store answers Missing/Rows/Refused at once (the
+        // in-memory store) or a DuckDB load whose only outcome yet
+        // possible is the first one this tile ever asks for. The tile's
+        // own load tag lands with its load lifecycle (`:e`/`:new`) and
+        // is threaded through here once it exists.
+        let (sheet, loading) = match shared.store.load(&name, QueryKey(id.0), 0) {
             Loaded::Rows(rows) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
@@ -366,6 +371,18 @@ impl PricerTile {
             Loaded::Pending => {
                 notices.push(LOADING.to_string());
                 (fallback(&name, &record), true)
+            }
+            // The load was never submitted: nothing will ever call
+            // `loaded` to clear a `loading` state, so this is the
+            // failed-load path (spec §7.1), not a load still on its
+            // way — a refused read must never let the empty fallback
+            // stand in for, and then overwrite, the real document.
+            Loaded::Refused => {
+                blocked = Some(blocked_notice(
+                    &name,
+                    "the store refused the load: the data service is busy or gone",
+                ));
+                (fallback(&name, &record), false)
             }
         };
         // A pending load's expansion waits for the rows: pruned against

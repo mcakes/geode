@@ -16099,6 +16099,63 @@ run_mutation "pricer storage: an answer for another sheet installs under this na
   '                Column::Utf8(_) => continue,' \
   geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
 
+run_mutation "pricer store: a refused submission answers Refused, not Pending" \
+  crates/geode-pricer/src/store.rs \
+  '        if queued {
+            Loaded::Pending
+        } else {
+            Loaded::Refused
+        }' \
+  '        let _ = queued;
+        Loaded::Pending' \
+  geode-pricer a_closed_channel_answers_refused_not_pending
+
+run_mutation "pricer store: DuckSheetStore.save publishes to the wrong dataset" \
+  crates/geode-pricer/src/store.rs \
+  '        self.data.publish(LocalPublish {
+            dataset: PRICER_SHEETS_DATASET.to_string(),
+            rows,
+        })' \
+  '        self.data.publish(LocalPublish {
+            dataset: String::new(),
+            rows,
+        })' \
+  geode-pricer save_submits_a_publish_request_with_the_dataset_and_rows
+
+run_mutation "pricer store: DuckSheetStore.forget names the wrong dataset" \
+  crates/geode-pricer/src/store.rs \
+  '        self.data.forget(LocalForget {
+            dataset: PRICER_SHEETS_DATASET.to_string(),
+            key: vec![name.to_string()],
+        })' \
+  '        self.data.forget(LocalForget {
+            dataset: String::new(),
+            key: vec![name.to_string()],
+        })' \
+  geode-pricer forget_submits_a_forget_request_naming_the_dataset_and_key
+
+run_mutation "pricer store: note_forgotten leaves a forgotten name known" \
+  crates/geode-pricer/src/store.rs \
+  '    pub fn note_forgotten(&self, name: &str) {
+        self.known.borrow_mut().remove(name);
+    }' \
+  '    pub fn note_forgotten(&self, name: &str) {
+        let _ = name;
+    }' \
+  geode-pricer names_and_contains_are_known_union_saved_minus_forgotten
+
+run_mutation "pricer store: MemorySheetStore.forget keeps the sheet" \
+  crates/geode-pricer/src/store.rs \
+  '    fn forget(&self, name: &str) -> bool {
+        self.sheets.borrow_mut().remove(name);
+        true
+    }' \
+  '    fn forget(&self, name: &str) -> bool {
+        let _ = name;
+        true
+    }' \
+  geode-pricer forget_removes_the_entry_and_drops_it_from_names
+
 run_mutation "pricer shorthand: a template quantity overflows silently" \
   crates/geode-pricer/src/core/shorthand.rs \
   '                qty: qty
