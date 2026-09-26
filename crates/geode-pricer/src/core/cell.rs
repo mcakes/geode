@@ -1,17 +1,18 @@
 //! The cell editor's pure half (line-pricer spec §8.4): what an editable
 //! cell opens with, what a commit means as ONE `Edit`, and how an arrow
-//! key nudges the open text. The tile only opens an `InputState` on the
-//! answer and hands the committed text back here.
+//! key nudges the open text. The tile only opens an `InputState` (or, for
+//! an expiry, a segmented date field) on the answer and hands the
+//! committed text or date back here.
 
 use crate::core::columns::ColumnKind;
 use crate::core::edit::Edit;
 use crate::core::sheet::{OwnShifts, Sheet};
 use crate::core::shorthand::{
-    parse_barrier_kind, parse_expiry, parse_strike, render_barrier_kind, render_expiry,
-    render_strike,
+    parse_barrier_kind, parse_expiry, parse_strike, render_barrier_kind, render_strike,
 };
+use chrono::NaiveDate;
 use geode_core::nudge::nudge_text;
-use geode_core::pricing::{Instrument, OptionKind, Vanilla};
+use geode_core::pricing::{Expiry, Instrument, OptionKind, Vanilla};
 use geode_core::schema::ColumnType;
 
 /// The footer's word for a cell that does not edit (spec §8.4).
@@ -31,6 +32,12 @@ pub enum CellEditor {
         current: String,
         free: bool,
     },
+    /// A segmented date field — every expiry, whatever it holds (user
+    /// ruling: "date field always"). `Some` is a date expiry's own date;
+    /// `None` is a tenor, which has no date here: the pricer never
+    /// resolves a tenor (the library's calendar does), so the host seeds
+    /// the field from its clock's today.
+    Date(Option<NaiveDate>),
 }
 
 /// The line's instrument, or `READ_ONLY` for a package (planning decision
@@ -64,7 +71,10 @@ pub fn editor_for(sheet: &Sheet, row: usize, kind: ColumnKind) -> Result<CellEdi
     let i = instrument(sheet, row)?;
     Ok(match kind {
         ColumnKind::Qty => CellEditor::Text(sheet.qty(row).to_string()),
-        ColumnKind::Expiry => CellEditor::Text(render_expiry(i.expiry())),
+        ColumnKind::Expiry => CellEditor::Date(match i.expiry() {
+            Expiry::Date(d) => Some(*d),
+            Expiry::Tenor(_) => None,
+        }),
         ColumnKind::Strike => CellEditor::Text(render_strike(i.strike())),
         ColumnKind::Barrier => CellEditor::Text(plain(barrier(i)?.0)),
         ColumnKind::SpotShift => {
@@ -132,10 +142,35 @@ fn shift(text: &str, what: &str) -> Result<Option<f64>, String> {
         .ok_or_else(|| format!("{what} '{t}' is not a number"))
 }
 
-/// The one `Edit` a committed cell means (spec §8.4), or the footer's
-/// refusal. The tile re-checks that the cell has not moved before it
-/// applies this (spec §8.4, "a commit whose cell moved is refused").
-pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result<Edit, String> {
+/// The one `Edit` a committed cell means (spec §8.4), `Ok(None)` when it
+/// parses to the value the line already holds, or the footer's refusal.
+/// The tile re-checks that the cell has not moved before it applies this
+/// (spec §8.4, "a commit whose cell moved is refused").
+pub fn commit(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Option<Edit>, String> {
+    edit_for(sheet, row, kind, text).map(|edit| changed(sheet, row, edit))
+}
+
+/// `edit` unless it would leave the line exactly as it is. Values are
+/// compared, never text: `5000` and `5000.0` are one strike, and an empty
+/// shift on an inherited one stays inherited — while an explicit value is
+/// a change from inherited to own even when it equals what was inherited.
+/// An unchanged commit is no edit: no undo entry, no reprice, no save.
+fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
+    let same = match &edit {
+        Edit::SetQty { qty, .. } => *qty == sheet.qty(row),
+        Edit::SetShift { shift, .. } => *shift == sheet.shift(row),
+        Edit::SetInstrument { instrument, .. } => sheet.instrument(row) == Some(instrument),
+        _ => false,
+    };
+    (!same).then_some(edit)
+}
+
+fn edit_for(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result<Edit, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
     let t = text.trim();
     match kind {
@@ -225,6 +260,16 @@ pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result
     }
 }
 
+/// The one `Edit` a committed expiry date means, `Ok(None)` when the line
+/// already expires on exactly that date (nothing to apply: no undo entry,
+/// no reprice, no save), or the footer's refusal. A tenor line always
+/// changes — committing turns it into a date expiry.
+pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<Edit>, String> {
+    let i = instrument(sheet, row).map_err(String::from)?;
+    let edit = set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date)));
+    Ok(changed(sheet, row, edit))
+}
+
 /// `up`/`down` in an open numeric editor (spec §8.4): `steps` units of the
 /// TEXT's own precision (planning decision 2), a strike's trailing `%`
 /// kept, an empty shift nudged from `0`. A barrier level is absolute
@@ -291,7 +336,10 @@ mod tests {
         );
         assert_eq!(
             editor_for(&s, 0, ColumnKind::Expiry),
-            Ok(CellEditor::Text("Z26".into()))
+            Ok(CellEditor::Date(Some(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 18).unwrap()
+            ))),
+            "an expiry always edits in a date field, on its own date"
         );
         assert_eq!(
             editor_for(&s, 0, ColumnKind::Strike),
@@ -369,25 +417,26 @@ mod tests {
         let s = one_line();
         assert_eq!(
             commit(&s, 0, ColumnKind::Qty, " 10 "),
-            Ok(Edit::SetQty { row: 0, qty: 10 })
+            Ok(Some(Edit::SetQty { row: 0, qty: 10 }))
         );
-        let Ok(Edit::SetInstrument { row: 0, instrument }) =
+        let Ok(Some(Edit::SetInstrument { row: 0, instrument })) =
             commit(&s, 0, ColumnKind::Strike, "95%")
         else {
             panic!("a strike commit is SetInstrument")
         };
         assert_eq!(instrument.strike(), Strike::Percent(95.0));
-        let Ok(Edit::SetInstrument { instrument, .. }) = commit(&s, 0, ColumnKind::Expiry, "3m")
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) =
+            commit(&s, 0, ColumnKind::Expiry, "3m")
         else {
             panic!()
         };
         assert_eq!(instrument.expiry(), &Expiry::Tenor("3m".into()));
-        let Ok(Edit::SetInstrument { instrument, .. }) = commit(&s, 0, ColumnKind::Type, "p")
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) = commit(&s, 0, ColumnKind::Type, "p")
         else {
             panic!()
         };
         assert_eq!(instrument.kind(), OptionKind::Put);
-        let Ok(Edit::SetInstrument { instrument, .. }) =
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) =
             commit(&s, 0, ColumnKind::Underlying, "ndx")
         else {
             panic!()
@@ -400,20 +449,20 @@ mod tests {
         let s = one_line();
         assert_eq!(
             commit(&s, 0, ColumnKind::SpotShift, "+2"),
-            Ok(Edit::SetShift {
+            Ok(Some(Edit::SetShift {
                 row: 0,
                 shift: OwnShifts {
                     spot_pct: Some(2.0),
                     vol_pts: None
                 }
-            })
+            }))
         );
         assert_eq!(
-            commit(&s, 0, ColumnKind::VolShift, "  "),
-            Ok(Edit::SetShift {
+            commit(&owned_spot(), 0, ColumnKind::SpotShift, "  "),
+            Ok(Some(Edit::SetShift {
                 row: 0,
                 shift: OwnShifts::default()
-            }),
+            })),
             "empty means inherit, not zero"
         );
     }
@@ -477,5 +526,119 @@ mod tests {
         assert!(nudge(ColumnKind::Barrier, "95%", 1).is_err());
         let b = barrier_line();
         assert!(commit(&b, 0, ColumnKind::Barrier, "95%").is_err());
+    }
+
+    fn tenor_line() -> Sheet {
+        let mut s = Sheet::new("t");
+        let i = with_vanilla(&spx(5000.0, OptionKind::Call), |v| {
+            v.expiry = Expiry::Tenor("3m".into())
+        });
+        push(&mut s, vec![line(i, 1)]);
+        s
+    }
+
+    fn ymd(y: i32, m: u32, d: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn a_tenor_expiry_opens_a_date_field_with_no_date_of_its_own() {
+        assert_eq!(
+            editor_for(&tenor_line(), 0, ColumnKind::Expiry),
+            Ok(CellEditor::Date(None)),
+            "the pricer never resolves a tenor: the host seeds the field"
+        );
+    }
+
+    #[test]
+    fn a_date_commit_sets_a_date_expiry_and_an_unchanged_one_is_no_edit() {
+        let s = one_line();
+        let Ok(Some(Edit::SetInstrument { row: 0, instrument })) =
+            commit_date(&s, 0, ymd(2027, 3, 19))
+        else {
+            panic!("a changed date is one SetInstrument")
+        };
+        assert_eq!(instrument.expiry(), &Expiry::Date(ymd(2027, 3, 19)));
+        assert_eq!(
+            instrument.strike(),
+            Strike::Absolute(5000.0),
+            "only the expiry"
+        );
+        assert_eq!(
+            commit_date(&s, 0, ymd(2026, 12, 18)),
+            Ok(None),
+            "the line's own date: nothing to apply"
+        );
+    }
+
+    #[test]
+    fn a_date_commit_on_a_tenor_line_always_makes_it_a_date() {
+        let s = tenor_line();
+        let Ok(Some(Edit::SetInstrument { instrument, .. })) = commit_date(&s, 0, ymd(2026, 9, 26))
+        else {
+            panic!("a tenor committed to a date is an edit")
+        };
+        assert_eq!(instrument.expiry(), &Expiry::Date(ymd(2026, 9, 26)));
+    }
+
+    #[test]
+    fn a_date_commit_on_a_package_is_read_only() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        assert_eq!(
+            commit_date(&s, 0, ymd(2026, 9, 26)),
+            Err(READ_ONLY.to_string())
+        );
+    }
+
+    /// One line with its own spot shift of 2%.
+    fn owned_spot() -> Sheet {
+        let mut s = one_line();
+        s.apply(Edit::SetShift {
+            row: 0,
+            shift: OwnShifts {
+                spot_pct: Some(2.0),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        s
+    }
+
+    /// A commit that parses to the value the line already holds is no
+    /// edit, in every editable cell: values are compared, not text.
+    #[test]
+    fn an_unchanged_commit_is_no_edit_in_every_cell() {
+        let s = one_line();
+        for (kind, text) in [
+            (ColumnKind::Qty, "-5"),
+            (ColumnKind::Qty, " -5 "),
+            (ColumnKind::Strike, "5000"),
+            (ColumnKind::Strike, "5000.0"),
+            (ColumnKind::Expiry, "Z26"),
+            (ColumnKind::Type, "c"),
+            (ColumnKind::Underlying, "spx"),
+            (ColumnKind::SpotShift, ""),
+            (ColumnKind::VolShift, "  "),
+        ] {
+            assert_eq!(commit(&s, 0, kind, text), Ok(None), "{kind:?} '{text}'");
+        }
+        let b = barrier_line();
+        assert_eq!(commit(&b, 0, ColumnKind::Barrier, "4200.0"), Ok(None));
+        assert_eq!(commit(&b, 0, ColumnKind::BarrierType, "do"), Ok(None));
+        let own = owned_spot();
+        assert_eq!(commit(&own, 0, ColumnKind::SpotShift, "2.0"), Ok(None));
+        assert!(
+            matches!(commit(&own, 0, ColumnKind::SpotShift, ""), Ok(Some(_))),
+            "own → inherited is a change"
+        );
+        assert!(
+            matches!(commit(&s, 0, ColumnKind::SpotShift, "0"), Ok(Some(_))),
+            "inherited → an explicit own value is a change, whatever it equals"
+        );
+        assert!(
+            matches!(commit(&s, 0, ColumnKind::Strike, "5000%"), Ok(Some(_))),
+            "a percent strike is not the absolute one"
+        );
     }
 }

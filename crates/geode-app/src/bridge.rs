@@ -1746,6 +1746,67 @@ role = "key"
         );
     }
 
+    /// The expiry's date field is insert focus for the shell too, though
+    /// it is not a text input: a shifted letter typed into it is no shell
+    /// binding (`shift+d` is `workspace::duplicate_horizontal`), digits
+    /// reach the field, `up` steps it (the fragment's `insert_up`), and
+    /// `enter` commits a date expiry — every key through the shell's real
+    /// matcher and insert-focus predicate.
+    #[gpui::test]
+    fn typing_into_the_pricer_date_field_fires_no_shell_binding(cx: &mut gpui::TestAppContext) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+        let mode = |vcx: &mut gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, _| {
+                t.key_context().get("mode").unwrap_or("").to_string()
+            })
+        };
+        let dispatched = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().any(|x| x == h)
+        };
+        type_a_line(&mut vcx, "-5 SPX Z26 5000 C");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert_eq!(mode(&mut vcx), "normal", "fixture: the entry field closed");
+        // qty → underlying → expiry, then edit.
+        vcx.simulate_keystrokes("l l i");
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(mode(&mut vcx), "insert", "the date field is insert mode");
+        vcx.simulate_keystrokes("shift-d");
+        vcx.run_until_parked();
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the date field ran a shell binding"
+        );
+        assert_eq!(mode(&mut vcx), "insert", "the field is still open");
+        vcx.simulate_keystrokes("2 5 up enter");
+        vcx.run_until_parked();
+        assert_eq!(mode(&mut vcx), "normal", "enter committed and closed it");
+        let expiry = tile.read_with(&vcx, |t, _| {
+            t.sheet().instrument(0).map(|i| i.expiry().clone())
+        });
+        assert_eq!(
+            expiry,
+            Some(geode_core::pricing::Expiry::Date(
+                chrono::NaiveDate::from_ymd_opt(2026, 12, 26).unwrap()
+            )),
+            "the digits typed the day and up stepped it"
+        );
+    }
+
     /// `escape` after committing a line closes the entry field that
     /// `enter` left open on the next line. The committed line is the
     /// table's selection, and `DataTable`'s own `escape` → `Cancel` would

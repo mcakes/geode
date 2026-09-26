@@ -88,6 +88,13 @@ pub struct Paints {
     pub menu_muted: Hsla,
     pub menu_active_text: Hsla,
     pub menu_active_muted: Hsla,
+    /// The expiry date field's active segment text on its `primary` fill,
+    /// and a mid-typing segment's on its `accent` fill. The field paints
+    /// on the cursor row, whose ground may be the line's own, hover or
+    /// selected: each fill is composited over all three (a translucent
+    /// fill reads differently on each) and the text floored on every one.
+    pub date_active_text: Hsla,
+    pub date_typing_text: Hsla,
 }
 
 impl Paints {
@@ -114,6 +121,14 @@ impl Paints {
             menu_muted: floor_toward_pole(theme.muted_foreground, popover),
             menu_active_text: floor_toward_pole(theme.accent_foreground, active),
             menu_active_muted: floor_toward_pole(theme.muted_foreground, active),
+            date_active_text: floor_on_all(
+                theme.primary_foreground,
+                &line.map(|g| over(theme.primary, g)),
+            ),
+            date_typing_text: floor_on_all(
+                theme.accent_foreground,
+                &line.map(|g| over(theme.accent, g)),
+            ),
         }
     }
 
@@ -196,6 +211,18 @@ mod tests {
                     ("menu muted", p.menu_muted, popover),
                     ("menu active text", p.menu_active_text, active),
                     ("menu active muted", p.menu_active_muted, active),
+                    // The date field's segment fills composited over the
+                    // row's own ground; hover and selected below.
+                    (
+                        "date active",
+                        p.date_active_text,
+                        over(theme.primary, ground),
+                    ),
+                    (
+                        "date typing",
+                        p.date_typing_text,
+                        over(theme.accent, ground),
+                    ),
                 ]
                 .into_iter()
                 .chain(
@@ -212,6 +239,19 @@ mod tests {
                                 ("package danger", p.package_danger),
                             ]
                             .map(|(label, text)| (leak(format!("{label} on {which}")), text, bg))
+                            .into_iter()
+                            .chain([
+                                (
+                                    leak(format!("date active on {which}")),
+                                    p.date_active_text,
+                                    over(theme.primary, bg),
+                                ),
+                                (
+                                    leak(format!("date typing on {which}")),
+                                    p.date_typing_text,
+                                    over(theme.accent, bg),
+                                ),
+                            ])
                         }),
                 ) {
                     checked += 1;

@@ -19103,8 +19103,8 @@ run_mutation "pricer tile: the entry field is dropped unblurred" \
 
 run_mutation "pricer tile: the cell editor is dropped unblurred" \
   crates/geode-pricer/src/tile.rs \
-  '        if editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
-  '        if false && editor.input().read(cx).focus_handle(cx).is_focused(window) {' \
+  '        if editor.focus_handle(cx).is_focused(window) {' \
+  '        if false && editor.focus_handle(cx).is_focused(window) {' \
   geode-pricer the_editor_gives_up_focus_before_it_is_dropped
 
 # No test covers this contract today: the mutation makes a commit whose
@@ -19114,8 +19114,8 @@ run_mutation "pricer tile: the cell editor is dropped unblurred" \
 # honest verdict, not a stale filter.
 run_mutation "pricer tile: a commit ignores that its line went away" \
   crates/geode-pricer/src/tile.rs \
-  '        let Some(row) = self.sheet.index_of(line).filter(|_| same_column) else {' \
-  '        let Some(row) = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column) else {' \
+  '        let row = self.sheet.index_of(line).filter(|_| same_column);' \
+  '        let row = self.sheet.index_of(line).or(Some(0)).filter(|_| same_column);' \
   geode-pricer an_editor_whose_line_went_away_closes_with_moved
 
 run_mutation "pricer tile: a refused save is silent" \
@@ -19228,14 +19228,14 @@ run_mutation "pricer app: a config reload never reaches the pricer" \
 # only when the query equals it or the trader moved it.
 run_mutation "pricer tile: the free typeahead commits an unmoved subsequence guess" \
   crates/geode-pricer/src/tile.rs \
-  '                        let take_highlight = *moved
-                            || highlighted
-                                .as_deref()
-                                .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
-  '                        let take_highlight = {
-                            let _ = moved;
-                            true
-                        };' \
+  '                    let take_highlight = *moved
+                        || highlighted
+                            .as_deref()
+                            .is_some_and(|o| o.eq_ignore_ascii_case(typed));' \
+  '                    let take_highlight = {
+                        let _ = moved;
+                        true
+                    };' \
   geode-pricer a_free_typeahead_commits_the_typed_underlying_unless_it_is_an_option_or_the_highlight_moved
 
 # A failed load shows a fallback; publishing it would make it the real
@@ -19827,12 +19827,12 @@ run_mutation "pricer tile: an editor whose column left the plan closes" \
 # The window-less close still blurs before the field drops.
 run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
   crates/geode-pricer/src/tile.rs \
-  '                    if input.read(cx).focus_handle(cx).is_focused(window) {
+  '                    if focus.is_focused(window) {
                         window.blur(cx);
                     }
                 });
             });' \
-  '                    let _ = (input, window);
+  '                    let _ = (focus, window);
                 });
             });' \
   geode-pricer a_view_reload_without_the_edited_column_closes_the_editor
@@ -20543,6 +20543,93 @@ run_mutation "pricer gutter: a cursor move refreshes relative numbers" \
   '        let stamp = (len, entry, None, mode);' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
+# A tenor line's date commit replaces the tenor with that date. Mutated,
+# a tenor commit applies nothing and the line keeps its tenor.
+run_mutation "pricer date field: a tenor commits as a date" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    let edit = set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date)));' \
+  '    let edit = if matches!(i.expiry(), Expiry::Tenor(_)) { set(row, i.clone()) } else { set(row, with_vanilla(i, |v| v.expiry = Expiry::Date(date))) };' \
+  geode-pricer a_tenor_opens_on_the_app_clocks_today_and_enter_makes_it_a_date
+
+# Committing the line's own date is no edit. Mutated, it applies an
+# identical instrument and records an undo entry.
+run_mutation "pricer date field: an unchanged commit records no undo" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    Ok(changed(sheet, row, edit))' \
+  '    Ok(Some(edit))' \
+  geode-pricer an_unchanged_date_commit_is_no_edit
+
+# A text commit of the value the cell already holds is no edit. Mutated,
+# every parsed commit applies and records an undo entry.
+run_mutation "pricer cell: an unchanged text commit records no undo" \
+  crates/geode-pricer/src/core/cell.rs \
+  '    edit_for(sheet, row, kind, text).map(|edit| changed(sheet, row, edit))' \
+  '    edit_for(sheet, row, kind, text).map(Some)' \
+  geode-pricer an_unchanged_text_commit_is_no_edit
+
+# Unchanged is decided on values: an instrument equal to the line's is no
+# edit. Mutated, `5000.0` on a `5000` strike applies.
+run_mutation "pricer cell: an equal instrument is unchanged" \
+  crates/geode-pricer/src/core/cell.rs \
+  '        Edit::SetInstrument { instrument, .. } => sheet.instrument(row) == Some(instrument),' \
+  '        Edit::SetInstrument { .. } => false,' \
+  geode-pricer an_unchanged_commit_is_no_edit_in_every_cell
+
+# Own → inherited is a change. Mutated, every shift commit reads as
+# unchanged and an emptied own shift keeps its value.
+run_mutation "pricer cell: own to inherited shift is a change" \
+  crates/geode-pricer/src/core/cell.rs \
+  '        Edit::SetShift { shift, .. } => *shift == sheet.shift(row),' \
+  '        Edit::SetShift { .. } => true,' \
+  geode-pricer an_unchanged_commit_is_no_edit_in_every_cell
+
+# The tenor note stands while the date field is open. Mutated, the first
+# key retires it.
+run_mutation "pricer date field: the tenor note stands until it closes" \
+  crates/geode-pricer/src/tile.rs \
+  '                let note = note.clone();' \
+  '                let note: Option<SharedString> = None;' \
+  geode-pricer the_tenor_note_stands_until_the_field_closes
+
+# `escape` in the date field cancels. Mutated, it commits the stepped
+# date and the tenor is lost.
+run_mutation "pricer date field: escape leaves the tenor" \
+  crates/geode-pricer/src/tile.rs \
+  '            FieldKey::Commit => {' \
+  '            FieldKey::Commit | FieldKey::Cancel => {' \
+  geode-pricer escape_leaves_a_tenor_untouched_and_blurs_the_field
+
+# An open date field puts the tile in `mode == insert`. Mutated, only a
+# text field does, and a letter typed into the date field reaches the
+# shell's bindings.
+run_mutation "pricer date field: insert mode while it is open" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {' \
+  '        if self.confirm.is_some() || self.entry.is_some() || self.editor.as_ref().is_some_and(|e| e.input().is_some()) {' \
+  geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
+
+# The date field's own focus handle counts as the tile holding focus
+# (the shell's other insert condition). Mutated, only a text input's does.
+run_mutation "pricer date field: its focus is the tile's" \
+  crates/geode-pricer/src/tile.rs \
+  '            .is_some_and(|e| e.focus_handle(cx).is_focused(window));' \
+  '            .is_some_and(|e| e.input().is_some_and(|i| i.read(cx).focus_handle(cx).is_focused(window)));' \
+  geode-app typing_into_the_pricer_date_field_fires_no_shell_binding
+
+# A click on a date segment selects it. Mutated, the click is swallowed.
+run_mutation "pricer date field: a segment click selects it" \
+  crates/geode-pricer/src/tile.rs \
+  '        field.select(segment);' \
+  '        let _ = segment;' \
+  geode-pricer a_segment_click_selects_it_and_a_click_elsewhere_cancels
+
+# In-grid fields paint no chrome. Mutated, the input's border and fill
+# come back and its text moves off the cell's own edge.
+run_mutation "pricer editor: in-grid fields paint no chrome" \
+  crates/geode-pricer/src/delegate.rs \
+  '        .appearance(false)' \
+  '        .appearance(true)' \
+  geode-pricer the_cell_editor_paints_no_chrome_and_its_text_sits_where_the_cells_did
 # An old-named colours.toml loads under the current doc name. Mutated, the
 # layer keeps a doc named `colours` that nothing reads, and the colors vanish.
 run_mutation "color rename: an old colours.toml loads as the colors doc" \
