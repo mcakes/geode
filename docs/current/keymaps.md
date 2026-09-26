@@ -55,6 +55,14 @@ cannot be silently redirected. Startup can use the remaining
 compiled bindings. On reload, compilation errors participate in the shell's
 last-good acceptance gate; see [reload](configuration.md#hot-reload).
 
+The rename mechanism only covers a one-for-one substitution. `blotter::visual`
+split into `blotter::visual_rows` and `blotter::visual_block` (grid selection
+spec §4) rather than being renamed, so it has no `register_rename` entry: a
+user keymap still binding `blotter::visual` (for example an old `"v" =
+"blotter::visual"`) warns as an unknown action and is skipped, silently
+dropping that binding rather than remapping it. Editing the binding to
+`blotter::visual_rows` or `blotter::visual_block` is a manual step.
+
 ## Key spelling and primary modifier
 
 A binding is a whitespace-separated sequence of keystrokes, such as `"g g"` or
@@ -93,6 +101,13 @@ blotter && mode == normal
 !modal && (blotter || marketdata)
 mode != insert
 ```
+
+A module can push more than one key onto its own frame. The blotter's
+`key_context` pushes `mode == visual` while a grid selection is live (the
+same flag `mode == normal` above tests for its absence) and, only then, a
+second `select == rows` or `select == block` pair naming the selection's
+kind — `blotter && select == rows` reaches only while a `V` row selection is
+live, never a `v` block one.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;

@@ -1847,3 +1847,28 @@ re-decimating four 500,000-point slots with the path cache cleared, about
 well inside the 8 ms budget. At 100,000 points or more it is over budget for a
 live drag. This is a colour-only change invalidating cached geometry. It is
 not a cost of the picker itself.
+
+### Grid selection: footer summary (2026-09-26)
+
+`geode_blotter::core::select::summarize` builds the footer aggregate strip
+(grid selection spec §3.3/§4.3): per selected measure column, an
+`Accumulator` pass over the selection's top-most rows only, after a
+`top_most` ancestor walk that drops any row whose parent is also selected.
+Benched at the same 720,881-row, fully expanded shape
+(`shape(80, 10, 900, 6)`) the `restore_by_path` benches above use, with a
+`Rows` selection spanning the whole grid (`V` then `G` from the top) and
+every one of the plan's measure columns — the worst case for both the
+ancestor walk (every row present, so the walk actually needs to run) and the
+accumulator loop (every measure column summed).
+
+Measured with `cargo bench -p geode-blotter --bench blotter -- summarize`
+(bench profile, `cargo bench`'s own defaults, no shortened sample window),
+on Apple M5 Pro (MacBook Pro) with rustc 1.96.0:
+
+| bench | median |
+| --- | ---: |
+| `summarize/720881 rows, all columns` | **1.2029 ms** |
+
+Well inside the 8 ms UI-action budget with headroom to spare, so a
+`V`-then-`G` top-of-grid selection over the demo's largest shape does not
+need the tile to summarize lazily or off the UI thread.

@@ -44,6 +44,45 @@ recompile columns or format the whole dataset. Publication watches are scoped
 to the datasets the view reads, and global frame changes are staged through
 the flip barrier.
 
+### Selection
+
+`V` (`blotter::visual_rows`) selects whole rows from the cursor; `v`
+(`blotter::visual_block`) selects a rectangular block of cells. Pressing the
+other key while a selection is live switches its kind at the same anchor;
+pressing the same key again clears it. Every motion extends the selection to
+the new cursor position instead of moving alone, and a bare `j`/`k` that
+would otherwise wrap clamps at the grid's ends instead — wrapping past the
+anchor would silently invert the selection. `y` yanks the selection as TSV: a
+row selection copies every column with its header row, and a cell block
+copies only its own columns, still with their header.
+
+The anchor is a tree path plus a column name, not a display index, so a
+re-sort, a column move, or a live redelivery keeps the same data selected. If
+the anchor's row is no longer shown — collapsed, filtered out, narrowed away
+— the selection clears and the tile reports "selection cleared: its first row
+is no longer shown".
+
+While a selection is live, the footer shows one aggregate per selected
+measure column, computed over the selection's top-most rows only: a group row
+already carries its children's total, so counting a child as well would
+double it. Each column reports sum, mean, and count, plus min and max when
+the selection spans a single measure column. A column carrying a
+`DeterminedNonAdditive` value anywhere in the selection shows `Σ —†` instead
+of a sum or mean — an explicit refusal rather than a plausible but wrong
+total.
+
+The mouse reaches the same states the keyboard does. A plain click clears any
+selection and moves the cursor; shift+click extends one, starting a block
+from the cursor or, from the line-number gutter, rows. A drag selects
+continuously, and whether it selects rows or a block is decided by where the
+press that started it landed — the gutter starts rows, a cell starts a
+block — so a drag that did not begin with a press on a cell or the gutter
+selects nothing. The first `escape` clears the selection alone; a second
+escape falls through to clearing narrowing or find, as it always did.
+
+Limitations: a selection is always one contiguous row range or rectangle —
+there is no multi-range selection — and there is no paste; `y` is yank-only.
+
 ## Market-data documents
 
 `geode-documents` owns typed wire-format parsers and writers. A parser produces
