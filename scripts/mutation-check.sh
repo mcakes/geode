@@ -16211,8 +16211,8 @@ run_mutation "pricer save: an Ok outcome leaves a failure standing" \
 
 run_mutation "pricer save: a failed save is not flushed on close" \
   crates/geode-pricer/src/tile.rs \
-  '            if this.dirty || this.save_failed {' \
-  '            if this.dirty {' \
+  '        if self.dirty || self.save_failed {' \
+  '        if self.dirty {' \
   geode-pricer an_ok_for_an_earlier_save_keeps_a_newer_edit_dirty_and_a_failure_is_flushed_on_close
 
 run_mutation "pricer save: an unconfirmed save makes its name known" \
@@ -16252,16 +16252,13 @@ run_mutation "pricer names: untitled-N ignores a queued unconfirmed save" \
 
 run_mutation "pricer names: a queued save is not recorded as pending" \
   crates/geode-pricer/src/tile.rs \
-  '            self.shared
-                .pending_saves
-                .borrow_mut()
-                .insert(self.sheet.name.clone());' \
+  '            self.shared.save_queued(&self.sheet.name);' \
   '' \
   geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
 
 run_mutation "pricer names: an answered save stays pending forever" \
   crates/geode-pricer/src/content.rs \
-  '        self.shared.pending_saves.borrow_mut().remove(sheet);' \
+  '                pending.remove(name);' \
   '' \
   geode-pricer a_queued_unconfirmed_save_keeps_its_name_taken
 
@@ -16570,18 +16567,13 @@ run_mutation "pricer retiring: an rm's forget does not reserve its name" \
 
 run_mutation "pricer deferred load: :e reads past a queued save" \
   crates/geode-pricer/src/tile.rs \
-  '            .contains(&self.sheet.name)
-        {
-            self.load_waiting = true;' \
-  '            .contains(&self.sheet.name)
-            && false
-        {
-            self.load_waiting = true;' \
+  '        if self.shared.save_pending(&self.sheet.name) {' \
+  '        if false {' \
   geode-pricer colon_e_back_to_a_sheet_with_a_queued_save_waits_for_its_answer
 
 run_mutation "pricer deferred load: a restore reads past a queued save" \
   crates/geode-pricer/src/tile.rs \
-  '        let load_waiting = shared.pending_saves.borrow().contains(&name);' \
+  '        let load_waiting = shared.save_pending(&name);' \
   '        let load_waiting = false;' \
   geode-pricer a_restore_of_a_name_with_a_queued_save_waits_for_its_answer
 
@@ -18595,10 +18587,8 @@ run_mutation "pricer tile: a refused save is silent" \
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            if this.dirty || this.save_failed {
-                let _ = this.save_now();
-            }' \
-  '            let _ = (this.dirty, this.save_failed);' \
+  '            this.flush_save();' \
+  '' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
 # A pending load (Part 4's production restore) holds the session record's
@@ -18724,9 +18714,9 @@ run_mutation "pricer tile: a failed load's fallback is saved over the document" 
 # flushes only a pending task loses the unsaved sheet.
 run_mutation "pricer tile: a close flushes only a pending save, not a refused one" \
   crates/geode-pricer/src/tile.rs \
-  '            this.save_task = None;
-            if this.dirty || this.save_failed {' \
-  '            if this.save_task.take().is_some() {' \
+  '        self.save_task = None;
+        if self.dirty || self.save_failed {' \
+  '        if self.save_task.take().is_some() {' \
   geode-pricer closing_after_a_refused_save_flushes_the_unsaved_sheet
 
 # ---- The cursor rests only on rows with a verb (ruling 2026-09-23) ----
@@ -19512,12 +19502,6 @@ run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \
   '                t.flush_save();' \
   '' \
-  geode-pricer flush_all_saves_every_unsaved_sheet_now
-
-run_mutation "pricer: a flush skips a sheet whose save failed" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.dirty || self.save_failed {' \
-  '        if self.dirty {' \
   geode-pricer flush_all_saves_every_unsaved_sheet_now
 
 # A deferred load starts only after the LAST queued save of its sheet.
