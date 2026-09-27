@@ -2880,6 +2880,42 @@ run_mutation "object stack: save-current names the covered dialog instead of Sco
   geode-shell \
   scope_save_current_stacks_over_views_without_touching_it
 
+run_mutation "object stack: a failed write rebuilds every open draft" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        .filter(|state| pending.origins.contains(&state.domain))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  a_failed_stacked_write_leaves_the_covered_draft_alone
+
+run_mutation "object stack: a batch forgets a second contributing domain" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        && !pending.origins.contains(&domain)' \
+  '        && pending.origins.is_empty()' \
+  geode-shell \
+  a_shared_batch_failure_rebuilds_every_contributing_draft
+
+run_mutation "object stack: a covered Scopes dialog misses its values reply" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .find(|state| state.domain == Domain::Scopes)' \
+  '        .take(1)
+        .find(|state| state.domain == Domain::Scopes)' \
+  geode-shell \
+  a_covered_scopes_values_stage_receives_its_delivery
+
+run_mutation "object stack: a covered expression field misses its values reply" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '            .chain(super::dialog::parked_objects_mut(&mut view.modals))' \
+  '            .chain(super::dialog::parked_objects_mut(&mut []))' \
+  geode-shell \
+  a_covered_expression_field_receives_its_values
+
+run_mutation "object stack: a reload leaves a covered expression field stale" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    .chain(super::dialog::parked_objects_mut(&mut self.modals))' \
+  '                    .chain(super::dialog::parked_objects_mut(&mut []))' \
+  geode-shell \
+  a_reload_refreshes_a_covered_object_expression_field
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
@@ -5597,9 +5633,9 @@ run_mutation "objectdialog: an edit assigns the config instead of going through 
 # Only a test counting the events can see it.
 run_mutation "objectdialog: the config fan-out fires per keystroke instead of riding the debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
+  '    schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);' \
   '    apply_in_memory(shell, &user_dir, &edits, cx);
-    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
+    schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);' \
   geode-shell \
   the_config_fan_out_is_debounced_and_goes_through_the_one_applier
 
@@ -5807,7 +5843,8 @@ run_mutation "objectdialog: a removal bypasses the batch again" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }' \
   '    let Some(user_dir) = shell.user_dir.clone() else {
@@ -8089,11 +8126,13 @@ run_mutation "objectdialog: a removal waits on the write debounce" \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);' \
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);' \
   '    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);' \
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, origin, cx);' \
   geode-shell deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
 # `Domain::objects` used to ask `Destination::Presentation.doc(self)`
@@ -8244,13 +8283,13 @@ run_mutation "objectdialog: create does not wait for the edit debounce" \
   '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
     None
 }' \
   '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, Some(domain), cx);
     None
 }' \
   geode-shell \
@@ -11907,9 +11946,9 @@ run_mutation "objectdialog: enter names i on a row i can open" \
 # with it, or the crumb keeps naming a column whose fields are gone.
 run_mutation "objectdialog: a reverted write leaves the column stage" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '                rebuilt.select_item_named(&column);
-                state.stage = Stage::Edit { object };' \
-  '                rebuilt.select_item_named(&column);' \
+  '            rebuilt.select_item_named(&column);
+            state.stage = Stage::Edit { object };' \
+  '            rebuilt.select_item_named(&column);' \
   geode-shell \
   a_failed_write_in_the_column_stage_steps_back_to_the_view
 

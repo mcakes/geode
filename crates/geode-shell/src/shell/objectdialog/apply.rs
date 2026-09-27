@@ -90,6 +90,10 @@ pub(crate) struct PendingConfigWrite {
     /// batch, so a failure reverts the batch, not the last keystroke of
     /// it.
     revert: Vec<LayerDoc>,
+    /// The object-dialog domains whose drafts contributed edits to this batch. A
+    /// failed write reverts memory for the whole batch, so exactly these drafts are
+    /// rebuilt; any other open dialog's draft had nothing in it and is left alone.
+    origins: Vec<Domain>,
 }
 
 /// Render and parse the exact object text used for persistence, so memory and disk
@@ -331,7 +335,7 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         draft.mark_saved();
     }
 
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, domain, cx);
     None
 }
 
@@ -354,7 +358,8 @@ pub(super) fn commit_removal(
     let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    let origin = shell.object_dialog.as_ref().map(|s| s.domain);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }
 
@@ -388,14 +393,15 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
     None
 }
 
 /// Queue one whole object (`[name]` in `doc`'s user layer) with zero delay, for a surface
 /// outside the object dialog that creates a definition. It joins any pending batch, so
 /// an object-dialog edit in flight is written with it rather than raced. Refuses, with
-/// nothing queued, when there is no writable user directory.
+/// nothing queued, when there is no writable user directory. No object dialog's draft
+/// contributed, so a failed write rebuilds none.
 pub(crate) fn queue_object(
     shell: &mut ShellView,
     doc: &'static str,
@@ -407,17 +413,19 @@ pub(crate) fn queue_object(
         return Err("no writable user config directory — nothing was changed".to_string());
     };
     let edits = BTreeMap::from([((doc, name.to_string()), Some(value))]);
-    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, None, cx);
     Ok(())
 }
 
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers
-/// resolve the writable directory before advancing any draft baseline.
+/// resolve the writable directory before advancing any draft baseline. `origin` is the
+/// object dialog whose draft produced the edits, if any.
 fn queue_batch(
     shell: &mut ShellView,
     edits: BTreeMap<(&'static str, String), ObjectEdit>,
     user_dir: PathBuf,
     delay: Duration,
+    origin: Option<Domain>,
     cx: &mut Context<ShellView>,
 ) {
     // Captured before the first edit of a batch, so a failed write
@@ -427,7 +435,7 @@ fn queue_batch(
         None => shell.services.config.all_docs(),
     };
 
-    schedule_flush(shell, user_dir, edits, revert, delay, cx);
+    schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);
 }
 
 /// Fold edits into the active layered documents, re-merge them, and use the same reload
@@ -479,6 +487,7 @@ fn schedule_flush(
     edits: BTreeMap<(&'static str, String), ObjectEdit>,
     revert: Vec<LayerDoc>,
     delay: Duration,
+    origin: Option<Domain>,
     cx: &mut Context<ShellView>,
 ) {
     let seq = shell.config_write_seq.wrapping_add(1);
@@ -490,9 +499,15 @@ fn schedule_flush(
             user_dir,
             edits: BTreeMap::new(),
             revert,
+            origins: Vec::new(),
         });
     pending.seq = seq;
     pending.edits.extend(edits);
+    if let Some(domain) = origin
+        && !pending.origins.contains(&domain)
+    {
+        pending.origins.push(domain);
+    }
 
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
@@ -626,7 +641,7 @@ fn run_writes(
 }
 
 /// Attempt to restore the batch's initial documents through the reload applier and
-/// rebuild any open draft after a current write failure.
+/// rebuild every open draft that contributed to the batch after a current write failure.
 ///
 /// Restoration covers the whole in-memory batch. Successful writes to other files are
 /// not rolled back, and the watcher may subsequently load that partial disk state. This
@@ -641,41 +656,55 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     shell.apply_reload(restored, cx);
     // Keep the failure visible even when the dialog that queued the write is closed.
     shell.config_write_error = Some(format!("config not saved — reverted: {message}"));
-    // The draft is the edit buffer the reverted value has to show through,
-    // so it is rebuilt from the config that just went back — otherwise the
-    // row keeps painting the value the file refused.
-    if let Some(state) = shell.object_dialog.as_mut()
-        && let Some(draft) = state.draft.as_ref()
+    // Only the drafts that contributed to the batch show it reverted. A covered
+    // dialog of another domain keeps its unsaved draft: nothing of it was in the
+    // batch, and rebuilding it would throw away the trader's place.
+    let config = &shell.services.config;
+    for state in shell
+        .object_dialog
+        .iter_mut()
+        .chain(crate::shell::dialog::parked_objects_mut(&mut shell.modals))
+        .filter(|state| pending.origins.contains(&state.domain))
     {
-        let selected = draft.selected;
-        let name = draft.name.clone();
-        let mut rebuilt = state.domain.draft(&shell.services.config, &name);
-        // The rebuilt draft has object fields, not a column projection. Return to the
-        // object stage and select the column by name rather than reusing an index into
-        // its seven presentation fields.
-        match &state.stage {
-            Stage::Column { object, column } => {
-                let (object, column) = (object.clone(), column.clone());
-                rebuilt.select_item_named(&column);
-                state.stage = Stage::Edit { object };
-            }
-            // A rebuilt scope also has no Values projection. Return to its object stage
-            // and reset the cursor to the first row.
-            Stage::Values { object, .. } => {
-                let object = object.clone();
-                rebuilt.selected = 0;
-                state.stage = Stage::Edit { object };
-            }
-            _ => rebuilt.selected = selected,
-        }
-        // Rebuilding can change which rows the restored index or column name
-        // identifies. Settle the replacement draft here because failure recovery runs
-        // outside the key path.
-        rebuilt.settle_selection(state.domain);
-        state.draft = Some(rebuilt);
-        state.notice = Some(format!("could not save — change reverted ({message})"));
+        rebuild_after_revert(state, config, &message);
     }
     cx.notify();
+}
+
+/// Rebuild one dialog's draft from the reverted config and say why. The draft is the
+/// edit buffer the reverted value has to show through; otherwise the row keeps
+/// painting the value the file refused.
+fn rebuild_after_revert(state: &mut super::ObjectDialogState, config: &Config, message: &str) {
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let selected = draft.selected;
+    let name = draft.name.clone();
+    let mut rebuilt = state.domain.draft(config, &name);
+    // The rebuilt draft has object fields, not a column projection. Return to the
+    // object stage and select the column by name rather than reusing an index into
+    // its seven presentation fields.
+    match &state.stage {
+        Stage::Column { object, column } => {
+            let (object, column) = (object.clone(), column.clone());
+            rebuilt.select_item_named(&column);
+            state.stage = Stage::Edit { object };
+        }
+        // A rebuilt scope also has no Values projection. Return to its object stage
+        // and reset the cursor to the first row.
+        Stage::Values { object, .. } => {
+            let object = object.clone();
+            rebuilt.selected = 0;
+            state.stage = Stage::Edit { object };
+        }
+        _ => rebuilt.selected = selected,
+    }
+    // Rebuilding can change which rows the restored index or column name
+    // identifies. Settle the replacement draft here because failure recovery runs
+    // outside the key path.
+    rebuilt.settle_selection(state.domain);
+    state.draft = Some(rebuilt);
+    state.notice = Some(format!("could not save — change reverted ({message})"));
 }
 
 #[cfg(test)]

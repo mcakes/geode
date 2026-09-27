@@ -5015,18 +5015,25 @@ pub(in crate::shell) fn on_row_dropped(
 /// a stage the trader has already left, or to a superseded request,
 /// changes nothing. `Ok` installs the ticked list as a CLEAN baseline
 /// (delivered ticks are the saved scope, not dirt); `Err` installs the
-/// failure row.
+/// failure row. A Scopes dialog covered by another domain's dialog still
+/// owns its request, so the reply reaches it wherever it is in the stack.
 pub(in crate::shell) fn deliver_values(
     shell: &mut ShellView,
     outcome: DistinctOutcome,
     cx: &mut Context<ShellView>,
 ) {
-    let Some(state) = shell.object_dialog.as_mut() else {
+    let live = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain == Domain::Scopes);
+    let Some(state) = shell
+        .object_dialog
+        .iter_mut()
+        .chain(dialog::parked_objects_mut(&mut shell.modals))
+        .find(|state| state.domain == Domain::Scopes)
+    else {
         return;
     };
-    if state.domain != Domain::Scopes {
-        return;
-    }
     let Stage::Values { column, .. } = &state.stage else {
         return;
     };
@@ -5057,8 +5064,11 @@ pub(in crate::shell) fn deliver_values(
     // Delivery replaces the loading row outside keyboard handling. Settle onto the
     // first available stop, skipping the Values header when there are value rows.
     draft.settle_selection(Domain::Scopes);
-    // Scroll to the settled cursor, which can differ from the initial index zero.
+    // Scroll to the settled cursor, which can differ from the initial index zero. A
+    // parked dialog does not own the shared scroll handle.
     let selected = draft.selected;
-    shell.object_dialog_scroll.scroll_to_item(selected);
+    if live {
+        shell.object_dialog_scroll.scroll_to_item(selected);
+    }
     cx.notify();
 }
