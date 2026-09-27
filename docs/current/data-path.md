@@ -322,10 +322,10 @@ Attribution says whether a value belongs to its row; it does not say whether
 a column adds up. The compiler records that separately as
 `ColumnMeta::summable`, true only for a plain measure whose schema aggregate
 is `sum`. Min, max, and any measures, derived expressions, joined columns,
-and grouping columns are not summable, and anything that builds a snapshot
-without the compiler defaults to not summable. A consumer that totals a
-selection (the blotter footer) must gate on it, because a total of maxima or
-of ratios is a plausible wrong number.
+and grouping columns are not summable. Document-query and catalog snapshot
+builders mark their columns false; custom builders must supply the flag
+explicitly. Selection totals require this flag and additive contributing
+values. Attribution alone cannot justify a total of maxima or ratios.
 
 ## Retention and maintenance
 

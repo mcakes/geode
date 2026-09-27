@@ -2073,12 +2073,9 @@ role = "key"
         }
     }
 
-    /// Grid selection spec §5: a mouse-started selection leaves keyboard
-    /// focus on the tile. The click lands on a painted cell through the
-    /// real window, and the `j` after it travels the shell's real keymap
-    /// matcher and focus route — not `BlotterTile::dispatch` — so the
-    /// selection extending proves both that the press kept focus where
-    /// the shell looks for it and that the key reached the blotter.
+    /// A pointer-started selection must retain tile focus. Click a painted
+    /// cell, then type `j` through the shell's keymap and focus routing;
+    /// the resulting extension proves the next key reaches the blotter.
     #[gpui::test]
     fn a_shift_click_selection_keeps_focus_so_a_typed_key_extends_it(
         cx: &mut gpui::TestAppContext,

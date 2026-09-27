@@ -1,14 +1,10 @@
-//! The blotter's pure-core costs at the three result shapes docs/perf.md
-//! records for the tree index and requery benches (133 / 135,733 /
-//! 720,881 rows): flatten fully expanded, flatten fully collapsed,
-//! filling a 40-row cache window, building a 100-column plan, (I3,
-//! final review) `restore_by_path` at the 720,881-row shape — the
-//! keypress-path cost `reflatten_keeping` pays on every requery/expand/
-//! collapse/sort — and (grid selection Task 7) `summarize` over every
-//! row and every measure column at the same 720,881-row shape, the cost
-//! the footer aggregate strip pays for a `V`-then-`G` top-of-grid
-//! selection. Medians are recorded in docs/perf.md under "Phase 3c:
-//! blotter core".
+//! Pure-core benchmarks at 133, 135,733, and 720,881 result rows:
+//! fully expanded and collapsed flattening, a 40-row format-cache window,
+//! and a 100-column plan. The largest shape also measures cursor path
+//! restoration near and far from its prior position and selection summaries
+//! over every row and measure column. These costs run on the UI thread;
+//! query execution and painting are excluded. Performance guidance and
+//! reference measurements are in `docs/current/performance.md`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_blotter::core::cache::FormatCache;
@@ -139,28 +135,11 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(ColumnPlan::build(&view, snap.grouping(), &snap)))
     });
 
-    // I3 (final review): `restore_by_path`'s cost on the render-thread
-    // keypress path (it runs inside every `reflatten_keeping`, i.e. on
-    // every requery/expand/collapse/sort), at the 720,881-row shape
-    // (`shape(80, 10, 900, 6)`, the same one `flatten_all_729k_rows`/
-    // `cache_fill_40x7_729k_rows` above use — labelled `729k_rows`
-    // there, 720,881 rows exactly). Fully expanded, so `visible`/`shown`
-    // hold every row; the target is the very last row (a depth-3 leaf,
-    // the deepest and most numerous depth in this shape — 720,000 of
-    // the 720,881 rows).
-    //
-    // Two `fallback` distances, because they measure different things:
-    // `nearby` (the cursor's previous row, 50 positions off) is the
-    // realistic case the outward-search fix targets — the cursor's node
-    // usually doesn't move far between one reflatten and the next — and
-    // is what the render-thread actually pays on a normal keypress.
-    // `far_fallback` (`fallback = 0`, on the opposite end of the list
-    // from the target) is the adversarial bound: with almost every row
-    // sharing the target's own depth here, the O(1) depth check can't
-    // reject much, so the outward search degrades toward the
-    // allocate-a-path-per-row cost the fix otherwise avoids. Recorded
-    // for honesty about the worst case, not as the number to expect
-    // from ordinary use.
+    // Cursor restoration after a reflatten at 720,881 rows. The fully
+    // expanded target is the last depth-3 leaf; 720,000 rows share that depth.
+    // A fallback 50 positions from the end measures a small cursor displacement.
+    // A fallback at zero measures the full scan: almost every row passes the
+    // depth check and requires constructing a path for comparison.
     let (snap, view) = shape(80, 10, 900, 6);
     let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
     let mut open = Expansion::default();
@@ -187,10 +166,9 @@ fn bench(c: &mut Criterion) {
 
     g.finish();
 
-    // Grid selection spec §3.3/§4.3, Task 7: the footer aggregate strip's
-    // cost at the same 720,881-row fully expanded shape (`snap`/`plan`/
-    // `shown` above) — `V` then `G` from the top, summarizing every
-    // measure column over the whole result.
+    // Summarize every measure over the fully expanded result, as selecting
+    // rows from top to bottom with `V` then `G` does. Ancestor deduplication
+    // is included in the timed work.
     {
         use geode_blotter::core::select::summarize;
         use geode_core::grid::selection::{SelectKind, resolve};

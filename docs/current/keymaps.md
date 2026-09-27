@@ -56,8 +56,9 @@ cannot be silently redirected. Startup can use the remaining
 compiled bindings. On reload, compilation errors participate in the shell's
 last-good acceptance gate; see [reload](configuration.md#hot-reload).
 
-`blotter::visual` is registered as a rename of `blotter::visual_rows`, the row
-selection it always was; the block selection, `blotter::visual_block`, is new.
+`blotter::visual_rows` selects whole rows; `blotter::visual_block` selects a
+cell rectangle. The compatibility name `blotter::visual` resolves to row
+selection.
 
 ## Key spelling and primary modifier
 

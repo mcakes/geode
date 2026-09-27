@@ -44,11 +44,9 @@ pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
 
-/// Every mouse gesture `render_td` recognises on a cell or its gutter
-/// (grid selection spec §5), carried to the tile exactly as `ChevronClicked`
-/// is — the tile's `pointer` handler is the one door both a shift+click and
-/// a drag go through to `start_selection`/`clear_selection`, so the mouse
-/// can never reach a selection state the keyboard doors forbid.
+/// A cell, gutter, or row-background selection gesture sent to the tile.
+/// The tile's `pointer` handler updates the cursor and selection through the
+/// same delegate state used by keyboard actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CellPointer {
     Press {
@@ -87,7 +85,7 @@ pub struct BlotterDelegate {
     /// What the table shows: `visible`, or its fzf-narrowed subset.
     pub shown: Vec<u32>,
     pub cursor: Cursor,
-    /// A live grid selection (grid selection spec §3–§4), anchored by row
+    /// A live grid selection, anchored by row
     /// path and column name so it survives a re-sort, a column move or a
     /// redelivery. `None` in the ordinary cursor-only state.
     pub selection: Option<Selection<Path, String>>,
@@ -520,9 +518,8 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
-    /// Start a selection of `kind` at the cursor, or — when one is live —
-    /// switch its kind keeping the anchor; the same kind again clears
-    /// (spec §4.1).
+    /// Start a selection of `kind` at the cursor. With a live selection,
+    /// switch kind while keeping the anchor, or clear when the kind matches.
     pub fn start_selection(&mut self, kind: SelectKind) {
         match self.selection.as_ref().map(|s| s.kind) {
             Some(k) if k == kind => self.selection = None,
@@ -1033,7 +1030,7 @@ impl BlotterDelegate {
             .is_some_and(|c| c.kind == ColumnKind::Measure)
     }
 
-    /// Wires a cell's or its gutter's mouse-selection gestures (spec §5)
+    /// Wires a cell's or its gutter's mouse-selection gestures
     /// onto `el`: a press (plain, or shift-extending) and, only while
     /// the primary button has stayed down since a press that landed on
     /// a cell or gutter, a drag. `gutter` fixes what kind that press (and
@@ -1332,7 +1329,7 @@ impl TableDelegate for BlotterDelegate {
             .id(("row", row_ix))
             .when(tint, |el| el.bg(cx.theme().selection.opacity(0.35)))
             // A press on the row outside every cell — the trailing filler
-            // column, row padding — is still a plain click (spec §5): it
+            // column, row padding — is still a plain click: it
             // reports a press at the cursor's column so the tile's one
             // pointer door clears or extends exactly as a cell press
             // would. The row bubbles after its cells, so a press a cell or

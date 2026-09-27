@@ -477,22 +477,15 @@ impl BlotterTile {
             .cloned()
     }
 
-    /// `:filter` narrows the tile's own scope layer, so it must be valid
-    /// against this tile's dataset (spec §10.1) the same way a frame
-    /// expression is checked against the schema when it is entered in the
-    /// shell's expression dialogs (`shell::scope_expr_view`, the `Set
-    /// scope expression…` dialog, and the Scopes object dialog's
-    /// `expression` field) — an unknown column or a bad operator on a
-    /// derived dimension is a user error reported at the caret/column, not
-    /// a silent no-op or a compiler error surfaced far downstream. That
-    /// dialog check runs only when the field is entered; a frame restored
-    /// from a saved session is not re-checked here (a saved scope is
-    /// checked separately, by `Scope::validate`, wherever it is loaded).
-    /// A tile's `:scope` word never reaches this check: `:` lines are
-    /// tile-local, so the parser refuses it rather than change the frame.
-    /// `Ok(())` when the view or its dataset isn't resolvable
-    /// (nothing to validate against yet — `requery`'s own "view is not
-    /// configured" error already covers that case).
+    /// Validate a tile-local `:filter` against its dataset and derived dimensions.
+    /// Unknown columns and unsupported operators are reported before the scope
+    /// changes. The shell's expression dialogs perform the corresponding check
+    /// for frame expressions; this method does not revalidate restored frames.
+    /// Saved scopes are checked separately by `Scope::validate` when loaded.
+    ///
+    /// The parser refuses `:scope` because tile commands cannot change the frame.
+    /// An unresolved view or dataset returns `Ok(())` here; query setup reports
+    /// the missing configuration.
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
         let Some(view) = self.view() else {
             return Ok(());
@@ -978,10 +971,9 @@ impl BlotterTile {
         self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
-            // Unconditional, as before this door existed: it also clears
-            // `right_clicked_row`, and `TableEvent::SelectRow`'s own
-            // handler is what keeps its unconditional re-emit from
-            // recursing (its early return on an unchanged row).
+            // Always clear `right_clicked_row` as well as setting the cursor row.
+            // The `SelectRow` handler returns early for an unchanged row, preventing
+            // this call's unconditional event from recursing.
             t.set_selected_row(row, cx);
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
@@ -990,14 +982,10 @@ impl BlotterTile {
         cx.notify();
     }
 
-    /// Every mouse selection gesture (grid selection spec §5) lands here
-    /// and goes through the same `start_selection`/`clear_selection`
-    /// doors the keys use, so a shift+click or a drag can never put the
-    /// delegate in a state the keyboard vocabulary could not also reach.
-    /// A plain press clears; a shift press or a drag starts a selection
-    /// only when none is live yet (repeating either while one is live
-    /// just moves the cursor, exactly as holding `V`/`v` down and moving
-    /// does).
+    /// Handle mouse selection through the delegate state used by keyboard actions.
+    /// A plain press clears the selection. A shift press or drag starts one
+    /// at the current cursor if none is active, then moves the cursor to the
+    /// pointer target. Extending a live selection preserves its kind and anchor.
     fn pointer(&mut self, event: CellPointer, cx: &mut Context<Self>) {
         let kind_for = |gutter: bool| {
             if gutter {
@@ -1101,7 +1089,7 @@ impl BlotterTile {
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
-                    // Spec §20.5: a bare j/k wraps outside a selection only —
+                    // A bare j/k wraps outside a selection only —
                     // wrapping past the anchor would silently invert it.
                     let wrap = d.selection.is_none();
                     d.cursor.move_rows(len, cmd, count, wrap);
@@ -2773,11 +2761,9 @@ mod tests {
         (h, cx)
     }
 
-    /// The centre of a painted, `debug_selector`-tagged element — every
-    /// mouse-selection test's way of turning a cell's logical `(row,
-    /// col)` into the point a real press would land on. `debug_bounds`
-    /// wants a `'static str`: every call site here passes a literal, so
-    /// this takes one too rather than the brief's plain `&str`.
+    /// Find the centre of a painted element by its `debug_selector` id so
+    /// mouse tests exercise the rendered cell. `debug_bounds` requires a
+    /// `'static str`; all callers supply literal selectors.
     fn centre(cx: &mut gpui::VisualTestContext, sel: &'static str) -> gpui::Point<gpui::Pixels> {
         cx.run_until_parked();
         cx.debug_bounds(sel)
@@ -2816,12 +2802,10 @@ mod tests {
         assert_eq!(r.rows, 0..2);
     }
 
-    /// A plain press on a row's area outside every cell — the trailing
-    /// filler column past the last one — is still a plain click (spec §5):
-    /// it clears a live selection and moves the cursor to that row, on
-    /// the cursor's own row as much as on another. Only `render_td` cells
-    /// used to report a press, so the table's own `SelectRow` moved the
-    /// cursor under a selection that stayed live.
+    /// A press on the row's trailing filler clears a live selection and
+    /// moves the cursor to that row, including when it is already the cursor
+    /// row. The row's press listener must report this gesture because no
+    /// cell listener handles the filler.
     #[gpui::test]
     fn a_plain_click_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
@@ -4601,11 +4585,8 @@ mod tests {
         );
     }
 
-    /// The cell's own press listener (grid selection spec §5) fires for
-    /// every left press, a double-click's first press included; a plain
-    /// press always clears any live selection, so it leaves none behind
-    /// here either — there was none to clear, but the toggle itself must
-    /// not have started one.
+    /// A plain cell press clears a live selection, including the presses in
+    /// a double-click. Toggling the row's expansion must not start a selection.
     #[gpui::test]
     fn a_double_click_that_toggles_a_row_leaves_no_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);

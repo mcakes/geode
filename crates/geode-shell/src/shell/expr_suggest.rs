@@ -51,9 +51,9 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     None
 }
 
-/// Re-read the field's text and caret. Runs from the input observer, on
-/// open, after an accept and before a claimed key. It never runs in
-/// render.
+/// Re-read the field's text and caret from input notifications, on open,
+/// after accepting a row, and before Tab inserts one. Unchanged text and
+/// caret skip rebuilding the suggestions. This does not run during render.
 pub(crate) fn refresh(view: &mut ShellView, cx: &mut Context<ShellView>) {
     // The observer fires for every dialog sharing the input (and every
     // cursor blink); with no expression field open, copy nothing.
@@ -198,8 +198,9 @@ pub(crate) fn accept_label(
     accept(view, i, window, cx);
 }
 
-/// Row height at the design rem; the viewport shows at most this many rows.
+/// Row height in design units, scaled with the window rem size.
 const ROW_HEIGHT: f32 = 26.0;
+/// Maximum rows visible before the suggestion list scrolls.
 const VISIBLE_ROWS: usize = 8;
 
 /// The hint line, the ranked rows (or "no matches") and the warning line.

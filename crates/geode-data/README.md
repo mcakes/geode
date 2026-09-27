@@ -79,6 +79,9 @@ often tripped:
 
 - `SUM` never double-counts: measures are split by grain at ingest and
   aggregated at their own grain by the compiler.
+- View column metadata marks only plain `sum` measures as summable.
+  Selection summaries also check per-cell attribution: a value belonging to
+  a row does not imply that its column can be totalled across rows.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows

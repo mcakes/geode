@@ -25,31 +25,22 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Retired action ids and their successors: a user keymap that still names
-/// an old id binds the new one, with a warning (`ActionRegistry::renamed`).
-/// `blotter::visual` selected whole rows, which is exactly what
-/// `blotter::visual_rows` does; `blotter::visual_block` is new.
+/// Compatibility aliases for user keymaps. `blotter::visual` resolves to
+/// `blotter::visual_rows` with a rename warning, preserving whole-row
+/// selection. `blotter::visual_block` selects a rectangular cell range.
 pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::visual_rows")];
 
-/// This module's default bindings (market-data documents §8.4), handed to
-/// the app through [`ModuleFactory::default_keymap`] and spliced above the
-/// shell's own `BUILTIN_KEYMAP` — where, until Part 3, these very two
-/// `[[bindings]]` sections lived, beside a mirrored copy of
-/// `crate::tile::ACTIONS` the shell had to carry because it cannot depend
-/// on this crate. Both copies are gone: the ids a binding names and the
-/// ids `register_actions` registers are now the same list in the same
-/// crate, so they cannot drift, and a desk or user keymap still overrides
-/// any of this exactly as it always did (a fragment sits below every layer
-/// a trader edits).
+/// Default bindings returned through [`ModuleFactory::default_keymap`].
+/// The app combines this fragment with the shell's built-ins; desk and user
+/// layers can override it. This crate owns both the fragment and the actions
+/// registered by its factory.
 ///
-/// Two contexts, matching what `BlotterTile::key_context` actually
-/// pushes: `normal` is the full grammar, `visual` the subset that makes
-/// sense while a selection is live — motions (both axes), `y`, `v`/`V` to
-/// switch or leave, and `escape`.
-/// `^`/`$` sit beside `home`/`end` as the column-extreme pair (user ruling
-/// 2026-09-12: a general navigation grammar, the blotter its first
-/// surface); both are shifted punctuation on a US layout, so they bind as
-/// the bare character with no `shift` modifier.
+/// The contexts match `BlotterTile::key_context`: `normal` has the full grammar;
+/// `visual` has motions on both axes, yank, selection toggles, and Escape.
+/// `v` selects a block and `V` selects rows. Pressing the active kind again
+/// clears the selection; pressing the other kind switches it, keeping the anchor.
+/// `^`/`$` and `home`/`end` move to the first/last column. Shifted punctuation
+/// binds as the bare character without a separate `shift` modifier.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "blotter && mode == normal"
@@ -398,11 +389,9 @@ mod tests {
         }
     }
 
-    /// A user keymap written before the selection split still binds:
-    /// the old `blotter::visual` WAS the row selection (grid selection
-    /// spec ruling 1), so the factory registers it as a rename of
-    /// `blotter::visual_rows` and the binding resolves there with a
-    /// warning instead of being dropped.
+    /// The compatibility alias `blotter::visual` binds whole-row selection
+    /// and reports the current action id in a warning, rather than dropping
+    /// the user's binding.
     #[test]
     fn a_user_binding_on_the_retired_visual_id_binds_visual_rows() {
         let (handle, _rx) = geode_data::DataHandle::for_tests();

@@ -56,8 +56,9 @@ anchor would silently invert the selection. `y` yanks the selection as TSV: a
 row selection copies every column with its header row, and a cell block
 copies only its own columns, still with their header.
 
-The anchor is a tree path plus a column name, not a display index, so a
-re-sort, a column move, or a live redelivery keeps the same data selected.
+The anchor is a tree path plus a column name. Sorting, column moves, and
+live redelivery preserve that identity and recompute the range to the current
+cursor in display order; the intermediate rows or columns can change.
 The anchor is the end the selection started from, which may be the range's
 last row. If the anchor's row is no longer shown — collapsed, filtered out,
 narrowed away — the selection clears and the tile reports "selection cleared:
@@ -69,25 +70,25 @@ column, so hiding one leaves it in place.
 While a selection is live, the footer leads with its extent (`12 rows × 3
 cols`) and then shows one group per selected measure column, parted by
 hairlines. A group's label takes the column's own color, as its header does;
-its sum and mean are painted the way that column's cells paint the same number
-(bullish or bearish for a `sign` column, the sign variant of a sign-tinted
-named color); counts and extremes stay in the foreground, and statistic names
-and refusal marks are muted. Values use the grid's monospace face. Each
+its sum and mean use the column's resolved cell colors, including bullish
+and bearish colors for sign-based columns and sign-tinted named colors.
+Counts and extremes use the foreground color; statistic names and refusal
+marks use muted text. Values use the grid's monospace face. Each
 aggregate is computed over the selection's top-most rows only: a group row
 already carries its children's total, so counting a child as well would double
-it. Each column reports sum, mean, and count, plus min and max when the
-selection spans a single measure column. A column carrying a
-`DeterminedNonAdditive` value anywhere in the selection shows `Σ —†` instead
-of a sum or mean — an explicit refusal rather than a plausible but wrong
-total.
+it. NULL and NaN values do not contribute. A summable column with values
+reports sum, mean, and count, plus min and max when the selection includes a
+single measure column. If any contributing value is `DeterminedNonAdditive`,
+the column shows `Σ —†` instead of sum and mean. An empty summable column
+shows only a zero count.
 
 Whether a column adds up at all is a separate fact, decided by the query
 compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
 only a plain measure whose schema aggregate is `sum` is summable. A `min`,
 `max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
 a joined column, and anything unmarked are not. Such a column shows `Σ —‡`
-with its count, min, and max, and the footer adds "‡ this column does not add
-up". Attribution alone cannot decide this: a `max` measure's values belong to
+with its count and, when values exist, min and max. The footer adds
+"‡ this column does not add up". This refusal takes precedence over `†`. Attribution alone cannot decide this: a `max` measure's values belong to
 their rows, yet the total of two maxima is meaningless.
 
 The mouse reaches the same states the keyboard does. A plain click anywhere
@@ -98,7 +99,7 @@ continuously, and whether it selects rows or a block is decided by where the
 press that started it landed — the gutter starts rows, a cell starts a
 block — so a drag that did not begin with a press on a cell or the gutter
 selects nothing. The first `escape` clears the selection alone; a second
-escape falls through to clearing narrowing or find, as it always did.
+escape follows the tile's normal narrowing and find-clearing behavior.
 
 Limitations: a selection is always one contiguous row range or rectangle —
 there is no multi-range selection — and there is no paste; `y` is yank-only.

@@ -22,7 +22,7 @@
 //! While typing, `expr_suggest` lists what fits at the caret and warns
 //! about schema problems. Enter refuses a syntax error or an unknown
 //! column (`geode_core::scope::complete::check`). An operator that means
-//! nothing on its column fails at query time, as before.
+//! nothing on its column fails at query time.
 
 use std::rc::Rc;
 

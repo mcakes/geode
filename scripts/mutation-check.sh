@@ -14907,11 +14907,9 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
-# Spec §20.5 at the blotter tile's own derivation (the final review's
-# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from whether a selection is live (grid selection spec
-# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
-# with a selection live leaps from the last row to row 0 and inverts it.
+# The tile enables row wrapping only when no selection is active.
+# Forcing wrap on makes a bare j jump from the last row to the first
+# and reverses the selected range across its anchor.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
   '                    let wrap = d.selection.is_none();' \
@@ -21168,7 +21166,7 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
-# ---- grid selection (grid selection spec) ---------------------------------
+# ---- grid selection ------------------------------------------------------
 
 run_mutation "grid selection: an ancestor in the selection hides the row" \
   crates/geode-core/src/grid/selection.rs \
@@ -21205,7 +21203,7 @@ run_mutation "grid selection: a lost anchor column is named as the column" \
   geode-core \
   resolution_goes_through_identity_and_names_the_lost_anchor
 
-# ---- blotter selection (grid selection spec) -------------------------------
+# ---- blotter selection ---------------------------------------------------
 
 run_mutation "blotter selection: escape clears the selection before find" \
   crates/geode-blotter/src/tile.rs \

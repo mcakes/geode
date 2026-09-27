@@ -1,10 +1,10 @@
-//! A grid selection (grid selection spec §3.1): whole rows (`V`) or a
-//! rectangular block of cells (`v`), anchored by row and column
-//! *identity* so a re-sort, a column move or a live redelivery keeps it
-//! on the same data. Indices are recomputed from the anchor to the
-//! cursor in the current display order on every change; an anchor that
-//! is no longer displayed resolves to `None` and the tile clears the
-//! selection rather than guessing a neighbour.
+//! Grid selections anchored by row and column identity. Whole-row
+//! selections include every column; cell blocks span a rectangle. Hosts
+//! resolve the anchor against the current display order after sorting,
+//! column moves, or data delivery, then span from it to the cursor.
+//! [`Selection::resolve_with`] returns [`Lost`] when the anchor row or a
+//! block's anchor column is absent, so the host can clear the selection.
+//! Row selections do not require their anchor column to remain visible.
 
 use crate::format::Sign;
 use std::ops::Range;
@@ -93,8 +93,8 @@ impl<R, C> Selection<R, C> {
     }
 }
 
-/// The rows of `rows` with no ancestor also in `rows` (spec §1 ruling 2):
-/// a parent row already carries its children's total, so counting both
+/// The rows of `rows` with no ancestor also in `rows`. A parent row
+/// already carries its children's total, so counting both
 /// would double it. Walks each row's ancestor chain against a dense
 /// membership bitmap of size `universe` — independent of display order,
 /// which fzf narrowing does not keep in tree order. Output keeps `rows`'
@@ -129,8 +129,10 @@ pub fn top_most(
 pub struct ColumnAggregate {
     /// Non-NULL, non-NaN values seen.
     pub count: usize,
-    /// `None` when `count == 0` or any value was non-additive.
+    /// `None` when `count == 0`, any value was non-additive, or the column
+    /// is unsummable.
     pub sum: Option<f64>,
+    /// Present under the same conditions as `sum`.
     pub mean: Option<f64>,
     pub min: Option<f64>,
     pub max: Option<f64>,
@@ -228,10 +230,9 @@ pub struct StatPart {
     pub refused: bool,
 }
 
-/// The footer summary for one column (spec §3.3), formatted with that
-/// column's own `ColumnFormat`. `extremes` adds `min`/`max` (a selection
-/// covering a single numeric column); an unsummable column always shows
-/// them, since they are all it has to say.
+/// The footer summary for one column, formatted with its `ColumnFormat`.
+/// `extremes` includes `min`/`max` when values are present; an unsummable
+/// column includes them regardless of that flag. Count is always included.
 ///
 /// Two markers refuse a total, each with its own footer legend: `†` for
 /// a column whose selected cells are shown for their row but must not be

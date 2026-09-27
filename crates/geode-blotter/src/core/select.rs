@@ -1,4 +1,4 @@
-//! The blotter's selection summary (grid selection spec §3.3, §4.3):
+//! Selection summaries:
 //! per selected measure column, the aggregate over the selection's
 //! top-most rows only — a group row already carries its children's
 //! total — with non-additive cells, and columns that do not add up

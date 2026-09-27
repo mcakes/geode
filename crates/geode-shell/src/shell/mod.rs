@@ -878,9 +878,9 @@ impl ShellView {
         .detach();
         // Expression suggestions follow the caret as well as the text. A
         // caret moved by an arrow or a click emits no `Change`, but the
-        // input notifies, so observe it. `expr_suggest::refresh` skips
-        // unchanged text and caret, so the cursor blink's notify costs one
-        // comparison.
+        // input notifies, so observe it. `expr_suggest::refresh` compares
+        // the text and caret before rebuilding; cursor blinks do not
+        // repeat context analysis or ranking.
         cx.observe(&dialog_input, |view, _input, cx| {
             expr_suggest::refresh(view, cx)
         })

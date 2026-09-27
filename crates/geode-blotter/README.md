@@ -38,6 +38,16 @@ cargo bench -p geode-blotter   # the pure core
 - A chevron click and a row double-click are `space`: both go through
   `expand_at_cursor`, the path `zo`/`zc`/`za` take. The chevron listener
   stops propagation and ignores `click_count() > 1`.
+- `v` selects a cell block and `V` selects whole rows. Repeating the active
+  kind clears the selection; switching kind keeps its anchor. Anchors use
+  row paths and column names across sorting, column moves, and redelivery.
+  Losing the anchor row, or a block's anchor column, clears the selection
+  with a notice. The compatibility action `blotter::visual` resolves to
+  `blotter::visual_rows` with a warning.
+- Selection summaries include only the selected rows without a selected
+  ancestor, avoiding double-counted group totals. Only compiler-marked
+  summable columns with additive values produce a sum and mean; `†` marks
+  non-additive values and `‡` marks unsummable columns.
 - Every mouse selection gesture reaches the tile as a `CellPointer`, and
   only through `pointer`. A cell or gutter press records `drag_origin`; the
   row's own mouse-down (`render_tr`) reports a press at the cursor's column

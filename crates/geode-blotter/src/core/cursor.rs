@@ -56,23 +56,13 @@ impl Cursor {
 }
 
 /// The visible index whose node has `path`, or `None` when no visible
-/// row matches (including an empty `visible`).
+/// row matches, including an empty `visible` list.
 ///
-/// I3 (final review): this runs inside every `reflatten_keeping`, i.e.
-/// on every keypress that expands/collapses/sorts/regroups, so its cost
-/// is the render-thread's, not a background one. Two things kept the
-/// naive scan-from-zero-and-`path_of`-everything shape expensive at row
-/// counts in the hundreds of thousands: `path_of` allocates a `Vec<
-/// Option<String>>` plus one `String` per ancestor, and it ran for every
-/// row from index 0 up to the match regardless of that row's depth or
-/// how close the match actually was to where the cursor already was.
-/// Fixed by (1) `tree.depth(row) == path.len()` first — an O(1), non-
-/// allocating check that skips the overwhelming majority of rows (most
-/// depths in a tree aren't the cursor's) before ever calling `path_of`,
-/// and (2) searching outward from `near` (the cursor's previous row)
-/// rather than from row 0 — the common case is that the cursor's node
-/// moved by a handful of positions or not at all, so this finds it in
-/// O(1) `path_of` calls instead of O(near).
+/// Search outward from `near`, the last known position, so a small movement
+/// after reflattening needs few path comparisons. Check depth before
+/// constructing a path to avoid allocations for rows that cannot match.
+/// This runs on the UI thread for cursor and selection-anchor restoration;
+/// a missing or distant match can still require scanning the entire list.
 pub fn find_by_path(
     visible: &[u32],
     snapshot: &Snapshot,
