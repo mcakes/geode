@@ -752,10 +752,18 @@ delivery; it does not call a pricing implementation directly.
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data
-documents. `geode-app --demo` writes them under a seed-specific temporary
-directory and uses the same ingestion, adapter, parsing, query, and delivery
-paths as configured sources. Demo adapters provide subscribed documents and
-fetchable series without pretending to be production vendor integrations.
+documents. `geode-app --demo` writes risk files under a seed-specific temporary
+directory and streams serialized documents through its in-process adapter.
+Both use the same ingestion, parsing, query, and delivery paths as configured
+sources. Demo configuration remains below desk and user overrides. Cached
+sources and database contents are reused, so schema or generator changes may
+require clearing the demo directory; see the [application README](../../crates/geode-app/README.md).
+
+Demo series provide deterministic minute bars in fixed weekday sessions from
+14:30 to 21:00 UTC, without holiday or daylight-saving rules. One source
+advertises identities and another requires manual entry. Document production
+and ingestion are asynchronous; starting the app does not guarantee data is
+ready for the first frame.
 
 `geode-app` is the composition root. It loads configuration, initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers

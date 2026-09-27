@@ -1,6 +1,7 @@
-//! The Geode binary. Loads layered config (spec §8), builds the action
-//! registry, keymap, and starting workspace state, then opens the window on
-//! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
+//! Application composition: initialize logging and GPUI, load layered config,
+//! register data providers and module factories, restore the session, and open
+//! the shell. This crate connects the shell, data service, and feature modules
+//! without introducing dependencies between those layers.
 
 mod assets;
 mod bridge;
@@ -45,15 +46,10 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Registry, fmt, reload};
 
 fn main() {
-    // First thing: the subscriber, before `Application::new` and before
-    // config load — the config load itself should log (spec §4.1, Phase
-    // 4b Task 2). `[log]`'s levels are applied through the returned
-    // control once `build_shell_services` has a `Config` to read them
-    // from.
-    //
-    // `_log_guard` MUST stay bound (never `let _ = ..`) for the rest of
-    // `main` — see `install_logging`'s own doc comment for why dropping
-    // it silently stops the file layer.
+    // Install logging before configuration loading so startup failures reach the
+    // ring, stderr, and any available file sink. Apply configured levels once
+    // configuration is loaded. Keep `_log_guard` bound until application exit;
+    // dropping it stops the background file writer.
     let (log_ring, log_control, _log_guard) = install_logging();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,32 +57,21 @@ fn main() {
         Ok(rows) => rows,
         Err(message) => {
             tracing::error!(target: "geode::config", "{message}");
-            // NEW-2 (final review round 2): `process::exit` runs no
-            // destructors, so `_log_guard` bound above would otherwise
-            // never drop and `tracing_appender`'s non-blocking worker
-            // thread would never flush — this line (and any log line
-            // still in its channel) could be missing from `logs/geode.
-            // YYYY-MM-DD.log` entirely, even though the appender was
-            // sent it. `drop` here runs the guard's flush-then-exit
-            // logic before the process actually ends; the stderr layer
-            // and the ring are both synchronous already and unaffected
-            // either way.
+            // `process::exit` skips destructors. Drop the file writer's guard first
+            // to flush buffered startup diagnostics.
             drop(_log_guard);
             std::process::exit(2);
         }
     };
 
-    // `--demo` (spec §7.1): emit the generator's sample data once per row
-    // count, off the render thread's critical path — this runs before
-    // `gpui_platform::application()` even opens a window, so there is no
-    // frame yet to stall. `ensure_emitted` is idempotent: a warm demo
-    // directory from an earlier run is reused rather than regenerated.
+    // Prepare demo sources before opening a window. A warm source directory is
+    // reused, keeping generation outside the UI's render work.
     let demo_root = demo_rows.map(demo::demo_dir);
     if let (Some(rows), Some(root)) = (demo_rows, &demo_root)
         && let Err(e) = demo::ensure_emitted(root, rows)
     {
         tracing::error!(target: "geode::ingest", "failed to emit sample data into {root:?}: {e}");
-        // NEW-2: see the other `process::exit` call's own comment above.
+        // Flush the file writer before exiting without unwinding.
         drop(_log_guard);
         std::process::exit(1);
     }
@@ -95,61 +80,35 @@ fn main() {
         .with_assets(assets::AppAssets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
-            // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus
-            // cycling) and `ctrl-f` (from its editor `Search` action, which
-            // otherwise swallows the list dialogs' and command palette's
-            // "page down" on Windows and Linux) — see that function's own
-            // doc comment for the full mechanism per key and why each is
-            // scoped the way it is. Shared with
-            // `shell::tests::dialog_test_shell` so the dialogs' own tests
-            // prove the `tab` reclaim, rather than merely assuming it holds
-            // here; `ctrl-f` has no such test (see the function's doc
-            // comment).
+            // Install shell key overrides after component bindings so list dialogs and
+            // the palette retain their navigation keys. Dialog test hosts use this same
+            // initializer; individual key coverage is documented at its definition.
             geode_shell::shell::dialog::init_reclaimed_keybindings(cx);
 
-            fonts::register(cx); // bundled Inter/JetBrains Mono (Task 10) —
-            // after init (installs the Theme global this edits), before the
-            // window opens so the first frame already carries them.
+            // Register bundled fonts after component init creates the theme and
+            // before the first window frame reads it.
+            fonts::register(cx);
 
-            // Reclaim `DataTable`'s own key bindings while a tile has
-            // gpui focus for one frame after a click (Phase 3 §3.3) — see
-            // `geode_blotter::init`'s own doc comment.
+            // Install tile key overrides after component initialization so a focused
+            // table does not consume keys owned by the tile.
             geode_blotter::init(cx);
             geode_diagnostics::init(cx);
-            // The market-data panel's body is a `DataTable` too (user
-            // ruling 2026-09-14), so it owes the same reclaim; binding the
-            // same keys to `NoAction` twice is harmless.
+            // Market-data tables need the same tile-owned key routing.
             geode_marketdata::init(cx);
-            // The timeseries tile hosts no `DataTable`, but its range
-            // popup owns the keyboard across two segmented date fields
-            // and `tab` is how a trader moves between them (timeseries
-            // spec §9.8) — so it owes the same `NoAction` reclaim of
-            // `Root`'s focus cycling, scoped to the popup's own key
-            // context. (The shell root's own `GeodeShell` reclaim is
-            // what gets `tab` as far as a focused TILE at all; this one
-            // is the popup's, at its own depth.)
+            // The range popup owns Tab navigation between its date fields. Its key
+            // context overrides Root focus cycling while the popup is active.
             geode_timeseries::init(cx);
-            // The line pricer's cell editor is a `DataTable` too, for the
-            // same reason: it owes the same reclaim while its grid holds
-            // gpui focus.
+            // Keep table bindings from consuming the pricer's editing keys.
             geode_pricer::init(cx);
 
-            // The demo bus's adapter (market-data-documents plan, Task
-            // 10): registered only under `--demo`, since it is the
-            // demo's own producer for the market-data path — a
-            // non-demo build never creates a `ChannelAdapter` and
-            // passes `AdapterRegistry::default()` into `data_setup`
-            // instead, exactly as it always has. Built here, before
-            // `build_shell_services`, because `bridge::data_setup`
-            // (called from inside it) is what actually registers the
-            // `[cvi]` source against this adapter.
+            // Register demo transports before data setup resolves configured sources
+            // and upload targets. Non-demo startup supplies an empty adapter registry.
             let (demo_feed, adapters) = if demo_rows.is_some() {
                 let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
                 let mut adapters = geode_data::adapter::AdapterRegistry::default();
                 adapters.register(adapter);
-                // The timeseries demo sources (timeseries spec §5.6): the
-                // same seed as the risk generator, one with a catalogue
-                // and one without.
+                // Use the risk generator's seed for both series sources, exercising
+                // catalogue and manual-identity discovery.
                 adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
                 adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
                 (Some(feed), adapters)
@@ -157,9 +116,7 @@ fn main() {
                 (None, geode_data::adapter::AdapterRegistry::default())
             };
 
-            // Every build has the mock (line-pricer spec §5.5); a vendor
-            // crate, when one exists, registers itself here behind its
-            // feature gate.
+            // The mock pricing implementation is available in every build.
             let mut pricers = geode_data::PricerRegistry::default();
             pricers.register(Arc::new(geode_pricing::MockPricer::new()));
 
@@ -172,22 +129,11 @@ fn main() {
                 cx,
             );
 
-            // The demo bus itself (Task 10; a second producer added by
-            // Task 11): spawned once, right after the services it feeds
-            // exist. `geode_demo_data::demo_underlyings()` is the risk
-            // generator's own vocabulary, so the documents this bus
-            // publishes never drift from the desk names `--demo`'s risk
-            // snapshot already uses — both the CVI and the dividend
-            // producer are built over it. Kept alive as `demo_bus` until
-            // the app quits (below) — dropping it early would stop the
-            // thread and close its `ChannelFeed`, which would in turn
-            // close the bus's inbound channel out from under the data
-            // service's own subscription.
+            // Start document producers after the service installs its subscriptions.
+            // Both use the risk generator's underlying vocabulary so demo datasets share
+            // identities. Keep the bus alive until the quit hook stops its thread.
             let mut demo_bus = demo_feed.map(|feed| {
-                // Every OTHER displayed time in this codebase reads the
-                // trader's clock (Phase 4a's ruling); the demo generators'
-                // "today" is no exception, even though it never paints —
-                // it seeds the synthetic documents' own dates.
+                // Seed synthetic document dates from the configured application clock.
                 let today = geode_core::clock::Clock::from_config(&services.config)
                     .0
                     .today(chrono::Utc::now());
@@ -226,35 +172,15 @@ fn main() {
                 )
             });
 
-            // The panic hook (Phase 4b Task 6), installed after the
-            // subscriber (`install_logging`, at the very top of `main`)
-            // and once `services` exists, since it needs `registry.
-            // hash_names()` — a clone of the registry's shared hash → id
-            // map (fix round 1, MIN-1: `register_pick_actions`/
-            // `register_scope_actions` both run once each, here inside
-            // `build_shell_services`, *before* this hook is installed —
-            // there is no reload-time registration for the clone to
-            // outlive; `hash_names()` is used because `ActionRegistry`
-            // itself is not `Send`/`Sync` and cannot be captured by a
-            // `'static` hook closure directly, not because the map
-            // changes after this point). `log` is always `Some` on this
-            // path (`install_logging` always builds a `Ring`); the
-            // `if let` mirrors every other "missing = skipped, never a
-            // panic" spot in this file rather than assuming it.
+            // Install the panic hook after logging and action registration. It captures
+            // only thread-safe handles: the log ring, action tail, and shared action-name
+            // map. The registry itself remains on the UI thread.
             if let Some(log) = &services.log {
                 let names_snapshot = services.registry.hash_names();
                 let names: Arc<dyn Fn(u64) -> Option<String> + Send + Sync> = Arc::new(move |h| {
-                    // Fix round 1, MIN-2: `try_read`, not a blocking
-                    // `read()` — see `crash.rs`'s own MIN-2 note on the
-                    // action tail's `try_lock` for why a hook must never
-                    // block on a lock the panicking thread itself might
-                    // already hold. `register` only ever *writes* this
-                    // map from the UI thread before the hook exists, so
-                    // contention here would mean the panicking thread is
-                    // the UI thread having panicked mid-`register` — the
-                    // `None` fallback (rendered as `<unknown action ..>`
-                    // by the hook) degrades gracefully rather than
-                    // risking a self-deadlock.
+                    // A hook runs before unwinding releases locks. Avoid waiting on a lock
+                    // the panicking thread may hold; an unavailable name becomes unknown
+                    // in the report.
                     names_snapshot
                         .try_read()
                         .ok()
@@ -310,18 +236,9 @@ fn main() {
                 bridge::stop_at_quit(bridge, cx);
             }
 
-            // The demo bus's own shutdown (Task 10): stopped before
-            // `_log_guard` drops at the end of `main` — off the UI
-            // thread, for the same reason the data service's shutdown
-            // above is, even though `DemoBus::stop` itself only ever
-            // waits out `STOP_POLL`-sized slices rather than a long
-            // cadence. `Arc<Mutex<Option<..>>>` (not a plain move) is
-            // what lets this run inside an `FnMut`: `on_app_quit`'s
-            // closure type must support being called more than once
-            // even though a real quit fires it only the once, and
-            // `DemoBus` cannot be cloned to give each hypothetical call
-            // its own copy the way the bridge's `DataHandle` clone
-            // above does — `take()` makes a second call a no-op instead.
+            // Stop the demo producer on a background executor so joining its thread
+            // does not block the UI. Taking the bus from an Option makes repeated hook
+            // calls harmless. GPUI's quit deadline still limits how long cleanup can run.
             if let Some(bus) = demo_bus.take() {
                 let bus = Arc::new(Mutex::new(Some(bus)));
                 cx.on_app_quit(move |cx| {
@@ -336,14 +253,8 @@ fn main() {
             }
 
             cx.spawn(async move |cx| {
-                // Task 4: the toolbar IS the native title bar
-                // (`geode_shell::shell::toolbar`), so the window itself
-                // must be opened with gpui-component's title-bar-owned
-                // options (window controls, drag/double-click ownership) —
-                // see `TitleBar::window_options`'s own doc comment
-                // (`gpui-component-0.6.2/src/title_bar.rs`), which carries
-                // the same worked example upstream's `examples/window_title`
-                // does.
+                // The shell toolbar owns title-bar controls and drag gestures. Use the
+                // matching window options when creating its native window.
                 let window = cx
                     .open_window(TitleBar::window_options(), |window, cx| {
                         let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
@@ -351,40 +262,16 @@ fn main() {
                     })
                     .expect("failed to open window");
 
-                // Wire the data bridge to the shell that just opened
-                // (Phase 3 §5.1): route query outcomes and health/publish
-                // events in, forward config reloads back out.
+                // Route service outcomes into the shell and forward configuration
+                // changes once the window exists.
                 if let Some(bridge) = &bridge {
                     cx.update(|cx| bridge::attach(bridge, window, cx));
                 }
 
-                // The diagnostics factory's config refresh (Phase 4b Task
-                // 5, fix round 1 MAJ-3): independent of the data bridge
-                // above — this module needs no `DataHandle`, so it
-                // subscribes for itself rather than piggybacking on
-                // `bridge::attach`, which does not run at all when no
-                // `[sources]`/`[datasets]` are configured. `ShellEvent::
-                // ConfigReloaded` (the original wiring) only fires when a
-                // reload changed `views`/`dimensions` — most reloads
-                // (`[log]`, `[theme]`, `keymap.toml`, ...) never touch it,
-                // so the config section's explainer went stale on exactly
-                // the reload the palette's `Set log level…`'s own
-                // persist causes (`:level` on a tile's command line
-                // caused the same reload until command-line locality
-                // closed that route 2026-09-20). `Frame::
-                // versions().config` now bumps on every *applied* reload
-                // (`hot_reload::apply_reload`'s `note_config_reloaded`
-                // call moved out from under the `views_changed` gate), so
-                // observing the frame directly and comparing that counter
-                // is the ungated signal this refresh actually needs — the
-                // same counter `DiagnosticsTile`'s own `cx.observe(&frame,
-                // ..)` narrows to (`config` + `as_of` only, fix round 1
-                // MAJ-6). `last_config_version` is a `Cell` (not a plain
-                // local) so the `FnMut` the observer boxes can update it
-                // between calls — same shape as `bridge.rs`'s own
-                // `catalog_tag: Rc<Cell<u64>>`. Guarded so a frame notify
-                // for an unrelated reason (a scope keystroke, an as-of
-                // change) does not re-clone `Config` for nothing.
+                // Refresh diagnostic configuration independently of the data bridge.
+                // The frame's config counter changes on every applied reload, including
+                // log, theme, and keymap edits that do not emit ConfigReloaded. Other
+                // frame changes must not clone configuration or trigger this refresh.
                 cx.update(|cx| {
                     let shell = window
                         .read(cx)
@@ -394,22 +281,10 @@ fn main() {
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
-                    // MIN-7 (final review): registered here, before any
-                    // diagnostics tile can exist to register its own
-                    // `cx.observe(&frame, ..)` — gpui invokes an entity's
-                    // observers in registration order, so this refresh of
-                    // `diagnostics_factory`'s shared `Rc<RefCell<Config>>`
-                    // is guaranteed to run before `DiagnosticsTile`'s own
-                    // frame observer (`geode-diagnostics/src/tile.rs`)
-                    // rebuilds the config section FROM that same `Config`
-                    // on the SAME `config` version bump. That ordering is
-                    // load-bearing and not stated anywhere gpui enforces
-                    // it structurally — if a future refactor ever let a
-                    // tile's observer register before this one (a second
-                    // window, a different construction order), the tile
-                    // would rebuild from the previous `Config` and never
-                    // rebuild again, since its own version is already
-                    // consumed by the time this one updates.
+                    // Register this observer before diagnostics tiles register theirs.
+                    // GPUI invokes observers in registration order: the shared factory
+                    // configuration must be current before a tile consumes the same
+                    // version bump and rebuilds its config section.
                     cx.observe(&frame, move |frame, cx| {
                         let now = frame.read(cx).versions().config;
                         if now != last_config_version.get() {
@@ -424,45 +299,20 @@ fn main() {
         });
 }
 
-/// Installs the process-wide `tracing` subscriber (Phase 4b Task 2, spec
-/// §4.1–4.3), before anything else in `main` runs: a level filter behind
-/// a `reload::Layer` (starting at [`LogLevels::default`] — `[log]`'s real
-/// levels apply once `build_shell_services` has loaded a `Config`), a
-/// plain stderr `fmt` layer (replaces the old per-call-site stderr prints), the ring
-/// every subscriber layer feeds (read later by the diagnostics tile),
-/// and — only when the user config dir exists — a daily rolling file
-/// under `<user>/logs/geode.YYYY-MM-DD.log`. `None` (no home) means no
-/// file layer, exactly as `ShellServices::session_path` has no session
-/// file: logging degrades to stderr-and-ring only, never a panic.
+/// Install process-wide tracing with a reloadable level filter, synchronous
+/// stderr and in-memory ring layers, and an optional background file writer.
+/// Default levels apply until configuration is loaded. The ring retains 4,096
+/// records. File setup failure leaves stderr and ring logging available.
 ///
-/// MIN-7 (fix round 1): that date is `tracing-appender`'s own clock,
-/// which is UTC (`OffsetDateTime::now_utc`) — unlike every *displayed*
-/// time in this app (Phase 4a's ruling: "times are the trader's local
-/// clock throughout" — as originally worded; now the configured clock,
-/// `[time] zone`), the log file's name is not local. West of UTC,
-/// `geode.2026-09-08.log` can hold the evening of the 7th, local.
-/// `trim_log_files`'s seven-file cap still sorts and counts correctly
-/// (the names are still in age order relative to each other), only the
-/// name's meaning is off — recorded here rather than fixed, since fixing
-/// it means hand-rolling the rotation `tracing-appender`'s `Builder`
-/// does not expose a local-clock option for.
+/// Daily files live under `<user>/logs/geode.YYYY-MM-DD.log`; their date and
+/// rotation use UTC, independently of the configured display clock. Startup
+/// trims matching files to seven before opening the current log. Rotation does
+/// not prune files during the run.
 ///
-/// Returns the file layer's [`tracing_appender::non_blocking::WorkerGuard`]
-/// (MIN-8, final review), `None` when there is no user dir to log into.
-/// **The caller MUST hold this for the life of the process — binding it
-/// with a leading underscore (`let _log_guard = ..`), never discarding
-/// it (`let _ = ..`) or letting the return value's temporary drop at the
-/// end of the call statement.** Dropping a `WorkerGuard` stops that
-/// background writer thread: `NonBlocking::write` after that silently
-/// drops every further log line bound for the file (the channel's
-/// receiver is gone, and `NonBlocking` fails open rather than blocking
-/// or panicking) rather than erroring. This was a plain, synchronous
-/// `RollingFileAppender` before this fix — every `tracing::*!` call that
-/// reached the file layer blocked the calling thread on that write.
-/// `non_blocking` moves the write onto a dedicated worker thread instead
-/// (PHILOSOPHY.md: "nothing may stall the render thread" — a UI-thread
-/// `warn`, the Global Constraint's one permitted level there, used to do
-/// synchronous file I/O inline on a paint).
+/// Retain the returned [`tracing_appender::non_blocking::WorkerGuard`] for the
+/// application lifetime and drop it before explicit process exits. Dropping it
+/// stops the file writer; subsequent file-bound records are lost. Daily logs can
+/// lag behind the synchronous ring that supplies panic reports.
 fn install_logging() -> (
     Arc<Ring>,
     Arc<dyn LevelControl>,
@@ -486,16 +336,8 @@ fn install_logging() -> (
             .filename_suffix("log")
             .build(&logs)
             .ok()?;
-        // MIN-8 (final review): `non_blocking` hands the write to a
-        // background thread rather than doing it on the calling thread
-        // (see this function's own doc for the trade this makes and the
-        // `WorkerGuard` contract). `crash.rs`'s panic hook used to rely
-        // on the OLD blocking behaviour to guarantee every earlier log
-        // line was already on disk by the time a panic reached it —
-        // updated there too: the crash file itself is built from the
-        // in-memory ring, not the file layer, so it is unaffected; only
-        // the on-disk daily log can now lag a panic by a buffered batch,
-        // an accepted trade documented at that call site.
+        // File writes run on a dedicated thread. The panic hook reads the
+        // synchronous ring, so its report does not wait for this buffer to flush.
         let (non_blocking, guard) = tracing_appender::non_blocking(appender);
         log_guard = Some(guard);
         Some(fmt::layer().with_writer(non_blocking).with_ansi(false))
@@ -520,10 +362,9 @@ fn install_logging() -> (
     (ring, Arc::new(ReloadControl(reload_handle)), log_guard)
 }
 
-/// `--demo [rows]` (default 100,000), or no arguments at all (spec §7.1).
-/// Anything else is a usage error the caller should exit(2) on — argument
-/// parsing has no config to fall back to, unlike a bad `*.toml`, so this
-/// is the one place invalid input does not just degrade and continue.
+/// Parse no arguments or `--demo [rows]`, defaulting to 100,000 demo rows.
+/// The row count must parse as `usize`; zero is accepted. Other inputs return
+/// a usage error, which startup logs before exiting with status 2.
 fn parse_args(args: &[String]) -> Result<Option<usize>, String> {
     match args {
         [] => Ok(None),
@@ -540,15 +381,10 @@ fn usage(reason: &str) -> String {
     format!("{reason}\nusage: geode [--demo [rows]]")
 }
 
-/// Wraps the bridge's shared `Rc<BlotterFactory>` so it can go in the
-/// roster, which wants an owned `Box<dyn ModuleFactory>` (§9.1) — the
-/// factory itself has to stay an `Rc` because `bridge::attach`'s reload
-/// handler also holds a clone, for `set_views`/`set_find_style`/
-/// `set_stale_after` on every `ConfigReloaded` (spec §5.1). A thin
-/// forwarding wrapper here, rather than `impl ModuleFactory for
-/// Rc<BlotterFactory>` in `geode-blotter` itself, keeps that crate's
-/// public surface exactly the one `ModuleFactory for BlotterFactory` impl
-/// it already has.
+/// Forward the roster's owned [`ModuleFactory`] interface to a shared blotter
+/// factory. The bridge retains the same factory to apply configuration reloads.
+/// Forward actions, contexts, keymaps, and creation so trait defaults cannot
+/// silently replace the wrapped factory's behavior.
 struct BlotterFactoryHandle(Rc<BlotterFactory>);
 
 impl ModuleFactory for BlotterFactoryHandle {
@@ -558,11 +394,8 @@ impl ModuleFactory for BlotterFactoryHandle {
     fn register_actions(&self, registry: &mut ActionRegistry) {
         self.0.register_actions(registry)
     }
-    // Forwarded like everything else on this trait: a defaulted method
-    // NOT forwarded here would silently answer for the wrapper (no
-    // fragment, contexts = the kind) instead of for the factory it
-    // wraps, and the blotter's whole keymap would vanish with no
-    // diagnostic anywhere.
+    // Forward context and keymap declarations alongside actions; inheriting
+    // trait defaults could silently remove or mis-scope the factory's bindings.
     fn contexts(&self) -> Vec<&'static str> {
         self.0.contexts()
     }
@@ -583,18 +416,9 @@ impl ModuleFactory for BlotterFactoryHandle {
     }
 }
 
-/// Same shape as [`BlotterFactoryHandle`], for the market-data panel's
-/// factory (market-data spec §8.1): the bridge's reload handler holds a
-/// clone for `set_stale_after`, so the roster gets a forwarder rather
-/// than the factory itself.
-///
-/// **Every defaulted trait method is forwarded**, for the reason
-/// [`BlotterFactoryHandle::contexts`] gives — and it bites harder here
-/// than anywhere else: this factory's kind (`cvi`) and its key context
-/// (`marketdata`) are DIFFERENT words, so a wrapper answering the
-/// trait's default would declare the context `cvi`, every one of the
-/// fragment's bindings would be dropped with an error diagnostic, and
-/// the panel would have no keys at all.
+/// Share a market-data factory between the roster and bridge. Forward its
+/// contexts explicitly: document kind `cvi` uses key context `marketdata`, so
+/// the trait's kind-based default would reject the panel's bindings.
 struct MarketDataFactoryHandle(Rc<MarketDataFactory>);
 
 impl ModuleFactory for MarketDataFactoryHandle {
@@ -624,19 +448,9 @@ impl ModuleFactory for MarketDataFactoryHandle {
     }
 }
 
-/// Same shape as [`BlotterFactoryHandle`], for the timeseries viewer's
-/// factory (timeseries spec §9.1): the bridge's reload handler holds a
-/// clone for `set_colours`, so the roster gets a forwarder rather than
-/// the factory itself.
-///
-/// **Every defaulted trait method is forwarded**, for the reason
-/// [`BlotterFactoryHandle::contexts`] gives — `contexts()` included,
-/// even though this factory's kind and its key context are the same word
-/// (`timeseries`) and the trait default would therefore answer
-/// correctly today. A wrapper that forwards some methods and inherits
-/// others is a wrapper that lies the moment the wrapped factory changes
-/// one of them, and `MarketDataFactoryHandle` is what that failure looks
-/// like when it happens.
+/// Share a timeseries factory between the roster and bridge reload handler.
+/// All trait methods forward to the factory so its actions, contexts, keymap,
+/// and creation behavior remain consistent.
 struct TimeseriesFactoryHandle(Rc<geode_timeseries::content::TimeseriesFactory>);
 
 impl ModuleFactory for TimeseriesFactoryHandle {
@@ -666,8 +480,7 @@ impl ModuleFactory for TimeseriesFactoryHandle {
     }
 }
 
-/// Same shape as [`TimeseriesFactoryHandle`], for the line pricer: the
-/// bridge keeps a clone for its reload.
+/// Share a pricer factory between the roster and bridge reload handler.
 struct PricerFactoryHandle(Rc<geode_pricer::content::PricerFactory>);
 
 impl ModuleFactory for PricerFactoryHandle {
@@ -697,9 +510,8 @@ impl ModuleFactory for PricerFactoryHandle {
     }
 }
 
-/// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
-/// `main`'s config-reload subscription (set up once a window exists, in
-/// the `cx.spawn` block below) also holds a clone, for `set_config`.
+/// Share a diagnostics factory between the roster and the frame-config
+/// observer installed after window creation.
 struct DiagnosticsFactoryHandle(Rc<geode_diagnostics::DiagnosticsFactory>);
 
 impl ModuleFactory for DiagnosticsFactoryHandle {
@@ -753,37 +565,20 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     builtin
 }
 
-/// Load config, register the shell's and modules' builtin actions,
-/// compile the keymap, and build the starting (empty, workspace 1)
-/// workspace state. Config and keymap diagnostics log at `geode::config`
-/// (spec §10.1: invalid config must never stop the app from starting —
-/// error/warn by [`Diagnostic::severity`], never a panic). Returns the
-/// desk/user config directories alongside the services so the caller can
-/// pass the same two directories into `ShellView::new` for the config
-/// hot-reload watcher (Task 1c-1) — one `config_dirs()` call, one source
-/// of truth for what's watched — and the data bridge (`None` when the
-/// config has no datasets/views to serve), so the caller can attach it
-/// to the window once it opens.
+/// Load layered configuration, construct the action registry and module roster,
+/// compile keybindings, and prepare shell services. The initial workspace is
+/// empty; session restoration happens before the shell is constructed. Config
+/// and keymap diagnostics are logged with their declared severity.
 ///
-/// `demo_root` is `Some` under `--demo` (spec §7.1): the directory
-/// `demo::ensure_emitted` has already populated with generated CSVs, one
-/// level above its `src` subdirectory. Its config layer goes in ahead of
-/// desk/user config, exactly where the builtin keymap already sits, so a
-/// desk or user layer can still override any of it.
+/// Return the same desk/user directories used for loading so the shell watches
+/// the correct sources. Return the data bridge for attachment after window
+/// creation; data setup requires datasets and views documents. The builtin
+/// pricer declarations supply these even outside demo mode.
 ///
-/// `log_ring`/`log_control` are `install_logging`'s output (Phase 4b
-/// Task 2), threaded through here rather than reinstalled: `[log]` in
-/// the just-loaded `config` is applied through `log_control` the moment
-/// it's parsed, so it takes effect for everything logged after this
-/// call, and both go onto the returned `ShellServices` for the
-/// diagnostics tile and the palette's `Set log level…` (`:level` on a
-/// tile's command line reached the same services until command-line
-/// locality closed that route 2026-09-20) to reach.
-///
-/// `adapters` (market-data-documents plan, Task 10) is the caller's own
-/// adapter roster — the `ChannelAdapter` registered under `--demo`, or
-/// `AdapterRegistry::default()` otherwise — forwarded verbatim into
-/// `bridge::data_setup`.
+/// `demo_root` names an already prepared demo directory. Its configuration is
+/// part of the builtin layer, below desk and user overrides. Provider registries
+/// are passed to data setup; logging uses the existing subscriber and applies
+/// configured levels through its reload control.
 fn build_shell_services(
     demo_root: Option<&Path>,
     log_ring: Arc<Ring>,
@@ -800,11 +595,8 @@ fn build_shell_services(
 ) {
     let (desk, user) = config_dirs();
     let builtin = builtin_layer(demo_root);
-    // `ShellServices::config_and_builtin` derives `config` and `builtin`
-    // from one `ConfigSources`, so the two cannot disagree (see that
-    // function's doc comment — reconstructing `builtin` separately from
-    // what `config` was loaded from silently deleted the demo desk on the
-    // first config write of a session).
+    // Load configuration and retain its builtin documents from one source set.
+    // Configuration writes and reloads must keep the same demo and pricer defaults.
     let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin,
         desk: desk.clone(),
@@ -814,69 +606,40 @@ fn build_shell_services(
         print_diagnostic(diag);
     }
 
-    // `[log]` (spec §4.2): parsed and applied through the reload control
-    // now that a `Config` exists, so it governs everything logged for
-    // the rest of startup and the run — the subscriber itself was
-    // already up (`install_logging`, before config load) at the
-    // conservative default so nothing logged before this point was lost.
+    // Apply configured levels for the remainder of startup and the run.
+    // Earlier messages used the subscriber's default filter.
     let (log_levels, log_diags) = LogLevels::from_doc(&config);
     for diag in &log_diags {
         print_diagnostic(diag);
     }
-    // MIN-10 (fix round 1): unreachable at startup today (only a
-    // poisoned or dropped reload handle can fail this, and neither
-    // happens between `install_logging` and here) but `LevelControl::
-    // set` is the same door the palette's `Set log level…` reloads
-    // through at runtime (`:level` on a tile's command line reloaded
-    // through the same door until command-line locality closed that
-    // route 2026-09-20), where a failure is real and swallowing it
-    // would be wrong — so it's never discarded, even here.
+    // Report filter-reload failures rather than silently retaining old levels.
     if let Err(e) = log_control.set(&log_levels) {
         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
     }
 
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
-    // The dimension pickers' per-column actions (Phase 4a §3.3): from the
-    // loaded schema, right after the shell's own builtins and before the
-    // keymap builds — `register_pick_actions`' own doc comment has the
-    // full ordering rationale.
+    // Register schema-derived picker actions before resolving keymap bindings.
     register_pick_actions(&mut registry, &pickable_columns(&config));
-    // One `scope::<name>` action per saved scope (Phase 4a §3.11), same
-    // ordering rationale as `register_pick_actions` just above — a scope
-    // added by a live reload is not registered until restart (spec §1.3).
-    // `false` (Phase 4b Task 1 fix round 1, MIN-8): `ShellView::new`'s own
-    // load of the same doc, right after this, is the one startup caller
-    // that reports diagnostics — this one printing too would show a
-    // malformed `scopes.toml` entry twice on every launch.
+    // Register saved-scope actions before keymap compilation. New scope action
+    // names require restart. ShellView reports this document's diagnostics at
+    // startup, so suppress duplicate reporting here.
     register_scope_actions(&mut registry, &saved_scopes(&config, false));
 
-    // No default kind (spec 2026-09-08 add-tile §7.1): a tile is added by
-    // naming the kind it hosts, and a tile nothing claims paints the
-    // placeholder. `[app] modules.default` is no longer read at all — a
-    // layer that still sets it gets the warning printed below.
+    // Tiles name their module kind explicitly. An unclaimed kind paints a
+    // placeholder; a deprecated modules.default setting is diagnosed below.
     let mut roster = ModuleRoster::new();
 
-    // The diagnostics module (Phase 4b Task 5, spec §4.6): registered
-    // unconditionally, unlike the blotter factory just below — it needs
-    // no data handle, so the palette's `Diagnostics: Split` row (or the
-    // status bar's diagnostics-summary click) opens a tile even with no
-    // `[sources]`/`[datasets]` configured at all. `diagnostics_factory` is
-    // returned to the caller so it can subscribe to `ShellEvent::
-    // ConfigReloaded` once a window (and so a `ShellView` to subscribe to)
-    // exists — `set_config` refreshes the config section's explainer the
-    // same way `BlotterFactory::set_views`/`set_schema` refresh theirs.
+    // Diagnostics needs no data handle and is always registered. Return its
+    // shared factory so the window's frame-config observer can refresh it.
     let diagnostics_factory = Rc::new(DiagnosticsFactory::new(log_ring.clone(), config.clone()));
     roster.add(Box::new(DiagnosticsFactoryHandle(
         diagnostics_factory.clone(),
     )));
 
-    // The data bridge (spec §5.1, §5.4): `None` when the config declares
-    // no datasets/views. A blotter with no data handle would panic on its
-    // first requery, so a roster with no bridge simply gets no blotter
-    // factory at all — the palette then lists no "Blotter: Split" row,
-    // and a tile nothing else claims paints the placeholder (2026-09-08
-    // add-tile §7.1).
+    // Data-backed factories require a successful data setup. If setup is absent,
+    // those kinds have no add-tile actions and restored tiles remain placeholders.
+    // The builtin pricer dataset and views normally supply the required documents.
     let db = bridge::db_path(
         &config,
         demo_root,
@@ -888,68 +651,37 @@ fn build_shell_services(
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
         roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
-        // The market-data panel (spec §8.1), registered on the same
-        // condition and for the same reason as the blotter: it asks for
-        // its document through the bridge's `DataHandle`, so with no
-        // bridge there is nothing for it to ask, and the palette then
-        // lists no "CVI: Split" row either.
+        // Register each data-backed module with the bridge's shared handle.
         roster.add(Box::new(MarketDataFactoryHandle(bridge.marketdata.clone())));
-        // The dividend schedule panel (spec §6.5): a second document
-        // kind over the same `MarketDataFactoryHandle` shape, on the
-        // same condition — and the palette then lists no "Dividend:
-        // Split" row either. Its factory was built `.without_keymap()`,
-        // so this registration adds no second `<module:dividend>`
-        // fragment; `default_keymap` is forwarded regardless (every
-        // defaulted trait method is, per `MarketDataFactoryHandle`'s own
-        // doc comment) and simply answers `None` for this one.
+        // Dividend shares the marketdata key context. Its factory disables its
+        // fragment to avoid installing the same bindings twice.
         roster.add(Box::new(MarketDataFactoryHandle(bridge.dividend.clone())));
-        // The timeseries viewer (timeseries spec §9), on the same
-        // condition and for the same reason as every module above: it
-        // fetches and queries its series through the bridge's
-        // `DataHandle`, so with no bridge there is nothing for it to ask
-        // and the palette lists no "Timeseries: Split" row either.
+        // The shared factory receives series configuration reloads through the bridge.
         roster.add(Box::new(TimeseriesFactoryHandle(bridge.timeseries.clone())));
-        // The line pricer (line-pricer spec §8), on the same condition
-        // and for the same reason as every module above: it prices its
-        // rows through the bridge's `DataHandle`, so with no bridge there
-        // is nothing for it to ask and the palette lists no "Pricer:
-        // Split" row either.
+        // The shared pricer factory receives pricing and local-write outcomes.
         roster.add(Box::new(PricerFactoryHandle(bridge.pricer.clone())));
         bridge
     });
 
-    // One "<Kind>: Split" palette row (plus the Horizontal/Vertical
-    // pair) per registered kind (spec 2026-09-08 add-tile §3.2, retitled
-    // by user ruling 2026-09-09), from the roster as it finally stands —
-    // so a build with no data bridge lists no "Blotter: Split". Before
-    // `build_keymap`, like every other registration in this function.
+    // Register split actions for the complete roster before keymap compilation.
     register_add_actions(&mut registry, &roster.kinds());
-    // Modules register their actions before the keymap builds (§3.2).
+    // Register module actions before resolving their keybindings.
     roster.register_actions(&mut registry);
 
-    // These two loops LOG; they do not seed the diagnostics entity.
-    // `ShellView::new` recomputes both from `services.config` and folds
-    // them into its own `note_config` call, in `apply_reload`'s order —
-    // neither diagnostic lives in `config.diagnostics`, so seeding from
-    // that list alone used to leave both out of the diagnostics tile
-    // until the first hot reload happened to add them.
+    // Log modifier-alias and deprecated-setting diagnostics here. ShellView
+    // recomputes these for its diagnostics entity; they are separate from the
+    // configuration loader's diagnostic list.
     let (mod_alias, mod_diags) = mod_alias_from_config(&config);
     for diag in &mod_diags {
         print_diagnostic(diag);
     }
-    // `[app] modules.default` is retired (§7.1) — one warning so the key
-    // does not silently rot in a desk file.
+    // Report a deprecated default-module setting instead of silently ignoring it.
     if let Some(diag) = modules_default_diagnostic(&config) {
         print_diagnostic(&diag);
     }
-    // Each module's own default bindings (market-data documents §8.4),
-    // spliced above the compiled-in keymap and below every desk/user
-    // layer — the roster is final by here (the bridge's blotter factory
-    // was added above), so this is the first point every fragment
-    // exists. Its diagnostics join `keymap_diags` below rather than
-    // living in `config.diagnostics`: like the keymap's own they are
-    // resolved against this registry and this roster, neither of which
-    // `ShellView::new` can reconstruct.
+    // Insert validated module bindings above builtin defaults and below desk/user
+    // layers. Their diagnostics depend on the completed roster and registry, so
+    // carry them into ShellServices alongside keymap compilation diagnostics.
     let (fragments, frag_diags) = roster.keymap_fragments();
     for diag in &frag_diags {
         print_diagnostic(diag);
@@ -969,9 +701,8 @@ fn build_shell_services(
         tracing::warn!(target: "geode::theme", "{warning}");
     }
 
-    // Session file lives alongside user config (spec: state-as-config),
-    // `user_config_dir()/session.toml` — `None` whenever there's no
-    // writable user dir (mirrors desk/user themselves being optional).
+    // Use the resolved user directory for session state when available. Path
+    // resolution does not check writability; the session writer reports failures.
     let session_path = user.as_ref().map(|dir| dir.join("session.toml"));
 
     let services = ShellServices {
@@ -992,11 +723,8 @@ fn build_shell_services(
             control: log_control,
             levels: log_levels,
         }),
-        // Phase 4b Task 6: the shared handle the crash hook resolves
-        // through, installed once `main`'s `run` closure has this
-        // `ShellServices` back (`install_panic_hook` needs `registry.
-        // hash_names()`, which only exists once `registry` — moved into
-        // `services` above — is built).
+        // Share recent action hashes with the panic hook installed after services
+        // and the action-name registry have been built.
         action_tail: Arc::new(Mutex::new(ActionTail::new())),
         // What `build_keymap` reported above. Printed already; carried
         // here because `ShellView::new` cannot recompute it (it needs
@@ -1012,11 +740,8 @@ fn build_shell_services(
     (services, desk, user, bridge, diagnostics_factory)
 }
 
-/// A config or keymap diagnostic (spec §10.1): logged at `geode::config`,
-/// error or warn by [`Diagnostic::severity`] — the message formatted as
-/// it always has been (`Diagnostic`'s own `Display`), minus the
-/// `[source]` prefix this used to carry: the target now says where it
-/// came from.
+/// Log a configuration or keymap diagnostic at `geode::config`, using its
+/// severity and Display message.
 fn print_diagnostic(diag: &Diagnostic) {
     match diag.severity {
         Severity::Warning => tracing::warn!(target: "geode::config", "{diag}"),
@@ -1024,11 +749,9 @@ fn print_diagnostic(diag: &Diagnostic) {
     }
 }
 
-/// Desk and user config directories (spec §8): desk comes from
-/// `GEODE_DESK_CONFIG` if set; user is a platform-appropriate per-user
-/// config directory. No `dirs` crate — see the workspace invariant in
-/// CLAUDE.md — so this hand-rolls the two cases that matter: Windows'
-/// `%APPDATA%`, and everything else's `$HOME/.config`.
+/// Resolve the desk directory from `GEODE_DESK_CONFIG` and the user directory
+/// from `APPDATA`, falling back to `HOME/.config`. Missing or non-Unicode
+/// environment values are treated as absent. No filesystem checks are made.
 fn config_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
     let desk = std::env::var("GEODE_DESK_CONFIG").ok().map(PathBuf::from);
     let user = user_config_dir(std::env::var("APPDATA").ok(), std::env::var("HOME").ok());
@@ -1210,21 +933,9 @@ mod tests {
         assert_eq!(docs.len(), 1);
     }
 
-    /// Task 12: the roster carries both document kinds' factories
-    /// (`MarketDataFactoryHandle`, exactly as `run` wires them beside
-    /// each other), but the dividend one was built `.without_keymap()`
-    /// — so `keymap_fragments()` splices only ONE `<module:cvi>` layer,
-    /// never a second `<module:dividend>` one binding the identical
-    /// `marketdata` context a second time — and `register_add_actions`
-    /// over the roster's own kinds still lists "Dividend: Split" for it
-    /// (`register_add_actions`'s own `"{Kind}: Split"` pattern, user
-    /// ruling 2026-09-09), since a factory that ships no fragment still
-    /// gets an add-tile row. (`register_add_actions`'s `capitalize`
-    /// title-cases only the first letter, so `cvi`'s own row reads
-    /// "Cvi: Split" rather than the "CVI: Split" several doc comments
-    /// describe — a pre-existing mismatch this test does not fix, since
-    /// it is not this task's kind; only `dividend`'s title is asserted
-    /// exactly, `cvi`'s presence merely confirmed.)
+    /// Both document kinds have add-tile actions, while only the CVI factory
+    /// contributes the shared marketdata keymap. Dividend disables its fragment
+    /// to avoid duplicate bindings without losing its roster entry.
     #[test]
     fn the_second_panel_ships_no_second_fragment_but_still_gets_an_add_tile_row() {
         use geode_data::DataHandle;
@@ -1263,20 +974,9 @@ mod tests {
         );
     }
 
-    /// Task 11 (timeseries spec §9): the roster carries the timeseries
-    /// viewer's factory through `TimeseriesFactoryHandle`, exactly as
-    /// `run` wires it beside the blotter's and the two panels' — so
-    /// `register_add_actions` lists a "Timeseries: Split" row for it
-    /// (`register_add_actions`'s own `"{Kind}: Split"` pattern, user
-    /// ruling 2026-09-09) and the module's own actions are registered
-    /// through the forwarder rather than being silently dropped by a
-    /// wrapper that answered the trait's defaults.
-    ///
-    /// `timeseries::add` is the one asserted by name because it is the
-    /// action the tile's own `DEFAULT_KEYMAP` binds `a` to: a forwarder
-    /// whose `register_actions` did not reach the factory would leave
-    /// every one of the fragment's bindings pointing at nothing, and
-    /// `build_keymap` drops such a binding without a word.
+    /// The timeseries forwarder must expose the factory's kind, registered
+    /// actions, and keymap fragment. Check `timeseries::add` explicitly because
+    /// the shipped fragment binds it to `a`.
     #[test]
     fn the_roster_lists_timeseries_and_registers_its_add_action() {
         use geode_data::DataHandle;
@@ -1313,22 +1013,9 @@ mod tests {
         assert_eq!(docs[0].file.to_string_lossy(), "<module:timeseries>");
     }
 
-    /// Task 11 fix round 1, Minor 4: **every** key in the production
-    /// keymap SPELLS. `build_keymap` drops a binding whose keystroke it
-    /// cannot parse and reports an error diagnostic — a loud one, in the
-    /// trader's diagnostics tile, but only at runtime, and until now
-    /// nothing checked it anywhere. `geode-timeseries` shipped
-    /// `"+" = "timeseries::zoom_in"` for five tasks that way: a fragment
-    /// is checked by `check_fragment` for its PREDICATES and by each
-    /// module's own test for its ACTION IDS, and neither of those ever
-    /// parses a key.
-    ///
-    /// This is `run`'s own pipeline as far as line 913 — the shipped
-    /// builtin keymap, the demo layer over it, the full registry (the
-    /// shell's builtins, the pickers' per-column actions, the saved
-    /// scopes, the add-tile rows) and the full roster's fragments
-    /// spliced in — and it catches the next `+` for every module at
-    /// once, rather than one crate-local net per module.
+    /// Build the complete builtin/demo keymap with the production registry and
+    /// module factories. This checks keystroke syntax as well as declared contexts
+    /// and registered action IDs; fragment validation alone does not parse keys.
     #[gpui::test]
     fn the_whole_production_keymap_builds_with_no_diagnostics(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1344,12 +1031,8 @@ mod tests {
         register_pick_actions(&mut registry, &pickable_columns(&config));
         register_scope_actions(&mut registry, &saved_scopes(&config, false));
 
-        // The roster as `run` finally has it: the diagnostics module,
-        // then everything the bridge carries. Built through the real
-        // `bridge::start`, so this is the production factory list rather
-        // than a hand-kept copy of it — a module added to `run` and not
-        // here would be invisible, which is exactly the failure this
-        // test exists to prevent.
+        // Construct real factories through bridge::start, then reproduce the
+        // application roster to check their combined fragments and action IDs.
         let mut pricers = geode_data::PricerRegistry::default();
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
         let setup = bridge::data_setup(
@@ -1386,15 +1069,9 @@ mod tests {
         );
     }
 
-    /// Phase 4b Task 2's migration invariant, kept true rather than
-    /// merely checked once: every `crates/*/src/**/*.rs` file outside a
-    /// `tests/` directory or an inline `#[cfg(test)] mod ... { ... }`
-    /// block is `eprintln!`-free — every real call site now goes through
-    /// `tracing` with a target and a level, so the ring/file/stderr
-    /// layers see everything. A test-only debug print inside an inline
-    /// `#[cfg(test)]` module (unlike `shell/tests/reload.rs`'s own,
-    /// which sits in a whole `tests/` directory and so is already
-    /// excluded) is deliberately still allowed.
+    /// Production workspace source uses tracing so level filters and the
+    /// ring/file/stderr sinks see its diagnostics. Debug prints are allowed only
+    /// under tests directories or recognized inline test gates.
     #[test]
     fn no_eprintln_outside_tests_in_workspace_src() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1423,9 +1100,8 @@ mod tests {
         );
     }
 
-    /// MIN-5 (fix round 1), blind spot 1: `#[cfg(test)] mod tests;` (no
-    /// body — the real one lives under a `tests/` directory) must not
-    /// swallow everything for the rest of the file.
+    /// A bodyless test module declaration must not hide subsequent production
+    /// lines from the debug-print scan.
     #[test]
     fn walk_rs_files_does_not_get_stuck_after_a_bodyless_cfg_test_mod_declaration() {
         let dir = tempfile::tempdir().unwrap();
@@ -1443,9 +1119,8 @@ mod tests {
         );
     }
 
-    /// MIN-5, blind spot 2: `#[cfg(any(test, feature = "test-support"))]`
-    /// gating a block is test scope too, the same as a plain
-    /// `#[cfg(test)]` — and the gated item need not be a `mod`.
+    /// Recognize cfg(any(test, ...)) blocks for any item kind, including
+    /// functions as well as modules.
     #[test]
     fn walk_rs_files_recognises_a_cfg_any_test_support_gated_block_as_test_scope() {
         let dir = tempfile::tempdir().unwrap();
@@ -1462,9 +1137,7 @@ mod tests {
         );
     }
 
-    /// MIN-5, blind spot 3: mentioning the macro's name in prose,
-    /// uninvoked, is not a call — narrowed from a bare `eprintln!`
-    /// substring match to the call shape `eprintln!(`.
+    /// Mentioning the macro name without invoking it must not count as a call.
     #[test]
     fn walk_rs_files_ignores_prose_mentioning_the_macro_without_calling_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1481,37 +1154,14 @@ mod tests {
         );
     }
 
-    /// Recurses into `dir` collecting `"<path>:<line>"` for every
-    /// `eprintln!(` call site outside a `tests/` path component or an
-    /// inline test-support block gated `#[cfg(test)]` or
-    /// `#[cfg(any(test, ...))]` (tracked by brace depth — a plain count
-    /// of `{`/`}` per line, which is exact for this codebase's
-    /// formatting: `cargo fmt` never puts a brace inside a string or
-    /// comment on a line that also opens/closes a block relevant here).
+    /// Collect path/line locations of debug-print calls outside tests directories
+    /// and blocks gated by cfg(test) or cfg(any(test, ...)). A gate applies to
+    /// the next nonempty, non-comment line only when that line opens a block;
+    /// bodyless declarations do not start a skipped region.
     ///
-    /// Fix round 1 (MIN-5) closed three blind spots the first version
-    /// had:
-    /// - A gate followed by a semicolon-terminated declaration with no
-    ///   body of its own (`#[cfg(test)] mod tests;` — the real body is
-    ///   `mod.rs`'s own `tests/` directory, already excluded by path)
-    ///   used to be treated as "entered a skip block" with nothing ever
-    ///   bringing the brace depth back down to end it, silently
-    ///   swallowing everything after it in the file. Now: a gate is only
-    ///   "entered" when the very next real line actually opens a brace.
-    /// - The gated item no longer has to be a `mod`: `#[cfg(any(test,
-    ///   feature = "test-support"))] pub mod test_support { ... }`
-    ///   (`geode_core::config`) and the same gate on a bare `pub fn`/
-    ///   `impl` block (`geode_data::handle::DataHandle::for_tests`,
-    ///   `geode_shell::module::recording`) are recognised the same way
-    ///   `#[cfg(test)] mod tests { ... }` always was — any line that
-    ///   opens a brace right after either gate starts a skipped block.
-    /// - The eprintln! match narrowed from a bare substring to
-    ///   `eprintln!(` (the call shape), so prose mentioning the macro by
-    ///   name without invoking it (a comment reads "replaces the old
-    ///   `eprintln!` call") no longer trips the check — this only
-    ///   narrows the false-positive surface, it doesn't eliminate every
-    ///   one (a backticked code example quoting a full call would still
-    ///   match, same as a real call would).
+    /// This is a textual check, not a Rust parser. It counts braces even inside
+    /// strings/comments and matches the macro's call spelling there too. Formatting
+    /// and quoted examples can therefore affect its scope or produce false positives.
     fn walk_rs_files(dir: &std::path::Path, offenders: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).expect("readable src subdirectory") {
             let entry = entry.unwrap();
