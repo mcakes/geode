@@ -2937,6 +2937,20 @@ run_mutation "object stack: an open color typeahead keeps the old options" \
   geode-shell \
   refreshing_rebuilds_an_open_color_typeahead
 
+run_mutation "object stack: a covered color typeahead keeps the old options through the palette route" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            *list = rebuilt;' \
+  '            let _ = rebuilt;' \
+  geode-shell \
+  an_open_color_typeahead_lists_a_color_created_above_it
+
+run_mutation "object stack: a covered open field loses its typed text and caret" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                dialog::unpark_object_dialog(self);' \
+  '                {}' \
+  geode-shell \
+  an_open_value_field_survives_a_stacked_colors_dialog
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \

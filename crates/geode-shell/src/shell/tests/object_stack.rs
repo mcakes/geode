@@ -454,3 +454,105 @@ fn a_color_created_in_a_stacked_dialog_is_offered_to_the_covered_column(
         "and the column is not dirtied"
     );
 }
+
+fn input_state(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> (String, usize) {
+    shell.read_with(cx, |s, cx| {
+        let input = s.dialog_input.read(cx);
+        (input.value().to_string(), input.cursor())
+    })
+}
+
+/// An open value field in the covered Views dialog, with typed text and the caret
+/// mid-text, survives a Colors push and pop: the field is still open, the text and
+/// caret come back, and typing continues into it.
+#[gpui::test]
+fn an_open_value_field_survives_a_stacked_colors_dialog(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage_with(cx, views_with_colors(), dir.path());
+    cx.simulate_keystrokes("enter"); // column stage, cursor on Label
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.selected_row().is_some_and(
+        |r| matches!(r, objectdialog::EditRow::Field(i) if d.fields[i].key == "label")
+    )));
+    cx.simulate_keystrokes("i");
+    cx.simulate_input("abc");
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    assert_eq!(input_state(&shell, &cx), ("abc".to_string(), 2));
+
+    open_palette_action(&mut cx, "Edit colors");
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views, Domain::Colors]);
+    assert_eq!(
+        input_state(&shell, &cx).0,
+        "",
+        "Colors starts on a clear input"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views]);
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the field is still open"
+    );
+    assert_eq!(input_state(&shell, &cx), ("abc".to_string(), 2));
+    cx.simulate_input("X");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "abXc");
+}
+
+/// A color typeahead open on the covered column's color row: after a color is created
+/// in the stacked Colors dialog, the revealed typeahead lists it and keeps its query.
+#[gpui::test]
+fn an_open_color_typeahead_lists_a_color_created_above_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage_with(cx, views_with_colors(), dir.path());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    for _ in 0..8 {
+        let on_color = edit_draft(&shell, &cx, |d| {
+            d.selected_row().is_some_and(
+                |r| matches!(r, objectdialog::EditRow::Field(i) if d.fields[i].key == "color"),
+            )
+        });
+        if on_color {
+            break;
+        }
+        cx.simulate_keystrokes("j");
+    }
+    cx.simulate_keystrokes("i");
+    cx.simulate_input("emb");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "the color typeahead is open"
+    );
+
+    open_palette_action(&mut cx, "Edit colors");
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views, Domain::Colors]);
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("ember");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    for _ in 0..3 {
+        if domains(&shell, &cx) == vec![Domain::Views] {
+            break;
+        }
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+    }
+    assert_eq!(domains(&shell, &cx), vec![Domain::Views]);
+    let (options, query, lit) = edit_draft(&shell, &cx, |d| {
+        let list = d.choice.as_ref().expect("the typeahead is still open");
+        (
+            list.options().to_vec(),
+            list.query().to_string(),
+            list.highlighted_text().map(str::to_string),
+        )
+    });
+    assert!(options.contains(&"ember".to_string()), "{options:?}");
+    assert_eq!(query, "emb");
+    assert_eq!(lit.as_deref(), Some("ember"));
+    assert_eq!(input_state(&shell, &cx).0, "emb");
+}
