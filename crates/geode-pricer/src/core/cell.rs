@@ -207,6 +207,21 @@ pub(crate) fn edit_for(
     text: &str,
 ) -> Result<Edit, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
+    edit_on(i, sheet.shift(row), row, kind, text)
+}
+
+/// [`edit_for`] against a given instrument and own shifts rather than the
+/// sheet's. An `Edit` rewrites the whole record (`SetInstrument` the whole
+/// instrument, `SetShift` both shifts), so several cells of one line that
+/// change in one batch must each build on the previous cell's result, or
+/// the last would silently put back what the earlier ones wrote.
+pub(crate) fn edit_on(
+    i: &Instrument,
+    own: OwnShifts,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Edit, String> {
     let t = text.trim();
     match kind {
         ColumnKind::Qty => {
@@ -269,26 +284,20 @@ pub(crate) fn edit_for(
             }
             Ok(set(row, out))
         }
-        ColumnKind::SpotShift => {
-            let own = sheet.shift(row);
-            Ok(Edit::SetShift {
-                row,
-                shift: OwnShifts {
-                    spot_pct: shift(t, "spot shift")?,
-                    ..own
-                },
-            })
-        }
-        ColumnKind::VolShift => {
-            let own = sheet.shift(row);
-            Ok(Edit::SetShift {
-                row,
-                shift: OwnShifts {
-                    vol_pts: shift(t, "vol shift")?,
-                    ..own
-                },
-            })
-        }
+        ColumnKind::SpotShift => Ok(Edit::SetShift {
+            row,
+            shift: OwnShifts {
+                spot_pct: shift(t, "spot shift")?,
+                ..own
+            },
+        }),
+        ColumnKind::VolShift => Ok(Edit::SetShift {
+            row,
+            shift: OwnShifts {
+                vol_pts: shift(t, "vol shift")?,
+                ..own
+            },
+        }),
         ColumnKind::Price
         | ColumnKind::Delta
         | ColumnKind::Gamma

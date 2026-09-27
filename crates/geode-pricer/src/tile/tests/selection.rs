@@ -1013,6 +1013,57 @@ fn a_block_step_steps_each_block_column_and_counts_what_does_not_step(
     assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200", "outside the block");
 }
 
+/// Both shifts live in one `SetShift` record: a block over them must move
+/// both, not have the vol step put the spot shift back.
+#[gpui::test]
+fn a_block_step_over_both_shifts_moves_both(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "right", None); // spot_shift, vol_shift
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let shift = |h: &Harness, vcx: &VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            let s = t.sheet.shift(0);
+            (s.spot_pct, s.vol_pts)
+        })
+    };
+    assert_eq!(shift(&h, &vcx), (Some(1.0), Some(1.0)));
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("stepped 2 cells +1"));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(shift(&h, &vcx), (None, None), "escape takes both back");
+}
+
+/// Strike and barrier level live in one `SetInstrument` record: a block
+/// from strike to barrier on a barrier line must move both.
+#[gpui::test]
+fn a_block_step_over_strike_and_barrier_moves_both(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C DO 4000"]);
+    h.command(&mut vcx, "view barrier").unwrap();
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "right", Some(2)); // strike, type, barrier
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4000"));
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001");
+    assert_eq!(h.cell(&vcx, 0, "barrier"), "4001");
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("stepped 2 cells +1, skipped 1 (1 not numeric)")
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "one undo takes both back"
+    );
+    assert_eq!(h.cell(&vcx, 0, "barrier"), "4000");
+}
+
 #[gpui::test]
 fn a_rows_step_moves_only_the_cursor_column(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);

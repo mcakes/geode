@@ -11,8 +11,10 @@ use crate::core::select::{
     RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, step_notice,
     top_most,
 };
+use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
 use geode_core::pricing::Instrument;
+use std::collections::BTreeMap;
 
 /// The refusal for `v`/`V` on a row with no line behind it.
 const NO_ANCHOR: &str = "select from a line or package row";
@@ -532,6 +534,12 @@ impl PricerTile {
         let (lines, cols) = self.selection_targets();
         let top = top_most(&self.sheet, &self.selected_sheet_rows());
         let mut edits: Vec<Edit> = Vec::new();
+        // Each stepped line's instrument and own shifts as this press has
+        // left them so far. `SetInstrument` and `SetShift` rewrite the whole
+        // record, so a block over strike and barrier, or both shifts, built
+        // from the sheet per column would have the later column's edit put
+        // back the earlier one's value.
+        let mut line_work: BTreeMap<usize, (Instrument, OwnShifts)> = BTreeMap::new();
         let mut stepped = 0usize;
         let mut skips = Skips::default();
         for col in cols {
@@ -599,16 +607,46 @@ impl PricerTile {
                     skips.add(Skip::NotNumeric);
                     continue;
                 };
-                match cell::commit(&self.sheet, l, ckind, &next) {
-                    Ok(Some(e)) => {
-                        edits.push(e);
+                // Built on this press's earlier cells of the same line, not
+                // on the sheet: see `line_work`.
+                let Some((inst, own)) = line_work.get(&l).cloned().or_else(|| {
+                    let i = self.sheet.instrument(l)?.clone();
+                    Some((i, self.sheet.shift(l)))
+                }) else {
+                    skips.add(Skip::ReadOnly);
+                    continue;
+                };
+                match cell::edit_on(&inst, own, l, ckind, &next) {
+                    Ok(Edit::SetInstrument { instrument, .. }) => {
+                        line_work.insert(l, (instrument, own));
                         stepped += 1;
                     }
-                    Ok(None) => stepped += 1,
+                    Ok(Edit::SetShift { shift, .. }) => {
+                        line_work.insert(l, (inst, shift));
+                        stepped += 1;
+                    }
+                    Ok(e) => {
+                        edits.extend(cell::changed(&self.sheet, l, e));
+                        stepped += 1;
+                    }
                     Err(why) if why == READ_ONLY => skips.add(Skip::ReadOnly),
                     Err(why) => return self.refuse_step(why, cx),
                 }
             }
+        }
+        // One whole-record edit per line and record: each carries every
+        // cell of the line this press stepped.
+        for (row, (instrument, shift)) in line_work {
+            edits.extend(cell::changed(
+                &self.sheet,
+                row,
+                Edit::SetInstrument { row, instrument },
+            ));
+            edits.extend(cell::changed(
+                &self.sheet,
+                row,
+                Edit::SetShift { row, shift },
+            ));
         }
         if edits.is_empty() {
             return self.refuse_step(format!("no cells to step{}", skips.describe()), cx);

@@ -24208,8 +24208,8 @@ run_mutation "pricer select: escape rolls back over a changed stepped cell" \
 # A step press is all or nothing: one refused cell refuses the press.
 run_mutation "pricer select: a refused line step lets the rest land" \
   crates/geode-pricer/src/tile/select.rs \
-  $'                    Err(why) => return self.refuse_step(why, cx),\n                }\n            }\n        }\n        if edits.is_empty()' \
-  $'                    Err(_) => skips.add(Skip::Refused),\n                }\n            }\n        }\n        if edits.is_empty()' \
+  $'                    Err(why) => return self.refuse_step(why, cx),\n                }\n            }\n        }\n        // One whole-record edit per line and record' \
+  $'                    Err(_) => skips.add(Skip::Refused),\n                }\n            }\n        }\n        // One whole-record edit per line and record' \
   geode-pricer a_step_that_zeroes_a_qty_writes_nothing
 
 run_mutation "pricer select: a refused package qty step lets the rest land" \
@@ -24256,6 +24256,52 @@ run_mutation "pricer select: a drag from off the cells selects" \
   $'            let Some(started_on_tree) = d.drag_origin else {\n                return;\n            };' \
   '            let started_on_tree = d.drag_origin.unwrap_or(false);' \
   geode-pricer a_drag_that_started_off_the_cells_selects_nothing
+
+# A step builds each line's whole-record edit on the press's earlier
+# cells of that line: from the sheet per column, the vol step's `SetShift`
+# would put the spot step back.
+run_mutation "pricer select: a block step builds each column on the sheet (shifts)" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let Some((inst, own)) = line_work.get(&l).cloned().or_else(|| {' \
+  '                let Some((inst, own)) = None::<(Instrument, OwnShifts)>.or_else(|| {' \
+  geode-pricer a_block_step_over_both_shifts_moves_both
+
+# ... and the barrier step's `SetInstrument` would put the strike step back.
+run_mutation "pricer select: a block step builds each column on the sheet (instrument)" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let Some((inst, own)) = line_work.get(&l).cloned().or_else(|| {' \
+  '                let Some((inst, own)) = line_work.get(&usize::MAX).cloned().or_else(|| {' \
+  geode-pricer a_block_step_over_strike_and_barrier_moves_both
+
+# Under `V` the live step moves the cursor's column only: a row selection's
+# columns span every column.
+run_mutation "pricer select: a V step moves every column of the rows" \
+  crates/geode-pricer/src/tile/select.rs \
+  '            SelectKind::Rows => vec![self.cursor.col],' \
+  '            SelectKind::Rows => r.cols.clone().collect(),' \
+  geode-pricer a_rows_step_moves_only_the_cursor_column
+
+# The table's click inside the open editor's cell is the editor's.
+run_mutation "pricer select: a table click inside the editor cancels it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                self.close_editor(window, cx);' \
+  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                self.close_editor(window, cx);' \
+  geode-pricer a_click_inside_the_open_editor_keeps_it_open
+
+# A double-click inside the open editor reopens nothing (it would take a
+# live step's steps back).
+run_mutation "pricer select: a double-click inside the editor reopens it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
+  $'                    .is_some_and(|_| false)\n                {\n                    return;\n                }\n                self.close_entry(window, cx);\n                let Some(id) = line else {' \
+  geode-pricer a_click_or_double_click_inside_the_stepped_editor_keeps_the_steps
+
+# The first `escape` with a selection live clears the selection alone.
+run_mutation "pricer select: escape leaves the selection live" \
+  crates/geode-pricer/src/tile.rs \
+  '            "escape" if self.selection.is_some() => self.clear_selection(),' \
+  '            "escape" if false => self.clear_selection(),' \
+  geode-pricer escape_clears_only_the_selection_first
 
 # `g u` dissolves bottom-up so each earlier package's index stays valid.
 run_mutation "pricer select: g u dissolves top-down" \
