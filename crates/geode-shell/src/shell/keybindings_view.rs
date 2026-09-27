@@ -342,7 +342,7 @@ const WIDTH: f32 = 640.0;
 /// Open a fresh keybinding dialog through the shared modal lifecycle. Leave an
 /// already-open modal intact.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Keybindings) {
         return;
     }
     // Fresh state every open — nothing survives a close/reopen, same
@@ -353,6 +353,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         view,
         window,
         cx,
+        dialog::DialogKind::Keybindings,
         "Keyboard shortcuts",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),

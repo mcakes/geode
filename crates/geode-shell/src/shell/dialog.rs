@@ -49,9 +49,56 @@ type ModalBuilder = Rc<dyn Fn(&ShellView, &mut Window, &mut App) -> AnyElement>;
 pub type ModalKeyHandler =
     Rc<dyn Fn(&mut ShellView, &Keystroke, &mut Window, &mut Context<ShellView>) -> bool>;
 
+/// Which dialog a stack entry is. Each kind but `Plain` owns one `ShellView`
+/// state field, so a kind appears at most once in the stack (see [`can_open`]);
+/// a second instance would overwrite the live one's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+    Settings,
+    Keybindings,
+    /// The dimension picker (`picker.rs`).
+    Picker,
+    AsOf,
+    ScopeExpr,
+    /// Every `choicedialog` target (tile kinds, grouping, log level): they share
+    /// the one `choice_dialog` field.
+    Choice,
+    /// Every object-dialog domain: they share the one `object_dialog` field.
+    Object,
+    /// A modal with no state field of its own.
+    Plain,
+}
+
+impl DialogKind {
+    /// The status notice for a request refused because this kind is already
+    /// open lower in the stack.
+    #[allow(dead_code)]
+    pub(crate) fn already_open_notice(self) -> &'static str {
+        match self {
+            DialogKind::Settings => "settings is already open underneath",
+            DialogKind::Keybindings => "keybindings is already open underneath",
+            DialogKind::Picker => "the picker is already open underneath",
+            DialogKind::AsOf => "as-of is already open underneath",
+            DialogKind::ScopeExpr => "the expression dialog is already open underneath",
+            DialogKind::Choice => "a choice list is already open underneath",
+            DialogKind::Object => "a configuration dialog is already open underneath",
+            DialogKind::Plain => "a dialog is already open underneath",
+        }
+    }
+}
+
+/// Whether a dialog of `kind` may be pushed now. Openers call this before
+/// installing their state, because installing state for a kind that is already
+/// open would overwrite the live instance.
+pub(crate) fn can_open(view: &mut ShellView, _kind: DialogKind) -> bool {
+    view.modals.is_empty()
+}
+
 /// One open modal, owned and rendered by `ShellView`. Its `Rc` closures can be cloned
-/// out of `self.modal` before invocation, releasing that field's borrow.
+/// out of `self.modals` before invocation, releasing that field's borrow.
 pub struct ShellModal {
+    /// Which state field this entry owns; see [`DialogKind`].
+    pub kind: DialogKind,
     pub title: SharedString,
     /// Build fresh content during [`ShellView::render`] using its existing borrow.
     /// Synchronous entity reads or updates would reenter the shell while it is being
@@ -93,7 +140,7 @@ pub fn set_title_extra(
     view: &mut ShellView,
     build: impl Fn(&ShellView, &mut App) -> AnyElement + 'static,
 ) {
-    if let Some(modal) = view.modal.as_mut() {
+    if let Some(modal) = view.modals.last_mut() {
         modal.title_extra = Some(Rc::new(build));
     }
 }
@@ -105,7 +152,7 @@ pub fn set_back(
     available: impl Fn(&ShellView) -> bool + 'static,
     step: impl Fn(&mut ShellView, &mut Window, &mut Context<ShellView>) + 'static,
 ) {
-    if let Some(modal) = view.modal.as_mut() {
+    if let Some(modal) = view.modals.last_mut() {
         modal.back = Some(ModalBack {
             available: Rc::new(available),
             step: Rc::new(step),
@@ -116,8 +163,8 @@ pub fn set_back(
 /// Whether the open modal currently offers a back step. Read during rendering to decide
 /// whether the title row paints its Back button.
 pub(crate) fn back_available(view: &ShellView) -> bool {
-    view.modal
-        .as_ref()
+    view.modals
+        .last()
         .and_then(|modal| modal.back.as_ref())
         .is_some_and(|back| (back.available)(view))
 }
@@ -126,8 +173,8 @@ pub(crate) fn back_available(view: &ShellView) -> bool {
 /// then synchronize the shared input's text and focus from the resulting state, as
 /// every pointer transition must.
 pub(crate) fn step_back(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    // Clone out of `view.modal` so the step can take the whole view.
-    let Some(back) = view.modal.as_ref().and_then(|modal| modal.back.clone()) else {
+    // Clone out of `view.modals` so the step can take the whole view.
+    let Some(back) = view.modals.last().and_then(|modal| modal.back.clone()) else {
         return;
     };
     if !(back.available)(view) {
@@ -192,12 +239,13 @@ pub fn open_shell_dialog<F>(
     view: &mut ShellView,
     window: &mut Window,
     cx: &mut Context<ShellView>,
+    kind: DialogKind,
     title: impl Into<SharedString>,
     build: F,
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
-    open_shell_dialog_with_key(view, window, cx, title, build, None, false);
+    open_shell_dialog_with_key(view, window, cx, kind, title, build, None, false);
 }
 
 /// Install a modal after cancelling pending key sequences and competing overlays. The
@@ -207,10 +255,13 @@ pub fn open_shell_dialog<F>(
 /// state install it before calling this function and pass `false`, allowing
 /// `sync_dialog_text` to choose focus from their state. Callers guard against
 /// replacing an already-open modal.
+#[allow(clippy::too_many_arguments)]
+// One door for every dialog; bundling these into a struct would only rename them.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
     cx: &mut Context<ShellView>,
+    kind: DialogKind,
     title: impl Into<SharedString>,
     build: F,
     on_key: Option<ModalKeyHandler>,
@@ -218,6 +269,12 @@ pub fn open_shell_dialog_with_key<F>(
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
+    // Backstop for an opener that skipped its own `can_open` check. By then that
+    // opener may already have overwritten the live state, which is why each
+    // opener checks first.
+    if !can_open(view, kind) {
+        return;
+    }
     // Do not let a pending shell key sequence survive into or across the modal.
     view.matcher.cancel();
     // Closing the palette releases its exclusive key route and restores focus before
@@ -235,7 +292,8 @@ pub fn open_shell_dialog_with_key<F>(
     // `close_modal` (see `ShellView::overlay_return_to_filter`).
     view.overlay_return_to_filter = view.filter_field_focused(window, cx);
 
-    view.modal = Some(ShellModal {
+    view.modals.push(ShellModal {
+        kind,
         title: title.into(),
         title_extra: None,
         build: Rc::new(build),

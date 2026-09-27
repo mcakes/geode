@@ -575,7 +575,7 @@ fn fetch_source_names(cx: &App) -> Vec<String> {
 /// Open fresh settings state through the shared modal lifecycle, preserving any
 /// already-open modal. The custom key handler routes the settings vocabulary.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Settings) {
         return;
     }
     // Install state before opening so synchronization parks Normal focus on the shell,
@@ -586,6 +586,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         view,
         window,
         cx,
+        dialog::DialogKind::Settings,
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),

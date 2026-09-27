@@ -570,11 +570,11 @@ impl ShellView {
         // preventing actions from reaching tiles behind the overlay. A shell modal
         // gets first refusal through its key handler; an unclaimed Escape closes it.
         // Component dialogs retain their own handling.
-        if self.modal.is_some() || window.has_active_dialog(cx) {
-            if self.modal.is_some() {
+        if self.modal_open() || window.has_active_dialog(cx) {
+            if self.modal_open() {
                 // Clone the handler before calling it so the modal borrow ends before
                 // the closure receives mutable access to the shell.
-                let handler = self.modal.as_ref().and_then(|m| m.on_key.clone());
+                let handler = self.modals.last().and_then(|m| m.on_key.clone());
                 let handled = handler.is_some_and(|handler| {
                     convert_keystroke(&event.keystroke)
                         .is_some_and(|ks| handler(self, &ks, window, cx))
@@ -582,7 +582,7 @@ impl ShellView {
                 // Reconcile the shared input and focus after every modal handler call,
                 // even for unclaimed keys. A handler may change state without consuming
                 // a key. Once closed, the modal's closer owns focus instead.
-                if self.modal.is_some() {
+                if self.modal_open() {
                     dialog::sync_dialog_text(self, window, cx);
                 }
                 if handled {

@@ -526,7 +526,7 @@ fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        shell.read_with(&vcx, |s, _| s.modal_open()),
         "step 2 is open"
     );
     assert!(vcx.debug_bounds("loglevel-choice-debug").is_some());
@@ -539,7 +539,7 @@ fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        shell.read_with(&vcx, |s, _| s.modal_open()),
         "back on step 1"
     );
     assert!(vcx.debug_bounds("loglevel-choice-ingest · info").is_some());
@@ -549,7 +549,7 @@ fn set_log_level_picks_a_target_then_a_level(cx: &mut gpui::TestAppContext) {
     vcx.simulate_input("debug");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
     let levels = diagnostics.read_with(&vcx, |d, _| d.levels.clone());
     assert_eq!(
@@ -578,10 +578,7 @@ fn the_back_button_returns_log_levels_to_targets(cx: &mut gpui::TestAppContext) 
         .expect("the level step paints a Back button");
     vcx.simulate_click(back.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
-        "still open"
-    );
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()), "still open");
     assert!(vcx.debug_bounds("loglevel-choice-ingest · info").is_some());
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
     assert_eq!(
@@ -602,6 +599,6 @@ fn the_back_button_returns_log_levels_to_targets(cx: &mut gpui::TestAppContext) 
 #[gpui::test]
 fn one_step_choice_dialogs_have_no_back_button(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "frame::grouping");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }

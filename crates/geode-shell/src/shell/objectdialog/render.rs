@@ -70,15 +70,15 @@ const VISIBLE_ROWS: usize = 10;
 const WIDTH: f32 = 640.0;
 
 /// Open the object dialog on `domain` (`config::views`, palette-only —
-/// see `defaults::register_builtin_actions`). A no-op if a modal is
-/// already open, mirroring the other dialogs' own guard.
+/// see `defaults::register_builtin_actions`). A no-op when this kind is
+/// already open (see `dialog::can_open`).
 pub fn open(
     view: &mut ShellView,
     domain: Domain,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Object) {
         return;
     }
     // Fresh state every open — nothing survives a close/reopen, the same
@@ -89,6 +89,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Object,
         domain.title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -649,7 +650,7 @@ pub(in crate::shell) fn open_save_scope(
     // own `begin_naming` read `shell.object_dialog` regardless of whose it is. Guarding
     // here, before either branch touches it, is what makes "no modal is already open"
     // the one precondition both branches share with `open` itself.
-    if shell.modal.is_some() {
+    if !dialog::can_open(shell, dialog::DialogKind::Object) {
         return;
     }
     if shell.frame.read(cx).scope().is_empty() {

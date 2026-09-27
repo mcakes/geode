@@ -112,7 +112,7 @@ impl Render for ShellView {
         // hides its boundary. Keep and persist resizes already applied.
         if self.divider_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
-                || self.modal.is_some()
+                || self.modal_open()
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
@@ -131,7 +131,7 @@ impl Render for ShellView {
         // change has been applied, so cancellation needs no persistence update.
         if self.tile_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
-                || self.modal.is_some()
+                || self.modal_open()
                 || !self.matcher.pending().is_empty()
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
@@ -227,7 +227,7 @@ impl Render for ShellView {
         // with the same click that dismisses an overlay. An existing divider
         // drag can continue under which-key because its catcher owns the mouse.
         let dividers_active =
-            self.palette.is_none() && self.modal.is_none() && self.matcher.pending().is_empty();
+            self.palette.is_none() && !self.modal_open() && self.matcher.pending().is_empty();
         // Mouse events arrive in window coordinates while the tile
         // geometry lives in surface coordinates (the surface starts below
         // the toolbar, right of the sidebar) — the drag rects captured at
@@ -951,9 +951,9 @@ impl Render for ShellView {
         let registry = &self.services.registry;
 
         // Clone the modal's shared title and callbacks before building the
-        // element tree, releasing the borrow of `self.modal` before closures
+        // element tree, releasing the borrow of `self.modals` before closures
         // need access to the rest of the view.
-        let modal = self.modal.as_ref().map(|modal| {
+        let modal = self.modals.last().map(|modal| {
             (
                 modal.title.clone(),
                 modal.title_extra.clone(),
@@ -986,7 +986,7 @@ impl Render for ShellView {
             // cycling so they reach the shell matcher, including module bindings.
             // `GeodeModalOpen` additionally reclaims modal commands while focus is
             // on the shell root; the panel's context is absent in Normal mode.
-            .key_context(if self.modal.is_some() {
+            .key_context(if self.modal_open() {
                 "GeodeShell GeodeModalOpen"
             } else {
                 "GeodeShell"
@@ -1324,7 +1324,7 @@ impl Render for ShellView {
             // matcher` can never go pending at all: `open_shell_dialog`
             // cancels it on open, and `handle_key_down`'s modal branch
             // returns before ever reaching `self.matcher.press` for as long
-            // as `self.modal` stays `Some`, so `which_key_continuations`
+            // as `self.modals` stays non-empty, so `which_key_continuations`
             // (computed from `self.matcher.pending()`, just above) is always
             // `None` whenever `modal` is `Some`.
             .when_some(which_key_continuations, |el, continuations| {

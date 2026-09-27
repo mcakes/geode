@@ -177,7 +177,7 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
             .clone()
     });
     assert_eq!(books, vec!["BK000".to_string(), "BK001".to_string()]);
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// Clicking a scope chip's body opens its column's Values stage and emits a
@@ -226,7 +226,7 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     vcx.run_until_parked();
 
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        shell.read_with(&vcx, |s, _| s.modal_open()),
         "clicking the chip body should have opened the picker modal"
     );
     let stage = shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone()));
@@ -428,7 +428,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         "with the cursor on the column just left"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(
         shell.read_with(&vcx, |s, _| s.picker.is_none()),
         "and a second escape closes, clearing the picker like every other dialog"
@@ -698,7 +698,7 @@ fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::
     // Arrow to the second value and apply — no `tab`, nothing ticked.
     vcx.simulate_keystrokes("down enter");
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.versions().scope),
         v0 + 1,

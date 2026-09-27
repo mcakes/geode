@@ -76,7 +76,7 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
         let _ = window.draw(cx);
     });
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
     assert_eq!(tiles, vec![tile], "no split: the placeholder was filled");
     assert_eq!(
@@ -128,7 +128,7 @@ fn a_row_click_adds_that_kind(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some("rec")
@@ -253,7 +253,7 @@ fn a_second_click_on_an_unfocused_placeholder_is_a_plain_click(cx: &mut gpui::Te
     });
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "no picker: the placeholder was not the focused tile"
     );
     assert_eq!(
@@ -275,7 +275,7 @@ fn a_single_click_on_a_placeholder_opens_nothing(cx: &mut gpui::TestAppContext) 
     let at = main_tile_point(&mut cx, &shell, tile, 0.5, 0.5);
     cx.simulate_click(at, gpui::Modifiers::none());
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&cx, |s, _| s.choice_dialog.is_none()));
 }
 
@@ -296,7 +296,7 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
     );
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "shift+double-click is not the door"
     );
 
@@ -309,7 +309,7 @@ fn a_double_click_on_a_real_tile_or_with_a_modifier_opens_nothing(cx: &mut gpui:
     double_click(&mut cx, at, gpui::Modifiers::none());
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "a real tile's double-click opens nothing"
     );
 }
@@ -349,7 +349,7 @@ fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tre
         let _ = window.draw(cx);
     });
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
     assert_eq!(tiles.len(), 1, "the pick is the tree's root tile");
     assert_eq!(
@@ -369,7 +369,7 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
         .expect("the empty hint painted");
     cx.simulate_click(hint.center(), gpui::Modifiers::none());
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     double_click(
         &mut cx,
         hint.center(),
@@ -379,7 +379,7 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
         },
     );
     cx.run_until_parked();
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&cx, |s, _| {
         s.services.workspaces.active().tree().tiles().is_empty()
     }));
@@ -466,7 +466,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
         "a click on an empty dock focuses it"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "a single click opens nothing"
     );
     assert!(

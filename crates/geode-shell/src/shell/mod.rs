@@ -402,12 +402,12 @@ pub struct ShellView {
     /// mutates nothing else still reaches the flush.
     palette_usage_version: u64,
     last_palette_usage_written: u64,
-    /// Open modal chrome and callbacks, installed through
-    /// `dialog::open_shell_dialog`. Key routing gives the modal handler first
-    /// refusal; an unclaimed Escape closes it. Other shell actions cannot
-    /// reach tiles behind the modal. Dialog-specific data and scroll handles
-    /// live in the fields below.
-    modal: Option<dialog::ShellModal>,
+    /// Open modals, bottom first. Only the last entry paints and receives keys;
+    /// the rest keep their state and reappear when everything above them pops.
+    /// Installed through `dialog::open_shell_dialog`. Dialog-specific data and
+    /// scroll handles live in the per-kind fields below; a kind's field is `Some`
+    /// exactly while that kind is in this stack.
+    modals: Vec<dialog::ShellModal>,
     /// State for the open keybinding dialog. Created by `keybindings_view::open`
     /// and cleared on close. The render callback and modal handler share this
     /// state; GPUI scrolling remains in `keybindings_scroll` so filtering,
@@ -1171,7 +1171,7 @@ impl ShellView {
             palette_usage,
             palette_usage_version: 0,
             last_palette_usage_written: 0,
-            modal: None,
+            modals: Vec::new(),
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
             settings: None,
@@ -1245,7 +1245,7 @@ impl ShellView {
     /// Clearing all states is required because the shared input subscription
     /// routes to whichever dialog state is present.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = None;
+        self.modals.clear();
         self.settings = None;
         self.keybindings = None;
         self.picker = None;
@@ -1255,6 +1255,29 @@ impl ShellView {
         self.object_dialog = None;
         self.return_focus_from_overlay(window, cx);
         cx.notify();
+    }
+
+    /// Whether any modal is open.
+    pub(crate) fn modal_open(&self) -> bool {
+        !self.modals.is_empty()
+    }
+
+    /// The live (topmost) modal.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn top_modal(&self) -> Option<&dialog::ShellModal> {
+        self.modals.last()
+    }
+
+    /// The live modal's kind, which decides who owns the shared input and keys.
+    #[allow(dead_code)]
+    pub(crate) fn top_kind(&self) -> Option<dialog::DialogKind> {
+        self.modals.last().map(|m| m.kind)
+    }
+
+    /// How many modals are stacked.
+    #[allow(dead_code)]
+    pub(crate) fn modal_depth(&self) -> usize {
+        self.modals.len()
     }
 
     /// Where focus goes when an overlay closes: back to the scope bar's

@@ -303,7 +303,7 @@ fn opening_a_shell_dialog_cancels_an_open_command_line(cx: &mut gpui::TestAppCon
         "opening the dialog should have cancelled the open command line"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "the dialog should still have opened"
     );
     use crate::module::{FindEvent, recording::Recorded};
