@@ -527,29 +527,67 @@ fn a_typed_strike_over_a_package_and_its_leg_writes_each_leg_once(cx: &mut gpui:
 }
 
 #[gpui::test]
-fn a_block_commit_skips_read_only_and_inapplicable_cells_and_counts_them(
+fn a_block_commit_writes_the_cursor_column_and_counts_an_inapplicable_line(
     cx: &mut gpui::TestAppContext,
 ) {
-    let (h, mut vcx) = open_seeded(cx, &BOOK);
-    // Anchored on the last risk column with the cursor back on strike:
-    // the cursor cell opens the editor, so it must itself be editable.
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C DO 4000", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "view barrier").unwrap();
     let columns = h.columns(&vcx);
-    let strike = columns.iter().position(|c| c == "strike").unwrap();
-    h.dispatch(&mut vcx, "last_col", None);
+    let at = |name: &str| columns.iter().position(|c| c == name).unwrap();
+    // A block strike … barrier over both lines, the cursor on the barrier
+    // line's barrier cell.
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "visual_block", None);
-    let back = (columns.len() - 1 - strike) as u32;
-    h.dispatch(&mut vcx, "left", Some(back)); // strike … the read-only risk columns
-    h.dispatch(&mut vcx, "edit", None);
-    set_editor(&h, &mut vcx, "4500");
-    h.dispatch(&mut vcx, "commit", None);
-    let notice = notice(&h, &vcx);
-    assert!(
-        notice
-            .as_deref()
-            .is_some_and(|n| n.starts_with("set ") && n.contains("read-only")),
-        "{notice:?}"
+    h.dispatch(&mut vcx, "up", None);
+    h.dispatch(
+        &mut vcx,
+        "right",
+        Some((at("barrier") - at("strike")) as u32),
     );
-    assert_eq!(h.cell(&vcx, 0, "strike"), "4500");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| r.2),
+        Some(at("strike")..at("barrier") + 1)
+    );
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3900");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 n/a)"),
+        "the vanilla line has no barrier; the block's other columns are not targets"
+    );
+    assert_eq!(h.cell(&vcx, 0, "barrier"), "3900");
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "3900 is a valid strike too, and still not written"
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4000");
+}
+
+#[gpui::test]
+fn a_typed_commit_in_a_block_leaves_its_other_columns_untouched(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "2 SPX Z26 4000 P"]);
+    // A block qty … strike, the cursor on strike: "5" parses as a qty too.
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "down", None);
+    let (qty, strike) = {
+        let c = h.columns(&vcx);
+        let at = |n: &str| c.iter().position(|x| x == n).unwrap();
+        (at("qty"), at("strike"))
+    };
+    h.dispatch(&mut vcx, "right", Some((strike - qty) as u32));
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "5");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+    assert_eq!(
+        line_texts(&h, &vcx),
+        vec!["SPX Z26 5 C", "2 SPX Z26 5 P"],
+        "the strikes took 5, the quantities kept theirs"
+    );
 }
 
 #[gpui::test]
@@ -667,4 +705,92 @@ fn a_read_only_cursor_cell_refuses_to_open_under_a_selection(cx: &mut gpui::Test
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(h.mode(&mut vcx), "visual", "no editor opened");
     assert_eq!(h.footer(&vcx).as_deref(), Some("read-only"));
+}
+
+fn leg_qtys(h: &Harness, vcx: &VisualTestContext, pkg: usize) -> Vec<i64> {
+    h.tile.read_with(vcx, |t, _| {
+        t.sheet.children(pkg).map(|l| t.sheet.qty(l)).collect()
+    })
+}
+
+fn can_undo(h: &Harness, vcx: &VisualTestContext) -> bool {
+    h.tile.read_with(vcx, |t, _| t.undo.can_undo())
+}
+
+#[gpui::test]
+fn an_unchanged_package_qty_over_a_selection_keeps_its_legs_weighted(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "down", None); // the CS package
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5]);
+    h.dispatch(&mut vcx, "edit", None);
+    let opened = h.tile.read_with(&vcx, |t, cx| match &t.editor {
+        Some(Editor::Text { input, .. }) => input.read(cx).value().to_string(),
+        _ => panic!("a text editor is open"),
+    });
+    assert_eq!(opened, "-5");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5], "not -5/-5");
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+    assert!(!can_undo(&h, &vcx), "no edit, no undo entry");
+}
+
+#[gpui::test]
+fn a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let weights = h.tile.read_with(&vcx, |t, _| {
+        crate::core::package::package_qty(&t.sheet, 1).unwrap().1
+    });
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "bottom", None); // the 4000 P
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None); // the cursor on the CS package
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    let want: Vec<i64> = weights.iter().map(|w| 3 * w).collect();
+    assert_eq!(leg_qtys(&h, &vcx, 1), want);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.qty(4)),
+        3,
+        "the line itself"
+    );
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5], "one undo entry");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(4)), 1);
+    assert!(!can_undo(&h, &vcx));
+}
+
+#[gpui::test]
+fn a_package_in_list_form_is_refused_a_selection_qty(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    // Put the CS in list form: its second leg's qty no longer fits.
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "expand", None);
+    h.dispatch(&mut vcx, "down", Some(2));
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3]);
+    // The package, then the 5000 C above it.
+    h.dispatch(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 refused)")
+    );
+    assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 3], "no leg written");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.qty(0)), 4);
 }

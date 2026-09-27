@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::core::cell::READ_ONLY;
+use crate::core::package::{self, package_qty};
 use crate::core::select::{
     RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, top_most,
 };
@@ -141,10 +142,11 @@ impl PricerTile {
             .collect()
     }
 
-    /// What a bulk edit writes: the selected rows' leaf lines (a package
+    /// What a bulk edit reaches: the selected rows' leaf lines (a package
     /// stands for its legs) and the plan columns — the cursor's alone
     /// under `V`, whose columns span every column including read-only
-    /// ones, and the block's under `v`.
+    /// ones, and the block's under `v`. A typed commit writes the
+    /// cursor's column alone under both; see [`Self::commit_selection`].
     pub(crate) fn selection_targets(&self) -> (Vec<usize>, Vec<usize>) {
         let Some(r) = &self.resolved else {
             return (Vec::new(), Vec::new());
@@ -157,16 +159,22 @@ impl PricerTile {
         (lines, cols)
     }
 
-    /// A typed value committed over a live selection: every target cell
-    /// that takes it is written, as ONE undo entry; the rest are skipped
-    /// and counted in the notice. Answers whether the editor closes — it
-    /// stays open when no cell accepts the value or the sheet refuses the
-    /// batch, and then nothing was written. `date` is the date field's
-    /// value, which an expiry cell takes as a date rather than as text.
+    /// A typed value committed over a live selection: every selected
+    /// line's cell in the cursor's column that takes it is written, as ONE
+    /// undo entry; the rest are skipped and counted in the notice. Answers
+    /// whether the editor closes — it stays open when no cell accepts the
+    /// value or the sheet refuses the batch, and then nothing was written.
+    /// `date` is the date field's value, which an expiry cell takes as a
+    /// date rather than as text.
     ///
-    /// Each cell is judged on its own line's instrument, never on the
-    /// cursor cell's: a value one line refuses must not reach it as some
-    /// other line's reading of the text.
+    /// The column is the cursor's under `v` too: one absolute text parsed
+    /// into several column grammars (qty 5 and strike 5, a type option in
+    /// the underlying) would be a plausible wrong value. Each cell is
+    /// judged on its own line's instrument, never on the cursor cell's.
+    ///
+    /// A selected package's quantity scales its legs by the template's
+    /// weights: the per-leg path would write the bare typed number to
+    /// every leg, turning a -5/+5 spread into -5/-5.
     pub(crate) fn commit_selection(
         &mut self,
         text: &str,
@@ -179,44 +187,68 @@ impl PricerTile {
             cx.notify();
             return false;
         }
-        let (lines, cols) = self.selection_targets();
+        let (mut lines, _) = self.selection_targets();
+        let Some(planned) = self.plan.columns.get(self.cursor.col) else {
+            return false;
+        };
+        let (kind, editable, format) = (
+            planned.def.kind,
+            planned.def.editable,
+            planned.format.clone(),
+        );
         let mut edits = Vec::new();
         let mut set = 0usize;
         let mut skips = Skips::default();
-        for &line in &lines {
-            for &col in &cols {
-                let Some(planned) = self.plan.columns.get(col) else {
-                    continue;
-                };
-                let (kind, editable) = (planned.def.kind, planned.def.editable);
-                if !editable {
-                    skips.add(Skip::ReadOnly);
-                    continue;
-                }
-                // `cell` answers `READ_ONLY` for a barrier cell on a vanilla
-                // line too; the notice tells the two apart, since the cell
-                // is not read-only on the lines it applies to.
-                let barrier_col = matches!(kind, ColumnKind::Barrier | ColumnKind::BarrierType);
-                if barrier_col
-                    && matches!(self.sheet.instrument(line), Some(Instrument::Vanilla(_)))
-                {
-                    skips.add(Skip::NotApplicable);
+        if kind == ColumnKind::Qty && editable {
+            let packages: Vec<usize> = top_most(&self.sheet, &self.selected_sheet_rows())
+                .into_iter()
+                .filter(|&r| self.sheet.is_package(r))
+                .collect();
+            for pkg in packages {
+                let legs = self.sheet.children(pkg);
+                lines.retain(|l| !legs.contains(l));
+                // In list form the legs no longer fit the template, so there
+                // are no weights, and one typed number would land on every
+                // leg unscaled: refused, none of its legs written.
+                if package_qty(&self.sheet, pkg).is_none() {
+                    skips.add(Skip::Refused);
                     continue;
                 }
-                let answer = match (kind, date) {
-                    (ColumnKind::Expiry, Some(d)) => cell::commit_date(&self.sheet, line, d),
-                    _ => cell::commit(&self.sheet, line, kind, text),
-                };
-                match answer {
-                    Ok(Some(edit)) => {
-                        edits.push(edit);
-                        set += 1;
+                match package::commit(&self.sheet, pkg, kind, &format, text) {
+                    Ok(es) => {
+                        set += legs.filter(|&l| self.sheet.is_line(l)).count();
+                        edits.extend(es);
                     }
-                    // Already that value: it counts as set, with no edit.
-                    Ok(None) => set += 1,
-                    Err(why) if why == READ_ONLY => skips.add(Skip::ReadOnly),
                     Err(_) => skips.add(Skip::Refused),
                 }
+            }
+        }
+        for &line in &lines {
+            if !editable {
+                skips.add(Skip::ReadOnly);
+                continue;
+            }
+            // `cell` answers `READ_ONLY` for a barrier cell on a vanilla
+            // line too; the notice tells the two apart, since the cell is
+            // not read-only on the lines it applies to.
+            let barrier_col = matches!(kind, ColumnKind::Barrier | ColumnKind::BarrierType);
+            if barrier_col && matches!(self.sheet.instrument(line), Some(Instrument::Vanilla(_))) {
+                skips.add(Skip::NotApplicable);
+                continue;
+            }
+            let answer = match (kind, date) {
+                (ColumnKind::Expiry, Some(d)) => cell::commit_date(&self.sheet, line, d),
+                _ => cell::commit(&self.sheet, line, kind, text),
+            };
+            match answer {
+                Ok(Some(edit)) => {
+                    edits.push(edit);
+                    set += 1;
+                }
+                // Already that value: it counts as set, with no edit.
+                Ok(None) => set += 1,
+                Err(why) if why == READ_ONLY => skips.add(Skip::ReadOnly),
+                Err(_) => skips.add(Skip::Refused),
             }
         }
         if set == 0 {
@@ -229,7 +261,10 @@ impl PricerTile {
         }
         // Every edit is a `Set*` on its own line, so no edit shifts
         // another's row index; one batch makes one undo entry and a
-        // refusal rolls the whole batch back.
+        // refusal rolls the whole batch back. Defensive: every edit was
+        // validated against the sheet above, so no route reaches this
+        // refusal today — but should the sheet's own checks ever outgrow
+        // the cell's, the value must not half-land.
         if !edits.is_empty()
             && let Err(e) = self.apply_edits(edits, cx)
         {
