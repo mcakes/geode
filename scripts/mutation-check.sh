@@ -6835,12 +6835,12 @@ run_mutation "blotter: the tree column is pinned left while the measures scroll"
 
 run_mutation "blotter gutter: the tree column widens by the gutter" \
   crates/geode-blotter/src/delegate.rs \
-  '            width: px(if c.kind == ColumnKind::Tree {
-                c.width + self.gutter_px()
-            } else {
-                c.width
-            }),' \
-  '            width: px(c.width),' \
+  '                if c.kind == ColumnKind::Tree {
+                    width + self.gutter_px()
+                } else {' \
+  '                if c.kind == ColumnKind::Tree {
+                    width
+                } else {' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
 run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
@@ -21714,8 +21714,8 @@ run_mutation "mdlines: a mode change refreshes the table" \
 # The label column widens by the gutter.
 run_mutation "mdlines: the label column widens by the gutter" \
   crates/geode-marketdata/src/delegate.rs \
-  '                width: px(LABEL_WIDTH + self.gutter_px()),' \
-  '                width: px(LABEL_WIDTH),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH) + self.gutter_px()),' \
+  '                width: px(self.width_of(ROW_AXIS_KEY, LABEL_WIDTH)),' \
   geode-marketdata the_line_numbers_global_paints_a_gutter_beside_the_row_label
 
 # Under a hidden label the first value column widens instead.
@@ -21902,8 +21902,8 @@ run_mutation "pricer gutter: the settings observer applies the mode" \
 # The tree column widens by the gutter, so the tree text keeps its room.
 run_mutation "pricer gutter: the tree column's width includes the gutter" \
   crates/geode-pricer/src/delegate.rs \
-  '                width: px(TREE_WIDTH + self.gutter_px()),' \
-  '                width: px(TREE_WIDTH),' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH) + self.gutter_px()' \
+  '                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH)' \
   geode-pricer the_line_numbers_global_paints_a_gutter_beside_the_tree_column
 
 # Relative numbers are re-derived when the cursor row moves. Mutated, the
@@ -23110,6 +23110,39 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# The fit is the widest content, not whichever cell comes first.
+run_mutation "autosize: the fit measures the first text, not the widest" \
+  crates/geode-shell/src/colfit.rs \
+  '        let widest = content.into_iter().fold(0.0_f32, f32::max);' \
+  '        let widest = content.into_iter().next().unwrap_or(0.0);' \
+  geode-shell the_widest_cell_decides_the_width
+
+# tile::autosize_columns reaches the focused occupant, not another tile.
+run_mutation "autosize: the palette action reaches a tile other than the focused one" \
+  crates/geode-shell/src/shell/input.rs \
+  $'                .focused_tile()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  $'                .tree()\n                .tiles()\n                .first()\n                .copied()\n                .and_then(|t| self.occupants.get(&t))\n            {\n                Some(o) => o.content.autosize_columns(false, window, cx),' \
+  geode-shell the_autosize_action_reaches_only_the_focused_tile
+
+# column() must prefer the fitted width, or the next refresh undoes a fit.
+run_mutation "autosize: the blotter delegate ignores the fitted width" \
+  crates/geode-blotter/src/delegate.rs \
+  '                let width = self.fitted.get(&c.name).copied().unwrap_or(c.width);' \
+  '                let width = c.width;' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+run_mutation "autosize: the market-data delegate ignores the fitted width" \
+  crates/geode-marketdata/src/delegate.rs \
+  '        self.fitted.get(key).copied().unwrap_or(default)' \
+  '        default' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the pricer delegate ignores the fitted width" \
+  crates/geode-pricer/src/delegate.rs \
+  '            width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),' \
+  '            width: px(c.width),' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -27,6 +27,43 @@ Every module follows these interaction rules:
 - Stack state is visible through the shared marker in the module header.
 - Delivery matches are exhaustive so a new outcome cannot be ignored silently.
 
+### Autosized columns
+
+The blotter, market-data, and pricer tiles fit their columns to their content
+on `:autosize` or the palette's "Autosize columns" (`tile::autosize_columns`,
+the focused tile only); `:autosize reset` returns to the configured or
+default widths. Each tile runs one method for both doors.
+
+- **Measure.** `geode_shell::colfit` counts the characters of the header and
+  each cell and multiplies by JetBrains Mono's advance (0.6 em) at `text_sm`
+  (0.875 rem). It adds the `XSmall` table cell's padding, read from
+  gpui-component, and the 2 px cursor border. The rem is the window's when the
+  command runs. Modules add their own cell chrome: the blotter's `px_1` and
+  sort icon, and the tree columns' indent and chevron slot. Widths are clamped
+  to 2.5–40 rem: at least about three characters, and never so wide that one
+  long cell pushes the other columns off-screen. The fit runs once on the UI
+  thread and never in render.
+- **What is measured.** Market data and the pricer measure every row of their
+  prepared model. The blotter measures only the header and the rows in its
+  format cache, which holds the window the table last asked to see.
+  Formatting a whole snapshot would break the UI budget, so a wider value in
+  a row that was never on screen does not widen its column.
+- **Storage.** The delegate holds fitted widths in pixels, keyed by a stable
+  column key: the blotter's column name (empty for the tree column), the
+  market-data column label (`__row_axis` for row labels), or the pricer's
+  vocabulary name (`__tree` for the tree). `column()` prefers a fitted width
+  to the default, so every refresh keeps it. A key the current model lacks is
+  ignored, and a new column gets its default width. The widths persist in the
+  session record's `column_widths` table. A missing or malformed table
+  restores as no fitted widths. Switching the blotter's view clears them.
+- **Limits.** Widths are pixels because `TableDelegate::column` has no window
+  from which to rescale rem. After a font-size change, fitted widths behave
+  like configured ones: run `:autosize` again. The blotter's header is painted
+  in the UI font but measured with the mono advance, which usually
+  overestimates it slightly. Market data and the pricer keep
+  `col_resizable(false)`. A blotter column dragged wider still returns to its
+  fitted or configured width on the next refresh.
+
 ## Blotter
 
 `geode-blotter` renders any configured view as a collapsible hierarchy. The

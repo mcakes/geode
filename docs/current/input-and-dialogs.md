@@ -257,6 +257,20 @@ module owns how those events affect its selection and search state. Opening
 the palette remains available through its effective toggle binding and uses
 the command line's cancellation path.
 
+### Autosize columns
+
+Two doors reach one route. `:autosize` in a blotter, market-data, or pricer
+tile fits every column of that tile's table to its content, and
+`:autosize reset` drops the fitted widths and returns to the configured or
+default ones; both are in each module's completions. The palette's
+"Autosize columns" (`tile::autosize_columns`, category Tile, unbound by
+default) calls `TileContent::autosize_columns` on the focused tile's
+occupant alone, which in the three table modules is the same method the
+command runs. The trait default refuses with "this tile has no table", and
+the shell paints a refusal, or the same text when no tile is focused, as a
+status notice that clears on the next dispatch. Measurement and storage are
+described in [features](features.md#autosized-columns).
+
 ## Scope text and stack selection
 
 The toolbar scope field edits `Frame::scope().text` live. Focus captures the
