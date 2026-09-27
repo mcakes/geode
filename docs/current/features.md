@@ -887,8 +887,11 @@ delivery; it does not call a pricing implementation directly.
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data
-documents. `geode-app --demo` writes risk files under a seed-specific temporary
-directory and streams serialized documents through its in-process adapter.
+documents. The [generator guide](../../crates/geode-demo-data/README.md)
+describes risk grains, deliberate ingestion edge cases, document sequences,
+and the demo configuration files. `geode-app --demo` writes risk files under
+a seed-specific temporary directory and streams serialized documents through
+its in-process adapter.
 Both use the same ingestion, parsing, query, and delivery paths as configured
 sources. Demo configuration remains below desk and user overrides. Cached
 sources and database contents are reused, so schema or generator changes may

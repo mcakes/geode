@@ -1,5 +1,5 @@
 //! Writes a realistic source directory: per-book CSVs in the source's own
-//! column spelling, each with a `.done` JSON sentinel (spec §5.3).
+//! column spelling, with `.done` JSON sentinels marking files ready to ingest.
 //!
 //! No quoting or escaping: every string column draws from fixed, comma-free
 //! vocabularies. Revisit if a vocabulary ever grows free-form values.
@@ -47,7 +47,7 @@ const SOURCE_NAMES: &[(&str, &str)] = &[
     ("sc", "SC"),
 ];
 
-/// Measures that also get an FX-converted `_USD` twin (spec §3.4).
+/// Measures emitted with a `_USD` twin using the fixed conversion factor 1.08.
 const USD_TWINS: &[&str] = &[
     "delta01",
     "delta02",
@@ -67,8 +67,8 @@ const USD_TWINS: &[&str] = &[
     "realized_theta",
 ];
 
-/// Optional columns omitted from some files, so §3.6's tolerance is
-/// exercised by fixtures (not every book is run with every greek).
+/// Columns omitted from every third file, together with their USD twins,
+/// to exercise missing-column ingestion and health reporting.
 const OMITTED_FROM_SOME_FILES: &[&str] = &["skew01", "rho_ois010"];
 
 fn source_name(canonical: &str) -> &'static str {
@@ -81,7 +81,8 @@ fn source_name(canonical: &str) -> &'static str {
 
 pub struct EmitOptions {
     pub root: PathBuf,
-    /// Omit the sentinel for one file, making it "pending" (spec §5.2).
+    /// Withhold the final file's sentinel so discovery leaves it pending.
+    /// An existing sentinel at that path is not removed.
     pub leave_one_pending: bool,
 }
 
@@ -109,22 +110,17 @@ pub struct EmittedFile {
 #[derive(Debug, Clone)]
 pub struct EmittedDirectory {
     pub files: Vec<EmittedFile>,
-    /// Instruments whose attributes were deliberately made to disagree
-    /// between files, for the §3.5 conflict detector.
+    /// Instruments with deliberately conflicting model codes among their
+    /// rows in one file, exercising within-grain conflict detection.
     pub conflicting_instruments: Vec<String>,
 }
 
 /// Group row indices into files: most books get one file, `BK000` is split
 /// across two, and `BK001`+`BK002` share one.
 ///
-/// **The split breaks on position boundaries, never mid-position.** A
-/// position's rows must all land in one file, because the two halves of a
-/// split book occupy different partitions (spec §4.3) and the grain split
-/// deduplicates only within a file. Splitting mid-position would put the
-/// same position key in two partitions, and `sum(daily_trading_pnl)` over
-/// that book would double-count — exactly what the grain split exists to
-/// make impossible. Real upstream splits are per-position for the same
-/// reason; this fixture must not model something the design cannot serve.
+/// Each date has separate files. Split books keep every position in one
+/// file: ingestion deduplicates within a file, so spreading a position
+/// across partitions would double-count its trading PnL.
 fn file_assignments(batch: &RiskBatch) -> BTreeMap<String, Vec<usize>> {
     let mut by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     let mut part_of_position: BTreeMap<&str, u8> = BTreeMap::new();
@@ -166,12 +162,9 @@ pub fn emit_directory(batch: &RiskBatch, opts: &EmitOptions) -> std::io::Result<
         };
         let columns = header_columns(omit);
 
-        // Plant an attribute disagreement in the second file, on *one*
-        // instrument and only *some* of its rows. Rewriting every row would
-        // leave the file internally consistent, and the §3.5 detector
-        // compares repeated values within a grain group — so a whole-file
-        // rewrite is invisible to it. The disagreement has to be inside the
-        // group to be the signal the detector is for.
+        // Change alternate rows of one instrument in the second file.
+        // Within-grain detection needs disagreement inside the group;
+        // changing every row would leave the group consistent.
         let conflict_instrument: Option<&str> = if idx == 1 {
             rows.first().map(|&i| batch.instrument_ref[i].as_str())
         } else {
