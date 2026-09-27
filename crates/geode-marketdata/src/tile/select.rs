@@ -117,6 +117,41 @@ impl MarketDataTile {
             .collect()
     }
 
+    /// `y` in visual mode: tab-separated, a header line first. `Rows`
+    /// copies what `y y` copies for each row (the label where it is
+    /// painted, then every column) under a header of the same shape, so
+    /// the pasted grid lines up with its column names; `Block` copies its
+    /// own columns' header and cells, no label.
+    pub(super) fn selection_tsv(&self) -> Option<String> {
+        let r = self.resolved.as_ref()?;
+        let label = matches!(r.kind, SelectKind::Rows) && self.spec.rows.shown();
+        let mut out = Vec::with_capacity(r.rows.len() + 1);
+        let header: Vec<&str> = label
+            .then_some(self.spec.rows.column)
+            .into_iter()
+            .chain(
+                r.cols
+                    .clone()
+                    .filter_map(|c| self.model.columns.get(c).map(|s| s.as_ref())),
+            )
+            .collect();
+        out.push(header.join("\t"));
+        for row in r.rows.clone() {
+            let m = self.model.rows.get(row)?;
+            let line: Vec<&str> = label
+                .then(|| m.label.as_ref())
+                .into_iter()
+                .chain(
+                    r.cols
+                        .clone()
+                        .filter_map(|c| m.cells.get(c).map(|cell| cell.text.as_ref())),
+                )
+                .collect();
+            out.push(line.join("\t"));
+        }
+        Some(out.join("\n"))
+    }
+
     /// The live selection as last resolved — the test reader for what
     /// the delegate was handed.
     #[cfg(test)]

@@ -198,3 +198,41 @@ fn an_attribute_click_clears_the_selection_without_a_notice(cx: &mut gpui::TestA
         "{texts:?}"
     );
 }
+
+/// `y` over a `Rows` selection copies a header line then each row as
+/// `y y` would, and consumes the selection.
+#[gpui::test]
+fn y_over_rows_copies_a_header_and_every_painted_column_then_ends_the_selection(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "yank", None);
+    let text = clipboard(&mut vcx).expect("copied");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "a header and two rows");
+    assert!(lines[1].ends_with("4500.00\t0.1800\t-1.0000\t0.1000\t0.2000\t0.3000"));
+    assert!(lines[2].ends_with("4510.00\t0.1900\t-1.1000\t0.4000\t0.5000\t0.6000"));
+    assert_eq!(h.mode(&vcx), "normal", "y consumes the selection");
+}
+
+/// `y` over a `Block` copies only its own columns' header and cells.
+#[gpui::test]
+fn y_over_a_block_copies_its_columns_header_and_cells_only(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32 + 1));
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "right", None);
+    h.dispatch(&mut vcx, "yank", None);
+    let columns = h
+        .tile
+        .read_with(&vcx, |t, _| t.model().columns[4..6].join("\t"));
+    assert_eq!(
+        clipboard(&mut vcx).as_deref(),
+        Some(format!("{columns}\n0.2000\t0.3000\n0.5000\t0.6000").as_str())
+    );
+}

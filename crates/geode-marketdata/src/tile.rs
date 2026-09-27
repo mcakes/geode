@@ -2164,6 +2164,15 @@ impl MarketDataTile {
                 };
                 was_attr != matches!(self.cursor, Cursor::Attr(_))
             }
+            // With a selection live, `y` copies the selection rather than
+            // the cursor cell, and consumes it.
+            "yank" if self.selection.is_some() => {
+                if let Some(text) = self.selection_tsv() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+                self.clear_selection();
+                false
+            }
             "yank" | "yank_row" | "yank_col" => {
                 let what = match verb {
                     "yank" => Yank::Cell,
