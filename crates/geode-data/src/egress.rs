@@ -552,13 +552,15 @@ mod tests {
         }
     }
 
-    struct GateAdapter {
+    /// Hands out one egress transport, once, under the given adapter name.
+    struct TakeOnceAdapter {
+        name: &'static str,
         egress: Mutex<Option<Box<dyn Egress>>>,
     }
 
-    impl Adapter for GateAdapter {
+    impl Adapter for TakeOnceAdapter {
         fn name(&self) -> &'static str {
-            "gate"
+            self.name
         }
         fn subscription(&self) -> Option<Box<dyn Subscription>> {
             None
@@ -573,7 +575,8 @@ mod tests {
         let (entered_tx, entered) = sync_channel(64);
         let (release, release_rx) = sync_channel(64);
         let mut adapters = AdapterRegistry::default();
-        adapters.register(Arc::new(GateAdapter {
+        adapters.register(Arc::new(TakeOnceAdapter {
+            name: "gate",
             egress: Mutex::new(Some(Box::new(GateEgress {
                 entered: entered_tx,
                 release: release_rx,
@@ -654,26 +657,11 @@ mod tests {
         }
     }
 
-    struct PanicAdapter {
-        egress: Mutex<Option<Box<dyn Egress>>>,
-    }
-
-    impl Adapter for PanicAdapter {
-        fn name(&self) -> &'static str {
-            "panic"
-        }
-        fn subscription(&self) -> Option<Box<dyn Subscription>> {
-            None
-        }
-        fn egress(&self) -> Option<Box<dyn Egress>> {
-            self.egress.lock().unwrap().take()
-        }
-    }
-
     #[test]
     fn a_panicking_transport_answers_the_upload_and_keeps_the_worker() {
         let mut adapters = AdapterRegistry::default();
-        adapters.register(Arc::new(PanicAdapter {
+        adapters.register(Arc::new(TakeOnceAdapter {
+            name: "panic",
             egress: Mutex::new(Some(Box::new(PanickingEgress { panics_left: 1 }))),
         }));
         let (sink, rx) = event_sink();
@@ -711,7 +699,8 @@ mod tests {
     fn resolve_drops_an_unknown_adapter_and_one_without_egress() {
         let (mut adapters, _adapter, _feed) = channel_registry();
         // A gate adapter whose one egress is already gone answers `None`.
-        adapters.register(Arc::new(GateAdapter {
+        adapters.register(Arc::new(TakeOnceAdapter {
+            name: "gate",
             egress: Mutex::new(None),
         }));
         let kept_spec = dividend_spec();

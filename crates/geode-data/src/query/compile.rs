@@ -30,6 +30,10 @@ pub struct CompiledColumn {
     /// joined attribute, and a grouping column are not — a footer that
     /// totalled them would print a plausible wrong number.
     pub summable: bool,
+    /// For an ungrouped dimension column, the index in `columns` (and the
+    /// result) of its boolean companion that is true where the rows under a
+    /// tree row disagree. Carried unchanged to `ColumnMeta::mixed_flag`.
+    pub mixed_flag: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +310,150 @@ pub(crate) fn era_for(
     })
 }
 
+/// The result column carrying an ungrouped dimension's mixed flag. Linked to
+/// its value column by index (`CompiledColumn::mixed_flag`), not by this
+/// name; the name only has to be distinct, which the compiler checks.
+fn mixed_flag_name(column: &str) -> String {
+    format!("{column}#mixed")
+}
+
+/// The two aggregates the unanimity rule needs for one ungrouped dimension,
+/// named for the column and its flag.
+///
+/// The value is kept only when every row has one and they are all equal:
+/// `count(c) = count(*)` rules out a NULL among values, `min = max` rules
+/// out two different values. The flag is set when there is some value but
+/// the rows are not unanimous — a NULL beside a value is mixed, because
+/// showing the value would claim it for the rows that have none. No value at
+/// all (no rows, or every row NULL) is neither: blank. Never `any_value`: a
+/// position holds several instruments, and an arbitrary leg's strike is a
+/// plausible wrong value. `min`/`max`/`count` rather than
+/// `count(distinct)` keeps it one cheap pass.
+fn unanimity_aggregates(column: &str) -> [String; 2] {
+    let c = format!("\"{column}\"");
+    [
+        format!("case when count({c}) = count(*) and min({c}) = max({c}) then min({c}) end as {c}"),
+        format!(
+            "(count({c}) > 0 and (count({c}) < count(*) or min({c}) <> max({c}))) as \"{}\"",
+            mixed_flag_name(column)
+        ),
+    ]
+}
+
+/// How one grain's aggregate lines up with the spine: which grouping columns
+/// it carries within the materialized depth, its grouping sets and level
+/// marker, and the join condition that attaches each of its levels to the
+/// spine rows of the matching depth. Shared by measure aggregates and the
+/// unanimity-only aggregate, so the two cannot attach differently.
+struct GrainShape {
+    /// Only the grouping columns this grain carries, and only within the
+    /// materialized depth — selecting a key the spine no longer groups by
+    /// would leave it outside every aggregate.
+    own: Vec<String>,
+    /// How many of *this grain's* grouping columns are present at each spine
+    /// depth. The aggregate groups by the same prefixes projected onto the
+    /// columns it has, so this is the map between the spine's depth and the
+    /// aggregate's own level.
+    own_present: Vec<usize>,
+    sub_group: String,
+    sub_depth: String,
+    on: String,
+}
+
+impl GrainShape {
+    fn new(
+        ds: &DatasetSpec,
+        dims: &DerivedDimensions,
+        grain: Grain,
+        grouping: &[String],
+        depth: usize,
+        alias: &str,
+    ) -> GrainShape {
+        let own: Vec<String> = grouping[..depth]
+            .iter()
+            .filter(|g| ds.carries(grain, dims.base_column(g)))
+            .cloned()
+            .collect();
+        let own_q = quoted(&own);
+
+        let own_present: Vec<usize> = (0..=depth)
+            .map(|d| own.iter().filter(|c| grouping[..d].contains(c)).count())
+            .collect();
+
+        // The same depths, projected onto the columns this grain has.
+        let sub_group = if own.is_empty() {
+            String::new()
+        } else {
+            let mut sets: Vec<String> = (0..=depth)
+                .map(|d| {
+                    let kept: Vec<String> = own
+                        .iter()
+                        .filter(|c| grouping[..d].contains(c))
+                        .map(|c| format!("\"{c}\""))
+                        .collect();
+                    format!("({})", kept.join(", "))
+                })
+                .collect();
+            sets.dedup();
+            format!(" group by grouping sets ({})", sets.join(", "))
+        };
+        // The aggregate carries its own level, for the same reason the
+        // spine does: matching on key values alone cannot tell a
+        // rolled-up NULL from a NULL that is really in the data, so a
+        // single NULL `lhu` would attach the aggregate's higher levels to
+        // the leaf row and fan it out.
+        let sub_depth = if own.is_empty() {
+            "0 as sub_depth".to_string()
+        } else {
+            format!(
+                "({} - bit_count(grouping({}))) as sub_depth",
+                own.len(),
+                own_q.join(", ")
+            )
+        };
+        let on = if own.is_empty() {
+            "true".to_string()
+        } else {
+            // `else -1`: unreachable, and a row that reached it would
+            // match nothing rather than the grand total.
+            let level = format!(
+                "{alias}.sub_depth = case s.row_depth {} else -1 end",
+                own_present
+                    .iter()
+                    .enumerate()
+                    .map(|(d, present)| format!("when {d} then {present}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            own.iter()
+                .map(|c| format!("{alias}.\"{c}\" is not distinct from s.\"{c}\""))
+                .chain(std::iter::once(level))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        };
+        GrainShape {
+            own,
+            own_present,
+            sub_group,
+            sub_depth,
+            on,
+        }
+    }
+
+    /// The aggregate CTE over `relation`, grouped to this shape's levels.
+    fn cte(&self, alias: &str, aggs: &[String], relation: &str, pred: &str) -> String {
+        format!(
+            "{alias} as (select {keys}{comma}{sub_depth}, {aggs} \
+             from {relation} base where {pred}{sub_group})",
+            keys = quoted(&self.own).join(", "),
+            comma = if self.own.is_empty() { "" } else { ", " },
+            sub_depth = self.sub_depth,
+            aggs = aggs.join(", "),
+            sub_group = self.sub_group,
+        )
+    }
+}
+
 fn compile_error(view: &ViewSpec, message: String) -> StoreError {
     StoreError::Sql {
         statement: format!("compile view '{}'", view.name),
@@ -410,20 +558,50 @@ pub(crate) fn compile_view_with_cache(
     let mut agg_selects: Vec<String> = Vec::new();
     let mut agg_columns: Vec<CompiledColumn> = Vec::new();
 
+    // Ungrouped dimension columns, each read from the grain validation chose
+    // for it (the coarsest carrying it alongside the whole grouping, so one
+    // grain serves every depth). One validation cannot honour is a compile
+    // error if required — reaching here with one means the caller skipped the
+    // gate — and dropped if optional, as validation said it would be.
+    let mut unanimous: Vec<(String, Grain)> = Vec::new();
+    for u in view.ungrouped_dimensions(schema, dims) {
+        match u.grain {
+            Some(grain) => unanimous.push((u.name.to_string(), grain)),
+            None if u.required => {
+                return Err(compile_error(
+                    view,
+                    format!(
+                        "column '{}' is an ungrouped dimension no declared grain of '{}' \
+                         carries alongside the grouping {:?}",
+                        u.name, view.dataset, view.grouping
+                    ),
+                ));
+            }
+            None => {}
+        }
+    }
+    // The companion flag is a result column of its own; a view column that
+    // already bears its name would make the snapshot's by-name lookups
+    // ambiguous.
+    for (name, _) in &unanimous {
+        let flag = mixed_flag_name(name);
+        if view.columns.iter().any(|c| c.name() == flag) || view.grouping.contains(&flag) {
+            return Err(compile_error(
+                view,
+                format!("column '{flag}' collides with the mixed flag of '{name}'"),
+            ));
+        }
+    }
+    // Per grain: the alias whose CTE carries its unanimity aggregates, and the
+    // grain's scope semantics, filled as each CTE is emitted.
+    let mut unanimity_at: Vec<(Grain, String, ScopeSemantics)> = Vec::new();
+
     // One aggregate subquery per measure grain the view touches.
     for grain in view.measure_grains(schema) {
         let alias = format!("agg_{}", grain.table());
         let grain_scope = compile_scope_cached(conn, scope, ds, grain, dims, era, cache)?;
 
-        // Only the grouping columns this grain carries, and only within
-        // the materialized depth — selecting a key the spine no longer
-        // groups by would leave it outside every aggregate.
-        let own: Vec<String> = materialized
-            .iter()
-            .filter(|g| ds.carries(grain, dims.base_column(g)))
-            .cloned()
-            .collect();
-        let own_q = quoted(&own);
+        let shape = GrainShape::new(ds, dims, grain, &view.grouping, depth, &alias);
 
         let measures: Vec<(&ColumnSpec, Aggregate)> = view
             .columns
@@ -447,65 +625,30 @@ pub(crate) fn compile_view_with_cache(
             continue;
         }
 
-        let aggs: Vec<String> = measures
+        let mut aggs: Vec<String> = measures
             .iter()
             .map(|(m, agg)| format!("{} as \"{}\"", agg.sql(&format!("\"{}\"", m.name)), m.name))
             .collect();
-
-        // How many of *this grain's* grouping columns are present at each
-        // spine depth. The aggregate groups by the same prefixes projected
-        // onto the columns it has, so this is the map between the spine's
-        // depth and the aggregate's own level.
-        let own_present: Vec<usize> = (0..=depth)
-            .map(|d| {
-                own.iter()
-                    .filter(|c| view.grouping[..d].contains(c))
-                    .count()
-            })
+        // An ungrouped dimension read at this grain rides the scan the
+        // measures already make, rather than a second one over the same table.
+        let folded: Vec<&str> = unanimous
+            .iter()
+            .filter(|(_, g)| *g == grain)
+            .map(|(name, _)| name.as_str())
             .collect();
+        if !folded.is_empty() {
+            aggs.extend(folded.iter().flat_map(|name| unanimity_aggregates(name)));
+            unanimity_at.push((grain, alias.clone(), grain_scope.semantics.clone()));
+        }
 
-        // The same depths, projected onto the columns this grain has.
-        let sub_group = if own.is_empty() {
-            String::new()
-        } else {
-            let mut sets: Vec<String> = (0..=depth)
-                .map(|d| {
-                    let kept: Vec<String> = own
-                        .iter()
-                        .filter(|c| view.grouping[..d].contains(c))
-                        .map(|c| format!("\"{c}\""))
-                        .collect();
-                    format!("({})", kept.join(", "))
-                })
-                .collect();
-            sets.dedup();
-            format!(" group by grouping sets ({})", sets.join(", "))
-        };
-        // The aggregate carries its own level, for the same reason the
-        // spine does: matching on key values alone cannot tell a
-        // rolled-up NULL from a NULL that is really in the data, so a
-        // single NULL `lhu` would attach the aggregate's higher levels to
-        // the leaf row and fan it out.
-        let sub_depth = if own.is_empty() {
-            "0 as sub_depth".to_string()
-        } else {
-            format!(
-                "({} - bit_count(grouping({}))) as sub_depth",
-                own.len(),
-                own_q.join(", ")
-            )
-        };
-        ctes.push(format!(
-            "{alias} as (select {keys}{comma}{sub_depth}, {aggs} \
-             from {relation} base where {pred}{sub_group})",
-            keys = own_q.join(", "),
-            comma = if own.is_empty() { "" } else { ", " },
-            aggs = aggs.join(", "),
-            relation = scan(
+        ctes.push(shape.cte(
+            &alias,
+            &aggs,
+            &scan(
                 &era.relation(&view.dataset, grain),
-                &derived_for(ds, &own, dims, grain),
+                &derived_for(ds, &shape.own, dims, grain),
             ),
-            pred = &grain_scope.predicate,
+            &grain_scope.predicate,
         ));
         // The grain subquery's params follow the previous CTE's, in CTE
         // order.
@@ -513,12 +656,14 @@ pub(crate) fn compile_view_with_cache(
 
         // The depths this grain carries in full are spine levels it can
         // supply: at such a depth its own level *is* the spine's.
-        let carried: Vec<usize> = (1..=depth).filter(|d| own_present[*d] == *d).collect();
+        let carried: Vec<usize> = (1..=depth)
+            .filter(|d| shape.own_present[*d] == *d)
+            .collect();
         if !carried.is_empty() {
             let projection: Vec<String> = materialized
                 .iter()
                 .map(|g| {
-                    if own.contains(g) {
+                    if shape.own.contains(g) {
                         format!("{alias}.\"{g}\"")
                     } else {
                         "NULL".to_string()
@@ -540,27 +685,7 @@ pub(crate) fn compile_view_with_cache(
             }
         }
 
-        let on = if own.is_empty() {
-            "true".to_string()
-        } else {
-            // `else -1`: unreachable, and a row that reached it would
-            // match nothing rather than the grand total.
-            let level = format!(
-                "{alias}.sub_depth = case s.row_depth {} else -1 end",
-                own_present
-                    .iter()
-                    .enumerate()
-                    .map(|(d, present)| format!("when {d} then {present}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            own.iter()
-                .map(|c| format!("{alias}.\"{c}\" is not distinct from s.\"{c}\""))
-                .chain(std::iter::once(level))
-                .collect::<Vec<_>>()
-                .join(" and ")
-        };
-        agg_joins.push(format!("left join {alias} on {on}"));
+        agg_joins.push(format!("left join {alias} on {}", shape.on));
 
         for (m, _) in measures {
             // Attribution per depth, from the schema alone.
@@ -595,8 +720,77 @@ pub(crate) fn compile_view_with_cache(
                         ..
                     }
                 ),
+                mixed_flag: None,
             });
         }
+    }
+
+    // A grain no measure aggregate reads gets a CTE of its own, holding only
+    // the unanimity aggregates. It is joined to the spine but never feeds it:
+    // adding a display column must not add or remove tree rows.
+    let mut own_grains: Vec<Grain> = unanimous
+        .iter()
+        .map(|(_, g)| *g)
+        .filter(|g| !unanimity_at.iter().any(|(at, _, _)| at == g))
+        .collect();
+    own_grains.sort_unstable();
+    own_grains.dedup();
+    for grain in own_grains {
+        let alias = format!("dim_{}", grain.table());
+        let grain_scope = compile_scope_cached(conn, scope, ds, grain, dims, era, cache)?;
+        let shape = GrainShape::new(ds, dims, grain, &view.grouping, depth, &alias);
+        let aggs: Vec<String> = unanimous
+            .iter()
+            .filter(|(_, g)| *g == grain)
+            .flat_map(|(name, _)| unanimity_aggregates(name))
+            .collect();
+        ctes.push(shape.cte(
+            &alias,
+            &aggs,
+            &scan(
+                &era.relation(&view.dataset, grain),
+                &derived_for(ds, &shape.own, dims, grain),
+            ),
+            &grain_scope.predicate,
+        ));
+        params.extend(grain_scope.params);
+        agg_joins.push(format!("left join {alias} on {}", shape.on));
+        unanimity_at.push((grain, alias, grain_scope.semantics));
+    }
+
+    // The outer select's unanimity columns, in view order: the value, cast to
+    // text as a grouping column is (the blotter reads a dimension as text),
+    // then its flag. A spine row the grain's table has no rows under matches
+    // nothing, so its value and flag are NULL: blank, not mixed.
+    let mut unanimity_selects: Vec<String> = Vec::new();
+    let mut unanimity_columns: Vec<CompiledColumn> = Vec::new();
+    for (name, grain) in &unanimous {
+        let Some((_, alias, semantics)) = unanimity_at.iter().find(|(g, _, _)| g == grain) else {
+            continue;
+        };
+        let flag = mixed_flag_name(name);
+        unanimity_selects.push(format!("{alias}.\"{name}\"::varchar as \"{name}\""));
+        unanimity_selects.push(format!("coalesce({alias}.\"{flag}\", false) as \"{flag}\""));
+        unanimity_columns.push(CompiledColumn {
+            name: name.clone(),
+            grain: Some(*grain),
+            // The unanimity rule is exact at every depth: a value shown
+            // is the value of every row beneath.
+            attribution_by_depth: vec![Attribution::Additive; n + 1],
+            scope_semantics: semantics.clone(),
+            summable: false,
+            // Filled with an absolute index once the column's position in
+            // the result is known.
+            mixed_flag: None,
+        });
+        unanimity_columns.push(CompiledColumn {
+            name: flag,
+            grain: None,
+            attribution_by_depth: vec![Attribution::Additive; n + 1],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        });
     }
 
     // Depths no measure grain carries — a view with no measures, or one
@@ -689,6 +883,7 @@ pub(crate) fn compile_view_with_cache(
             attribution_by_depth: vec![Attribution::Additive; n + 1],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         });
     }
     selects.push("s.row_depth".to_string());
@@ -698,10 +893,21 @@ pub(crate) fn compile_view_with_cache(
         attribution_by_depth: vec![Attribution::Additive; n + 1],
         scope_semantics: ScopeSemantics::Direct,
         summable: false,
+        mixed_flag: None,
     });
     joins.extend(agg_joins);
     selects.extend(agg_selects);
     columns.extend(agg_columns);
+    // Each value column is followed by its flag; link them by the flag's
+    // absolute position now that it is known.
+    selects.extend(unanimity_selects);
+    let base = columns.len();
+    for (i, mut c) in unanimity_columns.into_iter().enumerate() {
+        if i % 2 == 0 {
+            c.mixed_flag = Some(base + i + 1);
+        }
+        columns.push(c);
+    }
 
     // Join schema-declared keys onto the spine only at grouping depths that
     // reach the joined dataset's key. Coarser rolled-up rows have NULL keys
@@ -837,6 +1043,7 @@ pub(crate) fn compile_view_with_cache(
                     .collect(),
                 scope_semantics: ScopeSemantics::Direct,
                 summable: false,
+                mixed_flag: None,
             });
         }
     }
@@ -889,6 +1096,7 @@ pub(crate) fn compile_view_with_cache(
                 attribution_by_depth,
                 scope_semantics,
                 summable: false,
+                mixed_flag: None,
             });
         }
     }
@@ -2937,6 +3145,7 @@ kind = "measure"
                 attribution_by_depth: c.attribution_by_depth.clone(),
                 scope_semantics: c.scope_semantics.clone(),
                 summable: c.summable,
+                mixed_flag: None,
             })
             .collect();
         // DuckDB emits `row_depth` as Int32, not Int64. Pinned here
@@ -3954,5 +4163,467 @@ kind = "measure"
             "the interned-columns check's own cache.enum_types call is the only \
              catalog consumer when there is no text scope"
         );
+    }
+    /// `strike` and `expiry` carried at instrument grain, a position-grain
+    /// and an underlying-grain measure. Only the position and underlying
+    /// tables exist, so an ungrouped `strike` is read from the underlying one.
+    fn unanimity_schema() -> SchemaSpec {
+        let text = r#"
+[risk_u.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_u.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_u.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_u.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_u.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_u.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_u.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+[risk_u.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[risk_u.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk_u.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0
+    }
+
+    /// One book, three LHUs:
+    /// - L0/P1: two instruments with different strikes (100, 110), one expiry.
+    /// - L0/P2: one instrument on two underlyings, strike 100 on both rows.
+    /// - L1/P3: a NULL strike beside a 90, one expiry.
+    /// - L1/P4: every strike and expiry NULL.
+    /// - L2/P5: cash only — a position row and no underlying rows at all.
+    fn unanimity_fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .apply_schema(unanimity_schema().dataset("risk_u").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_u_position_live
+                   (book, lhu, position_ref, counterparty, npv,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C', 1, 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C', 2, 'b', 1, 1, now()),
+                   ('BK0','L1','P3','C', 3, 'b', 1, 1, now()),
+                   ('BK0','L1','P4','C', 4, 'b', 1, 1, now()),
+                   ('BK0','L2','P5','C', 5, 'b', 1, 1, now());
+                 insert into risk_u_underlying_live
+                   (book, lhu, position_ref, counterparty, instrument_ref,
+                    underlying_ref, delta01, strike, expiry,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C','I1','SPX', 1, 100, '2027-03', 'b', 1, 1, now()),
+                   ('BK0','L0','P1','C','I2','SPX', 1, 110, '2027-03', 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I3','SPX', 1, 100, '2027-03', 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I3','RUT', 1, 100, '2027-03', 'b', 1, 1, now()),
+                   ('BK0','L1','P3','C','I4','NDX', 1, NULL, '2027-06', 'b', 1, 1, now()),
+                   ('BK0','L1','P3','C','I5','NDX', 1, 90, '2027-06', 'b', 1, 1, now()),
+                   ('BK0','L1','P4','C','I6','NDX', 1, NULL, NULL, 'b', 1, 1, now()),
+                   ('BK0','L1','P4','C','I7','NDX', 1, NULL, NULL, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    /// A view over `risk_u` grouped by `grouping`, showing `measures` and
+    /// then `strike` and `expiry` as dimension columns.
+    fn unanimity_view(grouping: &str, measures: &[&str]) -> ViewSpec {
+        let mut text = format!("[u]\ndataset = \"risk_u\"\ngrouping = {grouping}\n");
+        for m in measures {
+            text.push_str(&format!("[[u.columns]]\nname = \"{m}\"\n"));
+        }
+        text.push_str(
+            "[[u.columns]]\nname = \"strike\"\nkind = \"dimension\"\n\
+             [[u.columns]]\nname = \"expiry\"\nkind = \"dimension\"\n",
+        );
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", &text).unwrap()]);
+        ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    fn compile_unanimity(
+        store: &crate::store::Store,
+        view: &ViewSpec,
+        max_depth: usize,
+    ) -> CompiledQuery {
+        let schema = unanimity_schema();
+        assert!(
+            view.validate(&schema, &DerivedDimensions::default())
+                .iter()
+                .all(|d| d.severity != geode_core::config::Severity::Error),
+            "the fixture view must validate"
+        );
+        compile_view(
+            store.writer(),
+            view,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            max_depth,
+        )
+        .unwrap_or_else(|e| panic!("compile failed at depth {max_depth}: {e}"))
+    }
+
+    /// What one tree row shows for one ungrouped dimension.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Shown {
+        Value(String),
+        Mixed,
+        Blank,
+    }
+
+    /// Each row as `(tree path, strike, expiry)`, the path being the
+    /// grouping values present at that depth joined with `/` ("" for the
+    /// grand total). Reads the value and the flag straight off the
+    /// database, so a flag that is NULL rather than false fails here.
+    fn unanimity_rows(
+        store: &crate::store::Store,
+        q: &CompiledQuery,
+    ) -> Vec<(String, Shown, Shown)> {
+        let conn = store.writer();
+        let mut stmt = conn
+            .prepare(&q.sql)
+            .unwrap_or_else(|e| panic!("prepare failed: {e}\n{}", q.sql));
+        let grouping = q.grouping.clone();
+        let rows = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                let depth: i64 = r.get("row_depth")?;
+                let path: Vec<String> = grouping
+                    .iter()
+                    .take(depth as usize)
+                    .map(|g| {
+                        r.get::<_, Option<String>>(g.as_str())
+                            .map(|v| v.unwrap_or_default())
+                    })
+                    .collect::<Result<_, _>>()?;
+                let shown = |col: &str| -> duckdb::Result<Shown> {
+                    let value: Option<String> = r.get(col)?;
+                    let flag: bool = r.get(mixed_flag_name(col).as_str())?;
+                    Ok(match (value, flag) {
+                        (Some(v), false) => Shown::Value(v),
+                        (None, true) => Shown::Mixed,
+                        (None, false) => Shown::Blank,
+                        (Some(v), true) => panic!("{col} is both {v} and mixed"),
+                    })
+                };
+                Ok((path.join("/"), shown("strike")?, shown("expiry")?))
+            })
+            .unwrap_or_else(|e| panic!("execute failed: {e}\n{}", q.sql));
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn shown_at(rows: &[(String, Shown, Shown)], path: &str) -> (Shown, Shown) {
+        let found: Vec<_> = rows.iter().filter(|r| r.0 == path).collect();
+        assert_eq!(found.len(), 1, "one row at '{path}': {rows:?}");
+        (found[0].1.clone(), found[0].2.clone())
+    }
+
+    fn value(v: &str) -> Shown {
+        Shown::Value(v.to_string())
+    }
+
+    /// The rule at every row of a position tree: a value only where every
+    /// row beneath has that one value, the marker where they disagree. P1
+    /// holds two instruments struck at 100 and 110 — `any_value` would paint
+    /// either, a plausible wrong strike; here it says mixed. P2's instrument
+    /// sits on two underlying rows with the same strike: that is agreement.
+    #[test]
+    fn an_ungrouped_dimension_shows_a_value_only_where_every_row_under_it_agrees() {
+        let (_d, store) = unanimity_fixture();
+        let view = unanimity_view(r#"["lhu", "position_ref"]"#, &["delta01", "npv"]);
+        let rows = unanimity_rows(&store, &compile_unanimity(&store, &view, usize::MAX));
+
+        assert_eq!(shown_at(&rows, "L0/P1").0, Shown::Mixed, "100 and 110");
+        assert_eq!(shown_at(&rows, "L0/P2").0, value("100.0"), "one strike");
+        assert_eq!(shown_at(&rows, "L0").0, Shown::Mixed, "P1 disagrees");
+        assert_eq!(
+            shown_at(&rows, "L0"),
+            (Shown::Mixed, value("2027-03")),
+            "every L0 row shares an expiry, so the LHU shows it"
+        );
+        assert_eq!(shown_at(&rows, "").0, Shown::Mixed, "the grand total");
+    }
+
+    /// A NULL beside a value is mixed, not that value: showing 90 for P3
+    /// would claim it for the instrument that has no strike. Every row NULL
+    /// is blank, and so is a position with no rows at the grain at all (the
+    /// cash-only P5) — blank there, not mixed and not an error.
+    #[test]
+    fn a_null_beside_a_value_is_mixed_and_no_value_at_all_is_blank() {
+        let (_d, store) = unanimity_fixture();
+        let view = unanimity_view(r#"["lhu", "position_ref"]"#, &["delta01", "npv"]);
+        let rows = unanimity_rows(&store, &compile_unanimity(&store, &view, usize::MAX));
+
+        assert_eq!(
+            shown_at(&rows, "L1/P3"),
+            (Shown::Mixed, value("2027-06")),
+            "NULL beside 90 is mixed"
+        );
+        assert_eq!(
+            shown_at(&rows, "L1/P4"),
+            (Shown::Blank, Shown::Blank),
+            "every row NULL"
+        );
+        assert_eq!(
+            shown_at(&rows, "L1"),
+            (Shown::Mixed, Shown::Mixed),
+            "P3's expiry beside P4's NULLs"
+        );
+        assert_eq!(
+            shown_at(&rows, "L2/P5"),
+            (Shown::Blank, Shown::Blank),
+            "no rows at the grain"
+        );
+        assert_eq!(shown_at(&rows, "L2"), (Shown::Blank, Shown::Blank));
+    }
+
+    /// Validation judged the column against the whole grouping, so the
+    /// compiler must serve it at every bound, the grand-total-only query
+    /// included, and the rows it does materialize say the same thing they
+    /// say unbounded. Grouped through the underlying level too, where the
+    /// aggregate joins on a key the position table does not carry.
+    #[test]
+    fn an_ungrouped_dimension_compiles_and_agrees_at_every_bounded_depth() {
+        let (_d, store) = unanimity_fixture();
+        let view = unanimity_view(
+            r#"["lhu", "underlying_ref", "position_ref"]"#,
+            &["npv", "delta01"],
+        );
+        let full = unanimity_rows(&store, &compile_unanimity(&store, &view, usize::MAX));
+        assert_eq!(shown_at(&full, "L0/SPX/P1").0, Shown::Mixed);
+        assert_eq!(shown_at(&full, "L0/RUT/P2").0, value("100.0"));
+        assert_eq!(shown_at(&full, "L0/RUT").0, value("100.0"));
+        assert_eq!(shown_at(&full, "L0/SPX").0, Shown::Mixed);
+        for max_depth in 0..=3 {
+            let bounded = unanimity_rows(&store, &compile_unanimity(&store, &view, max_depth));
+            assert!(!bounded.is_empty());
+            for row in &bounded {
+                assert!(
+                    full.contains(row),
+                    "depth bound {max_depth}: {row:?} differs from the unbounded tree"
+                );
+            }
+        }
+        let total = unanimity_rows(&store, &compile_unanimity(&store, &view, 0));
+        assert_eq!(total, vec![("".to_string(), Shown::Mixed, Shown::Mixed)]);
+    }
+
+    /// Adding a display column must not add or remove tree rows. With only a
+    /// position-grain measure the dimension is read from a CTE of its own,
+    /// which joins the spine but never feeds it; with an underlying measure
+    /// it rides that measure's scan instead of a second one.
+    #[test]
+    fn an_ungrouped_dimension_neither_changes_the_rows_nor_scans_twice() {
+        let (_d, store) = unanimity_fixture();
+        let schema = unanimity_schema();
+        let bare_text = "[b]\ndataset = \"risk_u\"\ngrouping = [\"lhu\", \"position_ref\"]\n\
+                         [[b.columns]]\nname = \"npv\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", bare_text).unwrap()]);
+        let bare = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        let bare_q = compile_view(
+            store.writer(),
+            &bare,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let bare_rows = run(
+            &store,
+            &bare_q,
+            &["row_depth", "lhu", "position_ref", "npv"],
+        );
+
+        let with = unanimity_view(r#"["lhu", "position_ref"]"#, &["npv"]);
+        let with_q = compile_unanimity(&store, &with, usize::MAX);
+        assert!(
+            with_q.sql.contains("dim_measures_underlying"),
+            "{}",
+            with_q.sql
+        );
+        let with_rows = run(
+            &store,
+            &with_q,
+            &["row_depth", "lhu", "position_ref", "npv"],
+        );
+        assert_eq!(with_rows, bare_rows, "the same tree, row for row");
+
+        let folded = compile_unanimity(
+            &store,
+            &unanimity_view(r#"["lhu", "position_ref"]"#, &["npv", "delta01"]),
+            usize::MAX,
+        );
+        assert_eq!(
+            folded.sql.matches("risk_u_underlying_live").count(),
+            1,
+            "one scan of the underlying table: {}",
+            folded.sql
+        );
+        assert!(!folded.sql.contains("dim_"), "{}", folded.sql);
+    }
+
+    /// The flag reaches the snapshot linked to its column by index, the value
+    /// stays NULL beneath it, and the column claims nothing it cannot: not
+    /// summable, additive at every depth.
+    #[test]
+    fn the_mixed_flag_reaches_the_snapshot_beside_a_null_value() {
+        let (_d, store) = unanimity_fixture();
+        let view = unanimity_view(r#"["lhu", "position_ref"]"#, &["delta01", "npv"]);
+        let q = compile_unanimity(&store, &view, usize::MAX);
+        let snap =
+            crate::query::pool::run_snapshot(store.writer(), &q, &q.grouping, Default::default())
+                .unwrap();
+        let strike = snap.column_index("strike").unwrap();
+        let flag = snap.column_index("strike#mixed").unwrap();
+        let meta = snap.meta_at(strike).unwrap();
+        assert_eq!(meta.mixed_flag, Some(flag));
+        assert!(!meta.summable);
+        assert!(
+            meta.attribution_by_depth
+                .iter()
+                .all(|a| *a == Attribution::Additive)
+        );
+        let depth = snap.column_index("row_depth").unwrap();
+        let root = (0..snap.rows())
+            .find(|r| snap.i64_at(depth, *r) == Some(0))
+            .unwrap();
+        assert!(snap.is_mixed_at(strike, root));
+        assert_eq!(snap.display_at(strike, root), None, "NULL beneath the flag");
+        assert!(snap.meta_at(flag).unwrap().mixed_flag.is_none());
+    }
+
+    /// Validation drops an optional unreachable dimension and refuses a
+    /// required one; the compiler, reached without that gate, does the same
+    /// rather than selecting nothing for it silently.
+    #[test]
+    fn an_unreachable_ungrouped_dimension_is_dropped_if_optional_and_an_error_if_required() {
+        let (_d, store) = unanimity_fixture();
+        // Without delta01 the dataset declares only the position grain,
+        // which stores no strike: no table can supply it.
+        let mut schema = unanimity_schema();
+        schema
+            .datasets
+            .iter_mut()
+            .find(|d| d.name == "risk_u")
+            .unwrap()
+            .columns
+            .retain(|c| c.name != "delta01");
+        for (required, ok) in [(false, true), (true, false)] {
+            let text = format!(
+                "[u]\ndataset = \"risk_u\"\ngrouping = [\"lhu\"]\n\
+                 [[u.columns]]\nname = \"npv\"\n\
+                 [[u.columns]]\nname = \"strike\"\nkind = \"dimension\"\nrequired = {required}\n"
+            );
+            let doc = merge_docs("views", &[LayerDoc::builtin("views", &text).unwrap()]);
+            let view = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+            let got = compile_view(
+                store.writer(),
+                &view,
+                &schema,
+                &Scope::default(),
+                &DerivedDimensions::default(),
+                &crate::query::as_of::AsOf::Live,
+                usize::MAX,
+            );
+            match got {
+                Ok(q) => {
+                    assert!(ok, "a required unreachable column must not compile");
+                    assert!(q.columns.iter().all(|c| c.name != "strike"));
+                }
+                Err(e) => {
+                    assert!(!ok, "an optional one is dropped, not an error: {e}");
+                    assert!(e.to_string().contains("strike"), "{e}");
+                }
+            }
+        }
+    }
+
+    /// A view declaring no ungrouped dimension compiles to exactly the
+    /// statement it did before the unanimity path existed: the path adds
+    /// nothing unless a column asks for it.
+    #[test]
+    ///
+    /// The expected text is the demo `tree` view's live statement at full
+    /// depth, captured from the compiler before that path was added
+    /// (`testdata/demo_tree_view.sql`, one trailing newline). Columns the
+    /// demo view shows by the unanimity rule are removed first, so the
+    /// comparison holds whatever the demo document declares. A deliberate
+    /// change to the statement's shape updates the file.
+    fn a_view_with_no_ungrouped_dimension_compiles_to_the_sql_it_always_has() {
+        let schema = SchemaSpec::from_doc(&merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                include_str!("../../../../examples/demo-config/datasets.toml"),
+            )
+            .unwrap()],
+        ))
+        .0;
+        let mut tree = ViewSpec::from_doc(&merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                include_str!("../../../../examples/demo-config/views.toml"),
+            )
+            .unwrap()],
+        ))
+        .0
+        .into_iter()
+        .find(|v| v.name == "tree")
+        .expect("the demo tree view");
+        let dims = DerivedDimensions::default();
+        let ungrouped: Vec<String> = tree
+            .ungrouped_dimensions(&schema, &dims)
+            .iter()
+            .map(|u| u.name.to_string())
+            .collect();
+        tree.columns
+            .retain(|c| !ungrouped.iter().any(|u| u == c.name()));
+        assert!(tree.ungrouped_dimensions(&schema, &dims).is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        for ds in &schema.datasets {
+            store.apply_schema(ds).unwrap();
+        }
+        let q = compile_view(
+            store.writer(),
+            &tree,
+            &schema,
+            &Scope::default(),
+            &dims,
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let expected = include_str!("testdata/demo_tree_view.sql");
+        assert_eq!(format!("{}\n", q.sql), expected);
     }
 }

@@ -212,7 +212,7 @@ impl super::ShellView {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        if self.modal.is_some() {
+        if self.modal_open() {
             return;
         }
         self.close_palette(window, cx);
@@ -284,7 +284,7 @@ impl super::ShellView {
             cx,
         );
         if return_to_filter {
-            if self.modal.is_some() {
+            if self.modal_open() {
                 self.overlay_return_to_filter = true;
             } else {
                 // Nothing opened (the action refused): back to the field now.

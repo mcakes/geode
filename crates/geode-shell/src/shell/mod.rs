@@ -402,14 +402,14 @@ pub struct ShellView {
     /// mutates nothing else still reaches the flush.
     palette_usage_version: u64,
     last_palette_usage_written: u64,
-    /// Open modal chrome and callbacks, installed through
-    /// `dialog::open_shell_dialog`. Key routing gives the modal handler first
-    /// refusal; an unclaimed Escape closes it. Other shell actions cannot
-    /// reach tiles behind the modal. Dialog-specific data and scroll handles
-    /// live in the fields below.
-    modal: Option<dialog::ShellModal>,
+    /// Open modals, bottom first. Only the last entry paints and receives keys;
+    /// the rest keep their state and reappear when everything above them pops.
+    /// Installed through `dialog::open_shell_dialog`. Dialog-specific data and
+    /// scroll handles live in the per-kind fields below; a kind's field is `Some`
+    /// exactly while that kind is in this stack.
+    modals: Vec<dialog::ShellModal>,
     /// State for the open keybinding dialog. Created by `keybindings_view::open`
-    /// and cleared on close. The render callback and modal handler share this
+    /// and cleared when its kind pops. The render callback and modal handler share this
     /// state; GPUI scrolling remains in `keybindings_scroll` so filtering,
     /// selection, and capture can be tested without a window.
     keybindings: Option<keybindings_view::KeybindingsState>,
@@ -419,7 +419,7 @@ pub struct ShellView {
     /// `ScrollHandle::scroll_to_item`).
     keybindings_scroll: ScrollHandle,
     /// State for the open settings dialog, created by [`settings_view::open`]
-    /// and cleared on close. Selection, filtering, and choice editing remain
+    /// and cleared when its kind pops. Selection, filtering, and choice editing remain
     /// independent of GPUI; scrolling lives in `settings_scroll`.
     settings: Option<settings_view::SettingsState>,
     /// Scroll state for the open settings dialog's row list — the
@@ -439,9 +439,11 @@ pub struct ShellView {
     /// Other keys must keep propagating so IME/text-input dispatch can deliver
     /// text to this field.
     palette_input: Entity<InputState>,
-    /// The dialogs' shared input. Only one modal can be open, and closing it
-    /// clears every dialog state before another can use this subscription. The
-    /// entity and focus handle persist; each dialog resets its value on open.
+    /// The dialogs' shared input. Only the top of the modal stack owns it;
+    /// popping one level clears only that kind's own state and hands the
+    /// input back to the entry beneath, restoring its saved text and caret
+    /// (see `dialog::refocus_top`). The entity and focus handle persist;
+    /// each dialog resets its value on open.
     ///
     /// Normal mode blurs the input so letters reach dialog commands. Entering
     /// filter mode focuses it; leaving filter mode blurs it again. Keybinding
@@ -478,8 +480,9 @@ pub struct ShellView {
     /// Whether the scope input held focus when an overlay opened. Closing the
     /// overlay consumes this flag and restores either the input or shell focus.
     /// Palette selection closes before dispatching, so a dialog launched from
-    /// the palette records the restored focus itself. One flag suffices because
-    /// the palette and modal are mutually exclusive.
+    /// the palette records the restored focus itself. One flag suffices: it
+    /// belongs to the first overlay opened, and a palette or dialog opened over
+    /// an open dialog neither records nor consumes it.
     overlay_return_to_filter: bool,
     /// Active divider drag. Mouse moves resize the layout immediately; release
     /// or cancellation preserves those changes and marks the session dirty if
@@ -639,7 +642,7 @@ pub struct ShellView {
     /// `pickable` and re-ranks an open expression field against it.
     expr_vocab: std::rc::Rc<geode_core::scope::complete::ExprVocab>,
     /// State for the open dimension picker. Created by `picker::open` and
-    /// cleared on modal close.
+    /// cleared when its kind pops.
     picker: Option<picker::PickerState>,
     /// Next distinct-request tag. Shared across picker opens so a late reply
     /// from a closed picker cannot match a fresh request for the same column.
@@ -649,7 +652,7 @@ pub struct ShellView {
     /// visible; virtualization alone does not move the viewport.
     picker_scroll: UniformListScrollHandle,
     /// State for the open as-of dialog. Created by [`asof_view::open`] and
-    /// cleared by [`close_modal`](Self::close_modal).
+    /// cleared when its kind pops.
     as_of_dialog: Option<asof_rows::AsOfState>,
     /// Scroll handle for the as-of rows. Navigation and refresh use
     /// `asof_rows::child_index_of` to keep the highlighted row visible.
@@ -659,10 +662,11 @@ pub struct ShellView {
     /// open and unused while the dialog is closed.
     as_of_data_version: u64,
     /// State for the open scope expression dialog. Created by
-    /// [`scope_expr_view::open`] and cleared by [`close_modal`](Self::close_modal).
+    /// [`scope_expr_view::open`] and cleared when its kind pops.
     scope_expr_dialog: Option<scope_expr_view::ScopeExprState>,
     /// State for the open grouping or tile-kind picker. Created by
-    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared on close.
+    /// `choicedialog::open_grouping` or `open_tile_kinds`, and cleared when its
+    /// kind pops.
     choice_dialog: Option<choicedialog::ChoiceDialogState>,
     /// Scroll state for the choice dialog's row list
     /// (`dialog::choice_rows`'s viewport) — the `settings_scroll` split,
@@ -672,7 +676,7 @@ pub struct ShellView {
     /// scrolls it to the top; a highlight move follows the lit row.
     expr_scroll: ScrollHandle,
     /// State for the open config-object dialog, shared across config domains.
-    /// Created by [`objectdialog::render::open`] and cleared on close. The stage
+    /// Created by [`objectdialog::render::open`] and cleared when its kind pops. The stage
     /// machine and provenance data contain no GPUI types; scrolling is separate.
     object_dialog: Option<objectdialog::ObjectDialogState>,
     /// Scroll state for the object dialog's row list — the
@@ -814,64 +818,82 @@ impl ShellView {
                 return;
             }
             let query = input.read(cx).value().to_string();
-            // Route to whichever dialog is actually open. `close_modal`
-            // clears every one of these fields, so at most one is `Some`
-            // here — the routing cannot land in a stale state left over
-            // from an earlier open.
-            if let Some(state) = view.object_dialog.as_mut() {
-                // First, and by nothing more than convenience: the arms
-                // are mutually exclusive by `close_modal`'s contract, so
-                // order carries no meaning here.
-                state.set_query(query);
-                // The top for a filter (the cursor just reset there); the
-                // edited row for an open plain field, which `set_query` keeps
-                // the cursor on — scrolling to 0 there would carry the list
-                // away from the row the trader is typing into.
-                // A choice field's rows are its ranked options, re-ranked
-                // by this keystroke: follow the lit one there instead.
-                let cursor = state
-                    .draft
-                    .as_ref()
-                    .and_then(|d| d.choice_ranked_highlighted())
-                    .unwrap_or_else(|| state.effective_selected());
-                view.object_dialog_scroll.scroll_to_item(cursor);
-            } else if let Some(state) = view.keybindings.as_mut() {
-                state.set_query(query);
-                view.keybindings_scroll.scroll_to_item(0);
-            } else if let Some(state) = view.settings.as_mut() {
-                state.set_query(query);
-                // Filtering resets the cursor to the top; a choice field
-                // re-ranks its options and the lit one is followed.
-                let row = state
-                    .choice
-                    .as_ref()
-                    .map_or(0, |entry| entry.list.ranked_highlighted());
-                view.settings_scroll.scroll_to_item(row);
-            } else if let Some(state) = view.picker.as_mut() {
-                // No `set_query` method (unlike the two dialogs above) —
-                // `PickerState` has no other side effect to bundle with a
-                // query edit, so the two-line reset lives here rather than
-                // behind a one-line wrapper with a single caller.
-                state.query = query;
-                state.selected = 0;
-                picker::sync_picker_scroll(view);
-            } else if let Some(state) = view.choice_dialog.as_mut() {
-                // A choice list re-ranks on every keystroke and the lit
-                // row is followed, as the settings dialog's choice does.
-                state.list.set_query(&query);
-                view.choice_dialog_scroll
-                    .scroll_to_item(state.list.ranked_highlighted());
-            } else if let Some(state) = view.as_of_dialog.as_mut() {
-                // Re-ranking resets the highlight; keep the selected row visible.
-                asof_view::on_query_changed(state, &query);
-                view.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
-                    state.painted(),
-                    state.highlighted(),
-                ));
-            } else if let Some(state) = view.scope_expr_dialog.as_mut() {
-                // The field IS the value; typing clears the last
-                // failed commit's message.
-                scope_expr_view::on_query_changed(state);
+            // Route to the live dialog. While stacked, several of these fields are
+            // `Some`; typing belongs to the top one only.
+            match view.top_kind() {
+                Some(dialog::DialogKind::Object) => {
+                    if let Some(state) = view.object_dialog.as_mut() {
+                        state.set_query(query);
+                        // The top for a filter (the cursor just reset there); the
+                        // edited row for an open plain field, which `set_query` keeps
+                        // the cursor on — scrolling to 0 there would carry the list
+                        // away from the row the trader is typing into.
+                        // A choice field's rows are its ranked options, re-ranked
+                        // by this keystroke: follow the lit one there instead.
+                        let cursor = state
+                            .draft
+                            .as_ref()
+                            .and_then(|d| d.choice_ranked_highlighted())
+                            .unwrap_or_else(|| state.effective_selected());
+                        view.object_dialog_scroll.scroll_to_item(cursor);
+                    }
+                }
+                Some(dialog::DialogKind::Keybindings) => {
+                    if let Some(state) = view.keybindings.as_mut() {
+                        state.set_query(query);
+                        view.keybindings_scroll.scroll_to_item(0);
+                    }
+                }
+                Some(dialog::DialogKind::Settings) => {
+                    if let Some(state) = view.settings.as_mut() {
+                        state.set_query(query);
+                        // Filtering resets the cursor to the top; a choice field
+                        // re-ranks its options and the lit one is followed.
+                        let row = state
+                            .choice
+                            .as_ref()
+                            .map_or(0, |entry| entry.list.ranked_highlighted());
+                        view.settings_scroll.scroll_to_item(row);
+                    }
+                }
+                Some(dialog::DialogKind::Picker) => {
+                    if let Some(state) = view.picker.as_mut() {
+                        // No `set_query` method (unlike the two dialogs above) —
+                        // `PickerState` has no other side effect to bundle with a
+                        // query edit, so the two-line reset lives here rather than
+                        // behind a one-line wrapper with a single caller.
+                        state.query = query;
+                        state.selected = 0;
+                        picker::sync_picker_scroll(view);
+                    }
+                }
+                Some(dialog::DialogKind::Choice) => {
+                    if let Some(state) = view.choice_dialog.as_mut() {
+                        // A choice list re-ranks on every keystroke and the lit
+                        // row is followed, as the settings dialog's choice does.
+                        state.list.set_query(&query);
+                        view.choice_dialog_scroll
+                            .scroll_to_item(state.list.ranked_highlighted());
+                    }
+                }
+                Some(dialog::DialogKind::AsOf) => {
+                    if let Some(state) = view.as_of_dialog.as_mut() {
+                        // Re-ranking resets the highlight; keep the selected row visible.
+                        asof_view::on_query_changed(state, &query);
+                        view.as_of_scroll.scroll_to_item(asof_rows::child_index_of(
+                            state.painted(),
+                            state.highlighted(),
+                        ));
+                    }
+                }
+                Some(dialog::DialogKind::ScopeExpr) => {
+                    if let Some(state) = view.scope_expr_dialog.as_mut() {
+                        // The field IS the value; typing clears the last
+                        // failed commit's message.
+                        scope_expr_view::on_query_changed(state);
+                    }
+                }
+                Some(dialog::DialogKind::Plain) | None => {}
             }
             cx.notify();
         })
@@ -1176,7 +1198,7 @@ impl ShellView {
             palette_usage,
             palette_usage_version: 0,
             last_palette_usage_written: 0,
-            modal: None,
+            modals: Vec::new(),
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
             settings: None,
@@ -1245,21 +1267,64 @@ impl ShellView {
         }
     }
 
-    /// Close the modal, clear every dialog state, and restore overlay focus.
-    /// Escape, the close button, and backdrop clicks use this same path.
-    /// Clearing all states is required because the shared input subscription
-    /// routes to whichever dialog state is present.
+    /// Close the live (topmost) modal: clear only its kind's state, then give the
+    /// revealed dialog back its input and focus, or, when none remains, return
+    /// focus to where the first dialog was opened from. Escape, the close button,
+    /// and backdrop clicks use this same path.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.modal = None;
-        self.settings = None;
-        self.keybindings = None;
-        self.picker = None;
-        self.as_of_dialog = None;
-        self.scope_expr_dialog = None;
-        self.choice_dialog = None;
-        self.object_dialog = None;
-        self.return_focus_from_overlay(window, cx);
+        if let Some(top) = self.modals.pop() {
+            self.clear_dialog_state(top.kind);
+        }
+        if self.modals.is_empty() {
+            // A same-kind refusal's notice names a kind lower in the stack; once
+            // the stack is empty that kind no longer exists, so the notice must
+            // not linger describing a dialog nothing points to.
+            if self.notice.is_some_and(dialog::is_already_open_notice) {
+                self.notice = None;
+            }
+            self.return_focus_from_overlay(window, cx);
+        } else {
+            dialog::refocus_top(self, window, cx);
+        }
         cx.notify();
+    }
+
+    /// Drop the state field `kind` owns. A field left behind would swallow the
+    /// next same-kind dialog's queries.
+    fn clear_dialog_state(&mut self, kind: dialog::DialogKind) {
+        use dialog::DialogKind;
+        match kind {
+            DialogKind::Settings => self.settings = None,
+            DialogKind::Keybindings => self.keybindings = None,
+            DialogKind::Picker => self.picker = None,
+            DialogKind::AsOf => self.as_of_dialog = None,
+            DialogKind::ScopeExpr => self.scope_expr_dialog = None,
+            DialogKind::Choice => self.choice_dialog = None,
+            DialogKind::Object => self.object_dialog = None,
+            DialogKind::Plain => {}
+        }
+    }
+
+    /// Whether any modal is open.
+    pub(crate) fn modal_open(&self) -> bool {
+        !self.modals.is_empty()
+    }
+
+    /// The live (topmost) modal.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn top_modal(&self) -> Option<&dialog::ShellModal> {
+        self.modals.last()
+    }
+
+    /// The live modal's kind, which decides who owns the shared input and keys.
+    pub(crate) fn top_kind(&self) -> Option<dialog::DialogKind> {
+        self.modals.last().map(|m| m.kind)
+    }
+
+    /// How many modals are stacked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn modal_depth(&self) -> usize {
+        self.modals.len()
     }
 
     /// Where focus goes when an overlay closes: back to the scope bar's

@@ -321,11 +321,59 @@ the join is simply never performed.
 
 The same checks run against a **per-query grouping override**, which validates a
 copy of the view with the override's grouping in place. Regrouping away from a
-`dimension` column that the view's own grouping supplied therefore refuses that
-query, rather than painting the column blank for as long as the override lasts.
-The remedy is in the message: group by the column again, or declare it
-`required = false`. No shipped view declares a dimension column, so nothing
-meets this today.
+`dimension` column that the view's own grouping supplied makes it an ungrouped
+dimension (below): it is shown by the unanimity rule when a grain carries it
+alongside the new grouping, and otherwise the query is refused rather than
+painting the column blank for as long as the override lasts. The remedy is in
+the message: group by the column again, or declare it `required = false`.
+
+### Ungrouped dimension columns
+
+A view may show a `dimension` column it does not group by — `strike` or
+`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
+is declared with the dimension role in the primary (measure-family) dataset, is
+not a derived dimension, and no join supplies it, the compiler computes it by
+the **unanimity rule**, at every depth including the grand total:
+
+- the value, when every stored row under the tree row has that one non-NULL
+  value;
+- **mixed**, when they disagree — including a NULL beside a value, since
+  showing the value would claim it for rows that have none;
+- blank (NULL), when no row under it has a value.
+
+It is never `any_value`: a position holds several instruments with their own
+strikes, and an arbitrary leg's strike is a plausible wrong value.
+
+The column is read from one table: the coarsest declared grain of the dataset
+that carries it and every column of the view's grouping (`unanimity_grain` in
+`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
+so one grain serves every depth and a view that validates compiles at every
+`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
+min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
+count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
+a measure aggregate at that grain, joined to the spine the same way, with the
+grain's scope predicate and era. When a measure aggregate already reads that
+grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
+holds them. That CTE is joined to the spine but never feeds it, so adding a
+display column never adds or removes tree rows, and a view declaring no
+ungrouped dimension compiles to the statement it always did.
+
+The result carries the value cast to text, as a grouping column is, and a
+boolean companion column named `<column>#mixed` (false where the grain has no
+rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
+companion by index and `Snapshot::from_batches` refuses a flag that is not a
+boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
+summable and is `Additive` at every depth, because the rule is already exact,
+and takes the chosen grain's scope semantics. A consumer reading the snapshot
+without the flag sees NULL, not a value.
+
+Known limitations: the unanimity is over the chosen grain table's rows, so an
+instrument with no row in that table (a cash instrument absent from the
+underlying table when the grouping forces the underlying grain) does not take
+part; choosing the coarsest carrying grain minimises this. A numeric column
+arrives as text, like a numeric grouping column, so it sorts as text. A derived
+column over the dimension sees only the value column, so where the input is
+mixed the derived cell is blank, not marked.
 
 The compiler no longer absorbs the same defects itself. A join naming an unknown
 dataset, or keyed on columns no grain of the joined dataset carries, is a
@@ -527,8 +575,22 @@ to the report time if adding the interval overflows.
   measurement log.
 - Ordinary tests verify outcomes. Targeted mutations in
   [`mutation-check.sh`](../../scripts/mutation-check.sh) check whether tests
-  can detect particular wrong-data behaviors; `--anchors-only` validates
-  their source anchors without running Cargo.
+  can detect particular wrong-data behaviors. `--anchors-only` validates the
+  table without running Cargo or editing source: it rejects a stale or
+  ambiguous anchor, a filter matching no test or several without an exact
+  name, an entry with no filter, a replacement equal to its anchor, and a
+  mutation repeated under the same test. The checker,
+  [`mutation_anchors.py`](../../scripts/mutation_anchors.py), has its own
+  unittest suite in `scripts/test_mutation_anchors.py`. A mutation that
+  does not compile is reported as `BUILD`, not caught, and fails the run,
+  as does a stale entry; the exit status reports only such harness errors,
+  while `SURVIVED`, `caught` and `FILTER` are verdicts read from the output.
+  `--build-check` compiles each selected mutation without running tests,
+  on the same target and test profile a mutation run builds, to find
+  replacements left stale by signature changes that the static check
+  cannot see. A mutation run or build check that selects no entry exits
+  nonzero, unless `--changed` skipped every candidate because no anchored
+  file changed.
 
 The code linked above is the implementation authority. If this guide and the
 code disagree, correct the guide and assess whether the behavior is an

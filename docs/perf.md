@@ -1908,3 +1908,33 @@ on Apple M5 Pro (MacBook Pro) with rustc 1.96.0:
 Well inside the 8 ms UI-action budget with headroom to spare, so a
 `V`-then-`G` top-of-grid selection over the demo's largest shape does not
 need the tile to summarize lazily or off the UI thread.
+
+## Ungrouped dimension columns (unanimity rule)
+
+`cargo bench -p geode-data --bench query -- query_carried`: the `tree` view
+(`lhu > underlying_ref > position_ref`, five measures over three grains)
+against `tree_carried`, the same view plus ungrouped `strike` (f64) and
+`expiry` (utf8), both carried at instrument grain. One service over one
+million generated rows (959,012 ingested) with both columns stored, so the
+two views read identical tables and differ only in the statement. Their
+aggregates fold into the underlying-grain measure scan; result row counts
+are identical (136,868 scoped, 133 scoped at depth 2, 729,466 unscoped).
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, bench profile,
+20 samples. **The machine was heavily loaded** (load average 34–43 from
+concurrent builds in other checkouts), so absolute values are inflated —
+the plain `tree` rows here are several times the Phase 2b table above. Read
+the pairs as a same-run ratio, not as reference values.
+
+| shape | `tree` median | `tree_carried` median | ratio |
+| --- | ---: | ---: | ---: |
+| scoped to 3 books, depth 2 | 21.8 ms | 32.3 ms | 1.48 |
+| unscoped, depth 2 | 25.9 ms | 41.2 ms | 1.59 |
+| scoped to 3 books, full depth | 124 ms | 184 ms | 1.48 |
+| unscoped, full depth | 600 ms | 735 ms | 1.22 |
+
+The depth-2 shapes the blotter opens with stay under the 50 ms requery
+budget with both columns even under this load. The added cost is the two
+`min`/`max`/`count` pairs per underlying row and two more text plus two
+boolean columns across the Arrow boundary. An unloaded re-measure is still
+owed before these become reference values.

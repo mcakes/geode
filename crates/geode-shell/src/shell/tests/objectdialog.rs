@@ -73,7 +73,7 @@ fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppC
     let (shell, mut cx) = open_views_dialog(cx);
 
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "config::views should have opened a modal"
     );
     assert_eq!(
@@ -119,7 +119,7 @@ fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppC
         "a bare letter must not be typed into the filter in normal mode"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and must not fall through to the shell underneath the modal"
     );
 }
@@ -207,7 +207,7 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
         "the second escape clears the query"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and does not close"
     );
     assert!(
@@ -217,7 +217,7 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the third closes"
     );
     assert!(
@@ -284,7 +284,7 @@ fn escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAp
         "and the row the first search found is on screen again"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "reverting a search never closes the dialog"
     );
 }
@@ -431,7 +431,7 @@ fn presentation_of(
     })
 }
 
-fn edit_draft<T>(
+pub(super) fn edit_draft<T>(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
     f: impl FnOnce(&objectdialog::Draft) -> T,
@@ -1307,7 +1307,7 @@ fn a_write_that_fails_after_the_dialog_closed_still_reports_itself(cx: &mut gpui
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the dialog is closed before the write is even attempted"
     );
 
@@ -1497,7 +1497,7 @@ fn escape_goes_back_a_stage_before_it_closes_the_dialog(cx: &mut gpui::TestAppCo
         "the first escape goes back a stage, not out of the dialog"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "the modal is still open"
     );
     assert!(
@@ -1508,7 +1508,7 @@ fn escape_goes_back_a_stage_before_it_closes_the_dialog(cx: &mut gpui::TestAppCo
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the second closes"
     );
 }
@@ -1575,7 +1575,7 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
         "escape goes back a stage, not out of the dialog"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "the modal is still open"
     );
 }
@@ -1600,7 +1600,7 @@ fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAp
     );
     // Saying so is all it does: the draft is untouched and the modal stays.
     assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
 }
 
 /// A user presentation entry alone is enough for `r` to revert a desk view's
@@ -1970,7 +1970,7 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the dialog has to be closed for ctrl+3 to reach frame::slot_3"
     );
 
@@ -2130,7 +2130,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
 /// A `scopes` doc with one saved scope, `mine`, selecting `book = BK001`
 /// — deliberately different from whatever a test then puts on the
 /// frame, so an assertion that the doc changed cannot pass by accident.
-fn services_with_a_saved_scope() -> ShellServices {
+pub(super) fn services_with_a_saved_scope() -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -2464,7 +2464,7 @@ fn a_missing_named_expressions_note_paints_in_danger_text(cx: &mut gpui::TestApp
 
 /// Walk the Scopes edit cursor to the Expression row with `j` and open it
 /// with `i`. Production keys only.
-fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+pub(super) fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
     open_scopes_field(shell, cx, "expression");
 }
 
@@ -3348,7 +3348,7 @@ fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::
     cx.run_until_parked();
 
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "scope::save_current should have opened a modal"
     );
     assert_eq!(
@@ -3390,7 +3390,7 @@ fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
     dispatch_action(&shell, "scope::save_current", &mut cx);
     cx.run_until_parked();
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse,
@@ -5422,7 +5422,7 @@ fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestA
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and the dialog is still open — this was the revert rung, not a close"
     );
 }
@@ -9833,7 +9833,7 @@ fn the_back_button_is_absent_in_browse(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
     assert!(!back_paints(&mut cx), "browse has no parent screen");
 }
 
@@ -9851,7 +9851,7 @@ fn the_back_button_leaves_the_edit_stage_for_browse(cx: &mut gpui::TestAppContex
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse
     );
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()), "still open");
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()), "still open");
     assert!(!back_paints(&mut cx), "browse paints no Back button");
     assert!(cx.debug_bounds("objectdialog-row-tree").is_some());
 

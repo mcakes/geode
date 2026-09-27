@@ -1487,6 +1487,11 @@ impl TableDelegate for BlotterDelegate {
             return el; // blank: NULL, NonAttributable, or not yet cached
         };
         let text: SharedString = SharedString::from(Arc::clone(&cell.text));
+        // The unanimity marker is not a value: muted like the other
+        // not-a-plain-value text in the grid, and never colored as one.
+        if cell.mixed {
+            return el.text_color(theme.muted_foreground).child(text);
+        }
         match cell.attribution {
             Attribution::NonAttributable => el, // never a number here
             Attribution::DeterminedNonAdditive => el
@@ -1556,6 +1561,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 4],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
     fn s(v: &str) -> Option<String> {
@@ -2120,6 +2126,7 @@ mod tests {
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
                         summable: false,
+                        mixed_flag: None,
                     },
                     TestColumn::Dict(vec![None, s("L1"), s("SPX"), s("SPX"), s("SPX"), s("SPX")]),
                 ),
@@ -2129,6 +2136,7 @@ mod tests {
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
                         summable: false,
+                        mixed_flag: None,
                     },
                     TestColumn::Dict(vec![None, None, s("A"), s("B"), s("C"), s("D")]),
                 ),
@@ -2138,6 +2146,7 @@ mod tests {
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
                         summable: false,
+                        mixed_flag: None,
                     },
                     TestColumn::I32(vec![0, 1, 2, 2, 2, 2]),
                 ),
@@ -2147,6 +2156,7 @@ mod tests {
                         attribution_by_depth: (0..4).map(determined).collect(),
                         scope_semantics: ScopeSemantics::Direct,
                         summable: false,
+                        mixed_flag: None,
                     },
                     TestColumn::F64(vec![
                         Some(9.0),

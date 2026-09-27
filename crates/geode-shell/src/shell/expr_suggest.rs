@@ -19,49 +19,64 @@ use crate::keymap::Keystroke;
 use crate::listfilter;
 use crate::vimnav::NavCommand;
 
+use super::dialog::DialogKind;
 use super::{EXPR_KEY, ShellEvent, ShellView, chip, scale, scope_expr_view};
 
-/// The open expression field's completion, whichever surface holds it.
+/// The live dialog's expression completion. The `dialog_input` observer calls
+/// `refresh` on every notify, so a covered dialog's completion must not be
+/// returned here, or another dialog's text would recompute it.
 pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion> {
-    if let Some(state) = view.scope_expr_dialog.as_mut() {
-        // The name entry shares the field; suggesting columns for a name
-        // would offer to write an expression into it.
-        if state.naming.is_some() {
-            return None;
+    match view.top_kind()? {
+        DialogKind::ScopeExpr => {
+            let state = view.scope_expr_dialog.as_mut()?;
+            // The name entry shares the field; suggesting columns for a name
+            // would offer to write an expression into it.
+            if state.naming.is_some() {
+                return None;
+            }
+            Some(&mut state.completion)
         }
-        return Some(&mut state.completion);
+        DialogKind::Object => {
+            let state = view.object_dialog.as_mut()?;
+            if !super::objectdialog::expression_entry_open(state) {
+                return None;
+            }
+            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => None,
     }
-    let state = view.object_dialog.as_mut()?;
-    if !super::objectdialog::expression_entry_open(state) {
-        return None;
-    }
-    Some(state.expr.get_or_insert_with(ExprCompletion::default))
 }
 
 /// The scope the finished expression will be ANDed with, which is what
 /// the values request is narrowed by.
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
-    let current = view.frame.read(cx).scope();
-    if let Some(state) = view.scope_expr_dialog.as_ref() {
-        return Some(scope_expr_view::request_scope(
-            &state.mode,
-            current,
-            &state.staged,
-        ));
-    }
-    let state = view
-        .object_dialog
-        .as_ref()
-        .filter(|state| super::objectdialog::expression_entry_open(state))?;
-    match state.domain {
-        // A named expression has no enclosing scope: it is ANDed into
-        // whichever scope ticks it, so its values are the whole dataset's.
-        super::objectdialog::Domain::Expressions => Some(Scope::default()),
-        super::objectdialog::Domain::Scopes => {
-            let draft = state.draft.as_ref()?;
-            let pending = super::objectdialog::apply::config_with_pending(view);
-            let config = pending.as_ref().unwrap_or(&view.services.config);
-            Some(super::objectdialog::scopes::expression_scope(draft, config))
+    match view.top_kind() {
+        Some(DialogKind::ScopeExpr) => {
+            let current = view.frame.read(cx).scope();
+            let state = view.scope_expr_dialog.as_ref()?;
+            Some(scope_expr_view::request_scope(
+                &state.mode,
+                current,
+                &state.staged,
+            ))
+        }
+        Some(DialogKind::Object) => {
+            let state = view
+                .object_dialog
+                .as_ref()
+                .filter(|state| super::objectdialog::expression_entry_open(state))?;
+            match state.domain {
+                // A named expression has no enclosing scope: it is ANDed into
+                // whichever scope ticks it, so its values are the whole dataset's.
+                super::objectdialog::Domain::Expressions => Some(Scope::default()),
+                super::objectdialog::Domain::Scopes => {
+                    let draft = state.draft.as_ref()?;
+                    let pending = super::objectdialog::apply::config_with_pending(view);
+                    let config = pending.as_ref().unwrap_or(&view.services.config);
+                    Some(super::objectdialog::scopes::expression_scope(draft, config))
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -124,14 +139,26 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     }));
 }
 
-/// An `EXPR_KEY` reply. It is dropped when no expression field is open
-/// or the tag is not the column's latest.
+/// An `EXPR_KEY` reply. A covered dialog's field still owns its outstanding
+/// request, so the reply is offered to each live completion; the tag decides
+/// which one asked. Dropped when none matches.
 pub(crate) fn deliver(view: &mut ShellView, outcome: DistinctOutcome, cx: &mut Context<ShellView>) {
     let vocab = view.expr_vocab.clone();
-    let Some(c) = completion_mut(view) else {
-        return;
-    };
-    if c.deliver(&outcome.column, outcome.tag, outcome.values, &vocab) {
+    let mut landed = false;
+    if let Some(state) = view.scope_expr_dialog.as_mut() {
+        landed =
+            state
+                .completion
+                .deliver(&outcome.column, outcome.tag, outcome.values.clone(), &vocab);
+    }
+    if !landed
+        && let Some(state) = view.object_dialog.as_mut()
+        && super::objectdialog::expression_entry_open(state)
+        && let Some(c) = state.expr.as_mut()
+    {
+        landed = c.deliver(&outcome.column, outcome.tag, outcome.values, &vocab);
+    }
+    if landed {
         cx.notify();
     }
 }
@@ -203,9 +230,12 @@ pub(crate) fn accept(
     // `sync_dialog_text` runs after the key and would put the old query
     // back unless the draft already holds the new text. A pointer accept
     // passes no key branch, so it syncs here; with the texts equal, the
-    // sync writes nothing.
+    // sync writes nothing. Gated on the top kind: a covered object dialog's
+    // draft belongs to it, not to whichever completion the accept above
+    // just wrote through the shared input.
     let text = view.dialog_input.read(cx).value().to_string();
-    if let Some(state) = view.object_dialog.as_mut()
+    if view.top_kind() == Some(DialogKind::Object)
+        && let Some(state) = view.object_dialog.as_mut()
         && super::objectdialog::expression_entry_open(state)
         && let Some(draft) = state.draft.as_mut()
     {

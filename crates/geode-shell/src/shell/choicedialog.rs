@@ -387,7 +387,7 @@ fn open(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Choice) {
         return;
     }
     let title = state.title();
@@ -399,6 +399,7 @@ fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Choice,
         title,
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),

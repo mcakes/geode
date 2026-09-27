@@ -401,12 +401,12 @@ pub fn open_term(
 }
 
 /// Open the dialog in `mode`, seeded from the frame's current expression.
-/// A no-op if a modal is already open, like every other `open` here. The
+/// A no-op when this kind is already open (see `dialog::can_open`). The
 /// seed is written AFTER the door (`open_shell_dialog_with_key` resets the
 /// field to empty), and `set_value` emits no `Change`, so the state starts
 /// with no error regardless.
 pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::ScopeExpr) {
         return;
     }
     let current = view.frame.read(cx).scope();
@@ -424,6 +424,7 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
         view,
         window,
         cx,
+        dialog::DialogKind::ScopeExpr,
         SharedString::new_static(title),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),

@@ -13,7 +13,9 @@ bench = false
 # dev-dependencies turn it on.
 test-support = []
 
-# The pure core (`core`) needs `geode-core` and `chrono` alone. The tile
+# The pure core (`core`) needs `geode-core` and `chrono`, plus
+# `geode-shell`'s pure `listfilter`/`exprcomplete` and gpui's
+# `SharedString` for the entry-bar completer (`core::complete`). The tile
 # adds `geode-shell` for the module-hosting contract (`TileContent`,
 # `Frame`, the keymap and action vocabulary, `ChoiceList`, the chip, colour,
 # list-row and control doors), `geode-data` for `DataHandle` alone — the one

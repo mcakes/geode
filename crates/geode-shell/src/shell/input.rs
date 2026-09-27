@@ -28,6 +28,10 @@ use super::{
 /// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
+/// The notice produced when a palette action tries to open transient chrome
+/// (the command line, find, or the stack list) while a dialog is open.
+pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
+
 /// The notice when no registered kind accepts the focused tile's context.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
@@ -108,6 +112,24 @@ impl ShellView {
         self.notice = None;
         self.stack_list = None;
         self.add_filter_menu = None;
+
+        // The palette reaches every action, including these three, even while a
+        // dialog is open (ruling 5). Each would open real transient chrome behind
+        // the stack that the user cannot see and, being blocked from the keyboard
+        // by the modal branch, can barely reach: an unfocusable command line that
+        // cancels itself on the next render, a find prompt with the same fate, or
+        // a stack list that only becomes usable once the stack closes. Refuse
+        // instead of running them behind the stack, unlike an ordinary palette
+        // action (see `commit_selected`), which is allowed to run there.
+        if self.modal_open()
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {
+            self.notice = Some(CLOSE_DIALOG_FIRST);
+            return;
+        }
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
             // Stack cycling consumes the count before the count-free workspace router.
@@ -609,13 +631,27 @@ impl ShellView {
     ) {
         // Both shell modals and component dialogs exclude the ordinary matcher,
         // preventing actions from reaching tiles behind the overlay. A shell modal
-        // gets first refusal through its key handler; an unclaimed Escape closes it.
-        // Component dialogs retain their own handling.
-        if self.modal.is_some() || window.has_active_dialog(cx) {
-            if self.modal.is_some() {
+        // gets first refusal through its key handler; a declined chord that opens a
+        // dialog pushes it; an unclaimed Escape closes the top dialog. Component
+        // dialogs retain their own handling.
+        if self.modal_open() || window.has_active_dialog(cx) {
+            // A palette opened over the stack owns the keyboard until it closes,
+            // exactly as it does with no dialog open.
+            if self.palette.is_some() && self.modal_open() {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && self.is_palette_toggle(&ks, cx)
+                {
+                    self.toggle_palette(window, cx);
+                } else {
+                    self.handle_palette_key(event, window, cx);
+                }
+                cx.notify();
+                return;
+            }
+            if self.modal_open() {
                 // Clone the handler before calling it so the modal borrow ends before
                 // the closure receives mutable access to the shell.
-                let handler = self.modal.as_ref().and_then(|m| m.on_key.clone());
+                let handler = self.modals.last().and_then(|m| m.on_key.clone());
                 let handled = handler.is_some_and(|handler| {
                     convert_keystroke(&event.keystroke)
                         .is_some_and(|ks| handler(self, &ks, window, cx))
@@ -623,7 +659,7 @@ impl ShellView {
                 // Reconcile the shared input and focus after every modal handler call,
                 // even for unclaimed keys. A handler may change state without consuming
                 // a key. Once closed, the modal's closer owns focus instead.
-                if self.modal.is_some() {
+                if self.modal_open() {
                     dialog::sync_dialog_text(self, window, cx);
                 }
                 if handled {
@@ -632,6 +668,34 @@ impl ShellView {
                     cx.stop_propagation();
                     cx.notify();
                     return;
+                }
+                // An unclaimed chord that opens a dialog pushes it over this one,
+                // resolved against the workspace context as the scope field's
+                // chords are. Every other chord stays inert: an action behind
+                // the modal would change tiles the trader cannot see.
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && ks.mods.is_chord()
+                {
+                    // The palette opens above the stack; it is how any action,
+                    // not only a dialog, is reached while dialogs are open.
+                    if self.is_palette_toggle(&ks, cx) {
+                        self.toggle_palette(window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
+                    let stack = [KeyContext::new("workspace")];
+                    let action = self
+                        .single_keystroke_binding(&ks, &stack)
+                        .map(|binding| binding.action.clone());
+                    if let Some(action) = action
+                        && dialog::opens_dialog(&action)
+                    {
+                        self.dispatch(&action, None, window, cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                        return;
+                    }
                 }
                 if event.keystroke.key == "escape" {
                     self.close_modal(window, cx);

@@ -228,7 +228,7 @@ impl ShellView {
             return false;
         }
         if self.palette.is_some()
-            || self.modal.is_some()
+            || self.modal_open()
             || !self.matcher.pending().is_empty()
             || self.divider_drag.is_some()
             || self.tile_drag.is_some()
@@ -260,7 +260,7 @@ impl ShellView {
             return false;
         }
         if self.palette.is_some()
-            || self.modal.is_some()
+            || self.modal_open()
             || !self.matcher.pending().is_empty()
             || self.divider_drag.is_some()
             || self.tile_drag.is_some()
@@ -302,7 +302,7 @@ impl ShellView {
             return false;
         }
         if self.palette.is_some()
-            || self.modal.is_some()
+            || self.modal_open()
             || !self.matcher.pending().is_empty()
             || self.divider_drag.is_some()
             || self.tile_drag.is_some()
@@ -406,7 +406,7 @@ impl ShellView {
             // The epoch catches switches away and back between renders.
             && drag.epoch == self.services.workspaces.switch_epoch()
             && self.palette.is_none()
-            && self.modal.is_none()
+            && !self.modal_open()
             && self.matcher.pending().is_empty()
             // A close and release can arrive before another render.
             && self

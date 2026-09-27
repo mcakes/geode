@@ -155,6 +155,7 @@ pub fn compile_document(
             }],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         })
         .collect();
 
