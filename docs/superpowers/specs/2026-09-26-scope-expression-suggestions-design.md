@@ -138,7 +138,7 @@ unsound as a narrowing.
 
 | Surface | Values narrowed by |
 |---|---|
-| Whole mode | The frame's dimension selections and as-of. The frame expression is excluded because the dialog replaces it. |
+| Whole mode | The frame's dimension selections, text filter and as-of. The frame expression is excluded because the dialog replaces it. |
 | Add mode | The frame's full current scope, including its expression. |
 | Term mode | The frame's scope with the edited term removed from the expression. |
 | Scopes dialog | The edited scope's own dimension selections and text filter, with the frame's as-of. |

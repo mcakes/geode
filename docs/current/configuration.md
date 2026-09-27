@@ -85,6 +85,23 @@ typed values. Series datasets describe identities and time/value columns.
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
+A view column carries a `kind` — `measure`, `dimension`, or `derived` — and the
+key **defaults to `measure`**. A view join and a view column also take
+`required`, a boolean defaulting to true; a non-bool value is ignored, as it is
+for a sort key's `descending` and for the schema's own `required`. Together those
+two defaults are the upgrade consequence of view validation becoming a gate: a
+column written as just a name is a measure, so if the primary dataset declares no
+measure of that name, the view is refused when queried instead of opening with
+that column blank. Writing `kind = "dimension"` where that was meant, or
+`required = false` to accept the column being dropped, is the fix, and the
+diagnostic names the view and the column. `required` has no effect on a
+`derived` column: nothing validates a derived expression at load — its SQL is
+the compiler's business — so there is no failure for the flag to downgrade. The same applies to a join whose keys
+no grain of the joined dataset carries, or which keys on a column the grouping
+does not include. See [queries and time
+travel](data-path.md#queries-and-time-travel) for what a refusal looks like at
+query time.
+
 ## Validation boundaries
 
 Typed readers in `geode-core` interpret supplied documents without I/O and
@@ -106,10 +123,16 @@ returns view and overlay diagnostics, including unknown-color warnings;
 schema and color-definition diagnostics are reported by other callers.
 
 Scope expressions use a restricted grammar validated against the schema. They
-are never raw SQL. Source adapter names, document kinds, module keymap
-fragments, and pricer names depend on what the assembled application has
-registered, so `geode-app` performs those cross-crate checks at startup and
-reload.
+are never raw SQL. A saved scope is checked by `Scope::validate` wherever it
+is loaded; both the frame's expression dialogs and the Scopes object dialog's
+`expression` field additionally check a typed draft at Enter, so an unknown
+column or a disallowed operator on a derived dimension is refused with the
+field still open rather than accepted and left to fail later at query time
+(see [input-and-dialogs.md's Frame expression](input-and-dialogs.md#frame-expression)
+and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md#scope-expression-field)).
+Source adapter names, document kinds, module keymap fragments, and pricer
+names depend on what the assembled application has registered, so `geode-app`
+performs those cross-crate checks at startup and reload.
 
 Schema changes do not migrate an existing DuckDB database. `apply_schema`
 creates missing tables and columns needed by its own metadata, while payload

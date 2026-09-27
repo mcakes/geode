@@ -4,25 +4,28 @@
 //! `render_td` is a lookup. The pure core does the work; this file only
 //! sequences it and paints.
 
-use crate::colour_cache::{ColourCache, Resolved};
+use crate::colour_cache::{ColourCache, Resolved as ColourResolved};
 use crate::core::cache::{FormatCache, cell};
-use crate::core::cursor::{Cursor, Mode, restore_by_path, selection};
+use crate::core::cursor::{Cursor, find_by_path, restore_by_path};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
 use crate::core::flatten::{SortOrder, SortSpec, flatten};
 use crate::core::format::Sign;
 use crate::core::plan::{ColumnKind, ColumnPlan};
+use crate::core::select::summarize;
 use geode_core::attribution::Attribution;
 use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::grid::selection::{Lost, Resolved, SelectKind, Selection, UNSUMMABLE_MARK};
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
+use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
 use gpui::{
-    App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, SharedString, Stateful,
-    TextAlign, Window, div, px,
+    App, ClickEvent, Context, Div, EventEmitter, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, SharedString, Stateful, TextAlign, Window, div, px,
 };
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -40,6 +43,28 @@ use std::sync::Arc;
 pub struct ChevronClicked(pub usize);
 
 impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
+
+/// Every mouse gesture `render_td` recognises on a cell or its gutter
+/// (grid selection spec §5), carried to the tile exactly as `ChevronClicked`
+/// is — the tile's `pointer` handler is the one door both a shift+click and
+/// a drag go through to `start_selection`/`clear_selection`, so the mouse
+/// can never reach a selection state the keyboard doors forbid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellPointer {
+    Press {
+        row: usize,
+        col: usize,
+        shift: bool,
+        gutter: bool,
+    },
+    Drag {
+        row: usize,
+        col: usize,
+        gutter: bool,
+    },
+}
+
+impl EventEmitter<CellPointer> for TableState<BlotterDelegate> {}
 
 /// A column's `colour` setting reduced to what a paint site needs to
 /// branch on — see `BlotterDelegate::colour_kind`.
@@ -62,7 +87,44 @@ pub struct BlotterDelegate {
     /// What the table shows: `visible`, or its fzf-narrowed subset.
     pub shown: Vec<u32>,
     pub cursor: Cursor,
-    pub mode: Mode,
+    /// A live grid selection (grid selection spec §3–§4), anchored by row
+    /// path and column name so it survives a re-sort, a column move or a
+    /// redelivery. `None` in the ordinary cursor-only state.
+    pub selection: Option<Selection<Path, String>>,
+    /// `selection` re-resolved against the current `shown`/`plan` by
+    /// `refresh_selection` — the only field `render_tr`/`render_td` read
+    /// to paint the tint, so painting never re-resolves anything itself.
+    pub resolved: Option<Resolved>,
+    /// The footer's per-column aggregates over `resolved`, rebuilt
+    /// alongside it.
+    pub summary: Vec<AggregateCell>,
+    /// The `plan.columns` index each `summary` group was taken from —
+    /// what `ensure_summary_paint` resolves its colors against.
+    summary_cols: Vec<usize>,
+    /// Bumped whenever `summary` is rebuilt, so the paint memo knows the
+    /// groups it colored are stale.
+    summary_generation: u64,
+    /// Each `summary` group's colors, index-aligned with it; rebuilt by
+    /// `ensure_summary_paint` only when the summary or the theme moved.
+    pub summary_paint: Vec<CellPaint>,
+    summary_paint_stamp: Option<(u64, [Hsla; 28])>,
+    /// The footer's `"{rows} rows × {cols} cols"` readout, leading the
+    /// strip while a selection is live; `None` otherwise. Prepared with
+    /// `summary` so render formats nothing.
+    pub selection_extent: Option<SharedString>,
+    /// Whether any `summary` cell refuses a total with `†` / `‡`, so
+    /// render shows each legend without scanning the strings per frame.
+    pub summary_non_additive: bool,
+    pub summary_unsummable: bool,
+    /// Set by `refresh_selection` when a live selection's anchor row —
+    /// or a block's anchor column — is no longer displayed and the
+    /// selection was cleared as a result, naming which one; taken by the
+    /// tile to raise its one-shot notice.
+    pub selection_lost: Option<Lost>,
+    /// The last resolved anchor row index, kept as `find_by_path`'s
+    /// `near` so a redelivery's re-resolution starts its search where
+    /// the anchor was last seen rather than from row 0.
+    anchor_hint: usize,
     pub sort: Option<SortSpec>,
     /// The column whose sort `apply_snapshot` just dropped because a
     /// rebuild no longer carries it (a view edit hid it, or a regroup
@@ -132,6 +194,31 @@ pub struct BlotterDelegate {
     /// which is what keeps the lazy read: a blotter naming no colour
     /// never builds it at all. See [`BlotterDelegate::ensure_theme_inputs`].
     theme_inputs: Option<([Hsla; 28], Anchors, Tokens)>,
+    /// The `(row, col)` a mouse-move handler last emitted a `CellPointer`
+    /// for, so a move that stays within the same cell (gpui fires one per
+    /// pixel, not per cell) never re-emits — the tile's `pointer` handler
+    /// would otherwise re-run `start_selection`'s no-op-if-already-live
+    /// branch and move the cursor to where it already is, harmlessly but
+    /// on every frame of a held drag. Stale once a drag ends without a
+    /// mouse-up any cell caught (see `drag_origin`), but harmless: a
+    /// mismatched value only ever costs one extra emission.
+    drag_last: Option<(usize, usize)>,
+    /// Whether the primary button is currently down because of a press
+    /// this delegate's own cell or gutter caught, and if so, which of the
+    /// two it was (`true` for the gutter). `None` outside such a press —
+    /// including while some other element owns the drag (a scrollbar
+    /// thumb, a header column reorder, a tile-split divider, a text
+    /// selection started in another tile) — so `render_td`'s move handler
+    /// can tell "the button is down over a cell" apart from "the button
+    /// is down because of a press that started somewhere else and is now
+    /// passing over a cell", and emit `CellPointer::Drag` only for the
+    /// former. Set by a cell/gutter's own mouse-down; cleared by a mouse
+    /// release anywhere (gpui dispatches every registered mouse listener
+    /// for every mouse event, hit or not — each one's own hit check, not
+    /// tree position, decides whether it fires — so a cell's own
+    /// `on_mouse_up`/`on_mouse_up_out` pair sees every release exactly
+    /// once regardless of where it lands).
+    drag_origin: Option<bool>,
     /// The chevron's pointer states, memoised behind every colour the
     /// derivation reads (`control::ControlInputs` is that key by
     /// construction). `control_paint` costs three `Hsla -> Rgb`
@@ -174,7 +261,18 @@ impl BlotterDelegate {
             visible: Vec::new(),
             shown: Vec::new(),
             cursor: Cursor::default(),
-            mode: Mode::Normal,
+            selection: None,
+            resolved: None,
+            summary: Vec::new(),
+            summary_cols: Vec::new(),
+            summary_generation: 0,
+            summary_paint: Vec::new(),
+            summary_paint_stamp: None,
+            selection_extent: None,
+            summary_non_additive: false,
+            summary_unsummable: false,
+            selection_lost: None,
+            anchor_hint: 0,
             sort: None,
             dropped_sort: None,
             cache: FormatCache::default(),
@@ -191,6 +289,8 @@ impl BlotterDelegate {
             colour_cache: ColourCache::new(),
             theme_inputs: None,
             chevron: None,
+            drag_last: None,
+            drag_origin: None,
         }
     }
 
@@ -205,6 +305,9 @@ impl BlotterDelegate {
         if !Arc::ptr_eq(&self.colours, &colours) {
             self.colours = colours;
             self.colour_cache.invalidate();
+            // The footer's memoized group colors came from the old
+            // definitions too.
+            self.summary_paint_stamp = None;
         }
     }
 
@@ -219,7 +322,7 @@ impl BlotterDelegate {
         col_ix: usize,
         anchors: &Anchors,
         tokens: &Tokens,
-    ) -> Option<Resolved> {
+    ) -> Option<ColourResolved> {
         // Borrows `self.plan` only, so the `&mut self.colour_cache`
         // below is a disjoint field — which is what lets the name stay a
         // `&str` rather than being cloned per cell per frame. That is
@@ -236,7 +339,7 @@ impl BlotterDelegate {
     ///
     /// The one door both paint sites use, so a cell and its header can no
     /// more disagree about the memo than they can about the colour.
-    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<Resolved> {
+    pub fn themed_cell_colour(&mut self, col_ix: usize, theme: &Theme) -> Option<ColourResolved> {
         self.ensure_theme_inputs(theme);
         // Four disjoint field borrows in one body — `plan` and `colours`
         // and `theme_inputs` shared, `colour_cache` mutable. Splitting
@@ -274,6 +377,47 @@ impl BlotterDelegate {
                 ));
             }
         }
+    }
+
+    /// Resolve each footer summary group's colors against `theme`: the
+    /// label takes the column's header color (a named color's base) and a
+    /// total takes what that column's signed cell would paint — a named
+    /// color's sign variant, `sign`'s bullish/bearish, or the foreground
+    /// for an uncolored column. Rebuilt only when the summary was rebuilt
+    /// or the theme moved, so the footer's per-frame cost is one compare.
+    /// Called from the tile's render, like `render_th`'s own lookup: it
+    /// writes nothing but this memo.
+    pub fn ensure_summary_paint(&mut self, theme: &Theme) {
+        let signature = theme_signature(theme);
+        if self.summary_paint_stamp == Some((self.summary_generation, signature)) {
+            return;
+        }
+        let cols = std::mem::take(&mut self.summary_cols);
+        let paint = cols
+            .iter()
+            .map(|&c| match self.colour_kind(c) {
+                Some(ColourKind::Named) => match self.themed_cell_colour(c, theme) {
+                    Some(r) => CellPaint {
+                        label: Some(r.base),
+                        positive: r.positive,
+                        negative: r.negative,
+                        zero: r.base,
+                    },
+                    // An unknown name paints as the foreground, as its
+                    // cells do.
+                    None => CellPaint::plain(theme),
+                },
+                Some(ColourKind::Sign) => CellPaint {
+                    positive: theme.chart_bullish,
+                    negative: theme.chart_bearish,
+                    ..CellPaint::plain(theme)
+                },
+                Some(ColourKind::Plain) | None => CellPaint::plain(theme),
+            })
+            .collect();
+        self.summary_cols = cols;
+        self.summary_paint = paint;
+        self.summary_paint_stamp = Some((self.summary_generation, signature));
     }
 
     /// The chevron's pointer states for `theme`, re-derived only when one
@@ -376,6 +520,120 @@ impl BlotterDelegate {
         self.shown.get(self.cursor.row).map(|r| *r as usize)
     }
 
+    /// The cursor row's underlying under the applied grouping, or `None`
+    /// (see [`crate::core::launch::underlying_at`]).
+    pub fn cursor_underlying(&self) -> Option<String> {
+        let plan = self.plan.as_ref()?;
+        crate::core::launch::underlying_at(&self.cursor_path()?, &plan.grouping)
+    }
+
+    /// Start a selection of `kind` at the cursor, or — when one is live —
+    /// switch its kind keeping the anchor; the same kind again clears
+    /// (spec §4.1).
+    pub fn start_selection(&mut self, kind: SelectKind) {
+        match self.selection.as_ref().map(|s| s.kind) {
+            Some(k) if k == kind => self.selection = None,
+            Some(_) => {
+                if let Some(s) = self.selection.as_mut() {
+                    s.kind = kind;
+                }
+            }
+            None => {
+                let (Some(path), Some(col)) = (
+                    self.cursor_path(),
+                    self.plan
+                        .as_ref()
+                        .and_then(|p| p.columns.get(self.cursor.col))
+                        .map(|c| c.name.clone()),
+                ) else {
+                    return;
+                };
+                self.anchor_hint = self.cursor.row;
+                self.selection = Some(Selection {
+                    kind,
+                    anchor_row: path,
+                    anchor_col: col,
+                });
+            }
+        }
+        self.refresh_selection();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.refresh_selection();
+    }
+
+    /// Re-resolve the selection against the current rows and columns and
+    /// rebuild the summary — every change point calls this, so render
+    /// only ever looks `resolved` and `summary` up. An anchor no longer
+    /// shown clears the selection and records which lookup failed in
+    /// `selection_lost` for the tile's notice; no neighbouring row is
+    /// guessed.
+    pub fn refresh_selection(&mut self) {
+        let outcome = match (&self.selection, &self.snapshot, &self.plan) {
+            (Some(sel), Some(snapshot), Some(plan)) => {
+                let hint = self.anchor_hint;
+                let shown = &self.shown;
+                Some(sel.resolve_with(
+                    (self.cursor.row, self.cursor.col),
+                    plan.columns.len(),
+                    |path| find_by_path(shown, snapshot, plan, path, hint),
+                    |name| plan.position_of(name),
+                ))
+            }
+            // No rows to resolve against: the anchor row is not shown.
+            (Some(_), _, _) => Some(Err(Lost::Row)),
+            (None, _, _) => None,
+        };
+        let resolved = match outcome {
+            Some(Ok(r)) => Some(r),
+            Some(Err(lost)) => {
+                self.selection = None;
+                self.selection_lost = Some(lost);
+                None
+            }
+            None => None,
+        };
+        if let Some(r) = &resolved {
+            // `resolve` orders the range, so the anchor is whichever end
+            // the cursor is not on.
+            self.anchor_hint = if r.rows.start == self.cursor.row {
+                r.rows.end - 1
+            } else {
+                r.rows.start
+            };
+        }
+        let summaries = match (&resolved, &self.snapshot, &self.plan) {
+            (Some(r), Some(snapshot), Some(plan)) => summarize(snapshot, plan, &self.shown, r),
+            _ => Vec::new(),
+        };
+        let refuses = |mark: char| {
+            summaries
+                .iter()
+                .any(|c| c.total.refused && c.total.text.contains(mark))
+        };
+        self.summary_non_additive = refuses('†');
+        self.summary_unsummable = refuses(UNSUMMABLE_MARK);
+        self.summary_cols = summaries.iter().map(|c| c.col).collect();
+        self.summary = summaries
+            .into_iter()
+            .map(|c| AggregateCell {
+                label: c.label.into(),
+                text: c.total.text.into(),
+                sign: c.total.sign,
+                refused: c.total.refused,
+            })
+            .collect();
+        self.summary_generation = self.summary_generation.wrapping_add(1);
+        self.selection_extent = resolved.as_ref().map(|r| {
+            let (rows, cols) = (r.rows.len(), r.cols.len());
+            let plural = |n: usize| if n == 1 { "" } else { "s" };
+            format!("{rows} row{} × {cols} col{}", plural(rows), plural(cols)).into()
+        });
+        self.resolved = resolved;
+    }
+
     /// Installs a snapshot and answers whether the column plan was
     /// replaced. The plan is always built afresh from `view` — it is
     /// where a column's label, width, format and colour live, and a
@@ -467,6 +725,7 @@ impl BlotterDelegate {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             self.visible.clear();
             self.shown.clear();
+            self.refresh_selection();
             return;
         };
         flatten(
@@ -494,6 +753,7 @@ impl BlotterDelegate {
         }
         self.cursor.clamp(self.shown.len(), plan.columns.len());
         self.invalidate_cells();
+        self.refresh_selection();
     }
 
     /// Invalidate the format cache and the cached tree glyphs together,
@@ -574,6 +834,7 @@ impl BlotterDelegate {
         let cols = self.plan.as_ref().map_or(0, |p| p.columns.len());
         self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();
+        self.refresh_selection();
     }
 
     pub fn shown_texts(&self) -> Vec<String> {
@@ -770,6 +1031,89 @@ impl BlotterDelegate {
             .and_then(|p| p.columns.get(col))
             .is_some_and(|c| c.kind == ColumnKind::Measure)
     }
+
+    /// Wires a cell's or its gutter's mouse-selection gestures (spec §5)
+    /// onto `el`: a press (plain, or shift-extending) and, only while
+    /// the primary button has stayed down since a press that landed on
+    /// a cell or gutter, a drag. `gutter` fixes what kind that press (and
+    /// every drag it goes on to arm) means — `true` for the gutter's own
+    /// call, `false` for the cell's — and is carried into every `Drag`
+    /// this element emits verbatim: the selection a drag makes is decided
+    /// by where it started, not by whatever cell the pointer is over now.
+    ///
+    /// None of the four listeners stop propagation: the row's own
+    /// `SelectRow`/tile-focus press must still arrive, and a fast
+    /// double-click still reaches gpui's own click-count tracking.
+    fn wire_pointer(
+        el: Div,
+        cx: &Context<TableState<Self>>,
+        row_ix: usize,
+        col_ix: usize,
+        gutter: bool,
+    ) -> Div {
+        el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let d = this.delegate_mut();
+                d.drag_last = Some((row_ix, col_ix));
+                // The gutter is a child of this cell, so a press on it
+                // reaches this handler too, bubbling after the gutter's
+                // own — `get_or_insert` keeps that repeat from
+                // overwriting the gutter's `true` with this call's
+                // `false`; on an ordinary cell press, nothing set it
+                // first, so it still lands here.
+                d.drag_origin.get_or_insert(gutter);
+                cx.emit(CellPointer::Press {
+                    row: row_ix,
+                    col: col_ix,
+                    shift: e.modifiers.shift,
+                    gutter,
+                });
+            }),
+        )
+        .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+            if e.pressed_button != Some(MouseButton::Left) {
+                return;
+            }
+            let d = this.delegate_mut();
+            // No press recorded here means the button came down over
+            // something else — a scrollbar thumb, a header column
+            // reorder, a tile-split divider, another tile's own text
+            // selection — and is only now passing over this cell; such a
+            // drag must never start or extend a selection.
+            let Some(started_on_gutter) = d.drag_origin else {
+                return;
+            };
+            if d.drag_last == Some((row_ix, col_ix)) {
+                return;
+            }
+            d.drag_last = Some((row_ix, col_ix));
+            cx.emit(CellPointer::Drag {
+                row: row_ix,
+                col: col_ix,
+                gutter: started_on_gutter,
+            });
+        }))
+        // A release anywhere ends the drag this cell or gutter may have
+        // armed. gpui dispatches every registered mouse listener for
+        // every mouse event regardless of hit position — each listener's
+        // own hit check (not tree position) decides whether it fires —
+        // so between a bubble `on_mouse_up` (release lands here) and a
+        // capture `on_mouse_up_out` (release lands anywhere else), this
+        // element sees every release exactly once.
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.delegate_mut().drag_origin = None;
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _: &MouseUpEvent, _, _| {
+                this.delegate_mut().drag_origin = None;
+            }),
+        )
+    }
 }
 
 impl TableDelegate for BlotterDelegate {
@@ -931,6 +1275,7 @@ impl TableDelegate for BlotterDelegate {
         // harmless: `refill_window` recomputes the same values from the
         // same tree, and the window is only ever tens of rows.
         self.invalidate_cells();
+        self.refresh_selection();
         cx.notify();
     }
 
@@ -978,11 +1323,36 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let range = selection(&self.mode, &self.cursor);
-        let in_visual = matches!(self.mode, Mode::Visual { .. }) && range.contains(&row_ix);
+        let tint = self
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Rows && r.contains_row(row_ix));
         div()
             .id(("row", row_ix))
-            .when(in_visual, |el| el.bg(cx.theme().selection.opacity(0.35)))
+            .when(tint, |el| el.bg(cx.theme().selection.opacity(0.35)))
+            // A press on the row outside every cell — the trailing filler
+            // column, row padding — is still a plain click (spec §5): it
+            // reports a press at the cursor's column so the tile's one
+            // pointer door clears or extends exactly as a cell press
+            // would. The row bubbles after its cells, so a press a cell or
+            // the gutter already caught has set `drag_origin` and is not
+            // reported twice; this press arms no drag.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    let d = this.delegate_mut();
+                    if d.drag_origin.is_some() {
+                        return;
+                    }
+                    let col = d.cursor.col;
+                    cx.emit(CellPointer::Press {
+                        row: row_ix,
+                        col,
+                        shift: e.modifiers.shift,
+                        gutter: false,
+                    });
+                }),
+            )
     }
 
     fn render_td(
@@ -994,13 +1364,17 @@ impl TableDelegate for BlotterDelegate {
     ) -> impl IntoElement {
         let theme = cx.theme();
         let is_cursor = self.cursor.row == row_ix && self.cursor.col == col_ix;
+        let in_block = self
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Block && r.contains(row_ix, col_ix));
         let kind = self
             .plan
             .as_ref()
             .and_then(|p| p.columns.get(col_ix))
             .map(|c| c.kind);
         let colour = self.colour_kind(col_ix);
-        let mut el = div()
+        let el = div()
             .size_full()
             .flex()
             .items_center()
@@ -1013,8 +1387,10 @@ impl TableDelegate for BlotterDelegate {
             // (the closure is dropped unevaluated, pinned release,
             // `gpui-pre-0.3.5/src/elements/div.rs`), so this costs
             // nothing on the render thread in release.
-            .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
+            .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"));
+        let mut el = Self::wire_pointer(el, cx, row_ix, col_ix, false)
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
+            .when(in_block, |el| el.bg(theme.selection.opacity(0.35)))
             .when(is_cursor, |el| {
                 el.border_1().border_color(theme.table_active_border)
             });
@@ -1059,18 +1435,19 @@ impl TableDelegate for BlotterDelegate {
                     .cloned()
                     .unwrap_or_default();
                 let on_cursor_row = self.cursor.row == row_ix;
-                el = el.child(
-                    div()
-                        .flex()
-                        .flex_shrink_0()
-                        .justify_end()
-                        .w(px(self.gutter_px()))
-                        .pr(px(GUTTER_GAP_PX))
-                        .mr(indent)
-                        .text_color(if on_cursor_row { fg } else { muted })
-                        .debug_selector(|| format!("blotter-gutter-{row_ix}"))
-                        .child(text),
-                );
+                // A gutter press means "rows" the way a cell's own means
+                // "block" — otherwise wired through the same door as the
+                // cell (`wire_pointer`, `gutter: true`).
+                let gutter_el = div()
+                    .flex()
+                    .flex_shrink_0()
+                    .justify_end()
+                    .w(px(self.gutter_px()))
+                    .pr(px(GUTTER_GAP_PX))
+                    .mr(indent)
+                    .text_color(if on_cursor_row { fg } else { muted })
+                    .debug_selector(|| format!("blotter-gutter-{row_ix}"));
+                el = el.child(Self::wire_pointer(gutter_el, cx, row_ix, col_ix, true).child(text));
             } else {
                 el = el.pl(indent);
             }
@@ -1127,7 +1504,7 @@ impl TableDelegate for BlotterDelegate {
                     // A named colour never paints bullish/bearish (§6.3):
                     // `sign` and a name are alternatives, not layers —
                     // but a `tint_sign` colour carries its own two sign
-                    // variants, and `Resolved::for_sign` picks by the
+                    // variants, and `ColourResolved::for_sign` picks by the
                     // cell's sign (the base for an untinted colour, for
                     // zero and for a cell with no number). An unknown
                     // name falls back to the theme's own foreground —
@@ -1178,6 +1555,7 @@ mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 4],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         }
     }
     fn s(v: &str) -> Option<String> {
@@ -1278,6 +1656,32 @@ mod tests {
             "open: BLACK DOWN-POINTING SMALL TRIANGLE"
         );
         assert_eq!(DETERMINED_MARK, "\u{2020}", "the determined mark is DAGGER");
+    }
+
+    /// The root is always in `shown` (`flatten` pushes every root before
+    /// descending), so the grand-total row is reachable by the cursor too.
+    #[test]
+    fn the_cursor_underlying_follows_the_cursor_row() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.expansion
+            .toggle(path_of(&snapshot(), d.plan.as_ref().unwrap(), 1));
+        d.reflatten();
+        let at = |d: &BlotterDelegate, snap_row: u32| {
+            d.shown.iter().position(|r| *r == snap_row).unwrap()
+        };
+        d.cursor.row = at(&d, 1);
+        assert_eq!(
+            d.cursor_underlying(),
+            None,
+            "L1 is above the underlying level"
+        );
+        d.cursor.row = at(&d, 3);
+        assert_eq!(d.cursor_underlying(), Some("SPX".into()));
+        d.cursor.row = at(&d, 4);
+        assert_eq!(d.cursor_underlying(), Some("NDX".into()));
+        d.cursor.row = at(&d, 0);
+        assert_eq!(d.cursor_underlying(), None, "the grand total");
     }
 
     /// Regression for the successor to C1: `TableState::
@@ -1715,6 +2119,7 @@ mod tests {
                         name: "lhu".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::Dict(vec![None, s("L1"), s("SPX"), s("SPX"), s("SPX"), s("SPX")]),
                 ),
@@ -1723,6 +2128,7 @@ mod tests {
                         name: "underlying_ref".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::Dict(vec![None, None, s("A"), s("B"), s("C"), s("D")]),
                 ),
@@ -1731,6 +2137,7 @@ mod tests {
                         name: "row_depth".into(),
                         attribution_by_depth: vec![Attribution::Additive; 4],
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::I32(vec![0, 1, 2, 2, 2, 2]),
                 ),
@@ -1739,6 +2146,7 @@ mod tests {
                         name: "delta01".into(),
                         attribution_by_depth: (0..4).map(determined).collect(),
                         scope_semantics: ScopeSemantics::Direct,
+                        summable: false,
                     },
                     TestColumn::F64(vec![
                         Some(9.0),
@@ -1781,6 +2189,76 @@ mod tests {
     /// moves — `ColumnPlan::move_column` refuses `from == 0 || to ==
     /// 0`), so only the cell cache needs to be repainted, immediately,
     /// for the window that was already on screen.
+    #[gpui::test]
+    fn a_header_column_move_keeps_a_block_on_its_column_names(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+             [[t.columns]]\nname = \"a\"\n[[t.columns]]\nname = \"b\"\n\
+             [[t.columns]]\nname = \"c\"\n[[t.columns]]\nname = \"d\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let f = || TestColumn::F64(vec![Some(1.0), Some(2.0)]);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("a"), f()),
+                (dim("b"), f()),
+                (dim("c"), f()),
+                (dim("d"), f()),
+            ],
+            1,
+        ));
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| TableState::new(BlotterDelegate::new(), window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let table = window.root(&mut vcx).unwrap();
+        let names = |d: &BlotterDelegate| -> Vec<String> {
+            let plan = d.plan.as_ref().unwrap();
+            d.resolved
+                .as_ref()
+                .unwrap()
+                .cols
+                .clone()
+                .map(|c| plan.columns[c].name.clone())
+                .collect()
+        };
+        table.update_in(&mut vcx, |t, window, cx| {
+            let d = t.delegate_mut();
+            d.apply_snapshot(snap, &view, &["lhu".to_string()]);
+            // Plan: [tree, a, b, c, d]. Anchor on `a`, cursor on `b`.
+            d.cursor.col = 1;
+            d.start_selection(SelectKind::Block);
+            d.cursor.col = 2;
+            d.refresh_selection();
+            assert_eq!(names(d), ["a", "b"], "fixture");
+
+            // `d`, outside the block, moves to its left edge.
+            d.move_column(4, 1, window, cx);
+            assert_eq!(names(t.delegate()), ["a", "b"], "an outside move");
+
+            // The cursor's own column `b` moves to the far right: the
+            // block still runs from the anchor `a` to the cursor on `b`.
+            let d = t.delegate_mut();
+            let from = d.plan.as_ref().unwrap().position_of("b").unwrap();
+            d.move_column(from, 4, window, cx);
+            let got = names(t.delegate());
+            assert_eq!(
+                (
+                    got.first().map(String::as_str),
+                    got.last().map(String::as_str)
+                ),
+                (Some("a"), Some("b")),
+                "the block's edges stay on the anchor's and the cursor's columns: {got:?}"
+            );
+        });
+    }
+
     #[gpui::test]
     fn move_column_refills_the_window_immediately(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -1973,7 +2451,9 @@ mod tests {
 
         assert_eq!(
             d.cell_colour(1, &anchors, &tokens),
-            Some(Resolved::plain(geode_shell::shell::colours::to_hsla(red))),
+            Some(ColourResolved::plain(geode_shell::shell::colours::to_hsla(
+                red
+            ))),
             "a named column resolves its own definition against the theme"
         );
         assert_eq!(
@@ -2001,7 +2481,7 @@ mod tests {
 
     /// A `tint_sign` colour: `cell_colour` hands back the triad — the
     /// three the cache resolved together — and `render_td`'s named arm
-    /// picks by the cell's own sign through `Resolved::for_sign`, while
+    /// picks by the cell's own sign through `ColourResolved::for_sign`, while
     /// the header takes the base. The cell signs come from the cache the
     /// same way the `sign` arm reads them.
     #[test]
@@ -2083,6 +2563,124 @@ mod tests {
         assert_eq!(resolved.for_sign(sign_at(&d, 1)), resolved.positive);
         assert_eq!(resolved.for_sign(sign_at(&d, 2)), resolved.negative);
         assert_eq!(resolved.for_sign(sign_at(&d, 0)), resolved.base);
+    }
+
+    /// Rows 1..=2 of a one-measure view (`L1` +5, `L2` −5) selected, so
+    /// the footer carries one group for `delta01` at plan column 1.
+    fn summary_fixture(view_text: &str, colours: NamedColours) -> BlotterDelegate {
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snapshot = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1"), s("L2")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(0.0), Some(5.0), Some(-5.0)]),
+                ),
+            ],
+            1,
+        ));
+        let mut d = BlotterDelegate::new();
+        d.set_colours(Arc::new(colours));
+        d.apply_snapshot(snapshot, &view, &["lhu".to_string()]);
+        d.cursor.row = 1;
+        d.start_selection(SelectKind::Rows);
+        d.cursor.row = 2;
+        d.refresh_selection();
+        assert_eq!(d.summary.len(), 1, "one measure group");
+        d
+    }
+
+    /// The footer group of a named-color column takes the header's color
+    /// for its label and the cells' sign variants for its totals.
+    #[test]
+    fn a_named_column_paints_its_footer_group_like_its_header_and_cells() {
+        let mut colours = NamedColours::default();
+        colours.insert("delta".into(), Definition::token(Token::Info).tinted());
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
+        let mut d = summary_fixture(text, colours);
+        let theme = Theme::default();
+        d.ensure_summary_paint(&theme);
+        let resolved = d.themed_cell_colour(1, &theme).expect("a named column");
+        let paint = d.summary_paint[0];
+        assert_eq!(paint.label, Some(resolved.base), "the header's color");
+        assert_eq!(paint.positive, resolved.positive);
+        assert_eq!(paint.negative, resolved.negative);
+        assert_eq!(paint.zero, resolved.base);
+    }
+
+    /// A colors.toml reload (a new definitions `Arc`) repaints the footer
+    /// even when the summary and the theme are unchanged.
+    #[test]
+    fn a_colors_reload_repaints_the_footer() {
+        let colours = |token| {
+            let mut c = NamedColours::default();
+            c.insert("delta".into(), Definition::token(token));
+            c
+        };
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"delta\" }\n";
+        let mut d = summary_fixture(text, colours(Token::Info));
+        // Distinct tokens: the default theme's colors can coincide, which
+        // would let a stale paint pass.
+        let theme = Theme {
+            colors: gpui_component::ThemeColor {
+                info: gpui::green(),
+                danger: gpui::red(),
+                ..Theme::default().colors
+            },
+            ..Theme::default()
+        };
+        d.ensure_summary_paint(&theme);
+        let before = d.summary_paint[0].label;
+        d.set_colours(Arc::new(colours(Token::Danger)));
+        d.ensure_summary_paint(&theme);
+        let now = d.themed_cell_colour(1, &theme).expect("a named column");
+        assert_ne!(before, Some(now.base), "the fixture needs two colors");
+        assert_eq!(
+            d.summary_paint[0].label,
+            Some(now.base),
+            "the reloaded color"
+        );
+    }
+
+    /// A `sign` column's totals take the cells' bullish/bearish; its label
+    /// stays muted, as its header is uncolored. The memo rebuilds only
+    /// when the summary does.
+    #[test]
+    fn a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary() {
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[t.columns]]\nname = \"delta01\"\nformat = { color = \"sign\" }\n";
+        let mut d = summary_fixture(text, NamedColours::default());
+        // Distinct poles: the default theme's bullish and bearish can
+        // coincide, which would let a crossed pair pass.
+        let theme = Theme {
+            colors: gpui_component::ThemeColor {
+                chart_bullish: gpui::green(),
+                chart_bearish: gpui::red(),
+                ..Theme::default().colors
+            },
+            ..Theme::default()
+        };
+        d.ensure_summary_paint(&theme);
+        let paint = d.summary_paint[0];
+        assert_eq!(paint.label, None);
+        assert_eq!(
+            (paint.positive, paint.negative, paint.zero),
+            (theme.chart_bullish, theme.chart_bearish, theme.foreground)
+        );
+        // Poison the memo: an unchanged summary and theme must not rebuild.
+        d.summary_paint.clear();
+        d.ensure_summary_paint(&theme);
+        assert!(
+            d.summary_paint.is_empty(),
+            "a steady footer resolves nothing"
+        );
+        d.refresh_selection();
+        d.ensure_summary_paint(&theme);
+        assert_eq!(d.summary_paint.len(), 1, "a rebuilt summary repaints");
     }
 
     /// I-1 (Part 2c final review): the theme -> `Anchors`/`Tokens`

@@ -76,8 +76,8 @@ tracing-subscriber.workspace = true
 # The daily rolling log file layer (`tracing_appender::rolling::daily`).
 tracing-appender.workspace = true
 # The roster's restored-tile state is opaque `toml::Table` (the module
-# hosting contract, geode-shell::module) — `BlotterFactoryHandle::create`
-# forwards it verbatim.
+# hosting contract, geode-shell::module); the production-roster tests read
+# a factory's launch state through it.
 toml = "1.1.4"
 
 [dev-dependencies]

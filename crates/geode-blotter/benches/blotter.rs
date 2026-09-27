@@ -1,10 +1,13 @@
 //! The blotter's pure-core costs at the three result shapes docs/perf.md
 //! records for the tree index and requery benches (133 / 135,733 /
 //! 720,881 rows): flatten fully expanded, flatten fully collapsed,
-//! filling a 40-row cache window, building a 100-column plan, and (I3,
+//! filling a 40-row cache window, building a 100-column plan, (I3,
 //! final review) `restore_by_path` at the 720,881-row shape — the
 //! keypress-path cost `reflatten_keeping` pays on every requery/expand/
-//! collapse/sort. Medians are recorded in docs/perf.md under "Phase 3c:
+//! collapse/sort — and (grid selection Task 7) `summarize` over every
+//! row and every measure column at the same 720,881-row shape, the cost
+//! the footer aggregate strip pays for a `V`-then-`G` top-of-grid
+//! selection. Medians are recorded in docs/perf.md under "Phase 3c:
 //! blotter core".
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -25,6 +28,7 @@ fn dim(name: &str) -> ColumnMeta {
         name: name.into(),
         attribution_by_depth: vec![Attribution::Additive; 4],
         scope_semantics: ScopeSemantics::Direct,
+        summable: false,
     }
 }
 
@@ -74,7 +78,7 @@ fn shape(l1: usize, l2: usize, l3: usize, measures: usize) -> (Snapshot, ViewSpe
         let name = format!("m{m}");
         let values: Vec<Option<f64>> = (0..rows).map(|r| Some(r as f64 * 1.5)).collect();
         columns.push((dim(&name), TestColumn::F64(values)));
-        view_columns.push(ViewColumn::Measure { name });
+        view_columns.push(ViewColumn::measure(name));
     }
     let snapshot = Snapshot::for_tests(columns, 3);
     let view = ViewSpec {
@@ -182,6 +186,24 @@ fn bench(c: &mut Criterion) {
     });
 
     g.finish();
+
+    // Grid selection spec §3.3/§4.3, Task 7: the footer aggregate strip's
+    // cost at the same 720,881-row fully expanded shape (`snap`/`plan`/
+    // `shown` above) — `V` then `G` from the top, summarizing every
+    // measure column over the whole result.
+    {
+        use geode_blotter::core::select::summarize;
+        use geode_core::grid::selection::{SelectKind, resolve};
+        let r = resolve(
+            SelectKind::Rows,
+            (0, 0),
+            (shown.len() - 1, 0),
+            plan.columns.len(),
+        );
+        c.bench_function("summarize/720881 rows, all columns", |b| {
+            b.iter(|| black_box(summarize(&snap, &plan, &shown, &r)))
+        });
+    }
 }
 
 criterion_group!(benches, bench);

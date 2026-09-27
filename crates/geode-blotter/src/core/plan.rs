@@ -37,6 +37,9 @@ pub struct PlannedColumn {
     pub attribution: Vec<Attribution>,
     /// Dimensions applied by membership rather than directly.
     pub semi_joined: Vec<String>,
+    /// Whether the column adds up across sibling rows — the compiler's
+    /// `ColumnMeta::summable`. False when the snapshot lacks the column.
+    pub summable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +63,7 @@ impl ColumnPlan {
             width: TREE_WIDTH,
             attribution: Vec::new(),
             semi_joined: Vec::new(),
+            summable: false,
         }];
         for column in &view.columns {
             let name = column.name();
@@ -121,6 +125,7 @@ impl ColumnPlan {
                 width,
                 attribution,
                 semi_joined,
+                summable: meta.is_some_and(|m| m.summable),
             });
         }
         ColumnPlan {
@@ -215,6 +220,7 @@ name = "missing_in_snapshot"
             name: name.into(),
             attribution_by_depth: by_depth,
             scope_semantics: semantics,
+            summable: false,
         }
     }
 
