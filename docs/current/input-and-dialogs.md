@@ -231,9 +231,12 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
 - A hint line that names keys inside prose writes them between backticks
   (``"double-click or `ctrl+k` → Add a tile"``); `kbd::marked` paints each
   backticked run as chips and the rest as text.
-- A module menu hint stored as a keymap spec goes through `kbd::menu_spec`.
-  A `:` command-line verb stays text because it is not a key, and so does a
-  spec naming `mod`, because the alias is the user's.
+- A module action-menu hint is an action identity that `geode_tile::menu`
+  resolves against the live keymap when the menu opens, when its rows
+  rebuild, and when the keymap is republished; the keys paint through
+  `kbd::menu_binding`. A `:` command-line verb (an unbound action's
+  fallback) or a label such as a range preset's `1w` stays text because it
+  is not a key.
 - A menu's trailing lane paints keys the way gpui-component's `PopupMenu`
   does: the label without the chip's fill or padding, in the lane's color,
   so a highlighted row's keys follow the highlight.
@@ -242,8 +245,8 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
   is what a user types into a keymap file.
 
 Hardcoded hints name the shipped key. A user rebinding does not change the
-empty-state hint's `ctrl+k` or a module menu's hint; the palette, keybinding
-rows, tooltips and the timeseries footer and menu read the live keymap.
+empty-state hint's `ctrl+k`; the palette, keybinding rows, tooltips, the
+timeseries footer, and every module's action menu read the live keymap.
 
 ## Per-tile command and find lines
 

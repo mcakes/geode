@@ -746,14 +746,13 @@ impl Harness {
     fn menu_ticked(&self, vcx: &gpui::VisualTestContext) -> String {
         self.tile
             .read_with(vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => m.rows.iter().find_map(|r| match r {
-                    menu::MenuRow::Action {
-                        title,
-                        checked: Some(true),
-                        ..
-                    } => Some(title.to_string()),
-                    _ => None,
-                }),
+                Some(Popup::Menu(m)) => m
+                    .menu
+                    .rows()
+                    .iter()
+                    .filter_map(|r| r.action())
+                    .find(|a| a.tick() == Some(true))
+                    .map(|a| a.title().to_string()),
                 _ => None,
             })
             .expect("a menu row is ticked")
@@ -2646,8 +2645,8 @@ fn f_opens_the_frequency_menu_and_a_capped_row_is_disabled_with_its_reason(
     assert_eq!(
         h.tile
             .read_with(&vcx, |t, _| match t.popup() {
-                Some(Popup::Menu(m)) => match m.rows[capped].trailing() {
-                    Some(menu::Trailing::Text(text)) => Some(text.to_string()),
+                Some(Popup::Menu(m)) => match m.menu.rows()[capped].action().unwrap().trailing() {
+                    geode_tile::menu::Trailing::Text(text) => Some(text.to_string()),
                     _ => None,
                 },
                 _ => None,
@@ -2833,16 +2832,17 @@ impl Harness {
     fn menu_rows(&self, vcx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Menu(m)) => m
-                .rows
+                .menu
+                .rows()
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
                     let title = match r {
-                        menu::MenuRow::Action { title, .. } => title.to_string(),
-                        menu::MenuRow::Separator => "---".into(),
-                        menu::MenuRow::Section(s) => format!("[{s}]"),
+                        geode_tile::menu::Row::Action(a) => a.title().to_string(),
+                        geode_tile::menu::Row::Separator => "---".into(),
+                        geode_tile::menu::Row::Section(s) => format!("[{s}]"),
                     };
-                    (title, i == m.highlighted)
+                    (title, Some(i) == m.menu.highlighted())
                 })
                 .collect(),
             _ => Vec::new(),
@@ -3651,12 +3651,12 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
     h.keys(&mut vcx, "f");
     let enabled = |h: &Harness, vcx: &gpui::VisualTestContext, want: &str| {
         h.tile.read_with(vcx, |t, _| match t.popup() {
-            Some(Popup::Menu(m)) => m.rows.iter().any(|r| {
-                matches!(
-                    r,
-                    menu::MenuRow::Action { title, enabled: Ok(()), .. } if title.as_ref() == want
-                )
-            }),
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .any(|a| a.is_enabled() && a.title().as_ref() == want),
             _ => false,
         })
     };
@@ -3715,4 +3715,44 @@ fn a_view_move_while_a_query_is_out_waits_for_its_answer(cx: &mut gpui::TestAppC
     h.wheel(&mut vcx, at, -40., 0.);
     h.dispatch(&mut vcx, "rule", None);
     assert!(h.series_request().is_some(), "a query change never waits");
+}
+
+/// Publish the keymap a running app resolves this tile's hints through
+/// (this module's fragment, plus an optional user layer) as `Chords`, the
+/// way the shell does on a keymap reload.
+fn publish_chords(vcx: &mut gpui::VisualTestContext, user: Option<&str>) {
+    let bindings = crate::content::test_bindings(user);
+    vcx.update(|_, cx| cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(bindings))));
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    publish_chords(&mut vcx, None);
+    h.keys(&mut vcx, "r");
+    let lane = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Menu(m)) => m
+                .menu
+                .rows()
+                .iter()
+                .filter_map(|r| r.action())
+                .find(|a| a.title().as_ref() == "Custom dates…")
+                .map(|a| a.lane().clone()),
+            _ => None,
+        })
+    };
+    let c = geode_shell::keymap::parse_binding("c", geode_shell::keymap::Modifiers::NONE).unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(c)));
+    publish_chords(
+        &mut vcx,
+        Some(
+            "[[bindings]]\ncontext = \"timeseries && mode == normal && popup == menu && menu == range\"\n[bindings.keys]\n\"c\" = \"none\"\n\"shift+c\" = \"timeseries::range_custom\"\n",
+        ),
+    );
+    let shift_c =
+        geode_shell::keymap::parse_binding("shift+c", geode_shell::keymap::Modifiers::NONE)
+            .unwrap();
+    assert_eq!(lane(&h, &vcx), Some(geode_tile::menu::Lane::Keys(shift_c)));
 }

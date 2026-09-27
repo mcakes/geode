@@ -2538,6 +2538,7 @@ dependencies = [
  "geode-core",
  "geode-data",
  "geode-shell",
+ "geode-tile",
  "gpui-component",
  "gpui-pre",
  "toml 1.1.4+spec-1.1.0",
@@ -2640,6 +2641,7 @@ dependencies = [
  "geode-core",
  "geode-data",
  "geode-shell",
+ "geode-tile",
  "geode-widgets",
  "gpui-component",
  "gpui-pre",
@@ -2658,6 +2660,7 @@ dependencies = [
  "geode-data",
  "geode-pricer",
  "geode-shell",
+ "geode-tile",
  "geode-widgets",
  "gpui-component",
  "gpui-pre",
@@ -2695,6 +2698,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-tile"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-shell",
+ "gpui-component",
+ "gpui-pre",
+]
+
+[[package]]
 name = "geode-timeseries"
 version = "0.1.0"
 dependencies = [
@@ -2704,6 +2717,7 @@ dependencies = [
  "geode-core",
  "geode-data",
  "geode-shell",
+ "geode-tile",
  "geode-widgets",
  "gpui-component",
  "gpui-pre",

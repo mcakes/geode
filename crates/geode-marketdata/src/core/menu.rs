@@ -1,10 +1,13 @@
-//! Prepared action-menu rows, enablement reasons, and policy choices.
-//! The popup renders this data; these functions own no entity or window.
+//! Prepared action-menu rows, enablement reasons, and policy choices, as
+//! `geode_tile::menu` rows over action ids. Key hints name actions; the door
+//! resolves them against the live keymap. These functions own no entity or
+//! window.
 
 use crate::core::draft::{DraftBadge, UpdatePolicy, local_hhmm};
 use crate::core::spec::KindAction;
 use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
+use geode_tile::menu::{ActionRow, Hint, Row};
 use gpui::SharedString;
 
 /// Inputs for [`rows`]: draft state, upload availability, current update
@@ -18,54 +21,35 @@ pub struct MenuInputs<'a> {
     pub kind_actions: &'a [KindAction],
 }
 
-/// One row of the action list.
-pub enum MenuRow {
-    Action {
-        id: ActionId,
-        title: SharedString,
-        hint: SharedString,
-        enabled: Result<(), &'static str>,
-        /// `None` for a verb; `Some(_)` for a CHOICE row — one of a group
-        /// of which exactly one is in force — and the paint puts a tick
-        /// (or a same-width blank) ahead of the title so the group reads
-        /// as a group.
-        checked: Option<bool>,
-    },
-    Separator,
-    Section(SharedString),
-}
-
 fn action(
-    id: &str,
+    id: &'static str,
     title: impl Into<SharedString>,
-    hint: &str,
+    hint: Hint,
     enabled: Result<(), &'static str>,
-) -> MenuRow {
-    MenuRow::Action {
-        id: ActionId(id.to_string()),
-        title: title.into(),
-        hint: hint.into(),
-        enabled,
-        checked: None,
-    }
+) -> Row<ActionId> {
+    Row::Action(
+        ActionRow::new(ActionId(id.to_string()), title)
+            .hint(hint)
+            .enabled(enabled.map_err(SharedString::new_static)),
+    )
 }
 
 /// The three "On new document" rows, in [`UpdatePolicy::ALL`]'s order,
-/// ticked where `policy` matches.
-fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
+/// ticked where `policy` matches: a choice group, exactly one in force.
+/// Each hint is its action's live chord, else the `:auto` verb that sets the
+/// same policy, so a user binding shows and an unbound row still names a route.
+fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = Row<ActionId>> {
     UpdatePolicy::ALL.into_iter().map(move |p| {
-        let (id, title) = match p {
-            UpdatePolicy::Hold => ("marketdata::auto_hold", "hold edits"),
-            UpdatePolicy::Rebase => ("marketdata::auto_rebase", "rebase edits"),
-            UpdatePolicy::Replace => ("marketdata::auto_replace", "replace edits"),
+        let (id, title, verb) = match p {
+            UpdatePolicy::Hold => ("marketdata::auto_hold", "hold edits", ":auto hold"),
+            UpdatePolicy::Rebase => ("marketdata::auto_rebase", "rebase edits", ":auto rebase"),
+            UpdatePolicy::Replace => ("marketdata::auto_replace", "replace edits", ":auto replace"),
         };
-        MenuRow::Action {
-            id: ActionId(id.to_string()),
-            title: title.into(),
-            hint: SharedString::default(),
-            enabled: Ok(()),
-            checked: Some(p == policy),
-        }
+        Row::Action(
+            ActionRow::new(ActionId(id.to_string()), title)
+                .hint(Hint::chord_or_verb(id, verb))
+                .checked(p == policy),
+        )
     })
 }
 
@@ -73,20 +57,20 @@ fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = MenuRow> {
 /// update-policy choices and any kind-specific actions. Load stays enabled
 /// because the tile parks drafts by underlying. Policy choices are always
 /// enabled because they configure later deliveries rather than edit the draft.
-pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
+pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
     let dirty = !matches!(i.badge, DraftBadge::Clean);
     let behind = matches!(i.badge, DraftBadge::Behind { .. });
     let mut out = vec![
         action(
             "marketdata::load_underlying",
             "Load underlying…",
-            "u",
+            Hint::chord("marketdata::load_underlying"),
             Ok(()),
         ),
         action(
             "marketdata::upload",
             "Upload",
-            ":upload",
+            Hint::chord_or_verb("marketdata::upload", ":upload"),
             if !i.upload_built {
                 Err("not built yet")
             } else if behind {
@@ -104,31 +88,32 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
         out.push(action(
             "marketdata::rebase",
             format!("Rebase onto {}", local_hhmm(newer, clock)),
-            ":rebase",
+            Hint::chord_or_verb("marketdata::rebase", ":rebase"),
             Ok(()),
         ));
     }
     out.push(action(
         "marketdata::revert",
         "Revert edits",
-        ":revert",
+        Hint::chord_or_verb("marketdata::revert", ":revert"),
         if dirty {
             Ok(())
         } else {
             Err("nothing to revert")
         },
     ));
-    out.push(MenuRow::Separator);
-    out.push(MenuRow::Section("On new document".into()));
+    out.push(Row::Separator);
+    out.push(Row::Section("On new document".into()));
     out.extend(policy_rows(i.policy));
     if !i.kind_actions.is_empty() {
-        out.push(MenuRow::Separator);
-        out.push(MenuRow::Section(i.kind_title.into()));
+        out.push(Row::Separator);
+        out.push(Row::Section(i.kind_title.into()));
         for k in i.kind_actions {
             out.push(action(
                 k.id,
                 k.title,
-                "",
+                // Kind actions ship unbound; a user binding still shows.
+                Hint::chord(k.id),
                 if k.built {
                     Ok(())
                 } else {
@@ -140,47 +125,11 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<MenuRow> {
     out
 }
 
-/// The first row worth landing the highlight on — the first enabled
-/// `Action`, or `0` if none is (an all-disabled menu still needs a
-/// highlighted row for the border to paint on).
-pub fn first_enabled(rows: &[MenuRow]) -> usize {
-    rows.iter().position(lands).unwrap_or(0)
-}
-
-fn lands(r: &MenuRow) -> bool {
-    matches!(
-        r,
-        MenuRow::Action {
-            enabled: Ok(()),
-            ..
-        }
-    )
-}
-
-/// Move by enabled actions, skipping disabled rows, separators, and sections.
-/// Clamp rather than wrap. If the pointer left the highlight on a disabled row,
-/// search from that position; keep it there when no enabled row lies farther
-/// in the requested direction.
-pub fn step(rows: &[MenuRow], from: usize, delta: isize) -> usize {
-    let mut at = from;
-    for _ in 0..delta.unsigned_abs() {
-        let next = if delta > 0 {
-            (at + 1..rows.len()).find(|&i| lands(&rows[i]))
-        } else {
-            (0..at.min(rows.len())).rev().find(|&i| lands(&rows[i]))
-        };
-        match next {
-            Some(i) => at = i,
-            None => break,
-        }
-    }
-    at
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::CVI;
+    use geode_tile::menu::{first_enabled, step};
 
     fn inputs(badge: DraftBadge) -> MenuInputs<'static> {
         MenuInputs {
@@ -191,31 +140,24 @@ mod tests {
             kind_actions: CVI.actions,
         }
     }
-    fn checked(rows: &[MenuRow]) -> Vec<(String, Option<bool>)> {
+    fn checked(rows: &[Row<ActionId>]) -> Vec<(String, Option<bool>)> {
         rows.iter()
-            .filter_map(|r| match r {
-                MenuRow::Action { title, checked, .. } => Some((title.to_string(), *checked)),
-                _ => None,
-            })
+            .filter_map(|r| r.action().map(|a| (a.title().to_string(), a.tick())))
             .collect()
     }
-    fn titles(rows: &[MenuRow]) -> Vec<String> {
+    fn titles(rows: &[Row<ActionId>]) -> Vec<String> {
         rows.iter()
             .map(|r| match r {
-                MenuRow::Action { title, .. } => title.to_string(),
-                MenuRow::Separator => "—".into(),
-                MenuRow::Section(s) => format!("[{s}]"),
+                Row::Action(a) => a.title().to_string(),
+                Row::Separator => "—".into(),
+                Row::Section(s) => format!("[{s}]"),
             })
             .collect()
     }
-    fn enabled(rows: &[MenuRow], title: &str) -> Result<(), &'static str> {
+    fn enabled(rows: &[Row<ActionId>], title: &str) -> Result<(), String> {
         rows.iter()
-            .find_map(|r| match r {
-                MenuRow::Action {
-                    title: t, enabled, ..
-                } if t == title => Some(*enabled),
-                _ => None,
-            })
+            .find_map(|r| r.action().filter(|a| a.title().as_ref() == title))
+            .map(|a| a.reason().map_or(Ok(()), |r| Err(r.to_string())))
             .unwrap()
     }
 
@@ -240,9 +182,12 @@ mod tests {
             ]
         );
         assert_eq!(enabled(&rows, "Load underlying…"), Ok(()));
-        assert_eq!(enabled(&rows, "Upload"), Err("not built yet"));
-        assert_eq!(enabled(&rows, "Revert edits"), Err("nothing to revert"));
-        assert_eq!(enabled(&rows, "Reanchor"), Err("not built yet"));
+        assert_eq!(enabled(&rows, "Upload"), Err("not built yet".into()));
+        assert_eq!(
+            enabled(&rows, "Revert edits"),
+            Err("nothing to revert".into())
+        );
+        assert_eq!(enabled(&rows, "Reanchor"), Err("not built yet".into()));
     }
 
     /// Loading another underlying remains available with pending edits;
@@ -262,7 +207,7 @@ mod tests {
             },
             Clock::utc(),
         );
-        assert_eq!(enabled(&clean, "Upload"), Err("nothing to upload"));
+        assert_eq!(enabled(&clean, "Upload"), Err("nothing to upload".into()));
     }
 
     #[test]
@@ -273,7 +218,7 @@ mod tests {
         i.upload_built = true;
         assert_eq!(
             enabled(&rows(&i, Clock::utc()), "Upload"),
-            Err("already sent")
+            Err("already sent".into())
         );
     }
 
@@ -285,7 +230,10 @@ mod tests {
         i.upload_built = true;
         let rows = rows(&i, Clock::utc());
         assert!(titles(&rows).iter().any(|t| t.starts_with("Rebase onto ")));
-        assert_eq!(enabled(&rows, "Upload"), Err("rebase or revert first"));
+        assert_eq!(
+            enabled(&rows, "Upload"),
+            Err("rebase or revert first".into())
+        );
     }
 
     #[test]
@@ -345,20 +293,24 @@ mod tests {
         let mut i = inputs(DraftBadge::Dirty);
         i.upload_built = true;
         let rows = rows(&i, Clock::utc());
-        assert_eq!(first_enabled(&rows), 0);
+        assert_eq!(first_enabled(&rows), Some(0));
         assert_eq!(
-            step(&rows, 2, 1),
-            5,
+            step(&rows, Some(2), 1),
+            Some(5),
             "over the separator and the `On new document` section header"
         );
-        assert_eq!(step(&rows, 5, -1), 2);
-        assert_eq!(step(&rows, 5, -2), 1, "a count steps that many rows");
+        assert_eq!(step(&rows, Some(5), -1), Some(2));
         assert_eq!(
-            step(&rows, 7, 1),
-            7,
+            step(&rows, Some(5), -2),
+            Some(1),
+            "a count steps that many rows"
+        );
+        assert_eq!(
+            step(&rows, Some(7), 1),
+            Some(7),
             "the kind section's rows are unbuilt: clamped on the last live row"
         );
-        assert_eq!(step(&rows, 0, -1), 0);
+        assert_eq!(step(&rows, Some(0), -1), Some(0));
     }
 
     /// On a clean draft, keyboard motion skips disabled Upload and Revert rows,
@@ -367,15 +319,23 @@ mod tests {
     #[test]
     fn navigation_skips_disabled_rows() {
         let rows = rows(&inputs(DraftBadge::Clean), Clock::utc());
-        assert_eq!(step(&rows, 0, 1), 5, "over Upload and Revert edits");
-        assert_eq!(step(&rows, 5, -1), 0);
         assert_eq!(
-            step(&rows, 2, 1),
-            5,
+            step(&rows, Some(0), 1),
+            Some(5),
+            "over Upload and Revert edits"
+        );
+        assert_eq!(step(&rows, Some(5), -1), Some(0));
+        assert_eq!(
+            step(&rows, Some(2), 1),
+            Some(5),
             "a highlight the pointer left on a greyed row steps from it"
         );
-        assert_eq!(step(&rows, 2, -1), 0);
+        assert_eq!(step(&rows, Some(2), -1), Some(0));
         let last = rows.len() - 1;
-        assert_eq!(step(&rows, last, 1), last, "nothing live below: stays");
+        assert_eq!(
+            step(&rows, Some(last), 1),
+            Some(last),
+            "nothing live below: stays"
+        );
     }
 }

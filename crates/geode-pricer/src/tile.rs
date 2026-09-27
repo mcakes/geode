@@ -25,7 +25,7 @@ use crate::core::{Place, RowSpec};
 use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
-use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
+use crate::popup::{PricerPick, choice_paint};
 use crate::session::Record;
 use crate::store::Loaded;
 use chrono::Utc;
@@ -38,24 +38,27 @@ use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
 use geode_shell::frame::Frame;
-use geode_shell::keymap::KeyContext;
+use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
+use geode_tile::confirm::{self, Confirm, ConfirmHost};
+use geode_tile::menu::{self, ActionRow, Hint, Menu, MenuHost, MenuIds, Row};
 use geode_widgets::datefield::{DateTimeField, FieldKey, Precision, Segment, route};
 use gpui::prelude::*;
 use gpui::{
     AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, SharedString,
-    Subscription, Task, Window, div,
+    Task, Window, div,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(crate) const LOADING: &str = "loading…";
@@ -103,17 +106,11 @@ fn blocked_notice(name: &str, why: &str) -> SharedString {
 /// The footer after an `:rm` confirm answered anything but `y`.
 pub(crate) const NOT_REMOVED: &str = "sheet not removed";
 
-/// An armed `:rm` confirmation. It holds the keyboard on its own `focus`
-/// handle, tracked by the prompt the header paints, whose `on_key_down`
-/// runs before the shell root's listener (`PricerTile::confirm_key`).
-/// `_blur` is the focus-leaving half: any move of window focus off the
-/// prompt cancels. Dropping this drops the subscription, so a confirm
-/// answered by a key never also hears its own blur.
-pub(crate) struct PendingRemove {
+/// What an armed `:rm` asks to remove. The prompt, its focus and its blur
+/// answer are the `geode_tile::confirm` door's. Public only because it is
+/// the public `PricerTile`'s `ConfirmHost` payload; its field stays private.
+pub struct PendingRemove {
     sheet: String,
-    prompt: SharedString,
-    focus: FocusHandle,
-    _blur: Subscription,
 }
 
 /// Fixed row steps for `ctrl+d`/`ctrl+u` and `ctrl+f`/`ctrl+b`, multiplied
@@ -347,7 +344,7 @@ pub struct PricerTile {
     /// here, where it was asked for.
     forgetting: Vec<String>,
     /// The armed `:rm` confirm: `None` outside it.
-    pub(crate) confirm: Option<PendingRemove>,
+    pub(crate) confirm: Option<Confirm<PendingRemove>>,
     /// Loading, but the load is not submitted: this sheet's name has a
     /// save queued and unanswered (`Shared::pending_saves`), and a read
     /// now could return the generation before it. The factory's
@@ -392,7 +389,11 @@ pub struct PricerTile {
     /// has no `Window` of its own to blur through (`drop_orphaned_editor`).
     editor_window: Option<AnyWindowHandle>,
     /// The `.` action menu: `None` outside menu mode.
-    pub(crate) menu: Option<Menu>,
+    pub(crate) menu: Option<Menu<PricerPick>>,
+    /// The keymap as last published, for the menu's key hints: read at
+    /// construction and on every `Chords` publish, so a chrome rebuild (which
+    /// has no `App`) resolves hints against the live keymap.
+    chords: Arc<Vec<Binding>>,
     /// The line a press that closed the entry bar resolved. Closing the
     /// bar moves the table up on screen, so the second press of the same
     /// double-click lands on a different painted row; this carries the
@@ -594,6 +595,15 @@ impl PricerTile {
             this.rebuild(cx);
         })
         .detach();
+        // A keymap reload re-resolves an open menu's hints at once.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.chords = menu::live_bindings(cx);
+            if let Some(m) = this.menu.as_mut() {
+                m.rehint(&this.chords);
+                cx.notify();
+            }
+        })
+        .detach();
         // Release flushes a dirty sheet once, cancels pricing, and releases its name
         // for another tile to open.
         cx.on_release(|this: &mut PricerTile, _cx| {
@@ -670,6 +680,7 @@ impl PricerTile {
             editor: None,
             editor_window: None,
             menu: None,
+            chords: menu::live_bindings(cx),
             click_anchor: None,
             pressed: None,
             underlyings: Rc::from([]),
@@ -728,10 +739,7 @@ impl PricerTile {
             .editor
             .as_ref()
             .is_some_and(|e| e.focus_handle(cx).is_focused(window));
-        let confirm = self
-            .confirm
-            .as_ref()
-            .is_some_and(|c| c.focus.is_focused(window));
+        let confirm = self.confirm.as_ref().is_some_and(|c| c.holds_focus(window));
         entry || editor || confirm
     }
 
@@ -2222,9 +2230,7 @@ impl PricerTile {
         self.footer = None;
         // A verb arriving under an armed `:rm` (a palette dispatch; a key
         // never gets here, the prompt consumes it) answers "no" first.
-        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
+        confirm::cancel(self, window, cx);
         // Any verb but the fields' own closes an open field first (a
         // palette dispatch can arrive while one is open). `add_below`
         // keeps an open bar: it is the bar's own opener.
@@ -2384,11 +2390,11 @@ impl PricerTile {
                     } else {
                         -(n as isize)
                     };
-                    m.highlighted = crate::popup::step(&m.items, m.highlighted, delta);
+                    m.step(delta);
                 }
             }
             "menu_pick" => {
-                let at = self.menu.as_ref().map(|m| m.highlighted);
+                let at = self.menu.as_ref().and_then(|m| m.highlighted());
                 if let Some(at) = at {
                     self.menu_pick(at, window, cx);
                 }
@@ -2586,27 +2592,32 @@ impl PricerTile {
         }
     }
 
-    /// Prepare action groups followed by the available Views. Command titles come from
-    /// content::ACTIONS. Enabled actions show default keys in the trailing lane;
-    /// disabled actions show their refusal reason there.
-    fn menu_items(&self) -> Vec<MenuItem> {
+    /// Action groups, then the available views. Titles are the palette's
+    /// (`content::action_title`); hints are the actions' live chords (a
+    /// `:price` verb when unbound); a disabled action carries its reason.
+    fn menu_items(&self) -> Vec<Row<PricerPick>> {
         let row = self.cursor_sheet_row();
         let root_line =
             row.is_some_and(|r| self.sheet.is_line(r) && self.sheet.parent(r).is_none());
         let packaged =
             row.is_some_and(|r| self.sheet.is_package(r) || self.sheet.parent(r).is_some());
-        let action = |id: &'static str, hint, enabled| MenuItem::Action {
-            id,
-            title: crate::content::action_title(id),
-            hint,
-            enabled,
+        let action = |id: &'static str, hint: Hint, enabled: Result<(), &'static str>| {
+            Row::Action(
+                ActionRow::new(PricerPick::Action(id), crate::content::action_title(id))
+                    .hint(hint)
+                    .enabled(enabled.map_err(SharedString::new_static)),
+            )
         };
         let mut items = vec![
-            action("pricer::price", ":price", Ok(())),
-            MenuItem::Separator,
+            action(
+                "pricer::price",
+                Hint::chord_or_verb("pricer::price", ":price"),
+                Ok(()),
+            ),
+            Row::Separator,
             action(
                 "pricer::group",
-                "g p",
+                Hint::chord("pricer::group"),
                 if root_line {
                     Ok(())
                 } else {
@@ -2615,17 +2626,17 @@ impl PricerTile {
             ),
             action(
                 "pricer::ungroup",
-                "g u",
+                Hint::chord("pricer::ungroup"),
                 if packaged {
                     Ok(())
                 } else {
                     Err("not in a package")
                 },
             ),
-            MenuItem::Separator,
+            Row::Separator,
             action(
                 "pricer::undo",
-                "u",
+                Hint::chord("pricer::undo"),
                 if self.undo.can_undo() {
                     Ok(())
                 } else {
@@ -2634,27 +2645,30 @@ impl PricerTile {
             ),
             action(
                 "pricer::redo",
-                "ctrl+r",
+                Hint::chord("pricer::redo"),
                 if self.undo.can_redo() {
                     Ok(())
                 } else {
                     Err("nothing to redo")
                 },
             ),
-            MenuItem::Separator,
+            Row::Separator,
             action(
                 "pricer::delete",
-                "d d",
+                Hint::chord("pricer::delete"),
                 if row.is_some() { Ok(()) } else { Err("no row") },
             ),
         ];
         let views = self.shared.views.borrow();
         if !views.is_empty() {
-            items.push(MenuItem::Separator);
-            items.push(MenuItem::Section("View"));
-            items.extend(views.names().map(|name| MenuItem::View {
-                name: name.to_string().into(),
-                current: name == self.sheet.view,
+            items.push(Row::Separator);
+            items.push(Row::Section(SharedString::new_static("View")));
+            items.extend(views.names().map(|name| {
+                let label: SharedString = name.to_string().into();
+                Row::Action(
+                    ActionRow::new(PricerPick::View(label.clone()), label)
+                        .checked(name == self.sheet.view),
+                )
             }));
         }
         items
@@ -2663,61 +2677,14 @@ impl PricerTile {
     fn toggle_menu(&mut self, cx: &mut Context<Self>) {
         self.menu = match self.menu {
             Some(_) => None,
-            None => Some(Menu {
-                items: self.menu_items(),
-                highlighted: 0,
-            }),
+            None => Some(Menu::new(self.menu_items(), &self.chords)),
         };
-        cx.notify();
-    }
-
-    /// Move the menu highlight on pointer hover, notifying only on change. Action and
-    /// View rows qualify, including disabled actions; separators and headings do not.
-    pub(crate) fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(m) = self.menu.as_mut() else {
-            return;
-        };
-        if m.highlighted == index || !m.items.get(index).is_some_and(MenuItem::pickable) {
-            return;
-        }
-        m.highlighted = index;
         cx.notify();
     }
 
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
         if self.menu.take().is_some() {
             cx.notify();
-        }
-    }
-
-    /// A disabled row says why and keeps the menu open; an enabled one
-    /// closes it and dispatches through the same door a key would.
-    pub(crate) fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = self.menu.as_ref().and_then(|m| m.items.get(index)).cloned() else {
-            return;
-        };
-        match item {
-            MenuItem::Action {
-                enabled: Err(why), ..
-            } => {
-                self.footer = Some(why.into());
-                self.rebuild_chrome();
-                cx.notify();
-            }
-            MenuItem::Action { id, .. } => {
-                self.menu = None;
-                self.dispatch(&ActionId(id.to_string()), None, window, cx);
-            }
-            // Structure, not a row: nothing to pick.
-            MenuItem::Separator | MenuItem::Section(_) => {}
-            MenuItem::View { name, .. } => {
-                self.menu = None;
-                if let Err(why) = self.set_view(&name, cx) {
-                    self.footer = Some(why.into());
-                }
-                self.rebuild_chrome();
-                cx.notify();
-            }
         }
     }
 
@@ -2814,7 +2781,7 @@ impl PricerTile {
         self.close_entry(window, cx);
         self.close_editor(window, cx);
         // A question standing over another verb is withdrawn, not answered.
-        let _ = self.disarm_remove(window, cx);
+        let _ = confirm::withdraw(self, cx);
         match commands::parse(line)? {
             Command::View(name) => self.set_view(&name, cx),
             Command::Price => {
@@ -3075,84 +3042,16 @@ impl PricerTile {
         if !self.shared.taken(&name) {
             return Err(format!("no sheet '{name}'"));
         }
-        let focus = cx.focus_handle();
-        focus.focus(window, cx);
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.confirm.is_some() {
-                this.cancel_remove(window, cx);
-            }
-        });
-        self.confirm = Some(PendingRemove {
-            prompt: format!("remove sheet '{name}' and all its history? (y/n)").into(),
-            sheet: name,
-            focus,
-            _blur: blur,
-        });
+        let prompt = format!("remove sheet '{name}' and all its history? (y/n)");
+        confirm::arm(self, PendingRemove { sheet: name }, prompt, window, cx);
         self.rebuild_chrome();
         cx.notify();
         Ok(())
     }
 
-    /// The confirm's own key handler, run from the prompt's `on_key_down`
-    /// in `header::render` — on the focused element, so before the shell
-    /// root's listener. While armed EVERY key is consumed (`true`): bare
-    /// `y` forgets, anything else cancels. A keystroke that answers the
-    /// question must not also act on the tile or the shell.
-    pub(crate) fn confirm_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        if self.confirm.is_none() {
-            return false;
-        }
-        let ks = &event.keystroke;
-        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);
-        } else {
-            self.cancel_remove(window, cx);
-        }
-        true
-    }
-
-    /// A pointer press anywhere on the tile while armed cancels (the tile
-    /// root's capture-phase mouse-down): a press on the header or the
-    /// menu button moves no focus, so the blur half alone would leave the
-    /// question standing behind the click.
-    pub(crate) fn cancel_remove_on_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm, giving up the keyboard first when its
-    /// prompt holds it (a surface dropping a focused handle blurs it).
-    fn disarm_remove(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<PendingRemove> {
-        let pending = self.confirm.take()?;
-        if pending.focus.is_focused(window) {
-            window.blur(cx);
-        }
-        Some(pending)
-    }
-
-    fn cancel_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = self.disarm_remove(window, cx);
-        self.footer = Some(NOT_REMOVED.into());
-        self.rebuild_chrome();
-        cx.notify();
-    }
-
     /// `y`: forget the sheet. Whether it went reaches the store through
     /// `PricerFactory::forget_answered`, and a failure is painted here.
-    fn submit_remove(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(pending) = self.disarm_remove(window, cx) else {
-            return;
-        };
+    fn submit_remove(&mut self, pending: PendingRemove, cx: &mut Context<Self>) {
         // The name was checked when the question was armed; a tile may
         // have opened it, or a `:name` begun retiring it, since. Forgetting
         // then would delete a sheet in use or race that rename's forget.
@@ -3335,7 +3234,7 @@ impl PricerTile {
         self.header = header::prepare(HeaderInputs {
             sheet: &self.sheet,
             notice,
-            prompt: self.confirm.as_ref().map(|c| c.prompt.clone()),
+            prompt: self.confirm.as_ref().map(|c| c.prompt_text().clone()),
             save: self.save_notice.clone(),
             settings: &settings,
             clock: self.clock,
@@ -3348,14 +3247,12 @@ impl PricerTile {
                 _ => None,
             }
         });
-        // Recompute an open menu after load, reload, or delivery changes its contents.
-        // Preserve its index when possible, otherwise clamp and snap to an Action or
-        // View row; snapping includes disabled actions.
+        // Recompute an open menu after load, reload, or delivery changes its
+        // contents; the door snaps its highlight onto an action row.
         if self.menu.is_some() {
             let items = self.menu_items();
             if let Some(m) = self.menu.as_mut() {
-                m.highlighted = crate::popup::snap(&items, m.highlighted);
-                m.items = items;
+                m.replace_rows(items, &self.chords);
             }
         }
     }
@@ -3554,11 +3451,10 @@ impl gpui::Render for PricerTile {
                 tile: &tile,
                 menu_open: self.menu.is_some(),
                 menu_tip: self.menu_tip.clone(),
-                confirm: self.confirm.as_ref().map(|c| &c.focus),
+                confirm: self.confirm.as_ref(),
             },
             theme,
         );
-        let paints = self.table.read(cx).delegate().paints;
         // Anchor the menu at the header's right edge. The relative wrapper
         // makes absolute positioning resolve against the header, not the window.
         let header =
@@ -3572,7 +3468,14 @@ impl gpui::Render for PricerTile {
                             .absolute()
                             .right_0()
                             .top(scale::design(header::HEADER_HEIGHT))
-                            .child(render_menu(m, &paints, &tile, cx)),
+                            .child(menu::render_menu(
+                                m,
+                                &MenuIds::new("pricer-menu", "pricer-menu-row"),
+                                gpui::Anchor::TopRight,
+                                &tile,
+                                |t: &mut PricerTile, _, cx| t.close_menu(cx),
+                                cx,
+                            )),
                     )
                 });
         let body = div().flex_1().min_h_0().w_full().child(
@@ -3593,21 +3496,72 @@ impl gpui::Render for PricerTile {
         });
         let footer = header::render_footer(self.footer_text.as_ref(), theme);
         // A pointer press anywhere on the tile cancels an armed `:rm`
-        // confirm — capture phase, so it runs before the press reaches
-        // whatever it was aimed at, and it never stops propagation.
-        let cancel_tile = tile.clone();
-        v_flex()
-            .size_full()
-            .debug_selector(|| format!("tile-content-{}", self.id.0))
-            .when(self.confirm.is_some(), |el| {
-                el.capture_any_mouse_down(move |_, window, cx| {
-                    cancel_tile.update(cx, |t, cx| t.cancel_remove_on_pointer(window, cx));
-                })
-            })
-            .child(header)
-            .children(bar)
-            .child(body)
-            .child(footer)
+        // confirm (the confirm door's capture-phase press).
+        confirm::cancel_on_press(
+            v_flex()
+                .size_full()
+                .debug_selector(|| format!("tile-content-{}", self.id.0))
+                .child(header)
+                .children(bar)
+                .child(body)
+                .child(footer),
+            self.confirm.is_some(),
+            &tile,
+        )
+    }
+}
+
+impl MenuHost for PricerTile {
+    /// A disabled row says why and keeps the menu open; an enabled one
+    /// closes it and dispatches through the same door a key would.
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(picked) = self.menu.as_ref().and_then(|m| m.pick(index)) else {
+            return;
+        };
+        match picked {
+            Err(why) => {
+                self.footer = Some(why);
+                self.rebuild_chrome();
+                cx.notify();
+            }
+            Ok(PricerPick::Action(id)) => {
+                self.menu = None;
+                self.dispatch(&ActionId(id.to_string()), None, window, cx);
+            }
+            Ok(PricerPick::View(name)) => {
+                self.menu = None;
+                if let Err(why) = self.set_view(&name, cx) {
+                    self.footer = Some(why.into());
+                }
+                self.rebuild_chrome();
+                cx.notify();
+            }
+        }
+    }
+
+    /// Change-only: gpui fires this on every pointer move over a row.
+    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.menu.as_mut().is_some_and(|m| m.highlight(index)) {
+            cx.notify();
+        }
+    }
+}
+
+impl ConfirmHost for PricerTile {
+    type Payload = PendingRemove;
+
+    fn confirm_slot(&mut self) -> &mut Option<Confirm<PendingRemove>> {
+        &mut self.confirm
+    }
+
+    fn confirmed(&mut self, pending: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
+        self.submit_remove(pending, cx);
+    }
+
+    fn cancelled(&mut self, _: PendingRemove, _: &mut Window, cx: &mut Context<Self>) {
+        self.footer = Some(NOT_REMOVED.into());
+        self.rebuild_chrome();
+        cx.notify();
     }
 }
 
@@ -3926,13 +3880,15 @@ pub(crate) mod tests {
             self.tile.read_with(vcx, |t, _| t.header.texts())
         }
         pub fn notice(&self, vcx: &VisualTestContext) -> Option<String> {
-            self.tile
-                .read_with(vcx, |t, _| t.header.notice.as_ref().map(|n| n.to_string()))
+            self.tile.read_with(vcx, |t, _| {
+                t.header.notice.as_ref().map(|n| n.text().to_string())
+            })
         }
         /// The save state's own header slot.
         pub fn save_notice(&self, vcx: &VisualTestContext) -> Option<String> {
-            self.tile
-                .read_with(vcx, |t, _| t.header.save.as_ref().map(|n| n.to_string()))
+            self.tile.read_with(vcx, |t, _| {
+                t.header.save.as_ref().map(|n| n.text().to_string())
+            })
         }
         pub fn entry_text(&self, vcx: &VisualTestContext) -> Option<String> {
             self.tile.read_with(vcx, |t, cx| {
@@ -6579,7 +6535,7 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(2));
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+                .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
             Some(8),
             "over the three greyed rows onto Delete row"
         );
@@ -6618,7 +6574,7 @@ pub(crate) mod tests {
         assert_eq!(h.mode(&mut vcx), "menu", "the answer leaves the menu open");
         assert_eq!(
             h.tile
-                .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted)),
+                .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted())),
             Some(8),
             "the highlight stays where it was"
         );
@@ -6646,17 +6602,19 @@ pub(crate) mod tests {
         let (views, highlighted) = h.tile.read_with(&vcx, |t, _| {
             let m = t.menu.as_ref().expect("the menu stays open");
             let views: Vec<String> = m
-                .items
+                .rows()
                 .iter()
-                .filter_map(|i| match i {
-                    MenuItem::View { name, current } => Some(format!("{name} {current}")),
+                .filter_map(|r| match r {
+                    Row::Action(a) if matches!(a.pick(), PricerPick::View(_)) => {
+                        Some(format!("{} {}", a.title(), a.tick() == Some(true)))
+                    }
                     _ => None,
                 })
                 .collect();
-            (views, m.highlighted)
+            (views, m.highlighted())
         });
         assert_eq!(views, vec!["slim false"]);
-        assert_eq!(highlighted, 11, "clamped to the last row");
+        assert_eq!(highlighted, Some(11), "clamped to the last row");
     }
 
     #[gpui::test]
@@ -7732,33 +7690,109 @@ pub(crate) mod tests {
     }
 
     fn menu_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+        use geode_tile::menu::Trailing;
         h.tile.read_with(vcx, |t, _| {
             t.menu
                 .as_ref()
                 .expect("the menu is open")
-                .items
+                .rows()
                 .iter()
-                .map(|i| match i {
-                    MenuItem::Action {
-                        title,
-                        hint,
-                        enabled,
-                        ..
-                    } => match enabled {
-                        Ok(()) => format!("{title} | {hint}"),
-                        Err(why) => format!("{title} | ({why})"),
+                .map(|r| match r {
+                    Row::Action(a) => match a.pick() {
+                        PricerPick::View(name) => {
+                            format!("{} {name}", if a.tick() == Some(true) { "✓" } else { " " })
+                        }
+                        PricerPick::Action(_) => match (a.reason(), a.trailing()) {
+                            (Some(why), _) => format!("{} | ({why})", a.title()),
+                            (None, Trailing::Keys(k)) => format!(
+                                "{} | {}",
+                                a.title(),
+                                geode_shell::palette::render_binding(k)
+                            ),
+                            (None, Trailing::Text(t)) => format!("{} | {t}", a.title()),
+                            (None, Trailing::None) => format!("{} | ", a.title()),
+                        },
                     },
-                    MenuItem::View { name, current } => {
-                        format!("{} {name}", if *current { "✓" } else { " " })
-                    }
-                    MenuItem::Separator => "—".into(),
-                    MenuItem::Section(s) => format!("[{s}]"),
+                    Row::Separator => "—".into(),
+                    Row::Section(s) => format!("[{s}]"),
                 })
                 .collect()
         })
     }
 
-    /// Menu actions share palette titles, with default keys or disabled reasons in the
+    /// The keymap the shell would publish: the pricer fragment over the
+    /// builtin actions, plus `user` as the user layer.
+    fn install_chords(vcx: &mut VisualTestContext, user: Option<&str>) {
+        use geode_core::config::{Layer, LayerDoc};
+        use geode_shell::actions::{ActionDef, ActionRegistry};
+        let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
+        for (id, title) in crate::content::ACTIONS {
+            registry
+                .register(ActionDef {
+                    id: ActionId(id.to_string()),
+                    title: title.to_string(),
+                    category: "Pricer".into(),
+                })
+                .unwrap();
+        }
+        let mut docs = vec![
+            geode_shell::keymap::fragments::fragment_doc("pricer", crate::content::DEFAULT_KEYMAP)
+                .unwrap(),
+        ];
+        if let Some(text) = user {
+            docs.push(LayerDoc {
+                layer: Layer::User,
+                name: "keymap".into(),
+                file: "user/keymap.toml".into(),
+                table: text.parse().unwrap(),
+            });
+        }
+        let (keymap, diags) = geode_shell::keymap::build_keymap(
+            &docs,
+            geode_shell::defaults::default_mod(),
+            &registry,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        vcx.update(|_, cx| {
+            cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(
+                keymap.bindings().to_vec(),
+            )))
+        });
+        vcx.run_until_parked();
+    }
+
+    const GROUP_REBOUND: &str = "[[bindings]]\ncontext = \"pricer && mode == normal\"\n[bindings.keys]\n\"g p\" = \"none\"\n\"g shift+p\" = \"pricer::group\"\n";
+
+    fn group_lane(h: &Harness, vcx: &VisualTestContext) -> String {
+        menu_rows(h, vcx)
+            .into_iter()
+            .find(|r| r.starts_with("Group into package |"))
+            .expect("the group row")
+    }
+
+    /// The menu's hints are the live keymap's: a user rebind shows.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_user_rebind(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, Some(GROUP_REBOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g shift+p");
+    }
+
+    /// A keymap republished while the menu is open re-resolves its hints
+    /// at once, not at the next open.
+    #[gpui::test]
+    fn an_open_menu_follows_a_keymap_reload(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, None);
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g p");
+        install_chords(&mut vcx, Some(GROUP_REBOUND));
+        assert_eq!(group_lane(&h, &vcx), "Group into package | g shift+p");
+    }
+
+    /// Menu actions share palette titles, with their live keys or disabled reasons in the
     /// trailing lane. Separators and the View heading are skipped by selection; current
     /// views show a leading tick.
     #[gpui::test]
@@ -7766,6 +7800,7 @@ pub(crate) mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
+        install_chords(&mut vcx, None);
         h.dispatch(&mut vcx, "menu", None);
         assert_eq!(
             menu_rows(&h, &vcx),
@@ -7798,17 +7833,17 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(2), "over the separator onto Group");
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(8), "over the greyed Ungroup, Undo and Redo");
         h.dispatch(&mut vcx, "menu_down", Some(1));
         let at = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(at, Some(11), "over the section header onto a view");
     }
 
@@ -7823,7 +7858,7 @@ pub(crate) mod tests {
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
         let highlighted = h
             .tile
-            .read_with(&vcx, |t, _| t.menu.as_ref().map(|m| m.highlighted));
+            .read_with(&vcx, |t, _| t.menu.as_ref().and_then(|m| m.highlighted()));
         assert_eq!(highlighted, Some(12));
         h.dispatch(&mut vcx, "menu_pick", None);
         assert!(h.columns(&vcx).contains(&"barrier".to_string()));
@@ -7881,23 +7916,18 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "menu", None);
         let at = centre_of(&mut vcx, "pricer-menu-row-3"); // Ungroup: A is a root line
         vcx.simulate_mouse_move(at, None, gpui::Modifiers::default());
-        let (highlighted, enabled, paint, paints) = h.tile.read_with(&vcx, |t, cx| {
+        let (highlighted, enabled, paint, p) = h.tile.read_with(&vcx, |t, cx| {
             let m = t.menu.as_ref().expect("the menu is open");
-            let enabled = matches!(
-                m.items[m.highlighted],
-                MenuItem::Action {
-                    enabled: Ok(()),
-                    ..
-                }
-            );
-            let paints = t.table.read(cx).delegate().paints;
-            let paint = crate::popup::menu_row_paint(true, enabled, &paints, cx.theme().accent);
-            (m.highlighted, enabled, paint, paints)
+            let at = m.highlighted().expect("a highlight");
+            let enabled = m.rows()[at].action().expect("an action row").is_enabled();
+            let p = geode_tile::menu::MenuPaint::derive(cx.theme());
+            let paint = geode_tile::menu::row_paint(&p, true, enabled);
+            (at, enabled, paint, p)
         });
         assert_eq!(highlighted, 3, "the pointer's row takes the highlight");
         assert!(!enabled, "fixture: Ungroup is disabled here");
         assert_eq!(paint.fill, None, "no fill on a disabled row");
-        assert_eq!(paint.text, paints.menu_muted);
+        assert_eq!(paint.text, p.muted);
         let at = centre_of(&mut vcx, "pricer-menu-row-3");
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
@@ -8789,8 +8819,9 @@ pub(crate) mod tests {
     }
 
     fn prompt(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
-        h.tile
-            .read_with(vcx, |t, _| t.confirm.as_ref().map(|c| c.prompt.to_string()))
+        h.tile.read_with(vcx, |t, _| {
+            t.confirm.as_ref().map(|c| c.prompt_text().to_string())
+        })
     }
 
     /// `old` in the store, `book` open here, `untitled-1` in another tile.
@@ -8997,7 +9028,7 @@ pub(crate) mod tests {
             h.draw(&mut vcx);
             // Held here so a handle dropped still focused stays visible.
             let focus = h.tile.read_with(&vcx, |t, _| {
-                t.confirm.as_ref().expect("armed").focus.clone()
+                t.confirm.as_ref().expect("armed").focus_handle().clone()
             });
             assert!(vcx.update(|window, _| focus.is_focused(window)));
             vcx.simulate_keystrokes(key);
