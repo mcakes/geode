@@ -84,6 +84,31 @@ impl PreparedTable {
             RowKind::Plain | RowKind::Notice => None,
         }
     }
+
+    /// The cell to paint at `(row_ix, col_ix)`. A notice row has one cell
+    /// and no colspan to span the row with, so it paints in the widest
+    /// column, where it has room, and nothing anywhere else; every other
+    /// row paints its cells in column order.
+    pub fn cell_at(&self, row_ix: usize, col_ix: usize) -> Option<&Cell> {
+        let row = self.rows.get(row_ix)?;
+        match row.kind {
+            RowKind::Notice if col_ix == widest_column(&self.columns) => row.cells.first(),
+            RowKind::Notice => None,
+            _ => row.cells.get(col_ix),
+        }
+    }
+}
+
+/// The index of the widest column; the first of equals. Zero for no
+/// columns, which no table this crate builds has.
+pub fn widest_column(columns: &[ColumnSpec]) -> usize {
+    columns.iter().enumerate().fold(0, |best, (ix, c)| {
+        if c.width > columns[best].width {
+            ix
+        } else {
+            best
+        }
+    })
 }
 
 const fn col(key: &'static str, name: &'static str, width: f32) -> ColumnSpec {
@@ -509,6 +534,20 @@ mod tests {
             )]
         );
         assert_eq!(log_table(&rows, 0).rows.len(), 1);
+    }
+
+    /// The notice's one cell must land where it has room: the `Time`
+    /// column would clip it to "7 records l…".
+    #[test]
+    fn a_notice_row_paints_its_cell_in_the_widest_column_only() {
+        let message = LOG_COLUMNS.iter().position(|c| c.key == "message").unwrap();
+        assert_eq!(widest_column(&LOG_COLUMNS), message);
+        let t = log_table(&[], 7);
+        assert!(t.cell_at(0, 0).is_none(), "nothing in Time");
+        assert!(t.cell_at(0, 1).is_none());
+        let cell = t.cell_at(0, message).expect("the notice in Message");
+        assert!(cell.text.contains("7 records lost"));
+        assert!(t.cell_at(1, message).is_none(), "no row there");
     }
 
     #[test]

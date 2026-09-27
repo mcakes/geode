@@ -1,6 +1,7 @@
 //! One `TableDelegate` for every table section, over a shared prepared
-//! table. The page owns the truth (cursor, expansion, filters); the
-//! delegate paints and reports clicks.
+//! table. The page owns the truth (cursor, expansion, filters) and hears
+//! row selection through `TableEvent::SelectRow` on the `TableState`; the
+//! delegate only paints.
 
 use std::rc::Rc;
 
@@ -13,6 +14,9 @@ use gpui_component::table::{Column, TableDelegate, TableState};
 
 use crate::model::Tone;
 use crate::prepared::{PreparedTable, RowKind};
+
+/// Design pixels of left padding per nesting level of a child cell.
+const INDENT_STEP: f32 = 12.0;
 
 pub struct SectionDelegate {
     table: Rc<PreparedTable>,
@@ -85,14 +89,13 @@ impl TableDelegate for SectionDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let Some(row) = self.table.rows.get(row_ix) else {
+        // `cell_at` places a notice row's one cell in the widest column;
+        // the table clips every td to its column, so the first column
+        // would cut the message short.
+        let Some(cell) = self.table.cell_at(row_ix, col_ix) else {
             return div();
         };
-        // A notice row paints its one cell in the first column and nothing
-        // elsewhere; the table has no colspan.
-        let Some(cell) = row.cells.get(col_ix) else {
-            return div();
-        };
+        let row = &self.table.rows[row_ix];
         let color = match cell.tone {
             Tone::Normal => theme.foreground,
             Tone::Muted => theme.muted_foreground,
@@ -114,7 +117,7 @@ impl TableDelegate for SectionDelegate {
         };
         div()
             .w_full()
-            .pl(scale::design(f32::from(cell.indent) * 12.0))
+            .pl(scale::design(f32::from(cell.indent) * INDENT_STEP))
             .font_family(fonts::MONO)
             .text_color(color)
             .whitespace_nowrap()
