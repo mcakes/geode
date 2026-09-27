@@ -36,14 +36,20 @@ fn action(
 
 /// The three "On new document" rows, in [`UpdatePolicy::ALL`]'s order,
 /// ticked where `policy` matches: a choice group, exactly one in force.
+/// Each hint is its action's live chord, else the `:auto` verb that sets the
+/// same policy, so a user binding shows and an unbound row still names a route.
 fn policy_rows(policy: UpdatePolicy) -> impl Iterator<Item = Row<ActionId>> {
     UpdatePolicy::ALL.into_iter().map(move |p| {
-        let (id, title) = match p {
-            UpdatePolicy::Hold => ("marketdata::auto_hold", "hold edits"),
-            UpdatePolicy::Rebase => ("marketdata::auto_rebase", "rebase edits"),
-            UpdatePolicy::Replace => ("marketdata::auto_replace", "replace edits"),
+        let (id, title, verb) = match p {
+            UpdatePolicy::Hold => ("marketdata::auto_hold", "hold edits", ":auto hold"),
+            UpdatePolicy::Rebase => ("marketdata::auto_rebase", "rebase edits", ":auto rebase"),
+            UpdatePolicy::Replace => ("marketdata::auto_replace", "replace edits", ":auto replace"),
         };
-        Row::Action(ActionRow::new(ActionId(id.to_string()), title).checked(p == policy))
+        Row::Action(
+            ActionRow::new(ActionId(id.to_string()), title)
+                .hint(Hint::chord_or_verb(id, verb))
+                .checked(p == policy),
+        )
     })
 }
 
@@ -106,7 +112,8 @@ pub fn rows(i: &MenuInputs, clock: Clock) -> Vec<Row<ActionId>> {
             out.push(action(
                 k.id,
                 k.title,
-                Hint::None,
+                // Kind actions ship unbound; a user binding still shows.
+                Hint::chord(k.id),
                 if k.built {
                     Ok(())
                 } else {

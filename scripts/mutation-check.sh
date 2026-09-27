@@ -15977,10 +15977,29 @@ run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
 # menu no longer says which policy is in force.
 run_mutation "mdauto: exactly one policy row is checked" \
   crates/geode-marketdata/src/core/menu.rs \
-  '        Row::Action(ActionRow::new(ActionId(id.to_string()), title).checked(p == policy))' \
-  '        Row::Action(ActionRow::new(ActionId(id.to_string()), title).checked(true))' \
+  '                .checked(p == policy),' \
+  '                .checked(true),' \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
+
+# A policy row's hint names its action, so a user binding shows in the menu;
+# mutated to no hint, a bound policy row trails nothing and an unbound one
+# loses its `:auto` verb.
+run_mutation "mdmenu: a policy row hints its live chord" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                .hint(Hint::chord_or_verb(id, verb))' \
+  '                .hint(Hint::None)' \
+  geode-marketdata \
+  a_menu_hint_follows_a_policy_and_kind_rebind
+
+# A kind action's row resolves the user's binding; mutated to no hint, the
+# row's lane stays empty whatever the keymap binds.
+run_mutation "mdmenu: a kind row hints its live chord" \
+  crates/geode-marketdata/src/core/menu.rs \
+  '                Hint::chord(k.id),' \
+  '                Hint::None,' \
+  geode-marketdata \
+  a_menu_hint_follows_a_policy_and_kind_rebind
 
 # `j` steps over a disabled row as over a separator (user report
 # 2026-09-25); mutated, a downward step lands on greyed `Upload`.

@@ -28,8 +28,8 @@ A row's hint is an action identity, not a string. `Menu::new`,
 `replace_rows` and `rehint` resolve it against the bindings they are given —
 modules pass `menu::live_bindings(cx)`, the shell's last `Chords` publish —
 so a user rebind shows. A module re-resolves an open menu from its `Chords`
-observer. An action bound nowhere shows its `Unbound` form: nothing, its `:`
-verb, or a key its surface handles itself.
+observer. An action bound nowhere shows its `Unbound` form: nothing, or its
+`:` verb.
 
 ## Commands
 

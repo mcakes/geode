@@ -22,7 +22,7 @@ pub use render::{MenuHost, MenuIds, render_menu};
 use std::sync::Arc;
 
 use geode_shell::actions::ActionId;
-use geode_shell::keymap::{Binding, Keystroke, Modifiers, parse_binding};
+use geode_shell::keymap::{Binding, Keystroke};
 use geode_shell::tips::{Chords, chord_for};
 use gpui::{App, SharedString};
 
@@ -70,17 +70,6 @@ impl Hint {
         }
     }
 
-    /// The live chord, or `shipped` (a keymap spelling) for a key the
-    /// surface handles itself when the keymap binds the action nowhere.
-    pub fn chord_or_keys(action: &'static str, shipped: &'static str) -> Hint {
-        Hint::Chord {
-            action: SharedString::new_static(action),
-            unbound: Unbound::Keys(
-                parse_binding(shipped, Modifiers::NONE).expect("a shipped hint spells a key"),
-            ),
-        }
-    }
-
     pub fn label(text: &'static str) -> Hint {
         Hint::Label(SharedString::new_static(text))
     }
@@ -91,7 +80,6 @@ impl Hint {
 pub enum Unbound {
     Blank,
     Verb(SharedString),
-    Keys(Vec<Keystroke>),
 }
 
 /// A hint resolved against the keymap: what an enabled row's lane holds.
@@ -288,7 +276,6 @@ fn resolve(hint: &Hint, bindings: &[Binding]) -> Lane {
             None => match unbound {
                 Unbound::Blank => Lane::Empty,
                 Unbound::Verb(verb) => Lane::Text(verb.clone()),
-                Unbound::Keys(keys) => Lane::Keys(keys.clone()),
             },
         },
     }
@@ -396,7 +383,7 @@ mod tests {
     use geode_core::config::{Layer, LayerDoc};
     use geode_shell::actions::{ActionDef, ActionRegistry};
     use geode_shell::defaults::default_mod;
-    use geode_shell::keymap::build_keymap;
+    use geode_shell::keymap::{Modifiers, build_keymap, parse_binding};
 
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) struct Id(pub &'static str);
@@ -569,9 +556,6 @@ mod tests {
             Row::Action(
                 ActionRow::new(Id("v"), "Verb").hint(Hint::chord_or_verb("demo::verb", ":verb")),
             ),
-            Row::Action(
-                ActionRow::new(Id("c"), "Custom").hint(Hint::chord_or_keys("demo::custom", "c")),
-            ),
             Row::Action(ActionRow::new(Id("u"), "Unbound").hint(Hint::chord("demo::unbound"))),
             Row::Action(ActionRow::new(Id("l"), "1 week").hint(Hint::label("1w"))),
         ];
@@ -586,7 +570,6 @@ mod tests {
             vec![
                 Lane::Keys(keys("a")),
                 Lane::Text(":verb".into()),
-                Lane::Keys(keys("c")),
                 Lane::Empty,
                 Lane::Text("1w".into()),
             ]

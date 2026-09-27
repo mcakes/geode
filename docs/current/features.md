@@ -43,7 +43,7 @@ has none of them.
   keymap when the menu opens, when its rows rebuild, and when the keymap is
   republished, so an open menu follows a reload. An action the keymap binds
   nowhere shows an empty lane, or its `:` verb on a row that has one
-  (`:price`, `:upload`, `:rebase`, `:revert`).
+  (`:price`, `:upload`, `:rebase`, `:revert`, `:auto hold`).
 - Keyboard stepping lands only on enabled actions, clamped at either end
   without wrapping; from a row that is not an action it lands on the first
   enabled action. A pointer can light a disabled row, which takes no
@@ -56,9 +56,9 @@ has none of them.
   leaving also cancels. A change that moves what the question is about
   withdraws it unanswered: neither the confirm nor the cancel action runs,
   and the prompt's blur is not heard as an `n`. Market-data withdraws on a
-  delivery that moves the painted document and says so in its notice
-  (`upload cancelled: a new document arrived`); the pricer withdraws on a `:`
-  command with no notice of its own. Each answer blurs the prompt before it
+  delivery that moves the painted document or the draft and says so in its
+  notice (`upload cancelled: a new document arrived`); the pricer withdraws
+  on a `:` command with no notice of its own. Each answer blurs the prompt before it
   drops, and the shell's focus restoration path returns the keyboard to the
   tile.
 - A notice is a status (muted), warning or danger line in the theme's text
@@ -279,9 +279,11 @@ validated before any edit is written. Bump deltas themselves are parsed as
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
 command-parser contracts. The `.` action list follows the
 [shared menu rules](#shared-tile-interaction): its key hints are the live
-keymap's and follow a keymap reload while it is open; `Upload`, `Rebase` and
-`Revert edits` fall back to their `:` verbs when unbound, and the other rows
-to an empty lane. A disabled row's reason becomes the notice.
+keymap's and follow a keymap reload while it is open, the update-policy and
+kind-action rows included; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold`, `:auto rebase`, `:auto replace`) fall back to their
+`:` verbs when unbound, and the other rows to an empty lane. A disabled row's
+reason becomes the notice.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does

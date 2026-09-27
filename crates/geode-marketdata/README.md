@@ -141,15 +141,16 @@ cargo bench -p geode-marketdata    # matrix model and draft
 ## Input and popup contracts
 
 The panel reports `normal`, `visual`, `menu`, or `insert` in the shared
-`marketdata` context, with `select == rows|block` added whenever a selection
-is live. An open editor or popup outranks the selection: a selection editor
-is `insert`. Editors, underlying and choice inputs, and upload confirmation
-use insert mode. Insert bindings leave shell chords available; confirmation consumes
-every key, including chords, while armed; a pointer press on the tile or focus
-leaving cancels it. A delivery that moves the painted document or the draft
-withdraws it unanswered (neither submit nor cancel runs) and says so in the
-notice, `upload cancelled: a new document arrived`. The upload confirm is `geode_tile::confirm`'s; after an answer
-the shell's focus restoration path returns the keyboard to the tile.
+`marketdata` context, with `select == rows|block` added whenever a selection is
+live. An open editor or popup outranks the selection: a selection editor is
+`insert`. Editors, underlying and choice inputs, and upload confirmation use
+insert mode. Insert bindings leave shell chords available; confirmation
+consumes every key, including chords, while armed; a pointer press on the tile
+or focus leaving cancels it. A delivery that moves the painted document or the
+draft withdraws it unanswered (neither submit nor cancel runs) and says so in
+the notice, `upload cancelled: a new document arrived`. The upload confirm is
+`geode_tile::confirm`'s; after an answer the shell's focus restoration path
+returns the keyboard to the tile.
 
 Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
 the menu opens on its first enabled action; motion counts enabled actions and
@@ -158,8 +159,9 @@ that is not an action lands on the first enabled one; hover can light a
 refused action, which takes no fill, and Enter or a click on it makes its
 reason the notice and keeps the menu open; key hints are the live keymap's,
 resolved when the menu opens, and follow a reload while the menu is open. A
-key-only row whose action the keymap binds nowhere shows an empty lane;
-`Upload`, `Rebase` and `Revert edits` fall back to their `:` verbs.
+key-only row (`Load underlying…`, a kind action) whose action the keymap binds
+nowhere shows an empty lane; `Upload`, `Rebase`, `Revert edits` and the three
+policy rows (`:auto hold|rebase|replace`) fall back to their `:` verbs.
 
 Underlying and choice lists retain every ranked match but paint a moving window
 of at most twelve rows. Hover changes selection, and clicks commit. Underlying

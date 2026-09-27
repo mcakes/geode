@@ -103,12 +103,12 @@ cargo bench -p geode-timeseries
 ## Range and frequency menus
 
 `r` (or the range trigger) opens the range menu: the seven presets written out
-with their short labels as text, then `Custom dates…` with its live chord
-(`c` as shipped) painted as a key. `f` (or the frequency trigger) opens the
-frequency menu; a frequency the point cap refuses over the range as resolved under the frame's as-of is a
-disabled row reading `over cap`, and choosing it gives the full refusal as the
-notice. Both tick the value in force and open with the highlight on it. There
-is no frequency step key.
+with their short labels as text, then `Custom dates…` with its live chord (`c`
+as shipped) painted as a key. `f` (or the frequency trigger) opens the
+frequency menu; a frequency the point cap refuses over the range as resolved
+under the frame's as-of is a disabled row reading `over cap`, and choosing it
+gives the full refusal as the notice. Both tick the value in force and open
+with the highlight on it. There is no frequency step key.
 
 The custom dates editor opens on From's day segment and digits edit the date
 at once. Tab switches fields; Enter commits the fields as an absolute range,

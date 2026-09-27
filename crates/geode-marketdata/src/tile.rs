@@ -10521,6 +10521,17 @@ edits = [["2099-01-01", "-1", 1.0]]
                 })
                 .expect("no duplicate ids");
         }
+        // Kind actions register beside ACTIONS, as the content's registration
+        // does, so a user layer may bind them.
+        for a in CVI.actions {
+            registry
+                .register(geode_shell::actions::ActionDef {
+                    id: ActionId(a.id.to_string()),
+                    title: a.title.to_string(),
+                    category: "Market data".to_string(),
+                })
+                .expect("no duplicate ids");
+        }
         let mut docs = vec![
             geode_shell::keymap::fragments::fragment_doc(CVI.kind, crate::content::DEFAULT_KEYMAP)
                 .expect("the fragment parses"),
@@ -10605,6 +10616,40 @@ edits = [["2099-01-01", "-1", 1.0]]
         assert_eq!(menu_lane(&h, &vcx, "Load underlying…"), "");
         assert_eq!(menu_lane(&h, &vcx, "Upload"), ":upload");
         assert_eq!(menu_lane(&h, &vcx, "Revert edits"), ":revert");
+    }
+
+    const POLICY_AND_KIND_BOUND: &str = "[[bindings]]\ncontext = \"marketdata && mode == normal\"\n[bindings.keys]\n\"z\" = \"marketdata::auto_rebase\"\n\"shift+z\" = \"marketdata::cvi_reanchor\"\n";
+
+    /// A user binding on an update-policy action and on a kind action reaches
+    /// the open menu: the policy row trails the chord instead of its `:auto`
+    /// verb, and the kind row's lane resolves to the chord (painted once the
+    /// action is built; an unbuilt row trails its reason over it). The other
+    /// policy rows keep their verbs.
+    #[gpui::test]
+    fn a_menu_hint_follows_a_policy_and_kind_rebind(cx: &mut gpui::TestAppContext) {
+        use geode_tile::menu::{Lane, Row};
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        install_chords(&mut vcx, Some(POLICY_AND_KIND_BOUND));
+        h.dispatch(&mut vcx, "menu", None);
+        assert_eq!(menu_lane(&h, &vcx, "rebase edits"), "z");
+        assert_eq!(menu_lane(&h, &vcx, "hold edits"), ":auto hold");
+        assert_eq!(menu_lane(&h, &vcx, "replace edits"), ":auto replace");
+        let reanchor = h.tile.read_with(&vcx, |t, _| match &t.popup {
+            Some(Popup::Menu(m)) => m
+                .rows()
+                .iter()
+                .find_map(|r| match r {
+                    Row::Action(a) if a.title().as_ref() == "Reanchor" => Some(a.lane().clone()),
+                    _ => None,
+                })
+                .expect("the row"),
+            _ => panic!("the menu is open"),
+        });
+        match reanchor {
+            Lane::Keys(k) => assert_eq!(geode_shell::palette::render_binding(&k), "shift+z"),
+            other => panic!("the kind row resolves its binding, got {other:?}"),
+        }
     }
 
     /// A keymap republished while the menu is open re-resolves its hints
