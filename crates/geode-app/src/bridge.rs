@@ -703,11 +703,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
             let as_of = shell.read(cx).frame().read(cx).as_of().clone();
-            if handle.catalog(CatalogParams {
-                key: DIAGNOSTICS_KEY,
-                tag,
-                as_of,
-            }) {
+            if handle
+                .catalog(CatalogParams {
+                    key: DIAGNOSTICS_KEY,
+                    tag,
+                    as_of,
+                })
+                .is_ok()
+            {
                 refresh.in_flight.set(Some((tag, request)));
             } else {
                 tracing::warn!(
@@ -779,7 +782,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     factory.set_schema(schema);
                 }
                 factory.set_dims(dims.clone());
-                handle.replace_views(views, dims);
+                let _ = handle.replace_views(views, dims);
                 // The config borrow has ended; diagnostics can now be updated through cx.
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
@@ -800,7 +803,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // call geode-data directly. If the service request channel refuses, deliver
             // a synthetic error with the same key/tag/column so the picker stops waiting.
             ShellEvent::DistinctRequested(params) => {
-                let queued = handle.distinct(params.clone());
+                let queued = handle.distinct(params.clone()).is_ok();
                 if !queued {
                     let outcome = DistinctOutcome {
                         key: params.key,
@@ -1155,6 +1158,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         shell.update(cx, |s, cx| {
                             s.deliver(Delivery::Price(outcome), window, cx)
                         });
+                    }
+                    DataEvent::ThreadStopped { thread, reason } => {
+                        tracing::error!(target: "geode::shell", "data thread {thread} stopped: {reason}");
                     }
                 }
             });
@@ -3030,14 +3036,18 @@ role = "key"
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = DataService::spawn(setup.config, Arc::new(move |e| tx.send(e).is_ok()));
-        assert!(handle.document(geode_core::query::DocumentParams {
-            key: QueryKey(7),
-            tag: 1,
-            submitted: std::time::Instant::now(),
-            dataset: PRICER_SHEETS_DATASET.into(),
-            document_key: vec!["book".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            handle
+                .document(geode_core::query::DocumentParams {
+                    key: QueryKey(7),
+                    tag: 1,
+                    submitted: std::time::Instant::now(),
+                    dataset: PRICER_SHEETS_DATASET.into(),
+                    document_key: vec!["book".into()],
+                    as_of: AsOf::Live,
+                })
+                .is_ok()
+        );
         let rows = loop {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 break o.snapshot.unwrap().rows();

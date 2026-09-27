@@ -1,6 +1,7 @@
 //! Cloneable request handle for the service thread. Ordinary submissions use
-//! try_send under a short mutex: full or disconnected channels refuse and count
-//! the request without waiting for queue space. Acceptance is queue admission,
+//! try_send under a short mutex and never wait for queue space: a full channel
+//! refuses `Busy` and is counted; a request loop that has stopped, or a closed
+//! or disconnected channel, refuses `Stopped`. Acceptance is queue admission,
 //! not completion. Cancellation and supersession can suppress query outcomes.
 //!
 //! View replacements use a latest-value mailbox with a best-effort wakeup.
@@ -11,6 +12,7 @@ use crate::egress::UploadParams;
 use crate::service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
 };
+use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::pricing::{LocalPublish, PriceParams};
@@ -19,7 +21,7 @@ use geode_core::query::{
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::view::ViewSpec;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -28,6 +30,25 @@ use std::thread::JoinHandle;
 /// queries, cancellation, and other ordinary requests; it does not bound work
 /// already handed to downstream workers.
 pub const REQUEST_BOUND: usize = 64;
+
+/// Why a submission was not admitted. `Busy` passes: the request queue was
+/// full and a later submission can succeed. `Stopped` does not: the request
+/// loop has ended (a panic, a failed open, or shutdown) and nothing will serve
+/// a later one, so retrying only repeats the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    Busy,
+    Stopped,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Refusal::Busy => "the data service is busy",
+            Refusal::Stopped => "the data service has stopped",
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum Request {
@@ -81,23 +102,29 @@ struct Inner {
     tx: Mutex<Option<SyncSender<Request>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     dropped: AtomicU64,
+    /// Set when the request loop can no longer serve: it failed to open, or
+    /// it is unwinding. Read before the channel so a submission racing a
+    /// dying loop is refused `Stopped` rather than admitted to a queue that
+    /// nothing will read. A deliberate shutdown does not set it.
+    stopped: Arc<AtomicBool>,
 }
 
 impl Inner {
-    fn send(&self, req: Request) -> bool {
+    fn send(&self, req: Request) -> Result<(), Refusal> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Refusal::Stopped);
+        }
         let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(tx) => match tx.try_send(req) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(_)) => {
                     self.dropped.fetch_add(1, Ordering::Relaxed);
-                    false
+                    Err(Refusal::Busy)
                 }
+                Err(TrySendError::Disconnected(_)) => Err(Refusal::Stopped),
             },
-            None => {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                false
-            }
+            None => Err(Refusal::Stopped),
         }
     }
 
@@ -133,108 +160,137 @@ pub struct DataHandle {
 }
 
 impl DataHandle {
-    fn send(&self, req: Request) -> bool {
+    fn send(&self, req: Request) -> Result<(), Refusal> {
         self.inner.send(req)
     }
 
-    /// Queue a query. False means no request was admitted and no reply is owed.
-    /// Outcomes preserve key/tag; supersession or cancellation can suppress them.
-    pub fn query(&self, params: QueryParams) -> bool {
+    /// Queue a query. `Err(Busy)` means the queue was full and a later
+    /// submission can succeed; `Err(Stopped)` means the service can no longer
+    /// serve and no outcome is owed. Outcomes preserve key/tag; supersession
+    /// or cancellation can suppress them.
+    pub fn query(&self, params: QueryParams) -> Result<(), Refusal> {
         self.send(Request::Query(params))
     }
 
     /// Queue cancellation for query-pool and pricing work under this key.
-    /// False means cancellation was not queued. There is no acknowledgement;
-    /// this does not cancel fetches or ingest jobs, or retract emitted results.
+    /// `false` means it was not queued; a stale answer that still arrives is
+    /// dropped by its receiver's tag check. There is no acknowledgement; this
+    /// does not cancel fetches or ingest jobs, or retract emitted results.
     pub fn cancel(&self, key: QueryKey) -> bool {
-        self.send(Request::Cancel { key })
+        self.send(Request::Cancel { key }).is_ok()
     }
 
-    /// Queue the picker's distinct-values query. `false` means it was not
-    /// queued; the result, when it comes, arrives on the sink as
-    /// `DataEvent::Distinct`, keyed and tagged as asked.
-    pub fn distinct(&self, params: DistinctParams) -> bool {
+    /// Queue the picker's distinct-values query. `Err(Busy)` means the queue
+    /// was full and a later submission can succeed; `Err(Stopped)` means the
+    /// service can no longer serve and no outcome is owed. The result, when it
+    /// comes, arrives on the sink as `DataEvent::Distinct`, keyed and tagged
+    /// as asked.
+    pub fn distinct(&self, params: DistinctParams) -> Result<(), Refusal> {
         self.send(Request::Distinct(params))
     }
 
-    /// Queue a document request. False means not queued. Outcomes share the
+    /// Queue a document request. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. Outcomes share the
     /// DataEvent::Query shape and preserve the request key/tag.
-    pub fn document(&self, params: DocumentParams) -> bool {
+    pub fn document(&self, params: DocumentParams) -> Result<(), Refusal> {
         self.send(Request::Document(params))
     }
 
-    /// Queue an upload. False means no request was admitted and no outcome is
-    /// owed; the caller reports the refusal. Serviced uploads normally emit one
+    /// Queue an upload. `Err(Busy)` means the queue was full and a later
+    /// submission can succeed; `Err(Stopped)` means the service can no longer
+    /// serve and no outcome is owed. Either way the caller reports the
+    /// refusal. Serviced uploads normally emit one
     /// `DataEvent::Upload`; startup, worker, and event-delivery failures can
     /// prevent that outcome. Admission does not acknowledge transport success.
-    pub fn upload(&self, params: UploadParams) -> bool {
+    pub fn upload(&self, params: UploadParams) -> Result<(), Refusal> {
         self.send(Request::Upload(params))
     }
 
-    /// Queue a series query. False means not queued. Cap and compile failures
+    /// Queue a series query. `Err(Busy)` means the queue was full and a later
+    /// submission can succeed; `Err(Stopped)` means the service can no longer
+    /// serve and no outcome is owed. Cap and compile failures
     /// for admitted requests are returned as keyed/tagged DataEvent::Series errors;
     /// superseded or cancelled work can produce no outcome.
-    pub fn series(&self, params: SeriesParams) -> bool {
+    pub fn series(&self, params: SeriesParams) -> Result<(), Refusal> {
         self.send(Request::Series(params))
     }
 
-    /// Queue catalog metadata work. False means not queued; outcomes preserve
-    /// key/tag in DataEvent::Catalog.
-    pub fn catalog(&self, params: CatalogParams) -> bool {
+    /// Queue catalog metadata work. `Err(Busy)` means the queue was full and
+    /// a later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. Outcomes preserve key/tag in
+    /// DataEvent::Catalog.
+    pub fn catalog(&self, params: CatalogParams) -> Result<(), Refusal> {
         self.send(Request::Catalog(params))
     }
 
-    /// Queue a pricing batch. False means the service channel refused it. A
-    /// subsequent pricing-worker refusal instead produces an error for each line.
-    pub fn price(&self, params: PriceParams) -> bool {
+    /// Queue a pricing batch. `Err(Busy)` means the queue was full and a later
+    /// submission can succeed; `Err(Stopped)` means the service can no longer
+    /// serve and no outcome is owed. A subsequent pricing-worker refusal
+    /// instead produces an error for each line.
+    pub fn price(&self, params: PriceParams) -> Result<(), Refusal> {
         self.send(Request::Price(params))
     }
 
-    /// Queue local publication. False means no admission. After admission the
+    /// Queue local publication. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed. After admission the
     /// service validates local-dataset permission and reports rejection through
     /// Diagnostics and LocalPublishFailed; otherwise the writer answers
-    /// LocalPublished or LocalPublishFailed. True does not mean the document
+    /// LocalPublished or LocalPublishFailed. `Ok` does not mean the document
     /// has been stored.
-    pub fn publish(&self, publish: LocalPublish) -> bool {
+    pub fn publish(&self, publish: LocalPublish) -> Result<(), Refusal> {
         self.send(Request::Publish(publish))
     }
 
-    /// Queue forgetting one local document. False means no admission. After
+    /// Queue forgetting one local document. `Err(Busy)` means the queue was
+    /// full and a later submission can succeed; `Err(Stopped)` means the
+    /// service can no longer serve and no outcome is owed. After
     /// admission the service refuses a dataset that is not local (or a key of
     /// the wrong arity) with an error Diagnostics and ForgetFailed and runs
     /// nothing; otherwise the forget runs on the writer after every publish
-    /// queued before it and answers Forgotten or ForgetFailed. True does not
+    /// queued before it and answers Forgotten or ForgetFailed. `Ok` does not
     /// mean it has run.
-    pub fn forget(&self, forget: LocalForget) -> bool {
+    pub fn forget(&self, forget: LocalForget) -> Result<(), Refusal> {
         self.send(Request::Forget(forget))
     }
 
-    /// Queue a fetch. False means not queued. SeriesFetched identifies the
+    /// Queue a fetch. `Err(Busy)` means the queue was full and a later
+    /// submission can succeed; `Err(Stopped)` means the service can no longer
+    /// serve and no outcome is owed. SeriesFetched identifies the
     /// identity/source pair so all visible tiles watching it can react, including
     /// when completion appended zero rows.
-    pub fn fetch(&self, params: FetchParams) -> bool {
+    pub fn fetch(&self, params: FetchParams) -> Result<(), Refusal> {
         self.send(Request::Fetch(params))
     }
 
-    /// Queue an identity refresh. False means no admission to the service queue.
+    /// Queue an identity refresh. `Err(Busy)` means the queue was full and a
+    /// later submission can succeed; `Err(Stopped)` means the service can no
+    /// longer serve and no outcome is owed.
     /// Worker refusal is logged; there is no dedicated completion event. Successful
     /// enumeration updates the identities returned by a later catalog request.
-    pub fn identities(&self, source: impl Into<String>) -> bool {
+    pub fn identities(&self, source: impl Into<String>) -> Result<(), Refusal> {
         self.send(Request::Identities {
             source: source.into(),
         })
     }
 
     /// Store the latest views and dimensions, replacing any pending replacement.
-    /// A full wakeup queue still returns true: the service checks the mailbox
-    /// before every dequeued request. False means closed admission or a disconnected
-    /// service. True acknowledges retained state, not validation or application;
-    /// validation diagnostics return through the event sink.
-    pub fn replace_views(&self, views: Vec<ViewSpec>, dimensions: DerivedDimensions) -> bool {
+    /// A full wakeup queue still answers `Ok`: the service checks the mailbox
+    /// before every dequeued request, so the only refusal is `Stopped`. `Ok`
+    /// acknowledges retained state, not validation or application; validation
+    /// diagnostics return through the event sink.
+    pub fn replace_views(
+        &self,
+        views: Vec<ViewSpec>,
+        dimensions: DerivedDimensions,
+    ) -> Result<(), Refusal> {
+        if self.inner.stopped.load(Ordering::Acquire) {
+            return Err(Refusal::Stopped);
+        }
         let guard = self.inner.tx.lock().unwrap_or_else(|e| e.into_inner());
         let Some(tx) = guard.as_ref() else {
-            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-            return false;
+            return Err(Refusal::Stopped);
         };
         let mut pending = self
             .inner
@@ -243,16 +299,17 @@ impl DataHandle {
             .unwrap_or_else(|e| e.into_inner());
         *pending = Some(ViewReplacement { views, dimensions });
         match tx.try_send(Request::ReplaceViews) {
-            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Disconnected(_)) => {
                 pending.take();
-                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-                false
+                Err(Refusal::Stopped)
             }
         }
     }
 
-    /// Requests refused so far. A diagnostic, not a UI condition.
+    /// Submissions refused `Busy` so far (a full request queue). `Stopped`
+    /// refusals are not counted: they describe a service that is gone, not one
+    /// that is behind.
     pub fn dropped_requests(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
     }
@@ -284,10 +341,19 @@ impl DataHandle {
                     tx: Mutex::new(Some(tx)),
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
+                    stopped: Arc::default(),
                 }),
             },
             rx,
         )
+    }
+
+    /// Fill the request queue so the next submission is refused `Busy`, the
+    /// refusal a burst produces. The test holding the paired receiver drains
+    /// it to admit again.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fill_for_tests(&self) {
+        while self.cancel(QueryKey(u64::MAX)) {}
     }
 }
 
@@ -300,9 +366,13 @@ impl DataService {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
         let pending_views = PendingViews::default();
         let service_views = Arc::clone(&pending_views);
-        let thread = std::thread::Builder::new()
-            .name("geode-data".into())
-            .spawn(move || serve(config, sink, rx, service_views))
+        let stopped = Arc::new(AtomicBool::new(false));
+        let loop_stopped = Arc::clone(&stopped);
+        let loop_sink = Arc::clone(&sink);
+        let thread =
+            crate::supervise::spawn_supervised(REQUEST_LOOP.to_string(), sink, move || {
+                serve(config, loop_sink, rx, service_views, loop_stopped)
+            })
             .expect("spawning the data service thread");
         DataHandle {
             inner: Arc::new(Inner {
@@ -310,6 +380,7 @@ impl DataService {
                 tx: Mutex::new(Some(tx)),
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
+                stopped,
             }),
         }
     }
@@ -320,17 +391,27 @@ fn serve(
     sink: EventSink,
     rx: Receiver<Request>,
     pending_views: PendingViews,
+    stopped: Arc<AtomicBool>,
 ) {
     let mut service = match DataService::open(config, Arc::clone(&sink)) {
         Ok(s) => s,
         Err(e) => {
-            sink(DataEvent::Diagnostics(vec![Diagnostic {
+            // The service never became available: refuse later submissions
+            // `Stopped` from now, and declare the loop gone although nothing
+            // unwound, so the status bar says so.
+            stopped.store(true, Ordering::Release);
+            let reason = format!("data service failed to open: {e}");
+            let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
                 severity: Severity::Error,
                 layer: None,
                 file: None,
-                message: format!("data service failed to open: {e}"),
+                message: reason.clone(),
                 path: None,
             }]));
+            let _ = sink(DataEvent::ThreadStopped {
+                thread: REQUEST_LOOP.to_string(),
+                reason,
+            });
             return;
         }
     };
@@ -433,13 +514,21 @@ mod tests {
     fn view_reload_survives_a_full_request_queue_and_keeps_the_latest() {
         let (handle, requests) = DataHandle::for_tests();
         for _ in 0..REQUEST_BOUND - 1 {
-            assert!(handle.send(Request::Cancel { key: QueryKey(1) }));
+            assert!(handle.send(Request::Cancel { key: QueryKey(1) }).is_ok());
         }
-        assert!(handle.query(params(2, "reloaded")));
-        assert!(handle.replace_views(Vec::new(), DerivedDimensions::default()));
+        assert!(handle.query(params(2, "reloaded")).is_ok());
+        assert!(
+            handle
+                .replace_views(Vec::new(), DerivedDimensions::default())
+                .is_ok()
+        );
         let mut view = crate::ingest::load::tests_support::tree_view();
         view.name = "reloaded".into();
-        assert!(handle.replace_views(vec![view], DerivedDimensions::default()));
+        assert!(
+            handle
+                .replace_views(vec![view], DerivedDimensions::default())
+                .is_ok()
+        );
         assert_eq!(handle.dropped_requests(), 0);
 
         let (db, _src, store, ds, _emitted) = crate::ingest::load::tests_support::fixture();
@@ -462,7 +551,8 @@ mod tests {
         let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
         let pending = Arc::clone(&handle.inner.pending_views);
         // The service starts only after the queue filled and both reloads arrived.
-        let service = std::thread::spawn(move || serve(config, sink, requests, pending));
+        let service =
+            std::thread::spawn(move || serve(config, sink, requests, pending, Arc::default()));
         loop {
             if let DataEvent::Query(outcome) =
                 outcomes.recv_timeout(Duration::from_secs(60)).unwrap()
@@ -474,7 +564,10 @@ mod tests {
         }
         handle.shutdown();
         service.join().unwrap();
-        assert!(!handle.replace_views(Vec::new(), DerivedDimensions::default()));
+        assert_eq!(
+            handle.replace_views(Vec::new(), DerivedDimensions::default()),
+            Err(Refusal::Stopped)
+        );
     }
 
     fn params(key: u64, view: &str) -> QueryParams {
@@ -493,7 +586,7 @@ mod tests {
     #[test]
     fn a_test_handle_hands_requests_to_the_test() {
         let (h, rx) = DataHandle::for_tests();
-        assert!(h.query(params(5, "tree")));
+        assert!(h.query(params(5, "tree")).is_ok());
         assert!(h.cancel(QueryKey(5)));
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Request::Query(p) => assert_eq!(p.key, QueryKey(5)),
@@ -508,14 +601,18 @@ mod tests {
     #[test]
     fn document_requests_are_forwarded_with_their_key() {
         let (handle, rx) = DataHandle::for_tests();
-        assert!(handle.document(DocumentParams {
-            key: QueryKey(5),
-            tag: 1,
-            submitted: Instant::now(),
-            dataset: "cvi_params".into(),
-            document_key: vec!["SPX.Z".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            handle
+                .document(DocumentParams {
+                    key: QueryKey(5),
+                    tag: 1,
+                    submitted: Instant::now(),
+                    dataset: "cvi_params".into(),
+                    document_key: vec!["SPX.Z".into()],
+                    as_of: AsOf::Live,
+                })
+                .is_ok()
+        );
         match rx.recv().unwrap() {
             Request::Document(p) => assert_eq!(
                 (p.key, p.document_key.as_slice()),
@@ -546,7 +643,7 @@ mod tests {
         for _ in 0..REQUEST_BOUND {
             assert!(handle.cancel(QueryKey(1)));
         }
-        assert!(!handle.upload(upload_params(1)));
+        assert_eq!(handle.upload(upload_params(1)), Err(Refusal::Busy));
         assert_eq!(handle.dropped_requests(), 1);
         // The admitted requests are the cancels; the refused upload left nothing.
         let queued: Vec<Request> = rx.try_iter().collect();
@@ -621,7 +718,7 @@ mod tests {
             sink,
         );
 
-        assert!(handle.upload(upload_params(4)));
+        assert!(handle.upload(upload_params(4)).is_ok());
 
         let outcome = loop {
             match events.recv_timeout(Duration::from_secs(60)).unwrap() {
@@ -660,7 +757,7 @@ mod tests {
     #[test]
     fn a_test_handle_hands_a_distinct_request_to_the_test() {
         let (h, rx) = DataHandle::for_tests();
-        assert!(h.distinct(distinct_params(7, "book")));
+        assert!(h.distinct(distinct_params(7, "book")).is_ok());
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Request::Distinct(p) => {
                 assert_eq!(p.key, QueryKey(7));
@@ -673,25 +770,26 @@ mod tests {
     #[test]
     fn fetch_and_identities_are_queued_as_requests() {
         let (handle, rx) = DataHandle::for_tests();
-        assert!(handle.fetch(FetchParams {
-            key: QueryKey(3),
-            source: "k".into(),
-            identity: "SPX".into(),
-            from: chrono::Utc::now(),
-            to: chrono::Utc::now(),
-        }));
-        assert!(handle.identities("k"));
+        assert!(
+            handle
+                .fetch(FetchParams {
+                    key: QueryKey(3),
+                    source: "k".into(),
+                    identity: "SPX".into(),
+                    from: chrono::Utc::now(),
+                    to: chrono::Utc::now(),
+                })
+                .is_ok()
+        );
+        assert!(handle.identities("k").is_ok());
         assert!(matches!(rx.recv().unwrap(), Request::Fetch(p) if p.identity == "SPX"));
         assert!(matches!(rx.recv().unwrap(), Request::Identities { source } if source == "k"));
     }
 
-    /// Series parameters must pass unchanged through the common request queue.
-    #[test]
-    fn a_series_request_is_queued_as_a_request() {
-        use geode_core::series::{BucketRule, Frequency, SeriesParams, SeriesSpec, SlotKind};
-        let (handle, rx) = DataHandle::for_tests();
-        assert!(handle.series(SeriesParams {
-            key: QueryKey(3),
+    fn series_params(key: u64) -> SeriesParams {
+        use geode_core::series::{BucketRule, Frequency, SeriesSpec, SlotKind};
+        SeriesParams {
+            key: QueryKey(key),
             tag: 5,
             submitted: Instant::now(),
             dataset: "series".into(),
@@ -709,7 +807,14 @@ mod tests {
             }],
             percentiles: Vec::new(),
             bins: None,
-        }));
+        }
+    }
+
+    /// Series parameters must pass unchanged through the common request queue.
+    #[test]
+    fn a_series_request_is_queued_as_a_request() {
+        let (handle, rx) = DataHandle::for_tests();
+        assert!(handle.series(series_params(3)).is_ok());
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Request::Series(p) => {
                 assert_eq!(p.key, QueryKey(3));
@@ -723,11 +828,14 @@ mod tests {
     #[test]
     fn a_test_handle_hands_a_catalog_request_to_the_test() {
         let (h, rx) = DataHandle::for_tests();
-        assert!(h.catalog(CatalogParams {
-            key: QueryKey(9),
-            tag: 3,
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            h.catalog(CatalogParams {
+                key: QueryKey(9),
+                tag: 3,
+                as_of: AsOf::Live,
+            })
+            .is_ok()
+        );
         match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
             Request::Catalog(p) => {
                 assert_eq!(p.key, QueryKey(9));
@@ -744,21 +852,37 @@ mod tests {
         let (h, _rx) = DataHandle::for_tests();
         let mut accepted = 0;
         for i in 0..(REQUEST_BOUND as u64 + 5) {
-            if h.query(params(i, "tree")) {
+            if h.query(params(i, "tree")).is_ok() {
                 accepted += 1;
             }
         }
         assert_eq!(accepted, REQUEST_BOUND);
         assert_eq!(h.dropped_requests(), 5);
+        assert_eq!(
+            h.query(params(99, "tree")),
+            Err(Refusal::Busy),
+            "a full queue passes: a later submission can succeed"
+        );
     }
 
     #[test]
     fn a_gone_service_thread_refuses_every_request() {
         let (h, rx) = DataHandle::for_tests();
         drop(rx);
-        assert!(!h.query(params(1, "tree")));
+        assert_eq!(h.query(params(1, "tree")), Err(Refusal::Stopped));
         assert!(!h.cancel(QueryKey(1)));
-        assert_eq!(h.dropped_requests(), 2);
+        assert_eq!(
+            h.dropped_requests(),
+            0,
+            "a stopped service is not a busy one; only Busy counts"
+        );
+    }
+
+    #[test]
+    fn fill_for_tests_makes_the_next_submission_busy() {
+        let (h, _rx) = DataHandle::for_tests();
+        h.fill_for_tests();
+        assert_eq!(h.series(series_params(3)), Err(Refusal::Busy));
     }
 
     #[test]
@@ -803,8 +927,8 @@ mod tests {
             },
             sink,
         );
-        assert!(h.query(params(9, "tree")));
-        assert!(h.query(params(10, "nonesuch")));
+        assert!(h.query(params(9, "tree")).is_ok());
+        assert!(h.query(params(10, "nonesuch")).is_ok());
         let mut got = std::collections::BTreeMap::new();
         while got.len() < 2 {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(60)).unwrap() {
@@ -818,14 +942,15 @@ mod tests {
             "unknown view is an Err outcome"
         );
         h.shutdown();
-        assert!(
-            !h.query(params(11, "tree")),
-            "after shutdown nothing is accepted"
+        assert_eq!(
+            h.query(params(11, "tree")),
+            Err(Refusal::Stopped),
+            "after shutdown nothing is accepted, and nothing will be"
         );
         assert_eq!(
             h.dropped_requests(),
-            1,
-            "the refused post-shutdown request is counted"
+            0,
+            "a refusal after shutdown is not a busy one"
         );
     }
 
@@ -877,22 +1002,28 @@ mod tests {
             },
             sink,
         );
-        assert!(h.document(DocumentParams {
-            key: QueryKey(9),
-            tag: 1,
-            submitted: Instant::now(),
-            dataset: "cvi_params".into(),
-            document_key: vec!["SPX.Z".into()],
-            as_of: AsOf::Live,
-        }));
-        assert!(h.document(DocumentParams {
-            key: QueryKey(10),
-            tag: 1,
-            submitted: Instant::now(),
-            dataset: "nonesuch".into(),
-            document_key: vec!["SPX.Z".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            h.document(DocumentParams {
+                key: QueryKey(9),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "cvi_params".into(),
+                document_key: vec!["SPX.Z".into()],
+                as_of: AsOf::Live,
+            })
+            .is_ok()
+        );
+        assert!(
+            h.document(DocumentParams {
+                key: QueryKey(10),
+                tag: 1,
+                submitted: Instant::now(),
+                dataset: "nonesuch".into(),
+                document_key: vec!["SPX.Z".into()],
+                as_of: AsOf::Live,
+            })
+            .is_ok()
+        );
         let mut got = std::collections::BTreeMap::new();
         while got.len() < 2 {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(60)).unwrap() {
@@ -950,11 +1081,14 @@ mod tests {
             },
             sink,
         );
-        assert!(h.catalog(CatalogParams {
-            key: QueryKey(21),
-            tag: 21,
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            h.catalog(CatalogParams {
+                key: QueryKey(21),
+                tag: 21,
+                as_of: AsOf::Live,
+            })
+            .is_ok()
+        );
         loop {
             match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
                 DataEvent::Catalog(o) => {
@@ -992,11 +1126,19 @@ mod tests {
             },
             sink,
         );
-        assert!(handle.price(crate::pricing::worker::tests::params(2, 9, &["SPX"])));
-        assert!(handle.publish(LocalPublish {
-            dataset: "sheets".into(),
-            rows: sheet_rows("a", &[7]),
-        }));
+        assert!(
+            handle
+                .price(crate::pricing::worker::tests::params(2, 9, &["SPX"]))
+                .is_ok()
+        );
+        assert!(
+            handle
+                .publish(LocalPublish {
+                    dataset: "sheets".into(),
+                    rows: sheet_rows("a", &[7]),
+                })
+                .is_ok()
+        );
         let mut priced = false;
         let mut published = false;
         while !(priced && published) {
@@ -1014,8 +1156,9 @@ mod tests {
             }
         }
         handle.shutdown();
-        assert!(
-            !handle.price(crate::pricing::worker::tests::params(2, 10, &["SPX"])),
+        assert_eq!(
+            handle.price(crate::pricing::worker::tests::params(2, 10, &["SPX"])),
+            Err(Refusal::Stopped),
             "refused after shutdown"
         );
     }
@@ -1068,27 +1211,39 @@ mod tests {
         let (dir, handle, _rx) = local_handle();
         let sheets: Vec<String> = (0..30).map(|i| format!("s{i}")).collect();
         for sheet in &sheets {
-            assert!(handle.publish(LocalPublish {
-                dataset: "sheets".into(),
-                rows: sheet_rows(sheet, &[1, 2]),
-            }));
+            assert!(
+                handle
+                    .publish(LocalPublish {
+                        dataset: "sheets".into(),
+                        rows: sheet_rows(sheet, &[1, 2]),
+                    })
+                    .is_ok()
+            );
         }
-        assert!(handle.forget(crate::service::LocalForget {
-            dataset: "sheets".into(),
-            key: vec!["s0".into()],
-        }));
+        assert!(
+            handle
+                .forget(crate::service::LocalForget {
+                    dataset: "sheets".into(),
+                    key: vec!["s0".into()],
+                })
+                .is_ok()
+        );
         handle.shutdown();
 
         let (handle, rx) = local_handle_at(dir.path());
         for (tag, sheet) in sheets.iter().enumerate() {
-            assert!(handle.document(DocumentParams {
-                key: QueryKey(9),
-                tag: tag as u64,
-                submitted: Instant::now(),
-                dataset: "sheets".into(),
-                document_key: vec![sheet.clone()],
-                as_of: AsOf::Live,
-            }));
+            assert!(
+                handle
+                    .document(DocumentParams {
+                        key: QueryKey(9),
+                        tag: tag as u64,
+                        submitted: Instant::now(),
+                        dataset: "sheets".into(),
+                        document_key: vec![sheet.clone()],
+                        as_of: AsOf::Live,
+                    })
+                    .is_ok()
+            );
             let rows = loop {
                 if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap()
                     && o.tag == tag as u64
@@ -1105,14 +1260,22 @@ mod tests {
     #[test]
     fn a_forget_through_the_handle_deletes_the_document_and_reports_forgotten() {
         let (_dir, handle, rx) = local_handle();
-        assert!(handle.publish(LocalPublish {
-            dataset: "sheets".into(),
-            rows: sheet_rows("a", &[7, 8]),
-        }));
-        assert!(handle.forget(crate::service::LocalForget {
-            dataset: "sheets".into(),
-            key: vec!["a".into()],
-        }));
+        assert!(
+            handle
+                .publish(LocalPublish {
+                    dataset: "sheets".into(),
+                    rows: sheet_rows("a", &[7, 8]),
+                })
+                .is_ok()
+        );
+        assert!(
+            handle
+                .forget(crate::service::LocalForget {
+                    dataset: "sheets".into(),
+                    key: vec!["a".into()],
+                })
+                .is_ok()
+        );
         loop {
             match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 DataEvent::Forgotten { dataset, batch } => {
@@ -1123,14 +1286,18 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(handle.document(DocumentParams {
-            key: QueryKey(4),
-            tag: 1,
-            submitted: Instant::now(),
-            dataset: "sheets".into(),
-            document_key: vec!["a".into()],
-            as_of: AsOf::Live,
-        }));
+        assert!(
+            handle
+                .document(DocumentParams {
+                    key: QueryKey(4),
+                    tag: 1,
+                    submitted: Instant::now(),
+                    dataset: "sheets".into(),
+                    document_key: vec!["a".into()],
+                    as_of: AsOf::Live,
+                })
+                .is_ok()
+        );
         loop {
             if let DataEvent::Query(o) = rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 assert_eq!(o.snapshot.unwrap().rows(), 0, "no document is left");
@@ -1171,7 +1338,10 @@ mod tests {
                 forget.dataset.clone(),
                 geode_core::document::join_key(&forget.key),
             );
-            assert!(handle.forget(forget), "admitted; the service refuses it");
+            assert!(
+                handle.forget(forget).is_ok(),
+                "admitted; the service refuses it"
+            );
             let mut diagnosed = false;
             let mut answered = false;
             while !(diagnosed && answered) {
@@ -1201,10 +1371,14 @@ mod tests {
                 }
             }
         }
-        assert!(handle.publish(LocalPublish {
-            dataset: "sheets".into(),
-            rows: sheet_rows("proof", &[1]),
-        }));
+        assert!(
+            handle
+                .publish(LocalPublish {
+                    dataset: "sheets".into(),
+                    rows: sheet_rows("proof", &[1]),
+                })
+                .is_ok()
+        );
         loop {
             match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
                 DataEvent::Published { dataset, .. } if dataset == "sheets" => break,
@@ -1277,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unopenable_database_is_a_diagnostic_not_a_panic() {
+    fn an_unopenable_database_is_a_diagnostic_and_a_stopped_request_loop() {
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
         let h = DataService::spawn(
@@ -1302,13 +1476,11 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // The thread is gone; the handle says so.
-        for _ in 0..200 {
-            if !h.query(params(1, "tree")) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("requests were still accepted after the service failed to open");
+        // Set before the diagnostic was sent: the next submission already
+        // says the service is gone, with no retry worth making.
+        assert_eq!(h.query(params(1, "tree")), Err(Refusal::Stopped));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&rx);
+        assert_eq!(thread, crate::supervise::REQUEST_LOOP);
+        assert!(reason.contains("failed to open"), "{reason}");
     }
 }

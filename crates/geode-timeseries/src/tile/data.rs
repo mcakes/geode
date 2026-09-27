@@ -132,7 +132,7 @@ impl TimeseriesTile {
                 from,
                 to,
             });
-            if queued {
+            if queued.is_ok() {
                 self.in_flight.insert((source, identity));
             } else {
                 // Nothing is coming, and a chip left `Fetching` for ever
@@ -185,7 +185,7 @@ impl TimeseriesTile {
         };
         let submitted = match params {
             Some(params) => {
-                let queued = self.data.series(params);
+                let queued = self.data.series(params).is_ok();
                 if !queued {
                     self.notice =
                         Some("series request refused: the data service is busy or gone".into());

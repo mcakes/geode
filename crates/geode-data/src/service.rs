@@ -159,6 +159,14 @@ pub enum DataEvent {
         batch: String,
         reason: String,
     },
+    /// A data thread unwound past every containment boundary and has ended.
+    /// Emitted once per thread; nothing restarts it. `thread` is the spawn
+    /// name (`geode-data`, `geode-ingest`, `geode-query-2`, ...), `reason` the
+    /// panic payload, or the open error for a request loop that never started.
+    ThreadStopped {
+        thread: String,
+        reason: String,
+    },
 }
 
 /// Forget one document of a `local = true` dataset: every generation, live
@@ -2869,7 +2877,7 @@ mod tests {
         );
         let mut p = series_params("X");
         p.dataset = "nope".into();
-        assert!(handle.series(p));
+        assert!(handle.series(p).is_ok());
         let o = next_series(&rx);
         assert_eq!((o.key, o.tag), (QueryKey(7), 5));
         assert!(o.result.unwrap_err().contains("unknown dataset 'nope'"));

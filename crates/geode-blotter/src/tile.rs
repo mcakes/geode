@@ -844,7 +844,7 @@ impl BlotterTile {
             as_of,
             max_depth,
         });
-        if !queued {
+        if queued.is_err() {
             self.error = Some((
                 "query refused: the data service is busy or gone".into(),
                 Tone::DangerText,

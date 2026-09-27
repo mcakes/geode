@@ -48,6 +48,9 @@ enum Key {
     Health(String),
     Polled(String),
     Diagnostics,
+    /// `ThreadStopped`, keyed by thread: each thread stops once, and two
+    /// stopping before a drain must both be delivered.
+    Stopped(String),
 }
 
 /// `seq` numbers local-write outcomes (see `Key::Local`); every other
@@ -73,6 +76,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
             result,
         } => Key::Fetched(source.clone(), identity.clone(), result.is_ok()),
         DataEvent::Loading { .. } | DataEvent::LoadEnded => Key::Load,
+        DataEvent::ThreadStopped { thread, .. } => Key::Stopped(thread.clone()),
         DataEvent::Health { source, .. } => Key::Health(source.clone()),
         DataEvent::Polled { source, .. } => Key::Polled(source.clone()),
         DataEvent::Diagnostics(_) => Key::Diagnostics,
@@ -411,5 +415,25 @@ mod tests {
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::Query(o) if o.tag == 4095));
         assert!(matches!(rx.recv().await.unwrap(), DataEvent::LoadEnded));
         assert!(rx.recv().await.is_err());
+    }
+
+    /// Each thread stops once, and two different ones stopping between two
+    /// drains must both reach the status bar.
+    #[gpui::test]
+    async fn two_threads_stopping_between_drains_are_both_delivered() {
+        let (tx, rx) = channel();
+        for thread in ["geode-ingest", "geode-discovery"] {
+            tx.try_send(DataEvent::ThreadStopped {
+                thread: thread.into(),
+                reason: "boom".into(),
+            })
+            .unwrap();
+        }
+        for expected in ["geode-ingest", "geode-discovery"] {
+            assert!(matches!(
+                rx.recv().await.unwrap(),
+                DataEvent::ThreadStopped { thread, .. } if thread == expected
+            ));
+        }
     }
 }

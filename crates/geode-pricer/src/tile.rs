@@ -506,7 +506,7 @@ impl PricerTile {
             }
             // No load answer will arrive. Block saves immediately so the
             // empty fallback cannot overwrite the stored document.
-            Loaded::Refused => {
+            Loaded::Refused(_) => {
                 blocked = Some(blocked_notice(&name, LOAD_REFUSED));
                 (fallback(&name, &record), false)
             }
@@ -1729,7 +1729,7 @@ impl PricerTile {
         let Some(rows) = to_rows(&self.sheet) else {
             return true;
         };
-        if self.shared.store.save(&self.sheet.name, rows) {
+        if self.shared.store.save(&self.sheet.name, rows).is_ok() {
             self.shared.save_queued(&self.sheet.name);
             self.shared
                 .save_origins
@@ -1770,7 +1770,7 @@ impl PricerTile {
                         // delete a sheet in use. `:e` and a restore refuse
                         // a retiring name, so no route reaches this today.
                         self.shared.retiring.borrow_mut().remove(&old);
-                    } else if self.shared.store.forget(&old) {
+                    } else if self.shared.store.forget(&old).is_ok() {
                         // Reserved until the forget is answered.
                         self.forgetting.push(old);
                     } else {
@@ -1831,7 +1831,7 @@ impl PricerTile {
             overrides: self.sheet.overrides().clone(),
             lines,
         });
-        if queued {
+        if queued.is_ok() {
             self.in_flight = flight;
             self.end_refusals();
         } else {
@@ -1991,7 +1991,7 @@ impl PricerTile {
             Loaded::Missing => Ok(None),
             // Never submitted: nothing is coming, so this is the failed
             // load, not a `loading` that never resolves.
-            Loaded::Refused => Err(LOAD_REFUSED.to_string()),
+            Loaded::Refused(_) => Err(LOAD_REFUSED.to_string()),
         };
         self.loaded(answer, cx);
     }
@@ -3057,7 +3057,7 @@ impl PricerTile {
         };
         if let Some(why) = refusal {
             self.footer = Some(format!("sheet '{}' not removed: {why}", pending.sheet).into());
-        } else if self.shared.store.forget(&pending.sheet) {
+        } else if self.shared.store.forget(&pending.sheet).is_ok() {
             // Reserved until the forget is answered.
             self.shared
                 .retiring
@@ -3564,7 +3564,7 @@ pub(crate) mod tests {
         })
         .unwrap();
         let store = MemorySheetStore::default();
-        assert!(store.save("book", to_rows(&s).unwrap()));
+        assert!(store.save("book", to_rows(&s).unwrap()).is_ok());
         let mut t = toml::Table::new();
         t.insert("sheet".into(), "book".into());
         (store, t)
@@ -6795,7 +6795,7 @@ pub(crate) mod tests {
         let (store, record) = seeded(&BOOK);
         let mut broken = store.get("book").unwrap();
         broken.axes.clear();
-        assert!(store.save("book", broken.clone()));
+        assert!(store.save("book", broken.clone()).is_ok());
         let base = store.save_count();
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
         h.visible(&mut vcx, true);
@@ -8135,6 +8135,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         answer_all(&h, &mut vcx, 1.0);
         let base = h.store.save_count();
@@ -8251,6 +8252,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("taken", sheet_rows("taken", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         let _second = second_tile(&h, &mut vcx, TILE + 1);
         let base = h.store.save_count();
@@ -8330,7 +8332,11 @@ pub(crate) mod tests {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         vcx.update(|window, _cx| window.activate_window());
         vcx.run_until_parked();
-        assert!(h.store.save("old", sheet_rows("old", &["NKY Z26 30000 C"])));
+        assert!(
+            h.store
+                .save("old", sheet_rows("old", &["NKY Z26 30000 C"]))
+                .is_ok()
+        );
         let second = second_tile(&h, &mut vcx, TILE + 1);
         (h, vcx, second)
     }
@@ -8439,6 +8445,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("mine", sheet_rows("mine", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         assert_eq!(command_on(&*second, &mut vcx, "e mine"), Ok(()));
         h.command(&mut vcx, "rm old").unwrap();
@@ -8566,6 +8573,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         // Hidden, so the new sheet submits nothing of its own that would
         // retire the old batch's tag by itself.
@@ -8750,6 +8758,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
         assert_eq!(h.command(&mut vcx, "e other"), Ok(()));
@@ -8778,6 +8787,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 6 });
         vcx.update(|_, cx| h.factory.flush_all(cx));
@@ -8854,6 +8864,7 @@ pub(crate) mod tests {
         assert!(
             h.store
                 .save("other", sheet_rows("other", &["NKY Z26 30000 C"]))
+                .is_ok()
         );
         let (second, second_tile) = second_with_entity(&h, &mut vcx, TILE + 1);
         edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });

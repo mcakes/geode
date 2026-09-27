@@ -983,8 +983,8 @@ impl MarketDataTile {
             document_key,
             as_of,
         });
-        self.query_in_flight = queued;
-        if !queued {
+        self.query_in_flight = queued.is_ok();
+        if queued.is_err() {
             self.notice = Some("document request refused: the data service is busy or gone".into());
             // A refused submission has no future delivery. Arrive before clearing
             // acted, which arrival reads; clearing then permits a later frame change to
@@ -1337,7 +1337,7 @@ impl MarketDataTile {
             document: self.spec.document.into(),
             rows: pending.rows,
         });
-        if !queued {
+        if queued.is_err() {
             self.notice = Some("upload refused: the data service is busy or gone".into());
             self.sent = None;
             self.submitted = None;
