@@ -21482,24 +21482,30 @@ run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   '            if false {
                 return self.switch_sheet(name, true, cx);' \
   geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
-# A date cell's field paints unframed. Mutated to the strip's frame, a
-# second rounded border sits inside the cursor's and the padding pushes
-# the day off the cell's right edge.
-run_mutation "mdedit: a date cell's field paints without the strip's frame" \
-  crates/geode-marketdata/src/delegate.rs \
-  '                            self.tile_id,
-                            false,' \
-  '                            self.tile_id,
-                            true,' \
-  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
-
-# ...and with flush segments. Mutated to padded ones, the digits spread
-# apart and the field outgrows the plain date, clipping the year.
+# A date field paints flush segments. Mutated to padded ones, the digits
+# spread apart and the field outgrows the plain date, clipping the year.
 run_mutation "mdedit: a date cell's segments paint flush" \
   crates/geode-marketdata/src/header.rs \
-  '        flush: !framed,' \
+  '        flush: true,' \
   '        flush: false,' \
   geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# A header text editor paints no frame of its own. Mutated to the
+# input's appearance, a bordered, rounded control appears inside the
+# attribute's box and grows it to the input's height.
+run_mutation "mdedit: a header text editor paints no frame of its own" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(true).px_0().py_0().h_auto())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
+
+# ...and takes its line's height, not the control's. Mutated to keep the
+# input's own height and padding, the box grows while editing.
+run_mutation "mdedit: a header text editor takes its line's height" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(false).px_0())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
 
 # ---- Market-data line numbers (2026-09-26): `[ui] line_numbers` ----
 
