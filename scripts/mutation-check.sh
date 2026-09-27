@@ -13990,6 +13990,32 @@ run_mutation "mdkeys: ^ is the panel's first-column key, matching the blotter" \
   geode-marketdata \
   caret_and_dollar_resolve_to_the_column_extremes
 
+# The visual block repeats the motions, `^` included: while a selection is
+# live, `^` extends it to the first column. Mutated back to `0`, `^` in
+# visual mode matches nothing.
+run_mutation "mdkeys: ^ is the first-column key in visual mode too" \
+  crates/geode-marketdata/src/content.rs \
+  'context = "marketdata && mode == visual"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"^" = "marketdata::first_col"' \
+  'context = "marketdata && mode == visual"
+[bindings.keys]
+"j" = "marketdata::down"
+"k" = "marketdata::up"
+"h" = "marketdata::left"
+"l" = "marketdata::right"
+"g g" = "marketdata::top"
+"shift+g" = "marketdata::bottom"
+"0" = "marketdata::first_col"' \
+  geode-marketdata \
+  caret_and_dollar_resolve_to_the_column_extremes
+
 # ---- Dirty cells readable on every theme (user report 2026-09-14) -------
 #
 # The state lives in the fill; the text is the theme's own foreground.

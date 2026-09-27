@@ -289,15 +289,19 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 struct Editing {
     state: EditorState,
     target: EditTarget,
-    /// Set only on a text cell editor opened over a live selection.
+    /// Set only on a text editor opened on a number cursor cell over a
+    /// live selection.
     bulk: Option<Bulk>,
 }
 
-/// A text cell editor opened over a live selection. While its text is
+/// A text editor opened on a number cursor cell over a live selection
+/// (any other cursor cell commits absolutely). While its text is
 /// untouched, arrows step every selected number in the draft at once,
 /// so the grid shows the steps as they are made; closing the editor any
-/// way but a commit puts `before` back, so a trader who escapes never
-/// leaves half a block stepped.
+/// way but a commit puts `before` back (while the steps are still the
+/// draft's last change and the painted base has not moved; see
+/// `undo_steps`), so a trader who escapes never leaves half a block
+/// stepped.
 struct Bulk {
     /// The draft when `i` opened the editor.
     before: Draft,

@@ -211,9 +211,9 @@ underlying clears the selection, because the next document's terms can carry
 the same labels and a selection must never carry over to another document. A
 click on a header attribute leaves the grid and clears it without a notice.
 
-The selection is tinted with the theme's selection color under each cell's
-own edited, sent, or deleted fill, and the cursor keeps its border inside the
-tint. A row selection tints its labels and every column. The footer shows the
+The selection tint, the theme's selection color, overlays each cell's own
+edited, sent, or deleted fill (it never replaces it) and sits under the text;
+the cursor keeps its border inside the tint. A row selection tints its labels and every column. The footer shows the
 extent alone (`2 rows × 3 cols`), with no totals: a vol or forward ladder does
 not add up.
 
@@ -224,12 +224,15 @@ In visual mode the verbs are single keys; the doubled normal-mode forms
   header line (the row-axis name where labels are shown, then every column)
   and each row as `y y` would; a block copies its own columns' header and
   cells, with no label.
-- `d` deletes every row of a row selection as one draft change and ends the
-  selection. Over a block it refuses with `d deletes rows — use V` and keeps
+- `d` deletes every row of a row selection and ends the selection. When
+  every selected row is already deleted it refuses and keeps the selection.
+  Over a block it refuses with `d deletes rows — use V` and keeps
   the selection, rather than deleting whole rows the block only partly covers.
 - `:bump <delta>` with no axis moves every selected number by `delta` and
   keeps the selection; `:bump <delta> row|col` keeps its cursor-relative
-  meaning and ignores the selection. It notices `bumped N cells`.
+  meaning and ignores the selection. It notices `bumped N cells`. Like a live
+  step it is all-or-nothing: a fractional delta over a block that includes an
+  integer column writes nothing.
 - `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
   that cell refuses (a deleted row, a document with nothing to edit); it does
   not look for another member.
@@ -260,8 +263,7 @@ current value by one unit of its column's displayed places, or by 1 on an
 integer column, and is never rounded to the painted grid: snapping would
 silently rewrite each cell's unpainted decimals. Empty, deleted, and
 non-number cells are skipped and counted. Each press is all-or-nothing: if
-any cell refuses (a fractional step on an integer column, an overflow),
-nothing is written. A step refuses while the draft is Behind or its upload
+any cell refuses (an overflow), nothing is written. A step refuses while the draft is Behind or its upload
 echo differs, as every edit does.
 
 - `enter` on the untouched text keeps the steps and the selection.
@@ -276,11 +278,13 @@ echo differs, as every edit does.
   as it is.
 - Typing makes the edit absolute. The typed value replaces the steps; a cell
   that refuses it returns to its pre-`i` value rather than keeping a
-  half-step. From then on the arrows nudge the editor's text alone.
+  half-step. The exception is a painted document that moved while the editor
+  was open: then the steps stay, the typed value is written over them, and
+  the notice reads `set N cells; steps kept: the document moved`. From then on the arrows nudge the editor's text alone.
 
 **Mouse.** A shift+click makes a block from the cursor as it was before the
 press to the clicked cell, or a row selection when it lands on a row label
-(on a panel with hidden labels, the line-number gutter). A drag selects
+or the line-number gutter. A drag selects
 continuously from the cell it started on; where the press landed decides the
 kind, and a drag that did not start on a cell, label, or gutter selects
 nothing. With a selection live, shift+click extends it. A plain click anywhere

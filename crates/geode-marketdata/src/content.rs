@@ -588,27 +588,30 @@ mod tests {
     }
 
     /// Column-extreme punctuation matches as bare characters even when numeric
-    /// counts are enabled on the context.
+    /// counts are enabled on the context, in normal mode and while a
+    /// selection is live (the visual block repeats the motions).
     #[test]
     fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc(CVI.kind, DEFAULT_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry());
         assert!(diags.is_empty(), "{diags:?}");
-        let stack = [
-            KeyContext::new("workspace"),
-            KeyContext::new("tile"),
-            KeyContext::new("marketdata")
-                .pair("mode", "normal")
-                .counts(),
-        ];
-        for (spec, expected) in [
-            ("^", "marketdata::first_col"),
-            ("$", "marketdata::last_col"),
-        ] {
-            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
-            match Matcher::default().press(&keymap, keystroke, &stack) {
-                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
-                other => panic!("{spec}: expected a match, got {other:?}"),
+        for mode in ["normal", "visual"] {
+            let stack = [
+                KeyContext::new("workspace"),
+                KeyContext::new("tile"),
+                KeyContext::new("marketdata").pair("mode", mode).counts(),
+            ];
+            for (spec, expected) in [
+                ("^", "marketdata::first_col"),
+                ("$", "marketdata::last_col"),
+            ] {
+                let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+                match Matcher::default().press(&keymap, keystroke, &stack) {
+                    MatchResult::Matched { action, .. } => {
+                        assert_eq!(action.0, expected, "{mode}: {spec}")
+                    }
+                    other => panic!("{mode}: {spec}: expected a match, got {other:?}"),
+                }
             }
         }
     }

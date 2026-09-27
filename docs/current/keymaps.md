@@ -103,7 +103,9 @@ market-data panel's `key_context` push `mode == visual` while a grid selection
 is live (the same flag `mode == normal` above tests for its absence) and, only
 then, a second `select == rows` or `select == block` pair naming the
 selection's kind — `blotter && select == rows` reaches only while a `V` row
-selection is live, never a `v` block one.
+selection is live, never a `v` block one. The market-data panel pushes its
+`select` pair whenever a selection is live, including while an editor or the
+action menu is open over it.
 
 The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
 An open editor, picker, choice field, or upload confirmation is `insert` even
