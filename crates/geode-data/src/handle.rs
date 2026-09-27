@@ -8,16 +8,17 @@
 //! Shutdown and final-handle drop join the service and can block; run those off
 //! the UI thread. See `docs/current/request-delivery.md`.
 
-use crate::egress::UploadParams;
+use crate::egress::{UploadOutcome, UploadParams};
 use crate::service::{
     DataEvent, DataService, DataServiceConfig, EventSink, FetchParams, LocalForget, QueryParams,
 };
 use crate::supervise::REQUEST_LOOP;
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::pricing::{LocalPublish, PriceParams};
+use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
-    CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey, QueryOutcome,
+    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
+    QueryOutcome,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::view::ViewSpec;
@@ -25,6 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 /// Maximum waiting requests on the service channel. This bound includes
 /// queries, cancellation, and other ordinary requests; it does not bound work
@@ -363,6 +365,12 @@ impl DataService {
     /// Requests admitted before that failure have no individual outcomes. Failure
     /// to spawn the thread itself panics at the expect below.
     pub fn spawn(config: DataServiceConfig, sink: EventSink) -> DataHandle {
+        Self::spawn_with_probe(config, sink, no_probe)
+    }
+
+    /// [`DataService::spawn`] with a probe `serve` calls at each
+    /// [`ServePoint`]; production passes [`no_probe`].
+    fn spawn_with_probe(config: DataServiceConfig, sink: EventSink, probe: Probe) -> DataHandle {
         let (tx, rx) = sync_channel(REQUEST_BOUND);
         let pending_views = PendingViews::default();
         let service_views = Arc::clone(&pending_views);
@@ -371,7 +379,7 @@ impl DataService {
         let loop_sink = Arc::clone(&sink);
         let thread =
             crate::supervise::spawn_supervised(REQUEST_LOOP.to_string(), sink, move || {
-                serve(config, loop_sink, rx, service_views, loop_stopped)
+                serve(config, loop_sink, rx, service_views, loop_stopped, probe)
             })
             .expect("spawning the data service thread");
         DataHandle {
@@ -386,12 +394,290 @@ impl DataService {
     }
 }
 
+/// Where `serve` calls its probe. Production passes [`no_probe`]; a test
+/// passes one that panics at a chosen point, for the arms and steps that no
+/// production input can panic.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum ServePoint<'a> {
+    /// Inside the view-replacement boundary, before the replacement runs.
+    Views,
+    /// Inside a request's boundary, before its arm runs.
+    Arm(&'a Request),
+    /// Outside every boundary, just after a request is received.
+    Loop(&'a Request),
+}
+
+type Probe = fn(ServePoint<'_>);
+
+fn no_probe(_: ServePoint<'_>) {}
+
+fn error_diagnostic(message: String) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: None,
+    }
+}
+
+/// Declares the request loop stopped when it is dropped by an unwind.
+/// Declared after the service in `serve`, so it drops first: the flag is set
+/// before the dying loop joins its workers, which can take as long as the
+/// slowest running job, and a submission in that window is refused
+/// `Stopped` rather than admitted to a queue nothing will read.
+struct StoppedOnUnwind(Arc<AtomicBool>);
+
+impl Drop for StoppedOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// Who a request's answer goes to, taken before its arm runs, so a panicking
+/// arm is still answered exactly once through the door that answers its
+/// success. A tile never waits on a request the loop swallowed.
+enum PanicAnswer {
+    Query {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+    },
+    Distinct {
+        key: QueryKey,
+        tag: u64,
+        column: String,
+    },
+    Series {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+    },
+    Catalog {
+        key: QueryKey,
+        tag: u64,
+    },
+    Price {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+        lines: Vec<(u64, u64)>,
+    },
+    Upload {
+        key: QueryKey,
+        tag: u64,
+        target: String,
+    },
+    Fetch {
+        source: String,
+        identity: String,
+    },
+    Publish {
+        dataset: String,
+        batch: String,
+    },
+    Forget {
+        dataset: String,
+        batch: String,
+    },
+    /// Identities, cancel and view replacement have no answer path.
+    Unanswered,
+}
+
+impl PanicAnswer {
+    /// The request's kind, for the message, and its answer.
+    fn of(req: &Request) -> (&'static str, PanicAnswer) {
+        match req {
+            Request::Query(p) => (
+                "query",
+                PanicAnswer::Query {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                },
+            ),
+            Request::Document(p) => (
+                "document",
+                PanicAnswer::Query {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                },
+            ),
+            Request::Distinct(p) => (
+                "distinct",
+                PanicAnswer::Distinct {
+                    key: p.key,
+                    tag: p.tag,
+                    column: p.column.clone(),
+                },
+            ),
+            Request::Series(p) => (
+                "series",
+                PanicAnswer::Series {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                },
+            ),
+            Request::Catalog(p) => (
+                "catalog",
+                PanicAnswer::Catalog {
+                    key: p.key,
+                    tag: p.tag,
+                },
+            ),
+            Request::Price(p) => (
+                "price",
+                PanicAnswer::Price {
+                    key: p.key,
+                    tag: p.tag,
+                    submitted: p.submitted,
+                    lines: p.lines.iter().map(|l| (l.id, l.revision)).collect(),
+                },
+            ),
+            Request::Upload(p) => (
+                "upload",
+                PanicAnswer::Upload {
+                    key: p.key,
+                    tag: p.tag,
+                    target: p.target.clone(),
+                },
+            ),
+            Request::Fetch(p) => (
+                "fetch",
+                PanicAnswer::Fetch {
+                    source: p.source.clone(),
+                    identity: p.identity.clone(),
+                },
+            ),
+            Request::Publish(p) => (
+                "publish",
+                PanicAnswer::Publish {
+                    dataset: p.dataset.clone(),
+                    batch: geode_core::document::join_key(&p.rows.key),
+                },
+            ),
+            Request::Forget(f) => (
+                "forget",
+                PanicAnswer::Forget {
+                    dataset: f.dataset.clone(),
+                    batch: geode_core::document::join_key(&f.key),
+                },
+            ),
+            Request::Identities { .. } => ("identities", PanicAnswer::Unanswered),
+            Request::Cancel { .. } => ("cancel", PanicAnswer::Unanswered),
+            Request::ReplaceViews => ("view replacement", PanicAnswer::Unanswered),
+            Request::Shutdown => ("shutdown", PanicAnswer::Unanswered),
+        }
+    }
+
+    fn answer(self, service: &DataService, sink: &EventSink, reason: String) {
+        match self {
+            PanicAnswer::Query {
+                key,
+                tag,
+                submitted,
+            } => {
+                let _ = sink(DataEvent::Query(QueryOutcome {
+                    key,
+                    tag,
+                    snapshot: Err(reason),
+                    submitted,
+                }));
+            }
+            PanicAnswer::Distinct { key, tag, column } => {
+                let _ = sink(DataEvent::Distinct(DistinctOutcome {
+                    key,
+                    tag,
+                    column,
+                    values: Err(reason),
+                }));
+            }
+            PanicAnswer::Series {
+                key,
+                tag,
+                submitted,
+            } => {
+                let _ = sink(DataEvent::Series(SeriesOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    result: Err(reason),
+                }));
+            }
+            PanicAnswer::Catalog { key, tag } => {
+                let _ = sink(DataEvent::Catalog(CatalogOutcome {
+                    key,
+                    tag,
+                    snapshot: Err(reason),
+                }));
+            }
+            PanicAnswer::Price {
+                key,
+                tag,
+                submitted,
+                lines,
+            } => {
+                let results = lines
+                    .into_iter()
+                    .map(|(id, revision)| (id, revision, Err(reason.clone())))
+                    .collect();
+                let _ = sink(DataEvent::Price(PriceOutcome {
+                    key,
+                    tag,
+                    submitted,
+                    results,
+                }));
+            }
+            PanicAnswer::Upload { key, tag, target } => {
+                let _ = sink(DataEvent::Upload(UploadOutcome {
+                    key,
+                    tag,
+                    target,
+                    result: Err(reason),
+                }));
+            }
+            PanicAnswer::Fetch { source, identity } => {
+                service.fail_fetch(&source, &identity, reason)
+            }
+            PanicAnswer::Publish { dataset, batch } => {
+                let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(format!(
+                    "local publish of {dataset}/{batch} failed: {reason}"
+                ))]));
+                let _ = sink(DataEvent::LocalPublishFailed {
+                    dataset,
+                    batch,
+                    reason,
+                });
+            }
+            PanicAnswer::Forget { dataset, batch } => {
+                let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(format!(
+                    "forgetting {dataset}/{batch} failed: {reason}"
+                ))]));
+                let _ = sink(DataEvent::ForgetFailed {
+                    dataset,
+                    batch,
+                    reason,
+                });
+            }
+            PanicAnswer::Unanswered => {
+                let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(reason)]));
+            }
+        }
+    }
+}
+
 fn serve(
     config: DataServiceConfig,
     sink: EventSink,
     rx: Receiver<Request>,
     pending_views: PendingViews,
     stopped: Arc<AtomicBool>,
+    probe: Probe,
 ) {
     let mut service = match DataService::open(config, Arc::clone(&sink)) {
         Ok(s) => s,
@@ -401,13 +687,9 @@ fn serve(
             // unwound, so the status bar says so.
             stopped.store(true, Ordering::Release);
             let reason = format!("data service failed to open: {e}");
-            let _ = sink(DataEvent::Diagnostics(vec![Diagnostic {
-                severity: Severity::Error,
-                layer: None,
-                file: None,
-                message: reason.clone(),
-                path: None,
-            }]));
+            let _ = sink(DataEvent::Diagnostics(vec![error_diagnostic(
+                reason.clone(),
+            )]));
             let _ = sink(DataEvent::ThreadStopped {
                 thread: REQUEST_LOOP.to_string(),
                 reason,
@@ -416,10 +698,12 @@ fn serve(
         }
     };
     if !service.diagnostics().is_empty() {
-        sink(DataEvent::Diagnostics(service.diagnostics().to_vec()));
+        let _ = sink(DataEvent::Diagnostics(service.diagnostics().to_vec()));
     }
 
+    let _declare = StoppedOnUnwind(Arc::clone(&stopped));
     while let Ok(req) = rx.recv() {
+        probe(ServePoint::Loop(&req));
         // Check before every request: a full request queue is already a wakeup.
         // The latest configuration therefore cannot be lost behind a burst.
         let replacement = pending_views
@@ -427,77 +711,116 @@ fn serve(
             .unwrap_or_else(|e| e.into_inner())
             .take();
         if let Some(ViewReplacement { views, dimensions }) = replacement {
-            let diags = service.replace_views(views, dimensions);
+            // Contained like a request: a panic keeps the previous views (the
+            // replacement validates before it assigns) and the loop serves on.
+            let replaced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                geode_core::panic::contained(|| {
+                    probe(ServePoint::Views);
+                    service.replace_views(views, dimensions)
+                })
+            }));
+            let diags = replaced.unwrap_or_else(|payload| {
+                vec![error_diagnostic(format!(
+                    "view replacement panicked: {}; the previous views stay in force",
+                    crate::ingest::runner::panic_payload_message(payload.as_ref())
+                ))]
+            });
             if !diags.is_empty() {
-                sink(DataEvent::Diagnostics(diags));
+                let _ = sink(DataEvent::Diagnostics(diags));
             }
         }
-        match req {
-            Request::Query(params) => {
-                if let Err(e) = service.query(&params) {
-                    // Return compile/validation failure with the original request key and tag.
-                    sink(DataEvent::Query(QueryOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        snapshot: Err(e.to_string()),
-                        submitted: params.submitted,
-                    }));
-                }
-            }
-            Request::Distinct(params) => {
-                if let Err(e) = service.distinct(&params) {
-                    // Return distinct-query compilation failure to the original requester.
-                    sink(DataEvent::Distinct(DistinctOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        column: params.column,
-                        values: Err(e.to_string()),
-                    }));
-                }
-            }
-            Request::Document(params) => {
-                if let Err(e) = service.document(&params) {
-                    // Document failures use DataEvent::Query, just like successful document
-                    // results, with the original request key/tag.
-                    sink(DataEvent::Query(QueryOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        snapshot: Err(e.to_string()),
-                        submitted: params.submitted,
-                    }));
-                }
-            }
-            Request::Series(params) => {
-                if let Err(e) = service.series(&params) {
-                    // Same rule as `Query`: a cap or compile failure is
-                    // this key's outcome, not a lost request.
-                    sink(DataEvent::Series(SeriesOutcome {
-                        key: params.key,
-                        tag: params.tag,
-                        submitted: params.submitted,
-                        result: Err(e.to_string()),
-                    }));
-                }
-            }
-            Request::Catalog(params) => {
-                sink(DataEvent::Catalog(service.catalog(&params)));
-            }
-            Request::Price(params) => service.price(params),
-            Request::Publish(publish) => service.publish(publish),
-            Request::Forget(forget) => service.forget(forget),
-            Request::Upload(params) => service.upload(params),
-            Request::Fetch(params) => service.fetch(&params),
-            Request::Identities { source } => {
-                if !service.identities(&source) {
-                    tracing::warn!(target: "geode::ingest", "identities request for '{source}' refused");
-                }
-            }
-            Request::Cancel { key } => service.cancel(key),
-            Request::ReplaceViews => {}
-            Request::Shutdown => break,
+        if matches!(req, Request::Shutdown) {
+            break;
+        }
+        // One request's panic is that request's error, answered once through
+        // its own door; the next request is still served.
+        let (kind, answer) = PanicAnswer::of(&req);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| {
+                probe(ServePoint::Arm(&req));
+                dispatch(&service, &sink, req);
+            })
+        }));
+        if let Err(payload) = outcome {
+            let payload = crate::ingest::runner::panic_payload_message(payload.as_ref());
+            tracing::error!(target: "geode::ingest", "a {kind} request panicked on the request loop: {payload}");
+            answer.answer(
+                &service,
+                &sink,
+                format!("{kind} request panicked: {payload}"),
+            );
         }
     }
     service.shutdown();
+}
+
+/// Run one request's arm. Every failure an arm returns is answered here on
+/// the request's own key; a panic is answered by `serve`.
+fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
+    match req {
+        Request::Query(params) => {
+            if let Err(e) = service.query(&params) {
+                // Return compile/validation failure with the original request key and tag.
+                let _ = sink(DataEvent::Query(QueryOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    snapshot: Err(e.to_string()),
+                    submitted: params.submitted,
+                }));
+            }
+        }
+        Request::Distinct(params) => {
+            if let Err(e) = service.distinct(&params) {
+                // Return distinct-query compilation failure to the original requester.
+                let _ = sink(DataEvent::Distinct(DistinctOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    column: params.column,
+                    values: Err(e.to_string()),
+                }));
+            }
+        }
+        Request::Document(params) => {
+            if let Err(e) = service.document(&params) {
+                // Document failures use DataEvent::Query, just like successful document
+                // results, with the original request key/tag.
+                let _ = sink(DataEvent::Query(QueryOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    snapshot: Err(e.to_string()),
+                    submitted: params.submitted,
+                }));
+            }
+        }
+        Request::Series(params) => {
+            if let Err(e) = service.series(&params) {
+                // Same rule as `Query`: a cap or compile failure is
+                // this key's outcome, not a lost request.
+                let _ = sink(DataEvent::Series(SeriesOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    submitted: params.submitted,
+                    result: Err(e.to_string()),
+                }));
+            }
+        }
+        Request::Catalog(params) => {
+            let _ = sink(DataEvent::Catalog(service.catalog(&params)));
+        }
+        Request::Price(params) => service.price(params),
+        Request::Publish(publish) => service.publish(publish),
+        Request::Forget(forget) => service.forget(forget),
+        Request::Upload(params) => service.upload(params),
+        Request::Fetch(params) => service.fetch(&params),
+        Request::Identities { source } => {
+            if !service.identities(&source) {
+                tracing::warn!(target: "geode::ingest", "identities request for '{source}' refused");
+            }
+        }
+        Request::Cancel { key } => service.cancel(key),
+        // Both are handled in `serve` before dispatch.
+        Request::ReplaceViews | Request::Shutdown => {}
+    }
 }
 
 #[cfg(test)]
@@ -551,8 +874,9 @@ mod tests {
         let sink: EventSink = Arc::new(move |event| tx.send(event).is_ok());
         let pending = Arc::clone(&handle.inner.pending_views);
         // The service starts only after the queue filled and both reloads arrived.
-        let service =
-            std::thread::spawn(move || serve(config, sink, requests, pending, Arc::default()));
+        let service = std::thread::spawn(move || {
+            serve(config, sink, requests, pending, Arc::default(), no_probe)
+        });
         loop {
             if let DataEvent::Query(outcome) =
                 outcomes.recv_timeout(Duration::from_secs(60)).unwrap()
@@ -1482,5 +1806,423 @@ mod tests {
         let (thread, reason) = crate::supervise::tests_support::next_stop(&rx);
         assert_eq!(thread, crate::supervise::REQUEST_LOOP);
         assert!(reason.contains("failed to open"), "{reason}");
+    }
+
+    const ARM_PANIC: &str = "injected arm panic";
+    const MARKED: QueryKey = QueryKey(666);
+
+    fn is_marked(req: &Request) -> bool {
+        match req {
+            Request::Query(p) => p.key == MARKED,
+            Request::Distinct(p) => p.key == MARKED,
+            Request::Document(p) => p.key == MARKED,
+            Request::Series(p) => p.key == MARKED,
+            Request::Catalog(p) => p.key == MARKED,
+            Request::Price(p) => p.key == MARKED,
+            Request::Upload(p) => p.key == MARKED,
+            Request::Fetch(p) => p.key == MARKED,
+            Request::Publish(p) => p.dataset == "marked",
+            Request::Forget(f) => f.dataset == "marked",
+            Request::Identities { source } => source == "marked",
+            Request::Cancel { key } => *key == MARKED,
+            Request::ReplaceViews | Request::Shutdown => false,
+        }
+    }
+
+    /// Panics inside a marked request's boundary: the arms no production
+    /// input can panic.
+    fn panic_marked_arms(point: ServePoint<'_>) {
+        if let ServePoint::Arm(req) = point
+            && is_marked(req)
+        {
+            panic!("{ARM_PANIC}");
+        }
+    }
+
+    /// Panics outside every boundary on a marked cancel: loop death.
+    fn panic_marked_cancel_outside(point: ServePoint<'_>) {
+        if let ServePoint::Loop(Request::Cancel { key }) = point
+            && *key == MARKED
+        {
+            panic!("injected loop panic");
+        }
+    }
+
+    fn empty_config(dir: &std::path::Path) -> DataServiceConfig {
+        DataServiceConfig {
+            db_path: dir.join("geode.duckdb"),
+            schema: geode_core::schema::SchemaSpec::default(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        }
+    }
+
+    fn probed(probe: Probe) -> (tempfile::TempDir, DataHandle, Receiver<DataEvent>) {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn_with_probe(empty_config(dir.path()), sink, probe);
+        (dir, handle, rx)
+    }
+
+    /// Everything the service emits before it answers a fresh catalog
+    /// request: proof the loop still serves. A `ThreadStopped` fails.
+    fn serves_on(handle: &DataHandle, rx: &Receiver<DataEvent>) -> Vec<DataEvent> {
+        handle
+            .catalog(CatalogParams {
+                key: QueryKey(1),
+                tag: 4242,
+                as_of: AsOf::Live,
+            })
+            .unwrap();
+        let mut seen = Vec::new();
+        loop {
+            match rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the loop still answers")
+            {
+                DataEvent::Catalog(o) if o.tag == 4242 => {
+                    assert!(o.snapshot.is_ok(), "{:?}", o.snapshot);
+                    return seen;
+                }
+                DataEvent::ThreadStopped { thread, reason } => {
+                    panic!("{thread} stopped: {reason}")
+                }
+                e => seen.push(e),
+            }
+        }
+    }
+
+    fn panicked(reason: &str, kind: &str) -> bool {
+        reason.contains(&format!("{kind} request panicked")) && reason.contains(ARM_PANIC)
+    }
+
+    fn error_names(events: &[DataEvent], kind: &str) -> bool {
+        events.iter().any(|e| {
+            matches!(e, DataEvent::Diagnostics(d)
+                if d.iter().any(|d| d.severity == Severity::Error && panicked(&d.message, kind)))
+        })
+    }
+
+    #[test]
+    fn a_panicking_query_is_answered_on_its_key_and_the_loop_serves_on() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.query(params(MARKED.0, "tree")).unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Query(o)
+            if o.key == MARKED && o.snapshot.as_ref().is_err_and(|r| panicked(r, "query")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_document_request_is_answered_on_its_key() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.document(DocumentParams {
+            key: MARKED,
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Query(o)
+            if o.key == MARKED && o.snapshot.as_ref().is_err_and(|r| panicked(r, "document")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_distinct_request_is_answered_on_its_key_and_column() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.distinct(distinct_params(MARKED.0, "book")).unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Distinct(o)
+            if o.key == MARKED && o.column == "book"
+                && o.values.as_ref().is_err_and(|r| panicked(r, "distinct")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_series_request_is_answered_on_its_key() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.series(series_params(MARKED.0)).unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Series(o)
+            if o.key == MARKED && o.result.as_ref().is_err_and(|r| panicked(r, "series")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_catalog_request_is_answered_on_its_key() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.catalog(CatalogParams {
+            key: MARKED,
+            tag: 7,
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Catalog(o)
+            if o.key == MARKED && o.tag == 7
+                && o.snapshot.as_ref().is_err_and(|r| panicked(r, "catalog")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_price_request_answers_every_line() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.price(crate::pricing::worker::tests::params(
+            MARKED.0,
+            3,
+            &["SPX", "NDX"],
+        ))
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Price(o)
+            if o.key == MARKED && o.tag == 3 && o.results.len() == 2
+                && o.results.iter().all(|(_, _, r)| r.as_ref().is_err_and(|r| panicked(r, "price"))))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_upload_is_answered_on_its_key_and_target() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        let mut upload = upload_params(5);
+        upload.key = MARKED;
+        h.upload(upload).unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Upload(o)
+            if o.key == MARKED && o.tag == 5 && o.target == "sophis"
+                && o.result.as_ref().is_err_and(|r| panicked(r, "upload")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_publish_is_a_diagnostic_and_its_writers_failure() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.publish(LocalPublish {
+            dataset: "marked".into(),
+            rows: sheet_rows("s", &[1]),
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(error_names(&seen, "publish"), "{seen:?}");
+        assert!(
+            seen.iter().any(
+                |e| matches!(e, DataEvent::LocalPublishFailed { dataset, batch, reason }
+            if dataset == "marked" && batch == "s" && panicked(reason, "publish"))
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_forget_is_a_diagnostic_and_its_askers_failure() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.forget(crate::service::LocalForget {
+            dataset: "marked".into(),
+            key: vec!["s".into()],
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(error_names(&seen, "forget"), "{seen:?}");
+        assert!(
+            seen.iter().any(
+                |e| matches!(e, DataEvent::ForgetFailed { dataset, batch, reason }
+            if dataset == "marked" && batch == "s" && panicked(reason, "forget"))
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_identities_request_is_one_error_diagnostic() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.identities("marked").unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(error_names(&seen, "identities"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_panicking_cancel_is_one_error_diagnostic() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        assert!(h.cancel(MARKED));
+        let seen = serves_on(&h, &rx);
+        assert!(error_names(&seen, "cancel"), "{seen:?}");
+    }
+
+    #[test]
+    fn a_panicking_view_replacement_keeps_the_previous_views_and_serves_on() {
+        fn panic_views(point: ServePoint<'_>) {
+            if let ServePoint::Views = point {
+                panic!("injected view panic");
+            }
+        }
+        let (_d, h, rx) = probed(panic_views);
+        h.replace_views(Vec::new(), DerivedDimensions::default())
+            .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(
+                |e| matches!(e, DataEvent::Diagnostics(d) if d.iter().any(|d|
+            d.severity == Severity::Error
+                && d.message.contains("view replacement panicked")
+                && d.message.contains("injected view panic")
+                && d.message.contains("previous views stay in force")))
+            ),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panic_outside_every_arm_declares_the_request_loop_stopped() {
+        let (_d, h, rx) = probed(panic_marked_cancel_outside);
+        assert!(h.cancel(MARKED));
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&rx);
+        assert_eq!(thread, crate::supervise::REQUEST_LOOP);
+        assert!(reason.contains("injected loop panic"), "{reason}");
+        assert_eq!(h.query(params(1, "tree")), Err(Refusal::Stopped));
+        assert_eq!(h.dropped_requests(), 0, "a stopped loop is not a busy one");
+    }
+
+    #[test]
+    fn a_clean_shutdown_declares_nothing() {
+        let (_d, h, rx) = probed(no_probe);
+        let _ = serves_on(&h, &rx);
+        h.shutdown();
+        assert!(
+            rx.try_iter()
+                .all(|e| !matches!(e, DataEvent::ThreadStopped { .. })),
+            "a quit is not a failure"
+        );
+        assert!(!h.inner.stopped.load(Ordering::Acquire));
+    }
+
+    /// A pricer whose `price` announces it has started, then blocks until
+    /// the test releases it: it holds a dying loop in its worker join for
+    /// exactly as long as the test wants, with no clock involved.
+    struct HeldPricer {
+        started: Mutex<std::sync::mpsc::Sender<()>>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl geode_core::pricing::Pricer for HeldPricer {
+        fn name(&self) -> &str {
+            "held"
+        }
+        fn set_overrides(
+            &self,
+            _: &geode_core::pricing::MarketOverrides,
+        ) -> Result<(), geode_core::pricing::PricingError> {
+            Ok(())
+        }
+        fn price(
+            &self,
+            _: &geode_core::pricing::PriceRequest,
+        ) -> Result<geode_core::pricing::PriceResult, geode_core::pricing::PricingError> {
+            let _ = self.started.lock().unwrap().send(());
+            let _ = self.release.lock().unwrap().recv();
+            Err(geode_core::pricing::PricingError("released".into()))
+        }
+    }
+
+    /// The dying loop joins its workers before its receiver drops; a
+    /// submission in that window must be refused `Stopped`, not admitted to
+    /// a queue nothing will read. A pricer line the test holds keeps the
+    /// window open until the test releases it.
+    #[test]
+    fn a_submission_while_the_dying_loop_joins_its_workers_is_refused_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (started_tx, started) = channel();
+        let (release, release_rx) = channel();
+        let mut config = empty_config(dir.path());
+        config.pricer = PricerConfig::with(Arc::new(HeldPricer {
+            started: Mutex::new(started_tx),
+            release: Mutex::new(release_rx),
+        }));
+        let (tx, rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let h = DataService::spawn_with_probe(config, sink, panic_marked_cancel_outside);
+        h.price(crate::pricing::worker::tests::params(5, 1, &["SPX"]))
+            .unwrap();
+        started
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the pricer started its line");
+        assert!(h.cancel(MARKED));
+        // The loop is now unwinding and blocked joining the held pricer.
+        // The deadline only guards against a hang; it is not the contract.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while h.query(params(1, "tree")) != Err(Refusal::Stopped) {
+            assert!(
+                Instant::now() < deadline,
+                "the dying loop admitted submissions while it joined its workers"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            rx.try_iter()
+                .all(|e| !matches!(e, DataEvent::ThreadStopped { .. })),
+            "the loop cannot be declared while it still joins the held pricer"
+        );
+        release.send(()).unwrap();
+        h.shutdown();
+        let stops: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                DataEvent::ThreadStopped { thread, reason } => {
+                    assert!(reason.contains("injected loop panic"), "{reason}");
+                    Some(thread)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(stops, vec![crate::supervise::REQUEST_LOOP.to_string()]);
+    }
+
+    /// `DataService::open` must hand the production sink to each supervised
+    /// worker as its stop sink, or a worker's death is announced to no one.
+    /// A sink that panics delivering the marked price outcome kills the
+    /// pricing worker outside its per-line boundaries.
+    #[test]
+    fn a_supervised_worker_death_reaches_the_services_own_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = channel();
+        let tx = Mutex::new(tx);
+        let sink: EventSink = Arc::new(move |e| {
+            if let DataEvent::Price(o) = &e
+                && o.key == MARKED
+            {
+                panic!("injected delivery panic");
+            }
+            tx.lock().unwrap().send(e).is_ok()
+        });
+        let h = DataService::spawn(empty_config(dir.path()), sink);
+        h.price(crate::pricing::worker::tests::params(MARKED.0, 1, &["SPX"]))
+            .unwrap();
+        let (thread, reason) = crate::supervise::tests_support::next_stop(&rx);
+        assert_eq!(thread, "geode-pricing");
+        assert!(reason.contains("injected delivery panic"), "{reason}");
+        h.shutdown();
     }
 }

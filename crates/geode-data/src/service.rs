@@ -584,6 +584,10 @@ pub struct DataService {
     /// every early exit of a fetch is a `SeriesFetched`, and the ones
     /// decided here never reach a worker or the runner.
     sink: EventSink,
+    /// The source-health lanes, shared with every worker sink, so a fetch
+    /// the request loop could not run is failed on the same load lane the
+    /// fetch worker reports on.
+    health: Arc<HealthTracker>,
     /// Config errors found at open. Held rather than
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
@@ -1354,6 +1358,7 @@ impl DataService {
             }),
             config,
             sink: stored_sink,
+            health: Arc::clone(&health_tracker),
             diagnostics,
             refused_views,
             egress,
@@ -1398,13 +1403,14 @@ impl DataService {
         views: Vec<ViewSpec>,
         dimensions: DerivedDimensions,
     ) -> Vec<Diagnostic> {
+        // Validate before assigning anything: if validation panics, the
+        // previous views, dimensions and refusals stay in force together.
+        let (diagnostics, refused_views) = validate_views(&views, &self.config.schema, &dimensions);
         self.read_config = Arc::new(ReadConfig {
             schema: Arc::clone(&self.read_config.schema),
             dimensions: dimensions.clone(),
         });
         self.config.dimensions = dimensions;
-        let (diagnostics, refused_views) =
-            validate_views(&views, &self.config.schema, &self.config.dimensions);
         self.config.views = views;
         self.diagnostics = diagnostics.clone();
         self.refused_views = refused_views;
@@ -1722,6 +1728,38 @@ impl DataService {
     /// `append_series` commits its rows and its coverage row in one
     /// transaction on the ingest thread, so a span this sees as covered
     /// is a span whose rows are queryable.
+    /// Answer a fetch the request loop could not run the way the fetch worker
+    /// answers its own panic: the pair's load lane goes `Failed`, then
+    /// `SeriesFetched` carries the error, so the asking tile and every other
+    /// tile watching the pair hear back.
+    pub(crate) fn fail_fetch(&self, source: &str, identity: &str, reason: String) {
+        let pair = format!("{identity}@{source}");
+        self.health.report_load_and_emit(
+            source,
+            &pair,
+            Health::Failed {
+                reason: reason.clone(),
+            },
+            format!("{pair}: {reason}"),
+            |reported| match reported {
+                Some((worst, detail)) => {
+                    log_health_event(source, &worst, &detail);
+                    (self.sink)(DataEvent::Health {
+                        source: source.to_string(),
+                        worst,
+                        detail,
+                    })
+                }
+                None => true,
+            },
+        );
+        let _ = (self.sink)(DataEvent::SeriesFetched {
+            source: source.to_string(),
+            identity: identity.to_string(),
+            result: Err(reason),
+        });
+    }
+
     pub fn fetch(&self, params: &FetchParams) {
         let answer = |result: Result<u64, String>| {
             let _ = (self.sink)(DataEvent::SeriesFetched {
@@ -5924,5 +5962,141 @@ source_name = "NPV"
         assert_eq!(records[0].target, "geode::ingest");
         assert!(records[0].message.contains("risk_snapshot/b1"));
         assert!(records[0].message.contains("bad header"));
+    }
+
+    /// A series dataset whose coverage row holds a timestamp past chrono's
+    /// range: `from_micros` panics reading it, in the catalog and in a fetch.
+    fn out_of_range_coverage_service() -> (
+        tempfile::TempDir,
+        crate::handle::DataHandle,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
+        const PAST_CHRONO: i64 = 9_000_000_000_000_000_000;
+        assert!(chrono::DateTime::<Utc>::from_timestamp_micros(PAST_CHRONO).is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = crate::store::ddl::tests_support::series_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into series_series_coverage values \
+                 ('kdb_hist', 'SPX', make_timestamp({PAST_CHRONO}::BIGINT), \
+                  make_timestamp({PAST_CHRONO}::BIGINT), now()::timestamp);"
+            ))
+            .unwrap();
+        drop(store);
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let mut adapters = AdapterRegistry::default();
+        adapters.register(Arc::new(FakeFetchAdapter {
+            calls: Default::default(),
+            catalogue: None,
+            fail_once: false,
+        }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: vec![crate::source::SourceSpec {
+                    adapter: "fake_kdb".to_string(),
+                    ..crate::source::SourceSpec::directory("kdb_hist", "series", Vec::new())
+                }],
+                adapters,
+                documents: Default::default(),
+                egress: Vec::new(),
+                pricer: PricerConfig::default(),
+            },
+            sink,
+        );
+        (dir, handle, rx)
+    }
+
+    /// An unknown view answers at once: proof the loop is still serving.
+    fn still_serves(handle: &crate::handle::DataHandle, rx: &std::sync::mpsc::Receiver<DataEvent>) {
+        handle
+            .query(params(4242, "nonesuch", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        until(rx, |e| match e {
+            DataEvent::Query(o) if o.key == QueryKey(4242) => Some(()),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+    }
+
+    #[test]
+    fn a_catalog_over_an_out_of_range_timestamp_answers_err_and_the_loop_serves_on() {
+        let (_d, handle, rx) = out_of_range_coverage_service();
+        handle
+            .catalog(CatalogParams {
+                key: QueryKey(3),
+                tag: 9,
+                as_of: AsOf::Live,
+            })
+            .unwrap();
+        let answer = until(&rx, |e| match e {
+            DataEvent::Catalog(o) if o.tag == 9 => Some(o),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        let reason = answer
+            .snapshot
+            .expect_err("a panicking catalog read is an error");
+        assert!(reason.contains("catalog request panicked"), "{reason}");
+        assert!(
+            reason.contains("a stored timestamp is in range"),
+            "{reason}"
+        );
+        still_serves(&handle, &rx);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_fetch_over_an_out_of_range_timestamp_fails_the_pair_and_the_loop_serves_on() {
+        let (_d, handle, rx) = out_of_range_coverage_service();
+        let now = Utc::now();
+        handle
+            .fetch(FetchParams {
+                key: QueryKey(3),
+                source: "kdb_hist".into(),
+                identity: "SPX".into(),
+                from: now - chrono::Duration::days(1),
+                to: now,
+            })
+            .unwrap();
+        let health = until(&rx, |e| match e {
+            DataEvent::Health {
+                source,
+                worst: Health::Failed { reason },
+                detail,
+            } if source == "kdb_hist" => Some((reason, detail)),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(health.0.contains("fetch request panicked"), "{health:?}");
+        assert!(health.1.starts_with("SPX@kdb_hist"), "{health:?}");
+        let fetched = until(&rx, |e| match e {
+            DataEvent::SeriesFetched {
+                source,
+                identity,
+                result,
+            } if source == "kdb_hist" && identity == "SPX" => Some(result),
+            DataEvent::ThreadStopped { thread, reason } => panic!("{thread} stopped: {reason}"),
+            _ => None,
+        });
+        assert!(
+            fetched
+                .as_ref()
+                .is_err_and(|r| r.contains("a stored timestamp is in range")),
+            "{fetched:?}"
+        );
+        still_serves(&handle, &rx);
+        handle.shutdown();
     }
 }
