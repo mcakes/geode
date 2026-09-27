@@ -1,7 +1,7 @@
-//! Rules a selection-wide edit applies per cell (grid selection spec
-//! §4.4): whether a typed value lands in a cell of a given kind, how
-//! far one arrow step moves a numeric cell, and the one notice line
-//! that counts what was written and what was skipped and why.
+//! Rules a selection-wide edit applies per cell: whether a typed value
+//! lands in a cell of a given kind, how far one arrow step moves a
+//! numeric cell, and the one notice line that counts what was written
+//! and what was skipped and why.
 
 use crate::core::draft::{parse_attr, parse_cell};
 use crate::core::matrix::CellKind;

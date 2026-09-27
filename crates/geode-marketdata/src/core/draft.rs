@@ -267,21 +267,29 @@ impl Draft {
         }
     }
 
-    /// Put back `before` — the open bulk editor's undo (grid selection spec
-    /// §4.4). A `Behind` this draft reached since is kept: a delivery that
-    /// landed while the editor was open is still news, and restoring the
-    /// older state would hide it. An empty result is `Clean`, since an empty
-    /// draft is never behind.
+    /// Put back `before` — the open bulk editor's undo. The edits come back
+    /// but delivery facts reached meanwhile win: a `Behind` this draft
+    /// reached since is kept, because a delivery that landed while the
+    /// editor was open is still news; and an `Editing` reached from a
+    /// `before` that was `Behind` is kept, because the base generation came
+    /// back and restoring the older `Behind` would name a delivery that is
+    /// no longer on offer. Otherwise `before`'s state returns, so a draft
+    /// that was `Sent` is `Sent` again. An empty result is `Clean` with no
+    /// base, since an empty draft is never behind.
     pub fn restore_from(&mut self, before: Draft) {
-        let behind = matches!(self.state, DraftState::Behind { .. }).then(|| self.state.clone());
+        let before_behind = matches!(before.state, DraftState::Behind { .. });
+        let keep = match &self.state {
+            DraftState::Behind { .. } => true,
+            DraftState::Editing => before_behind,
+            DraftState::Clean | DraftState::Sent { .. } => false,
+        };
+        let current = std::mem::take(&mut self.state);
         *self = before;
-        match behind {
-            Some(state) if !self.is_empty() => self.state = state,
-            _ if self.is_empty() => {
-                self.state = DraftState::Clean;
-                self.base = None;
-            }
-            _ => {}
+        if self.is_empty() {
+            self.state = DraftState::Clean;
+            self.base = None;
+        } else if keep {
+            self.state = current;
         }
     }
 
@@ -2477,5 +2485,28 @@ mod tests {
         // Restoring to an empty draft is Clean: an empty draft is never behind.
         now.restore_from(Draft::default());
         assert!(now.is_empty() && !now.is_behind());
+    }
+
+    #[test]
+    fn restore_from_does_not_revive_a_behind_the_base_redelivery_ended() {
+        let base = DocumentBase::default();
+        let newer = DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        };
+        let mut before = Draft::default();
+        before.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        before.on_delivered(&newer);
+        assert!(before.is_behind());
+
+        let mut now = before.clone();
+        now.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        now.on_delivered(&base);
+        assert_eq!(now.state, DraftState::Editing, "the base came back");
+
+        now.restore_from(before.clone());
+        assert_eq!(now.len(), 1, "the step's edit is gone");
+        assert_eq!(now.edits, before.edits, "the earlier edits are back");
+        assert!(!now.is_behind(), "the stale delivery is not revived");
     }
 }

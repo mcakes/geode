@@ -90,7 +90,7 @@ pub fn step(cursor: Cursor, last_grid_col: &mut usize, motion: Motion, grid: Gri
     }
 }
 
-/// One motion while a selection is live (grid selection spec §4.1):
+/// One motion while a selection is live:
 /// every move clamps at the grid's edges instead of wrapping, and none
 /// leaves the grid for the attribute strip, because wrapping past the
 /// anchor would silently invert the selection.
