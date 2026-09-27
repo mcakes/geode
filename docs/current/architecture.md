@@ -14,9 +14,11 @@ Dependencies point toward smaller and more stable crates:
                     /         |          \
              feature modules  |       geode-data
                /      \       |           |
-        geode-shell   shared widgets   geode-core
-               \        |                 /
-                └──── geode-core ─────────┘
+        geode-tile  shared widgets    geode-core
+               |        |                 /
+        geode-shell     |                /
+               \        |               /
+                └──── geode-core ──────┘
 
 calculation leaf: geode-pricing ─────────────────► geode-core
 pure presentation: geode-chart, geode-widgets ───► geode-core
@@ -33,6 +35,13 @@ and pricing requests.
 `geode-shell` owns the window and interaction model. It does not depend on the
 data service or on feature modules. `geode-data` owns sources, DuckDB, and
 background data work. It does not depend on the shell or feature modules.
+
+`geode-tile` is the kit tiles are built from: the popover, the `.` action
+menu, the in-tile y/n confirm and the notice line, as models with one
+painter each. It depends on `geode-shell` for its paint doors and the live
+keymap, never on `geode-data` or a feature module, and the shell never
+depends on it. A tile mechanism two modules would otherwise each write lives
+there.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-diagnostics`, and `geode-pricer` implement the

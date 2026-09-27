@@ -1,0 +1,26 @@
+[package]
+name = "geode-tile"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# The kit tile modules are built from. `geode-shell` supplies the paint
+# doors these build on (`kbd`, `control`, `scale`, `chip`, `listrow`,
+# `colours`) and the live keymap (`tips::Chords`); `geode-core` the
+# readability floor. Never `geode-data` and never a feature module; the
+# shell never depends on this crate.
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+
+# The same test features the rest of the workspace enables, so
+# `cargo test --workspace` builds `geode-shell` once.
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

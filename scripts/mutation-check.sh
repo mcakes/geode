@@ -24213,6 +24213,29 @@ run_mutation "autosize: the trait default accepts a fit" \
   '        Ok(())' \
   geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
 
+# ---- geode-tile: notice and popover doors ------------------------------
+#
+# A tone is one color in every tile. Mutated, a warning paints as danger.
+run_mutation "tile notice: warning paints the danger token" \
+  crates/geode-tile/src/notice.rs \
+  '        Tone::Warning => chip_paint(theme, chip::Tone::WarningText).text,' \
+  '        Tone::Warning => chip_paint(theme, chip::Tone::DangerText).text,' \
+  geode-tile each_tone_paints_its_own_token
+
+# A popup hangs by the corner its caller names.
+run_mutation "tile popover: a popup ignores its corner" \
+  crates/geode-tile/src/popover.rs \
+  '            .anchor(corner)' \
+  '            .anchor(Anchor::TopLeft)' \
+  geode-tile a_popup_hangs_from_its_anchor_corner
+
+# A popup near the window edge keeps the snap margin.
+run_mutation "tile popover: a popup snaps to the window edge itself" \
+  crates/geode-tile/src/popover.rs \
+  '            .snap_to_window_with_margin(px(SNAP_MARGIN))' \
+  '            .snap_to_window_with_margin(px(0.))' \
+  geode-tile a_popup_near_the_edge_snaps_inside_the_margin
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

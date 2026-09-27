@@ -2695,6 +2695,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-tile"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-shell",
+ "gpui-component",
+ "gpui-pre",
+]
+
+[[package]]
 name = "geode-timeseries"
 version = "0.1.0"
 dependencies = [
