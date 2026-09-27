@@ -77,14 +77,19 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   spelled as a line's cell spells them. Barrier columns read only barrier
   legs. Shifts group by the spelled effective value (an own 2.04 and an
   inherited 2.0 are one `+2.0`), an unset part among set ones paints `—`,
-  and the cell paints inherited only when every leg inherits. Qty is the package quantity (first leg qty over the
-  template's first weight) while the legs fit the template, else the list
-  of distinct leg quantities.
+  and the cell paints inherited only when every leg inherits. Qty is the
+  package quantity (first leg qty over the template's first weight) while
+  the legs fit the template, else the list of distinct leg quantities.
 - A package cell's edit maps by position onto the distinct values it shows,
   validates every part through the line cell's `edit_for` before anything
   applies, and applies as one undo entry (one reprice). A commit that
   changes no leg is no edit. Package rows open a plain text editor, even
-  for expiry and type.
+  for expiry and type. The editor and the commit group by the planned
+  column's format, the one the cell paints with, so a view's precision
+  override counts the same parts in all three. The editor records the text
+  it opened on; a commit whose cell would now open on other text (a
+  template reload moved the legs into or out of the template's form, which
+  changes whether a qty rescales by weight) closes with `MOVED`.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
   the legs one per line. The grid keeps
@@ -137,19 +142,21 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - `add_below` with the bar already open (a palette dispatch) refocuses its
   field: the palette's commit focuses the shell root first, and an open bar
   without focus reads `insert` while shell bindings take shifted letters.
-- The expiry always edits in `geode_widgets::datefield`'s pure field; the
-  tile owns its focus handle (what `holds_focus` and the shell's insert
-  predicate read) and routes keys through `datefield::route` in
-  `date_field_key` before they bubble to the shell. The painter and key
+- A line's expiry edits in `geode_widgets::datefield`'s pure field (a
+  package row's expiry edits as text, above); the tile owns its focus
+  handle (what `holds_focus` and the shell's insert predicate read) and
+  routes keys through `datefield::route` in `date_field_key` before they
+  bubble to the shell. The painter and key
   routing are a local copy of market-data's grid pattern (a module may not
   depend on a sibling). A tenor seeds from the app clock's today, never
   `chrono::Local`. The tenor note is kept on the editor and restored after
   any key or refusal until the field commits or cancels.
-- `cell::commit` and `cell::commit_date` answer `Ok(None)` when the parsed
-  value equals what the line holds (`cell::changed` compares values: qty,
-  own shifts, instrument). The tile's `finish_commit` closes the editor
-  without an edit, so an unchanged commit in any cell records no undo entry,
-  reprices nothing and saves nothing.
+- `cell::commit_edits` answers an empty `Vec` (and `cell::commit_date`
+  `Ok(None)`) when every parsed value equals what the line or leg holds
+  (`cell::changed` compares values: qty, own shifts, instrument). The
+  tile's `finish_commit` closes the editor without an edit, so an unchanged
+  commit in any cell records no undo entry, reprices nothing and saves
+  nothing.
 - In-grid fields (`delegate::cell_input`) are `Input::appearance(false)` with
   no horizontal padding, at the row's height, in the cell's alignment: the
   cell's cursor border is the only frame. `:` and `/` close

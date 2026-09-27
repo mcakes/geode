@@ -23233,8 +23233,8 @@ run_mutation "pricer package: package qty sets every leg to q" \
 # A package cell opens a text editor on its groups, not the line's editor.
 run_mutation "pricer package: a package cell opens no editor" \
   crates/geode-pricer/src/core/cell.rs \
-  $'    if sheet.is_package(row) {\n        return crate::core::package::editor_text(sheet, row, kind)' \
-  $'    if false {\n        return crate::core::package::editor_text(sheet, row, kind)' \
+  $'    if sheet.is_package(row) {\n        return crate::core::package::editor_text(sheet, row, kind, format)' \
+  $'    if false {\n        return crate::core::package::editor_text(sheet, row, kind, format)' \
   geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
 
 # A `/` list has no one number to step.
@@ -23250,6 +23250,44 @@ run_mutation "pricer tile: a package commit applies only its first edit" \
   '                    self.apply_edits(edits, cx)' \
   '                    self.apply_edit(edits.remove(0), cx)' \
   geode-pricer editing_a_package_strike_moves_both_legs_in_one_undo_step
+
+# Several package edits as several undo entries: one undo must restore all.
+run_mutation "pricer tile: a package commit applies its edits one undo entry each" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.apply_edits(edits, cx)' \
+  '                    edits.into_iter().try_for_each(|e| self.apply_edit(e, cx))' \
+  geode-pricer editing_a_package_strike_moves_both_legs_in_one_undo_step
+
+# A package row's commit goes through package::commit, not the line's.
+run_mutation "pricer package: a package commit takes the line route" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if sheet.is_package(row) {\n        return crate::core::package::commit(sheet, row, kind, format, text);' \
+  $'    if false {\n        return crate::core::package::commit(sheet, row, kind, format, text);' \
+  geode-pricer commit_edits_routes_a_package_and_wraps_a_line
+
+# The editor groups a shift cell by the view's format, as the cell paints
+# it: the column default would open two painted parts as one.
+run_mutation "pricer package: the editor groups by the column default format" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    let gs = groups(sheet, row, kind, format);\n    if gs.is_empty() {\n        return None;' \
+  $'    let gs = groups(sheet, row, kind, &crate::core::columns::COLUMNS.iter().find(|c| c.kind == kind)?.default_format);\n    if gs.is_empty() {\n        return None;' \
+  geode-pricer a_view_precision_groups_the_cell_the_editor_and_the_commit_alike
+
+# The commit counts groups by the view's format, so its refusal quotes the
+# cell on screen.
+run_mutation "pricer package: the commit groups by the column default format" \
+  crates/geode-pricer/src/core/package.rs \
+  $'    let gs = groups(sheet, row, kind, format);\n    if gs.is_empty() {\n        return Err(read_only());' \
+  $'    let gs = groups(sheet, row, kind, &crate::core::columns::COLUMNS.iter().find(|c| c.kind == kind).ok_or_else(read_only)?.default_format);\n    if gs.is_empty() {\n        return Err(read_only());' \
+  geode-pricer a_view_precision_groups_the_cell_the_editor_and_the_commit_alike
+
+# A template reload under an open package editor changes what its text
+# means: the commit re-checks the opening text and refuses with MOVED.
+run_mutation "pricer tile: a package commit ignores a changed opening text" \
+  crates/geode-pricer/src/tile.rs \
+  '            && cell::editor_for(&self.sheet, row, kind, format) != Ok(CellEditor::Text(opened))' \
+  '            && opened.is_empty()' \
+  geode-pricer a_template_reload_under_an_open_package_qty_editor_refuses_the_commit
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

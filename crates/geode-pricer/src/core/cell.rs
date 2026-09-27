@@ -14,6 +14,7 @@ use chrono::NaiveDate;
 use geode_core::nudge::nudge_text;
 use geode_core::pricing::{Expiry, Instrument, OptionKind, Vanilla};
 use geode_core::schema::ColumnType;
+use geode_core::view::ColumnFormat;
 
 /// The footer's word for a cell that does not edit.
 pub const READ_ONLY: &str = "read-only";
@@ -66,11 +67,18 @@ fn kind_token(kind: OptionKind) -> &'static str {
 }
 
 /// What the editor opens with on (`row`, `kind`), or why it does not open.
-pub fn editor_for(sheet: &Sheet, row: usize, kind: ColumnKind) -> Result<CellEditor, &'static str> {
+/// `format` is the planned column's: a package cell groups its legs by
+/// the text that format paints.
+pub fn editor_for(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    format: &ColumnFormat,
+) -> Result<CellEditor, &'static str> {
     // A package cell may hold a `/` list, which neither a date field nor a
     // choice list can show: every aggregated column opens a text field.
     if sheet.is_package(row) {
-        return crate::core::package::editor_text(sheet, row, kind)
+        return crate::core::package::editor_text(sheet, row, kind, format)
             .map(CellEditor::Text)
             .ok_or(READ_ONLY);
     }
@@ -162,15 +170,17 @@ pub fn commit(
 
 /// A committed cell's edits: a package row's through `package::commit`
 /// (one per leg that changes), a line's as zero or one. The tile applies
-/// several as one undo entry.
+/// several as one undo entry. `format` is the planned column's, as for
+/// [`editor_for`].
 pub fn commit_edits(
     sheet: &Sheet,
     row: usize,
     kind: ColumnKind,
+    format: &ColumnFormat,
     text: &str,
 ) -> Result<Vec<Edit>, String> {
     if sheet.is_package(row) {
-        return crate::core::package::commit(sheet, row, kind, text);
+        return crate::core::package::commit(sheet, row, kind, format, text);
     }
     commit(sheet, row, kind, text).map(|e| e.into_iter().collect())
 }
@@ -336,6 +346,15 @@ mod tests {
     use crate::core::sheet::{OwnShifts, Sheet};
     use geode_core::pricing::{Barrier, BarrierKind, Expiry, Instrument, OptionKind, Strike};
 
+    /// The column's default format, as a view without overrides plans it.
+    fn fmt(kind: ColumnKind) -> &'static ColumnFormat {
+        &crate::core::columns::COLUMNS
+            .iter()
+            .find(|c| c.kind == kind)
+            .unwrap()
+            .default_format
+    }
+
     fn one_line() -> Sheet {
         let mut s = Sheet::new("t");
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), -5)]);
@@ -365,28 +384,28 @@ mod tests {
     fn a_text_cell_opens_on_the_grammar_spelling_of_its_value() {
         let s = one_line();
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Qty),
+            editor_for(&s, 0, ColumnKind::Qty, fmt(ColumnKind::Qty)),
             Ok(CellEditor::Text("-5".into()))
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Expiry),
+            editor_for(&s, 0, ColumnKind::Expiry, fmt(ColumnKind::Expiry)),
             Ok(CellEditor::Date(Some(
                 chrono::NaiveDate::from_ymd_opt(2026, 12, 18).unwrap()
             ))),
             "an expiry always edits in a date field, on its own date"
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Strike),
+            editor_for(&s, 0, ColumnKind::Strike, fmt(ColumnKind::Strike)),
             Ok(CellEditor::Text("5000".into()))
         );
         // An inherited shift opens EMPTY: an empty commit means "inherit".
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::SpotShift),
+            editor_for(&s, 0, ColumnKind::SpotShift, fmt(ColumnKind::SpotShift)),
             Ok(CellEditor::Text(String::new()))
         );
         let b = barrier_line();
         assert_eq!(
-            editor_for(&b, 0, ColumnKind::Barrier),
+            editor_for(&b, 0, ColumnKind::Barrier, fmt(ColumnKind::Barrier)),
             Ok(CellEditor::Text("4200".into()))
         );
     }
@@ -396,7 +415,7 @@ mod tests {
         let mut s = one_line();
         push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Type),
+            editor_for(&s, 0, ColumnKind::Type, fmt(ColumnKind::Type)),
             Ok(CellEditor::Choice {
                 options: vec!["C".into(), "P".into()],
                 current: "C".into(),
@@ -404,7 +423,7 @@ mod tests {
             })
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Underlying),
+            editor_for(&s, 0, ColumnKind::Underlying, fmt(ColumnKind::Underlying)),
             Ok(CellEditor::Choice {
                 options: vec!["SPX".into()],
                 current: "SPX".into(),
@@ -414,7 +433,7 @@ mod tests {
         );
         let b = barrier_line();
         assert_eq!(
-            editor_for(&b, 0, ColumnKind::BarrierType),
+            editor_for(&b, 0, ColumnKind::BarrierType, fmt(ColumnKind::BarrierType)),
             Ok(CellEditor::Choice {
                 options: vec!["UI".into(), "UO".into(), "DI".into(), "DO".into()],
                 current: "DO".into(),
@@ -439,7 +458,11 @@ mod tests {
             ColumnKind::Barrier,
             ColumnKind::BarrierType,
         ] {
-            assert_eq!(editor_for(&s, 0, kind), Err(READ_ONLY), "{kind:?}");
+            assert_eq!(
+                editor_for(&s, 0, kind, fmt(kind)),
+                Err(READ_ONLY),
+                "{kind:?}"
+            );
         }
         // A package's own columns (results, status) stay read-only; its
         // aggregated columns edit through text.
@@ -449,7 +472,11 @@ mod tests {
             ColumnKind::PricedAt,
             ColumnKind::Status,
         ] {
-            assert_eq!(editor_for(&s, 1, kind), Err(READ_ONLY), "package {kind:?}");
+            assert_eq!(
+                editor_for(&s, 1, kind, fmt(kind)),
+                Err(READ_ONLY),
+                "package {kind:?}"
+            );
         }
     }
 
@@ -590,7 +617,12 @@ mod tests {
     #[test]
     fn a_tenor_expiry_opens_a_date_field_with_no_date_of_its_own() {
         assert_eq!(
-            editor_for(&tenor_line(), 0, ColumnKind::Expiry),
+            editor_for(
+                &tenor_line(),
+                0,
+                ColumnKind::Expiry,
+                fmt(ColumnKind::Expiry)
+            ),
             Ok(CellEditor::Date(None)),
             "the pricer never resolves a tenor: the host seeds the field"
         );
@@ -632,14 +664,17 @@ mod tests {
         let mut s = Sheet::new("t");
         push(&mut s, vec![callspread(1)]);
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Expiry),
+            editor_for(&s, 0, ColumnKind::Expiry, fmt(ColumnKind::Expiry)),
             Ok(CellEditor::Text("Z26".into()))
         );
         assert_eq!(
-            editor_for(&s, 0, ColumnKind::Type),
+            editor_for(&s, 0, ColumnKind::Type, fmt(ColumnKind::Type)),
             Ok(CellEditor::Text("C".into()))
         );
-        assert_eq!(editor_for(&s, 0, ColumnKind::Price), Err(READ_ONLY));
+        assert_eq!(
+            editor_for(&s, 0, ColumnKind::Price, fmt(ColumnKind::Price)),
+            Err(READ_ONLY)
+        );
         assert_eq!(
             nudge(ColumnKind::Strike, "4800/5200", 1),
             Err("a list does not nudge".into())
@@ -652,13 +687,23 @@ mod tests {
         let mut s = Sheet::new("t");
         push(&mut s, vec![callspread(1)]);
         push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
-        let edits = commit_edits(&s, 0, ColumnKind::Strike, "4900/5300").unwrap();
+        let edits = commit_edits(
+            &s,
+            0,
+            ColumnKind::Strike,
+            fmt(ColumnKind::Strike),
+            "4900/5300",
+        )
+        .unwrap();
         assert_eq!(edits.len(), 2, "one edit per leg");
         assert_eq!(
-            commit_edits(&s, 3, ColumnKind::Qty, "7"),
+            commit_edits(&s, 3, ColumnKind::Qty, fmt(ColumnKind::Qty), "7"),
             Ok(vec![Edit::SetQty { row: 3, qty: 7 }])
         );
-        assert_eq!(commit_edits(&s, 3, ColumnKind::Qty, "1"), Ok(vec![]));
+        assert_eq!(
+            commit_edits(&s, 3, ColumnKind::Qty, fmt(ColumnKind::Qty), "1"),
+            Ok(vec![])
+        );
     }
 
     #[test]

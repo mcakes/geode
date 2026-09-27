@@ -163,8 +163,9 @@ pub(crate) struct Entry {
 
 const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
 
-/// A commit whose target line went away, or whose column is no longer the
-/// one it opened on (a view switch), refuses with this.
+/// A commit whose target line went away, whose column is no longer the
+/// one it opened on (a view switch), or whose package cell would now open
+/// on other text (a template reload), refuses with this.
 pub(crate) const MOVED: &str = "the cell moved; edit refused";
 
 /// The open cell editor (spec §8.4): its target by line identity and
@@ -176,6 +177,11 @@ pub(crate) enum Editor {
         col: usize,
         kind: ColumnKind,
         input: Entity<InputState>,
+        /// A package cell's opening text; `None` on a line. A package
+        /// commit's meaning depends on the sheet (the quantity rescales by
+        /// template weight only while the legs fit), so a commit whose
+        /// cell would now open on other text refuses with `MOVED`.
+        opened: Option<String>,
     },
     Choice {
         line: LineId,
@@ -1192,7 +1198,7 @@ impl PricerTile {
             return;
         };
         let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
-        let editor = match cell::editor_for(&self.sheet, row, kind) {
+        let editor = match cell::editor_for(&self.sheet, row, kind, &planned.format) {
             Err(why) => {
                 self.footer = Some(why.into());
                 return;
@@ -1229,6 +1235,7 @@ impl PricerTile {
                 }
             }
             Ok(CellEditor::Text(text)) => {
+                let opened = self.sheet.is_package(row).then(|| text.clone());
                 let input = cx.new(|cx| InputState::new(window, cx));
                 input.update(cx, |s, cx| s.set_value(text, window, cx));
                 Editor::Text {
@@ -1236,6 +1243,7 @@ impl PricerTile {
                     col,
                     kind,
                     input,
+                    opened,
                 }
             }
             Ok(CellEditor::Choice {
@@ -1295,17 +1303,19 @@ impl PricerTile {
     }
 
     /// `enter`: the live text (re-read — `set_value` emits no `Change`),
-    /// the target re-checked by line and column kind, parsed into one
-    /// `Edit`; a bad value keeps the editor open with the reason. The
-    /// editor closes (blur first) BEFORE the edit applies, so the rebuild
-    /// never paints a dead field.
+    /// the target re-checked by line and column kind (and, on a package
+    /// row, by the text the cell opened on), parsed into its edits — none,
+    /// one, or one per package leg that changes — through
+    /// `finish_commit`; a bad value keeps the editor open with the reason.
+    /// The editor closes (blur first) BEFORE the edits apply, so the
+    /// rebuild never paints a dead field.
     fn commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.editor, Some(Editor::Date { .. })) {
             self.commit_date(window, cx);
             return;
         }
         // The editor's borrow ends inside this block, before any `self` call.
-        let (value, (line, col, kind)) = {
+        let (value, (line, col, kind), opened) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
@@ -1314,6 +1324,10 @@ impl PricerTile {
             };
             let text = input.read(cx).value().to_string();
             let target = editor.target();
+            let opened = match editor {
+                Editor::Text { opened, .. } => opened.clone(),
+                _ => None,
+            };
             let value = if let Editor::Choice {
                 list, free, moved, ..
             } = editor
@@ -1339,7 +1353,7 @@ impl PricerTile {
             } else {
                 Choice::Value(text)
             };
-            (value, target)
+            (value, target, opened)
         };
         let value = match value {
             Choice::Value(v) => Some(v),
@@ -1363,7 +1377,18 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        let answer = cell::commit_edits(&self.sheet, row, kind, &value);
+        // `editor_row` confirmed the planned column at `col`.
+        let format = &self.plan.columns[col].format;
+        // A package cell that would open on other text now (a template
+        // reload moved its legs out of or into the template's form) would
+        // read the typed text another way: refuse rather than guess.
+        if let Some(opened) = opened
+            && cell::editor_for(&self.sheet, row, kind, format) != Ok(CellEditor::Text(opened))
+        {
+            self.refuse_moved(window, cx);
+            return;
+        }
+        let answer = cell::commit_edits(&self.sheet, row, kind, format, &value);
         self.finish_commit(answer, window, cx);
     }
 
@@ -1423,12 +1448,18 @@ impl PricerTile {
             .is_some_and(|c| c.def.kind == kind);
         let row = self.sheet.index_of(line).filter(|_| same_column);
         if row.is_none() {
-            self.close_editor(window, cx);
-            self.footer = Some(MOVED.into());
-            self.rebuild_chrome();
-            cx.notify();
+            self.refuse_moved(window, cx);
         }
         row
+    }
+
+    /// Close the editor with `MOVED`: its commit no longer means what the
+    /// trader saw when it opened.
+    fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_editor(window, cx);
+        self.footer = Some(MOVED.into());
+        self.rebuild_chrome();
+        cx.notify();
     }
 
     /// `enter` in the date field: finish a half-typed segment or refuse
@@ -5586,6 +5617,60 @@ pub(crate) mod tests {
             spread, "-5 SPX Z26 7400/7800 CS",
             "one undo restores both legs"
         );
+    }
+
+    /// A package quantity rescales by template weight only while the legs
+    /// fit the template; otherwise a single value sets every leg. A reload
+    /// that redefines the template under an open qty editor changes what
+    /// `enter` would mean, so the commit refuses with MOVED and no leg
+    /// moves.
+    #[gpui::test]
+    fn a_template_reload_under_an_open_package_qty_editor_refuses_the_commit(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &["-5 SPX Z26 7400/7800 CS"]);
+        goto_column(&h, &mut vcx, "qty");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("-5"), "package form");
+        select_all_and_type(&h, &mut vcx, "10");
+        let redefined = {
+            let builtin = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                crate::core::BUILTIN_TEMPLATES,
+            )
+            .unwrap();
+            let user = geode_core::config::LayerDoc::builtin(
+                crate::core::PRICER_TEMPLATES_DOC,
+                // Long both calls: the stored -5/+5 legs no longer fit, so
+                // the cell would now open on the leg list.
+                "[CS]\nlegs = [ { weight = 1, strike = 1, kind = \"C\" }, { weight = 1, strike = 2, kind = \"C\" } ]\n",
+            )
+            .unwrap();
+            TemplateSet::from_doc(&geode_core::config::merge_docs(
+                crate::core::PRICER_TEMPLATES_DOC,
+                &[builtin, user],
+            ))
+            .0
+        };
+        let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
+        vcx.update(|_, cx| {
+            h.factory
+                .reload(views, redefined, settings.refresh, settings.stale_after, cx)
+        });
+        h.draw(&mut vcx);
+        let legs = |h: &Harness, vcx: &VisualTestContext| {
+            h.tile.read_with(vcx, |t, _| {
+                t.sheet
+                    .children(0)
+                    .map(|l| t.sheet.qty(l))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(legs(&h, &vcx), [-5, 5], "the reload keeps the stored legs");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some(MOVED));
+        assert_eq!(h.mode(&mut vcx), "normal", "the editor closed");
+        assert_eq!(legs(&h, &vcx), [-5, 5], "no leg moved");
     }
 
     /// Spec §3, §6: a package expiry opens a plain text editor, not the

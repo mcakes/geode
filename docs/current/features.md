@@ -569,8 +569,13 @@ each where it appears (`7500/7900` moves a spread's two strikes; a fly's
 body moves once); a package quantity rescales every leg by its weight. A
 list with the wrong part count is refused naming the count and the cell
 (`2 values: 7400/7800`) and the editor stays open. Every part is checked
-first, and the whole edit is one undo step and one reprice. Result columns
-stay read-only.
+first, and the whole edit is one undo step and one reprice. The editor
+groups a cell as the view paints it, so a precision override counts the
+same parts on screen, in the editor and in a refusal. If a template reload
+under an open package editor changes the text the cell would open on (the
+legs now fit the template, or no longer do), `enter` refuses with the
+editor's `the cell moved` message rather than read the typed quantity
+another way. Result columns stay read-only.
 
 The shorthand's package types come from the `pricer_templates` configuration
 document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,

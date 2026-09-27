@@ -4,7 +4,7 @@
 //! text, and each part is spelled as a line's cell spells it. Pure: the
 //! grid model prepares these cells outside render, as it does a line's.
 
-use crate::core::columns::{COLUMNS, CellState, CellText, ColumnKind, signed};
+use crate::core::columns::{CellState, CellText, ColumnKind, signed};
 use crate::core::edit::Edit;
 use crate::core::sheet::{OwnShifts, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_package, render_strike};
@@ -159,9 +159,10 @@ pub(crate) fn groups(
             let pick = shift_pick(kind).expect("a shift column");
             let sheet_value = pick(sheet.sheet_shift());
             let display = |v: &Option<f64>| v.map(|v| signed(v, format)).unwrap_or_default();
-            // Shifts group by their spelled text (spec §2): an own 2.04 and
-            // an inherited 2.0 that both paint `+2.0` are one part. The
-            // edit spelling is set per group below.
+            // Shifts group by their spelled text: an own 2.04 and an
+            // inherited 2.0 that both paint `+2.0` are one part, so the
+            // cell never shows two parts that read alike. The edit
+            // spelling is set per group below.
             let mut gs = group_by_key(
                 sheet
                     .children(row)
@@ -203,20 +204,17 @@ fn painted(gs: &[Group]) -> String {
         .join("/")
 }
 
-/// A column's default format for `kind`. The format only spells the
-/// groups' display (the wrong-count message); edits parse the `edit`
-/// spelling, which no format touches.
-fn format_for(kind: ColumnKind) -> Option<&'static ColumnFormat> {
-    COLUMNS
-        .iter()
-        .find(|c| c.kind == kind)
-        .map(|c| &c.default_format)
-}
-
 /// The text the editor opens on: the package quantity while the legs fit
 /// the template, else the groups in the line editor's spellings joined
-/// with `/`. `None` for a column that does not aggregate.
-pub fn editor_text(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<String> {
+/// with `/`. `None` for a column that does not aggregate. `format` is the
+/// planned column's — the one the cell paints with — because shifts group
+/// by their spelled text: another precision would count other groups.
+pub fn editor_text(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    format: &ColumnFormat,
+) -> Option<String> {
     if !aggregates(kind) {
         return None;
     }
@@ -227,7 +225,7 @@ pub fn editor_text(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<String
     }
     // No leg the column reads (a barrier column on vanillas): the cell
     // refuses at open, as a vanilla line's does.
-    let gs = groups(sheet, row, kind, format_for(kind)?);
+    let gs = groups(sheet, row, kind, format);
     if gs.is_empty() {
         return None;
     }
@@ -246,11 +244,13 @@ pub fn editor_text(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<String
 /// and sets each leg to it times the leg's weight. Every part is validated
 /// through the line cell's own `edit_for` before anything is returned, so
 /// a refusal changes nothing; only legs that change produce an edit, and
-/// an empty vector is no change.
+/// an empty vector is no change. `format` is the planned column's, as for
+/// [`editor_text`], so the groups and the refusal match the painted cell.
 pub fn commit(
     sheet: &Sheet,
     row: usize,
     kind: ColumnKind,
+    format: &ColumnFormat,
     text: &str,
 ) -> Result<Vec<Edit>, String> {
     let read_only = || String::from(crate::core::cell::READ_ONLY);
@@ -279,7 +279,7 @@ pub fn commit(
         }
         return Ok(edits);
     }
-    let gs = groups(sheet, row, kind, format_for(kind).ok_or_else(read_only)?);
+    let gs = groups(sheet, row, kind, format);
     if gs.is_empty() {
         return Err(read_only());
     }
@@ -355,6 +355,15 @@ mod tests {
             lines.iter().map(|l| parse_builtin(l).unwrap()).collect(),
         );
         s
+    }
+
+    /// The column's default format, as a view without overrides plans it.
+    fn fmt(kind: ColumnKind) -> &'static ColumnFormat {
+        &crate::core::columns::COLUMNS
+            .iter()
+            .find(|c| c.kind == kind)
+            .unwrap()
+            .default_format
     }
 
     fn text(s: &Sheet, row: usize, name: &str) -> (String, CellState) {
@@ -542,7 +551,7 @@ mod tests {
 
     fn apply(s: &mut Sheet, row: usize, name: &str, text: &str) -> Result<usize, String> {
         let kind = column(name).unwrap().kind;
-        let edits = commit(s, row, kind, text)?;
+        let edits = commit(s, row, kind, fmt(kind), text)?;
         let n = edits.len();
         for e in edits {
             s.apply(e).unwrap();
@@ -670,23 +679,32 @@ mod tests {
     fn the_editor_opens_on_the_line_editors_spellings() {
         let s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
         assert_eq!(
-            editor_text(&s, 0, ColumnKind::Strike).as_deref(),
+            editor_text(&s, 0, ColumnKind::Strike, fmt(ColumnKind::Strike)).as_deref(),
             Some("7400/7800")
         );
-        assert_eq!(editor_text(&s, 0, ColumnKind::Qty).as_deref(), Some("-5"));
-        assert_eq!(editor_text(&s, 0, ColumnKind::Price), None);
         assert_eq!(
-            editor_text(&s, 0, ColumnKind::Barrier),
+            editor_text(&s, 0, ColumnKind::Qty, fmt(ColumnKind::Qty)).as_deref(),
+            Some("-5")
+        );
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::Price, fmt(ColumnKind::Price)),
+            None
+        );
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::Barrier, fmt(ColumnKind::Barrier)),
             None,
             "no leg reads a barrier: the editor refuses at open"
         );
-        assert_eq!(editor_text(&s, 0, ColumnKind::BarrierType), None);
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::BarrierType, fmt(ColumnKind::BarrierType)),
+            None
+        );
     }
 
     /// Commits the text the editor opens on, unchanged.
     fn enter_unchanged(s: &mut Sheet, name: &str) -> Result<usize, String> {
         let kind = column(name).unwrap().kind;
-        let opened = editor_text(s, 0, kind).expect("the cell opens");
+        let opened = editor_text(s, 0, kind, fmt(kind)).expect("the cell opens");
         apply(s, 0, name, &opened)
     }
 
@@ -699,7 +717,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            editor_text(&s, 0, ColumnKind::SpotShift).as_deref(),
+            editor_text(&s, 0, ColumnKind::SpotShift, fmt(ColumnKind::SpotShift)).as_deref(),
             Some(""),
             "no leg owns a shift: the line editor's rule"
         );
@@ -733,7 +751,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            editor_text(&s, 0, ColumnKind::SpotShift).as_deref(),
+            editor_text(&s, 0, ColumnKind::SpotShift, fmt(ColumnKind::SpotShift)).as_deref(),
             Some("2.04"),
             "the first leg that owns one"
         );
@@ -749,5 +767,43 @@ mod tests {
             "empty clears the one own leg"
         );
         assert_eq!(s.shift(2).spot_pct, None);
+    }
+
+    #[test]
+    fn a_view_precision_groups_the_cell_the_editor_and_the_commit_alike() {
+        let mut s = sheet_of(&["SPX Z26 7400/7800 CS"]);
+        for (row, v) in [(1, 2.25), (2, 2.30)] {
+            s.apply(Edit::SetShift {
+                row,
+                shift: OwnShifts {
+                    spot_pct: Some(v),
+                    vol_pts: None,
+                },
+            })
+            .unwrap();
+        }
+        // A view override: two places where the column default has one.
+        let two = ColumnFormat {
+            precision: 2,
+            ..crate::core::columns::SHIFT
+        };
+        let kind = ColumnKind::SpotShift;
+        assert_eq!(aggregate(&s, 0, kind, &two).text, "+2.25/+2.30");
+        assert_eq!(
+            editor_text(&s, 0, kind, &two).as_deref(),
+            Some("2.25/2.3"),
+            "the editor opens on the two parts the cell paints"
+        );
+        assert_eq!(
+            commit(&s, 0, kind, &two, "1/2/3"),
+            Err("2 values: +2.25/+2.30".into()),
+            "the refusal quotes the cell on screen"
+        );
+        let edits = commit(&s, 0, kind, &two, "2.25/2.4").unwrap();
+        assert_eq!(
+            edits.len(),
+            1,
+            "two groups by position: only the second leg moves"
+        );
     }
 }
