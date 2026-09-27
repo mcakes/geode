@@ -22826,6 +22826,56 @@ run_mutation "events: two threads stopping coalesce into one" \
   '        DataEvent::ThreadStopped { .. } => Key::Stopped(String::new()),' \
   geode-app two_threads_stopping_between_drains_are_both_delivered
 
+# A worker spawned without the service's sink is still caught, but its death
+# is announced to no one: the status bar stays green over a dead thread.
+run_mutation "supervise: a query worker's death is announced to no one" \
+  crates/geode-data/src/query/pool.rs \
+  '                    format!("geode-query-{i}"),
+                    Arc::clone(&stop),' \
+  '                    format!("geode-query-{i}"),
+                    crate::supervise::unwatched(),' \
+  geode-data a_query_worker_that_dies_is_declared_by_its_thread_name
+
+run_mutation "supervise: the pricing worker's death is announced to no one" \
+  crates/geode-data/src/pricing/worker.rs \
+  '            crate::supervise::spawn_supervised("geode-pricing".to_string(), stop, move || {' \
+  '            crate::supervise::spawn_supervised("geode-pricing".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data a_pricing_worker_that_dies_is_declared
+
+run_mutation "supervise: the ingest runner's death is announced to no one" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            crate::supervise::spawn_supervised("geode-ingest".to_string(), stop, move || {' \
+  '            crate::supervise::spawn_supervised("geode-ingest".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data an_ingest_runner_that_dies_is_declared
+
+run_mutation "supervise: discovery's death is announced to no one" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            crate::supervise::spawn_supervised("geode-discovery".to_string(), stopped, move || {' \
+  '            crate::supervise::spawn_supervised("geode-discovery".to_string(), crate::supervise::unwatched(), move || {' \
+  geode-data a_discovery_thread_that_dies_is_declared
+
+run_mutation "supervise: a fetch worker's death is announced to no one" \
+  crates/geode-data/src/ingest/fetch.rs \
+  '            crate::supervise::spawn_supervised(name.clone(), stop, move || run(fetch, rx, sink))' \
+  '            crate::supervise::spawn_supervised(name.clone(), crate::supervise::unwatched(), move || run(fetch, rx, sink))' \
+  geode-data a_fetch_worker_that_dies_is_declared
+
+run_mutation "supervise: a receiver's death is announced to no one" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '            format!("geode-subscribe-{}", spec.name),
+            stopped,' \
+  '            format!("geode-subscribe-{}", spec.name),
+            crate::supervise::unwatched(),' \
+  geode-data a_receiver_that_dies_is_declared
+
+run_mutation "supervise: an egress worker's death is announced to no one" \
+  crates/geode-data/src/egress.rs \
+  '                        format!("geode-egress-{}", spec.name),
+                        EventSink::clone(&sink),' \
+  '                        format!("geode-egress-{}", spec.name),
+                        crate::supervise::unwatched(),' \
+  geode-data an_egress_worker_that_dies_is_declared
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
