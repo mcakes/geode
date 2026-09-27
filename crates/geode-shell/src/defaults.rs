@@ -51,7 +51,11 @@ context = "workspace"
 "shift+up" = "workspace::resize_up"
 "shift+right" = "workspace::resize_right"
 "mod+e" = "workspace::toggle_split_orientation"
-"mod+s" = "workspace::toggle_stack"
+"mod+s" = "stack::split"
+"mod+shift+h" = "stack::pull_left"
+"mod+shift+j" = "stack::pull_down"
+"mod+shift+k" = "stack::pull_up"
+"mod+shift+l" = "stack::pull_right"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+w" = "workspace::close_tile"
 "shift+d" = "workspace::duplicate_horizontal"
@@ -143,9 +147,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Toggle split orientation",
         "Workspace",
     );
-    // Turn the focused tile's split into a stack or its stack into a split;
-    // ShellView dispatches it because the new split's orientation needs geometry.
-    action(reg, "workspace::toggle_stack", "Toggle stack", "Workspace");
     // Duplicate the focused tile with its serialized state: horizontal places
     // it to the right, vertical places it below.
     action(
@@ -180,6 +181,29 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "stack::prev", "Stack: Previous", "Workspace");
     action(reg, "stack::pick", "Stack: Pick…", "Workspace");
     action(reg, "stack::unstack", "Stack: Unstack", "Workspace");
+    // Split a whole stack back into tiles, or pull the visible neighbour in a
+    // direction into the focused tile's slot. ShellView dispatches both: the
+    // split's orientation needs geometry and a refused pull leaves a notice.
+    action(reg, "stack::split", "Stack: Split into tiles", "Workspace");
+    action(
+        reg,
+        "stack::pull_left",
+        "Stack: Pull from left",
+        "Workspace",
+    );
+    action(
+        reg,
+        "stack::pull_down",
+        "Stack: Pull from below",
+        "Workspace",
+    );
+    action(reg, "stack::pull_up", "Stack: Pull from above", "Workspace");
+    action(
+        reg,
+        "stack::pull_right",
+        "Stack: Pull from right",
+        "Workspace",
+    );
     for i in 1..=9 {
         action(
             reg,

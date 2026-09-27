@@ -16559,98 +16559,135 @@ run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
   geode-shell \
   stacking_onto_a_fullscreen_tile_exits_fullscreen
 
-# Toggle stack: the split-to-stack direction takes every tile under the
-# focused leaf's parent split and acts on the innermost container only;
-# the stack-to-split direction gives equal ratios. (The new stack's
-# `active` index is also set by `set_focus`, so neither alone is
-# observable and no entry defends it.)
-run_mutation "toggle stack: a nested split and its stacks flatten" \
-  crates/geode-shell/src/tiling/tree.rs \
-  '                    let mut members = Vec::new();
-                    collect_leaves(node, &mut members);' \
-  '                    let mut members = Vec::new();
-                    for c in children.iter() {
-                        if let Node::Leaf(id) = c {
-                            members.push(*id);
-                        }
-                    }' \
-  geode-shell \
-  toggle_stack_flattens_a_nested_split_and_its_stacks
 
-run_mutation "toggle stack: only the innermost container converts" \
+# Split and pull: `stack::split` (mod+s) turns the focused stack into an
+# equal split in its own slot; `stack::pull_*` (mod+shift+h/j/k/l) pulls
+# the visible neighbour into the focused tile's slot in screen order.
+# The stack's `active` index is left to `set_focus`, the one door.
+run_mutation "stack split: members get equal ratios" \
   crates/geode-shell/src/tiling/tree.rs \
-  '                    if !matches!(slot, Node::Leaf(_)) {
-                        return toggle_at(slot, focused, orientation);' \
-  '                    if matches!(slot, Node::Stack { .. }) {
-                        return toggle_at(slot, focused, orientation);' \
+  '        let share = 1.0 / children.len() as f32;' \
+  '        let share = 0.5;' \
   geode-shell \
-  toggle_stack_converts_only_the_innermost_split
+  split_stack_gives_three_members_equal_room
 
-run_mutation "toggle stack: exits fullscreen" \
+run_mutation "stack split: exits fullscreen" \
   crates/geode-shell/src/tiling/tree.rs \
-  '            // layout operation trumps a stale fullscreen.
-            self.fullscreen = None;' \
-  '            // layout operation trumps a stale fullscreen.' \
+  '        // operation trumps a stale fullscreen.
+        self.fullscreen = None;' \
+  '        // operation trumps a stale fullscreen.' \
   geode-shell \
-  toggle_stack_exits_fullscreen
+  split_stack_exits_fullscreen
 
-run_mutation "toggle stack: a split stack gets equal ratios" \
+run_mutation "stack pull: the pulled tile leaves its old slot" \
   crates/geode-shell/src/tiling/tree.rs \
-  '                    let share = 1.0 / children.len() as f32;' \
-  '                    let share = 0.5;' \
+  '            .and_then(|n| remove_leaf(n, pulled, &mut done))' \
+  '            .map(|n| {
+                done = true;
+                n
+            })' \
   geode-shell \
-  toggle_stack_round_trip_gives_an_equal_flat_split
+  pull_right_stacks_the_neighbour_behind_the_focused_tile
 
-run_mutation "toggle stack: mod+s is bound" \
+run_mutation "stack pull: stack order follows the screen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        let first = matches!(dir, Direction::Left | Direction::Up);' \
+  '        let first = false;' \
+  geode-shell \
+  repeated_pulls_sweep_a_row_in_screen_order_either_way
+
+run_mutation "stack pull: focus stays on its tile" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        insert(&mut root, focused, pulled, first);
+        self.root = Some(root);
+        self.set_focus(focused);' \
+  '        insert(&mut root, focused, pulled, first);
+        self.root = Some(root);
+        self.set_focus(pulled);' \
+  geode-shell \
+  pull_right_stacks_the_neighbour_behind_the_focused_tile
+
+run_mutation "stack pull: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).pull(dir)' \
+  '        self.tree_for_mut(FocusRegion::Main).pull(dir)' \
+  geode-shell \
+  pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone
+
+run_mutation "stack split: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).split_stack(orientation)' \
+  '        self.tree_for_mut(FocusRegion::Main).split_stack(orientation)' \
+  geode-shell \
+  pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone
+
+run_mutation "stack split: mod+s is bound" \
   crates/geode-shell/src/defaults.rs \
-  '"mod+s" = "workspace::toggle_stack"
+  '"mod+s" = "stack::split"
 ' \
   '' \
   geode-shell \
-  mod_s_splits_the_focused_stack_and_stacks_it_back
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
-run_mutation "toggle stack: a conversion dirties the session" \
-  crates/geode-shell/src/shell/input.rs \
-  '                .toggle_stack(orientation)
-            {
-                self.session_dirty = true;' \
-  '                .toggle_stack(orientation)
-            {' \
+run_mutation "stack pull: mod+shift+k is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+shift+k" = "stack::pull_up"
+' \
+  '' \
   geode-shell \
-  mod_s_splits_the_focused_stack_and_stacks_it_back
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
-run_mutation "toggle stack: a split stack takes the add direction" \
+run_mutation "stack pull: each action names its own direction" \
+  crates/geode-shell/src/shell/input.rs \
+  '        "stack::pull_up" => Some(Direction::Up),' \
+  '        "stack::pull_up" => Some(Direction::Down),' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack split: takes the add direction" \
   crates/geode-shell/src/shell/input.rs \
   '            let orientation = self.add_direction.resolve(None, rect);
             if self
                 .services
                 .workspaces
                 .active_mut()
-                .toggle_stack(orientation)' \
+                .split_stack(orientation)' \
   '            let _ = rect;
             let orientation = crate::tiling::Orientation::Horizontal;
             if self
                 .services
                 .workspaces
                 .active_mut()
-                .toggle_stack(orientation)' \
+                .split_stack(orientation)' \
   geode-shell \
-  mod_s_splits_the_focused_stack_and_stacks_it_back
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
-run_mutation "toggle stack: acts in the focused region" \
-  crates/geode-shell/src/tiling/workspaces.rs \
-  '        let region = self.region;
-        self.tree_for_mut(region).toggle_stack(orientation)' \
-  '        self.tree_for_mut(FocusRegion::Main).toggle_stack(orientation)' \
-  geode-shell \
-  toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone
-
-run_mutation "toggle stack: a refusal leaves a notice" \
+run_mutation "stack split: dirties the session" \
   crates/geode-shell/src/shell/input.rs \
-  '                self.notice = Some(NOTHING_TO_STACK);' \
+  '                .split_stack(orientation)
+            {
+                self.session_dirty = true;' \
+  '                .split_stack(orientation)
+            {' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack pull: dirties the session" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.services.workspaces.active_mut().pull(dir) {
+                self.session_dirty = true;' \
+  '            if self.services.workspaces.active_mut().pull(dir) {' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack pull: a refusal leaves a notice" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NO_TILE_THAT_WAY);' \
   '                {}' \
   geode-shell \
-  mod_s_on_a_lone_tile_leaves_a_notice
+  a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice
 
 # Brief's original pick (drop the `ix < active` branch entirely) turned
 # out unreachable: both `remove_focused` and `pop_out` always target

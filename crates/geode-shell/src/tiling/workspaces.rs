@@ -357,11 +357,18 @@ impl Workspace {
         self.tree_for_mut(region).unstack_focused(orientation)
     }
 
-    /// Convert the focused region's innermost container between split and
-    /// stack; return false for an empty region or a lone tile.
-    pub fn toggle_stack(&mut self, orientation: Orientation) -> bool {
+    /// Split the focused region's focused stack in its own slot; return false
+    /// for a plain tile or an empty region.
+    pub fn split_stack(&mut self, orientation: Orientation) -> bool {
         let region = self.region;
-        self.tree_for_mut(region).toggle_stack(orientation)
+        self.tree_for_mut(region).split_stack(orientation)
+    }
+
+    /// Pull the visible tile beside focus in `dir`, within the focused
+    /// region, into the focused tile's slot; return false with no neighbour.
+    pub fn pull(&mut self, dir: Direction) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).pull(dir)
     }
 
     /// Find `id`'s member index and stack length across this workspace's trees.
@@ -1600,16 +1607,27 @@ mod tests {
     }
 
     #[test]
-    fn toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone() {
+    fn pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let remaining = ws.active().tree().focused().expect("one tile left in main");
         assert!(ws.active_mut().focus_main_tile(remaining));
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let main_before = ws.active().tree().clone();
-        assert!(ws.active_mut().toggle_stack(Orientation::Vertical));
-        let dock = ws.active().docks().get(DockSide::Left).tree();
-        assert_eq!(dock.visible_tiles().len(), 1, "the dock's split stacked");
+        let dirs = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ];
+        assert!(
+            dirs.into_iter().any(|d| ws.active_mut().pull(d)),
+            "the dock's other tile is beside focus"
+        );
+        let dock = |ws: &Workspaces| ws.active().docks().get(DockSide::Left).tree().clone();
+        assert_eq!(dock(&ws).visible_tiles().len(), 1, "pulled into one slot");
+        assert!(ws.active_mut().split_stack(Orientation::Vertical));
+        assert_eq!(dock(&ws).visible_tiles().len(), 2, "split back");
         assert_eq!(ws.active().tree(), &main_before);
     }
 

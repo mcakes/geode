@@ -12,7 +12,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
-use crate::tiling::{Orientation, apply_workspace_action};
+use crate::tiling::{Direction, Orientation, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -28,9 +28,20 @@ use super::{
 /// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
-/// The notice produced when `workspace::toggle_stack` finds no split or stack
-/// around focus: an empty region or a lone tile.
-pub(super) const NOTHING_TO_STACK: &str = "nothing to stack";
+/// The notice produced when a `stack::pull_*` finds no visible tile beside
+/// focus in its direction.
+pub(super) const NO_TILE_THAT_WAY: &str = "no tile that way";
+
+/// The direction a `stack::pull_*` action names, or `None` for any other id.
+fn pull_direction(id: &str) -> Option<Direction> {
+    match id {
+        "stack::pull_left" => Some(Direction::Left),
+        "stack::pull_down" => Some(Direction::Down),
+        "stack::pull_up" => Some(Direction::Up),
+        "stack::pull_right" => Some(Direction::Right),
+        _ => None,
+    }
+}
 
 /// The notice produced when a palette action tries to open transient chrome
 /// (the command line, find, or the stack list) while a dialog is open.
@@ -147,9 +158,9 @@ impl ShellView {
             }
             return;
         }
-        if action.0 == "workspace::toggle_stack" {
-            // A stack becomes a split shaped like `stack::unstack`'s: the
-            // configured add direction resolved against the focused slot.
+        if action.0 == "stack::split" {
+            // The split is shaped like `stack::unstack`'s: the configured add
+            // direction resolved against the focused slot.
             let rect = self
                 .services
                 .workspaces
@@ -160,12 +171,22 @@ impl ShellView {
                 .services
                 .workspaces
                 .active_mut()
-                .toggle_stack(orientation)
+                .split_stack(orientation)
             {
                 self.session_dirty = true;
                 self.note_keyboard_focus_move(window, cx);
             } else {
-                self.notice = Some(NOTHING_TO_STACK);
+                self.notice = Some(NOT_IN_A_STACK);
+            }
+            return;
+        }
+        if let Some(dir) = pull_direction(&action.0) {
+            // Focus stays on its tile; the pulled one is hidden, and the
+            // occupant sync delivers both tiles' new stack positions.
+            if self.services.workspaces.active_mut().pull(dir) {
+                self.session_dirty = true;
+            } else {
+                self.notice = Some(NO_TILE_THAT_WAY);
             }
             return;
         }

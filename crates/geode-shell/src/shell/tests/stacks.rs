@@ -167,7 +167,7 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
 }
 
 #[gpui::test]
-fn mod_s_splits_the_focused_stack_and_stacks_it_back(cx: &mut gpui::TestAppContext) {
+fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, log, left, right, top) = stacked_shell(cx);
     let visible = |cx: &gpui::VisualTestContext| {
         shell.read_with(cx, |s, _| {
@@ -211,19 +211,28 @@ fn mod_s_splits_the_focused_stack_and_stacks_it_back(cx: &mut gpui::TestAppConte
         Some(top)
     );
 
-    // Focus sits in the split the stack became, so the same chord
-    // restacks that slot and leaves `left` beside it.
-    cx.simulate_keystrokes("alt-s");
+    // `top` sits below `right`: pulling up puts `right` first in top's
+    // slot, and pulling left then puts `left` first again.
+    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    cx.simulate_keystrokes("alt-shift-k");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
     assert_eq!(visible(&cx), vec![left, top]);
     assert_eq!(stack_events(&log, right).last(), Some(&Some((1, 2))));
     assert_eq!(stack_events(&log, top).last(), Some(&Some((2, 2))));
+    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    cx.simulate_keystrokes("alt-shift-h");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![top], "one slot, focus still showing");
+    assert_eq!(stack_events(&log, left).last(), Some(&Some((1, 3))));
+    assert_eq!(stack_events(&log, top).last(), Some(&Some((3, 3))));
 }
 
 #[gpui::test]
-fn mod_s_on_a_lone_tile_leaves_a_notice(cx: &mut gpui::TestAppContext) {
+fn a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
@@ -234,8 +243,19 @@ fn mod_s_on_a_lone_tile_leaves_a_notice(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(
         shell.read_with(&cx, |s, _| s.notice),
-        Some("nothing to stack")
+        Some("not in a stack")
     );
+    for chord in ["alt-shift-h", "alt-shift-j", "alt-shift-k", "alt-shift-l"] {
+        cx.simulate_keystrokes(chord);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.notice),
+            Some("no tile that way"),
+            "{chord}"
+        );
+    }
 }
 
 #[gpui::test]

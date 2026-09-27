@@ -57,7 +57,8 @@ is reserved for the shipped literal bindings.
 | `ctrl+k` | command palette, the universal fallback |
 | `mod+h/j/k/l`, `mod+1..9` | move focus between tiles, switch workspace |
 | `mod+n`, `mod+f`, `mod+e` | add a tile, fullscreen, flip a split |
-| `mod+[`, `mod+]`, `mod+s` | cycle a tile stack, turn a split into a stack and back |
+| `mod+[`, `mod+]` | cycle a tile stack |
+| `mod+shift+h/j/k/l`, `mod+s` | pull a neighbour into the tile's stack, split a stack into tiles |
 | `ctrl+1..9`, `ctrl+0` | grouping slots, clear |
 | `mod+g`, `mod+p`, `mod+t` | grouping picker, dimension picker, as-of |
 | `mod+/`, `mod+z`, `mod+shift+z` | scope text, scope undo, redo |
