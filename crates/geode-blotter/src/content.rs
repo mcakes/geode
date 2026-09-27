@@ -49,7 +49,9 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[("blotter::visual", "blotter::vis
 /// `^`/`$` sit beside `home`/`end` as the column-extreme pair (user ruling
 /// 2026-09-12: a general navigation grammar, the blotter its first
 /// surface); both are shifted punctuation on a US layout, so they bind as
-/// the bare character with no `shift` modifier.
+/// the bare character with no `shift` modifier. `g m` binds the shell's
+/// `tile::open_with`: a fragment may name any action, only its context
+/// must be the module's own.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "blotter && mode == normal"
@@ -59,6 +61,7 @@ context = "blotter && mode == normal"
 "h" = "blotter::left"
 "l" = "blotter::right"
 "g g" = "blotter::top"
+"g m" = "tile::open_with"
 "shift+g" = "blotter::bottom"
 "ctrl+d" = "blotter::page_down"
 "ctrl+u" = "blotter::page_up"
@@ -159,6 +162,9 @@ impl TileContent for BlotterContent {
     }
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize()
+    }
+    fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
+        self.tile.read(cx).launch_context(cx)
     }
 }
 
@@ -339,6 +345,7 @@ mod tests {
             "every fragment binding must name this module's own context: {diags:?}"
         );
         let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
         for (id, title) in ACTIONS {
             registry
                 .register(ActionDef {
@@ -364,6 +371,13 @@ mod tests {
                 "{id} is registered but the default keymap binds nothing to it"
             );
         }
+        for action in &bound {
+            assert!(
+                action.starts_with("blotter::") || *action == "tile::open_with",
+                "{action} is a shell action this module's keymap binds but does not name; \
+                 only tile::open_with is deliberately named here"
+            );
+        }
     }
 
     /// Moved here from the shell's own `defaults.rs` with the bindings
@@ -375,6 +389,7 @@ mod tests {
     fn caret_and_dollar_resolve_to_the_column_extremes() {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
         let mut registry = ActionRegistry::default();
+        geode_shell::defaults::register_builtin_actions(&mut registry);
         for (id, title) in ACTIONS {
             let _ = registry.register(ActionDef {
                 id: ActionId((*id).to_string()),
@@ -445,6 +460,9 @@ mod tests {
     fn v_and_shift_v_start_the_two_selections_and_h_moves_in_visual() {
         let doc = fragment_doc("blotter", DEFAULT_KEYMAP).unwrap();
         let mut registry = ActionRegistry::default();
+        // `g m` names the shell's `tile::open_with`; without the builtins
+        // registered the keymap build would warn and skip it.
+        geode_shell::defaults::register_builtin_actions(&mut registry);
         for (id, title) in ACTIONS {
             let _ = registry.register(ActionDef {
                 id: ActionId((*id).to_string()),
@@ -498,6 +516,20 @@ mod tests {
         );
         assert_eq!(factory.default_keymap(), Some(DEFAULT_KEYMAP));
         assert_eq!(factory.contexts(), vec!["blotter"]);
+    }
+
+    /// `g m` sits beside `g g` in normal mode and names the shell's action.
+    #[test]
+    fn g_m_opens_with_context_in_normal_mode() {
+        let t: toml::Table = DEFAULT_KEYMAP.parse().unwrap();
+        let normal = t["bindings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["context"].as_str() == Some("blotter && mode == normal"))
+            .unwrap();
+        assert_eq!(normal["keys"]["g m"].as_str(), Some("tile::open_with"));
+        assert_eq!(normal["keys"]["g g"].as_str(), Some("blotter::top"));
     }
 
     /// One tile per open window, its own `VisualTestContext`.

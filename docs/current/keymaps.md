@@ -160,6 +160,11 @@ module roster from loading. Retained fragment-filter diagnostics are shown on
 reload but do not themselves reject a user edit; errors from the ordinary
 compiler still participate in the reload gate.
 
+A fragment may name any action, not only ones its own module registers, so
+long as its context is the module's own: both the blotter's and the pricer's
+default fragments bind `g m` to the shell's `tile::open_with` inside their own
+`mode == normal` context.
+
 See [input and dialogs](input-and-dialogs.md#keyboard-ownership) for surfaces
 that bypass sequences and counts while handling text, and for the limits of
 palette binding badges and which-key hints.

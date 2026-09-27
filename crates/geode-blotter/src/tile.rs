@@ -465,6 +465,14 @@ impl BlotterTile {
         &self.table
     }
 
+    /// The launch context at the cursor: its underlying, when it has one.
+    /// In visual mode this is the cursor row, not the selection.
+    pub fn launch_context(&self, cx: &App) -> geode_core::launch::LaunchContext {
+        geode_core::launch::LaunchContext {
+            underlying: self.table.read(cx).delegate().cursor_underlying(),
+        }
+    }
+
     pub fn last_query(&self) -> Option<(u64, Vec<String>)> {
         (self.tag > 0).then(|| (self.tag, self.last_grouping.clone()))
     }
@@ -5965,6 +5973,7 @@ mod tests {
                 .push(geode_core::view::JoinSpec {
                     dataset: "joined".into(),
                     on: vec!["lhu".into()],
+                    required: true,
                 });
             views.iter_mut().find(|v| v.name == "wide").unwrap().dataset = "other".into();
         });

@@ -83,6 +83,10 @@ cargo bench -p geode-marketdata    # matrix model and draft
   their separate padded frame. Fixed column widths can still constrain dates.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.
+- A panel opened through an add (palette, tile picker, `open_with`,
+  duplicate) with no underlying opens the underlying picker at once; a
+  restored panel does not. Every panel kind accepts an underlying launch
+  context.
 
 ## Input and popup contracts
 

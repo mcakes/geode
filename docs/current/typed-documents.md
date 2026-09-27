@@ -85,11 +85,19 @@ one lookup, so chained derived dimensions are not recursively resolved.
 
 [`ViewSpec`](../../crates/geode-core/src/view.rs) reads dataset, joins,
 selected columns, grouping, sort, and per-column display properties. Parsing
-and schema validation are separate. `validate` checks the primary dataset,
-join datasets, selected-column references, and grouping references. Derived
-dimensions must resolve to a source column in the primary dataset. It does
-not validate derived SQL, join keys, sort keys, or every column's role;
-query compilation performs further checks.
+and schema validation are separate. `validate` checks the primary dataset, join
+datasets, each join's keys against both the joined dataset's grains and the
+view's own grouping, selected-column references, a `measure` column's role in the
+primary dataset, a `dimension` column's reachability through the grouping or a
+join, and grouping references. Derived dimensions must resolve to a source column
+in the primary dataset. It does not validate derived SQL or sort keys; query
+compilation performs those.
+
+`validate` is the gate, not advice. An error means the view cannot be honoured,
+and the data service refuses it by name when queried. A column's `kind` defaults
+to `measure`; a join and a column take `required`, defaulting to true, and
+`required = false` turns that declaration's error into a warning naming what was
+dropped, leaving the view open.
 
 A top-level string `default = "name"` marks that view when present. A table
 named `default` is an ordinary view. Without a string default, parsed views

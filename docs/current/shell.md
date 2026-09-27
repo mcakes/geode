@@ -66,6 +66,30 @@ occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
 must requery when shown if their followed versions changed.
 
+### Launch context
+
+A tile reports `TileContent::launch_context` on demand: what a module knows
+at its cursor that another module may open on, such as an underlying. A
+field is empty whenever the cursor names no single value, never a guessed
+key, because a panel opened on a made-up value is a plausible wrong answer.
+
+`tile::open_with` pulls the focused tile's context and lists, in the shared
+choice dialog, every roster kind whose `ModuleFactory::accepts` covers it,
+titled `Open {underlying} in…`. A pick always splits: the factory's
+`launch_state` translates the context into that kind's own restored-state
+table, so a source and a target agree without depending on each other. An
+empty context falls back to the plain tile picker; no accepting kind
+produces a notice instead of opening anything. The context is captured when
+the dialog opens, so moving the source tile's cursor afterward does not
+change what a pick creates.
+
+`TileContent::launched` runs once, deferred with `cx.defer_in` past the
+current render, for an occupant `ShellView::add_tile` created (an add or a
+duplicate, never a session restore) that is the focused tile on its first
+render. A module that is useless without further state, such as a panel
+added with no state — from the palette, the tile picker, or
+`tile::open_with` falling back to the picker — asks for it here.
+
 ## Actions and keyboard routing
 
 The action registry is the vocabulary shared by the keymap and command

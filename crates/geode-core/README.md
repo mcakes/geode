@@ -27,7 +27,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `scopes` | Saved scopes (`scopes.toml`), including each scope's ticked named-expression references. Names are read and persisted without checking them against `expressions.toml`; `Scope::resolve` is where a missing or invalid one fails. |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
-| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. |
+| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. `ViewSpec::validate` resolves every reference the compiler will resolve: the primary and join datasets, each join's keys against the joined dataset's grains and against the grouping, selected columns, a measure column's role, a dimension column's reachability, and grouping columns. Derived SQL and sort keys remain the compiler's. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
 | `grid` | `grid::selection`: a grid selection (whole rows or a cell block) anchored by row and column identity rather than display index, resolved to display ranges against the current order, the top-most-rows rule for summing a group without double-counting its children, and the accumulator and formatter behind a selection's footer summary. Shared by any module hosting a selectable grid; the blotter is its first user. |
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
@@ -73,6 +73,14 @@ for its readiness strategy; the data service checks those boundaries.
 - Configuration readers return diagnostics with usable values. Depending on
   the rule, invalid input is skipped, defaulted, or retained with a warning;
   a diagnostic does not imply that the entire document was rejected.
+- `ViewSpec::validate` is the exception, and it is a gate rather than advice: an
+  error there means the view cannot be honoured, and the data service refuses it
+  by name instead of querying it. A warning means the author declared the failing
+  join or column `required = false` and it was dropped, or that a join supplies
+  no column and is dead weight; the view still serves. A column's `kind` defaults
+  to `measure` and `required` defaults to true, so a declaration that says
+  nothing says "I meant this". What validate still leaves to the compiler is
+  derived SQL, which DuckDB's binder rejects, and sort keys.
 - `Snapshot` and `DocumentRows` store columns; the tree index stores parallel
   arrays. Snapshot construction prepares concatenated columns and the tree
   before UI delivery.

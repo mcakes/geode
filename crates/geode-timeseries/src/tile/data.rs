@@ -48,7 +48,21 @@ impl TimeseriesTile {
                 self.arrive(cx);
             }
         }
+        self.release_view(cx);
         cx.notify();
+    }
+
+    /// Ask for the view a move left waiting behind the answered request.
+    /// A staged result waits for its promotion, which releases instead, so
+    /// the requery never discards a result the flip barrier still holds.
+    pub(super) fn release_view(&mut self, cx: &mut Context<Self>) {
+        if !self.view_waiting || self.query_in_flight || self.staged.is_some() {
+            return;
+        }
+        self.view_waiting = false;
+        if self.visible && !self.model.slots().is_empty() {
+            self.requery(cx);
+        }
     }
 
     /// Complete fetch tracking and update every slot over this pair.
@@ -148,8 +162,10 @@ impl TimeseriesTile {
     pub(super) fn requery(&mut self, cx: &mut Context<Self>) {
         // A fresh question supersedes whatever was staged for the old
         // one, whether or not `promote`'s own version check would have
-        // caught it.
+        // caught it. It also asks for the current view, so a waiting
+        // view move has nothing left to ask.
         self.staged = None;
+        self.view_waiting = false;
         let (as_of, versions) = {
             let frame = self.frame.read(cx);
             (frame.as_of().clone(), frame.versions())
@@ -265,6 +281,7 @@ impl TimeseriesTile {
             self.apply_result(result, cx);
             cx.notify();
         }
+        self.release_view(cx);
     }
 
     /// Install a delivered result: the new full extent, the view, the

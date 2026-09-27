@@ -266,6 +266,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // The tile picker lists roster kinds. Its id is outside the `tile::add_`
     // prefix so parse_add_action cannot mistake it for a specific module kind.
     action(reg, "tile::add", "Add a tile…", "Tiles");
+    // Pulls the focused tile's launch context and lists the kinds that
+    // accept it. Outside the `tile::add_` prefix, like `tile::add`.
+    action(reg, "tile::open_with", "Open with context…", "Tiles");
     // Control-1 through Control-9 activate grouping slots; empty slots are
     // ignored. Control-0 restores each following tile's view-default grouping.
     for i in 1..=9 {
