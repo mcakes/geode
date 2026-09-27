@@ -1103,6 +1103,33 @@ fn a_typed_commit_after_the_selection_cleared_mid_step_keeps_the_value(
     );
 }
 
+/// A typed value equal to the one the step already wrote leaves the
+/// draft looking exactly as the steps left it; the commit must still
+/// keep the typed cell and the other cells' steps, not restore the
+/// pre-`i` draft on close.
+#[gpui::test]
+fn a_typed_commit_equal_to_the_stepped_value_keeps_every_step(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
+    h.dispatch(&mut vcx, "visual_block", None); // the same key again clears
+    assert!(resolved(&h, &vcx).is_none());
+    // Not the seeded text (which is the untouched-steps path), but the
+    // same number the step wrote.
+    h.set_editor(&mut vcx, "0.50010");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.editor_value(&vcx).is_none());
+    assert_eq!(
+        h.row_texts(&vcx, 1)[3..],
+        ["0.4001", "0.5001", "0.6000"],
+        "the typed cell and its stepped neighbour keep their values"
+    );
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1001", "0.2001", "0.3000"]);
+}
+
 /// Under `:auto replace` a delivery reverts the draft and says so. The
 /// escape after it has no steps to keep and must not claim any, nor
 /// overwrite the replace disclosure.

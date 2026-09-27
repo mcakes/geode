@@ -3009,6 +3009,10 @@ impl MarketDataTile {
                 );
             }
         }
+        // A written value is kept: the close below must never restore the
+        // pre-`i` draft over it, even when the write left the draft equal
+        // to what the steps had made it.
+        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
         self.close_editor(window, cx);
         self.notice = None;
         let snapshot = match self.painted_snapshot() {
