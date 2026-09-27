@@ -57,6 +57,20 @@ themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
 
+A multi-screen dialog registers its back step with `dialog::set_back`: a
+predicate over its current state and the transition Escape's final back step
+runs. While the predicate holds, the shared title row paints a ghost Back
+button left of the title, with a tooltip naming Escape. A click leaves exactly
+one screen: it discards whatever Escape's earlier steps would discard, then
+takes that same transition, and synchronizes the shared input as every
+pointer transition does. The object dialog shows Back in Naming, Edit, Column,
+and Values; the dimension picker in Values; the log-level choice in its level
+step. Browse, Columns, the log-level targets, and one-step dialogs paint none.
+In the object dialog one click cancels an open value field with its typed
+text, reverts filtering, and clears a kept query before leaving; while a y/n
+confirmation is pending the button stays painted and its click does nothing.
+The as-of dialog's Custom field and timeseries popups have no Back button.
+
 Normal/Filter dialogs use the [shared filter contract](shell.md#dialog-filtering):
 Escape restores the entry query, bare Enter keeps the typed query, and neither
 exit activates a row. Value fields, naming, Settings choices, and keybinding
@@ -246,9 +260,10 @@ current frame scope, preserving its other fields:
 
 Enter is not gated on loading, success, or a nonempty filtered list. While
 loading or after a query failure it can still apply pre-ticks or remove the
-column when no fallback exists. Escape from Values discards the stage's query,
-results, and ticks and returns to the previous column. Escape from Columns
-closes the dialog. Neither Escape step applies the draft.
+column when no fallback exists. Escape or the title row's Back button from
+Values discards the stage's query, results, and ticks and returns to the
+previous column. Escape from Columns closes the dialog. Neither step applies
+the draft.
 
 ## As-of selector
 
@@ -287,7 +302,7 @@ level stage.
 |---|---|
 | Grouping | View default, then filled slots 1–9; opens on the active choice. Empty-query digits commit directly, with zero choosing the default. Unfilled digits are consumed. Commit rechecks slot existence, reports removal if needed, then closes. |
 | Tile kind | Roster order excluding the placeholder. Closes before adding to the tile focused at commit time: fills a placeholder or splits a real tile using the configured placement. |
-| Log level | Choose a logging target, then its level. Escape from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
+| Log level | Choose a logging target, then its level. Escape or the Back button from levels returns to a rebuilt target list and clears the filter; a level choice submits `Diagnostics::request_level`. |
 
 Closing and reopening creates fresh dialog state. These pickers apply on
 Enter; they do not use Normal/Filter mode's keep-query Enter.
@@ -329,6 +344,80 @@ palette row would. Opening the menu takes the shell root's focus; if the
 scope text field held focus, the menu's own close returns it there, and so
 does closing the dialog or picker one of its rows opened.
 
-Validation is syntax-only. The editor has no dataset against which to check
-column names, types, or operator compatibility, so an accepted expression may
-still fail when a tile queries its dataset.
+### Suggestions
+
+While the field is open, a live list under it
+([`shell/expr_suggest.rs`](../../crates/geode-shell/src/shell/expr_suggest.rs),
+pure state in
+[`exprcomplete.rs`](../../crates/geode-shell/src/exprcomplete.rs)) shows what
+fits at the caret, reading the partial text through
+[`geode_core::scope::complete`](../../crates/geode-core/src/scope/complete.rs).
+It updates on every keystroke and every caret move, not only on a full parse.
+
+The rows depend on the caret's position in the grammar:
+
+| Caret is after | Rows offered |
+|---|---|
+| Nothing, `(`, `and`, `or`, `not` | Every column, then `not` and `(` |
+| A column | The operators valid for that column's type |
+| An operator, or inside an open `in (` list | Values for that column, when there are any to list |
+| A complete term | `and`, `or`, plus `)` when a paren is open (or `,` / `)` inside an `in` list) |
+
+Right after typing `in` and before its `(`, the only row offered is `(` itself.
+
+Operators are filtered by the column's type: text offers `= != in like`;
+number, date, and timestamp offer `= != < <= > >= in`; bool offers `= !=`;
+a derived dimension offers `= != in`. `<>` still parses but is never offered;
+it is a synonym for `!=`.
+
+A value list is offered only for a categorical text column (a dimension's
+dictionary): a distinct query returns its values with row counts, requested
+once per column per dialog opening — the cache resets each time the field
+opens, and a failed request is not retried again within that opening. Every
+column is requested under one query-pool key, and the pool keeps only the
+newest request per key, so at most one request is outstanding: asking for a
+second column forgets a first that has not answered, and returning to it
+asks again rather than showing `loading values…` for good. The
+hint reads `loading values…` while the request is in flight and `values
+unavailable: <reason>` if it fails. A derived dimension lists its configured
+labels with no query, and a bool column lists `true`/`false`. Every other
+kind — non-categorical text such as a key, and number, date, or timestamp
+columns — gets a hint instead of a list; a date or timestamp hint gives an
+example literal to type in quotes. The values request is narrowed by a scope,
+never by the in-progress text (a half-typed value or a trailing `or` would
+make the typed prefix an unsound filter):
+
+| Mode | Values narrowed by |
+|---|---|
+| Whole | The frame's dimension selections, text filter and as-of. Its own expression is excluded, since the dialog replaces it. |
+| Add | The frame's full current scope, including its expression. |
+| Term | The frame's scope with the edited term removed. |
+
+A reply whose tag is not that column's latest is dropped, so a superseded
+request never overwrites a newer one.
+
+Tab inserts the highlighted row over the token under the caret and re-reads
+the new position; shift+tab moves the highlight back one row; the arrows and
+ctrl+p/ctrl+n move it by exactly one (page keys and ctrl+u/d/b/f stay the
+field's own caret keys). A row click inserts without moving focus out of the
+field. The click names its row by label, found in the list as it stands at
+the press, so a list rebuilt since paint never inserts a different row; the
+second press of a double-click is ignored, so it inserts once. Enter never inserts a suggestion; as the mode table above says, it
+always applies the whole draft. Every insertion is a range replace on the
+field's own text, so cmd+z undoes it like any other edit.
+
+A warning line under the rows names the first schema problem in the text — an
+unknown column (with `did you mean <name>?` when one is close) or an
+ordering/`like` comparison on a derived dimension — but never one whose span
+still touches the caret, so a warning never flags a word still being typed.
+Syntax errors stay silent while typing; they surface only on Enter.
+
+Enter refuses a syntax error or a schema error (the same check the warning
+line uses) with its message, and the text stays in the field. With no schema
+loaded (an empty vocabulary), the schema check does nothing and Enter
+accepts the text.
+
+Known limitations: the grammar has no date literal, so a malformed date is
+only caught at query time; values are not narrowed by the text already typed;
+ordering on a text column is not checked; and the blotter's own `:filter`
+command-line completion is unchanged by any of this.

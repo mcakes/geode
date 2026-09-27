@@ -56,7 +56,7 @@ Operators by column:
 | Column | Operators |
 |---|---|
 | text | `= != in like` |
-| number | `= != < <= > >= in` |
+| number, date, timestamp | `= != < <= > >= in` |
 | bool | `= !=` |
 | derived | `= != in` |
 
@@ -66,19 +66,19 @@ Values by column:
 
 | Column | Values offered |
 |---|---|
-| Text | Distinct values from the data, with row counts. |
+| Categorical text (a dimension's dictionary) | Distinct values from the data, with row counts. |
+| Non-categorical text (keys, free text) | No list. The hint says `text in quotes, e.g. 'ABC'`. |
 | Derived | The configured labels. No query. |
 | Bool | `true`, `false` |
 | Number, date, timestamp | No list. The hint says what to type, e.g. `a number, e.g. 1000` for a number. |
 
-For date and timestamp columns the hint wording is not settled. The grammar
-has no date literal, and the compiler binds a quoted string as a text
-parameter. The implementation first tests whether DuckDB compares that text
-parameter against a date column:
+For date and timestamp columns, the hint is `a date in quotes, e.g. '2026-09-26'`,
+and the operators are `= != < <= > >= in`. Verified against the pinned DuckDB:
 
-- If it does, the hint says `a date in quotes, e.g. '2026-09-26'`.
-- If it does not, the hint says `dates can't be compared in an expression yet`.
-  An operator on a date column also gets a live warning saying the same.
+- a text parameter compares correctly with both `date` and `timestamptz`
+  columns;
+- text that is not a date fails at query time with DuckDB's conversion
+  error.
 
 For text values, the rows appear in the order the distinct query returns them
 (by value). While the user types, the fuzzy matcher re-ranks them.
@@ -138,7 +138,7 @@ unsound as a narrowing.
 
 | Surface | Values narrowed by |
 |---|---|
-| Whole mode | The frame's dimension selections and as-of. The frame expression is excluded because the dialog replaces it. |
+| Whole mode | The frame's dimension selections, text filter and as-of. The frame expression is excluded because the dialog replaces it. |
 | Add mode | The frame's full current scope, including its expression. |
 | Term mode | The frame's scope with the edited term removed from the expression. |
 | Scopes dialog | The edited scope's own dimension selections and text filter, with the frame's as-of. |
@@ -248,15 +248,20 @@ A refresh costs one lex of the field (a short string) plus ranking of the
 candidates.
 
 - Columns and operators are small sets.
-- Values can be large. A key column such as `underlying_ref` can return
-  100k+ distinct values.
+- Values can be large. The perf log puts the shared fuzzy matcher at about 400 µs per 2,000
+  items. A key column such as `position_ref` can hold 1M distinct values.
+  Ranking those would cost about 20 ms per keystroke, over the 8 ms pure-UI
+  budget, and the distinct query itself would be large.
 
-Ranking must stay within the 8 ms pure-UI budget. Measure ranking of the
-largest demo column at 1M rows.
+Value lists are therefore fetched only for categorical columns. Those are
+dictionary-backed, so their size is bounded.
 
-If ranking exceeds the budget, add an optional `limit` to `DistinctParams`
-(most frequent first) and have the hint say `showing top <n>, keep typing`.
-Record the measurement in the performance log either way.
+- Non-categorical text, keys included, gets a hint and no list. This follows
+  the picker's own rule: a key has no dictionary to pick from.
+- The list keeps at most 50 ranked rows. The hint still states the total
+  value count.
+- A Criterion bench ranks 20,000 values, and the result is recorded in the
+  performance log.
 
 ## Testing
 
@@ -309,7 +314,8 @@ Record the measurement in the performance log either way.
 
 ## Known limitations
 
-- There is no date or timestamp literal in the grammar, so date columns get
-  a hint only.
+- There is no date literal in the grammar. A date column gets a hint and no
+  list, and a malformed date fails at query time.
+- Non-categorical text columns, such as keys, get no value list.
 - Values are not narrowed by the in-progress expression.
 - `:filter` completion is unchanged until the follow-up.

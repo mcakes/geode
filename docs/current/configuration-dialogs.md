@@ -34,7 +34,10 @@ After keeping a filter, a second Enter performs the stage's normal action: Brows
 Column or Values. Other rows retain their ordinary edit instructions.
 
 In Normal mode, Escape clears a remaining query, then returns to the parent
-stage, then closes. Open value fields and Naming handle their keys separately:
+stage, then closes. The title row's Back button, painted in every stage but
+Browse, returns to the parent stage in one click: it first cancels an open
+value field, reverts filtering, and clears the query, and it does nothing
+while a confirmation is pending. Open value fields and Naming handle their keys separately:
 Enter applies or chooses a field value, or validates and creates a name;
 Escape cancels that entry. They do not use the filter snapshot even though
 they focus the same input. Cancelling typed text or reverting a filter does
@@ -227,3 +230,20 @@ as such. Ticking values updates the parent scope's source; unticking the last
 one removes that dimension constraint. Selection summaries are presentation
 only: persistence dirtiness also compares source values so two different
 selections with identical truncated summaries still produce a write.
+
+## Scope expression field
+
+The Scopes domain's `expression` field carries the same suggestion list as
+the frame's expression dialogs — see [input-and-dialogs.md's Frame
+expression](input-and-dialogs.md#frame-expression) for the rows, operators,
+value rules, and keys, all of which apply here while the field is open. It
+narrows its values request by the edited scope's own dimension selections
+and text filter, with no expression (the field is replacing it), and the
+frame's as-of.
+
+Enter commits the field, as any other text field does, and refuses an
+unknown column or a bad operator on a derived dimension with an `expression:`
+notice, keeping the field open; escape reverts the field's text instead of
+committing it. Both keep the object dialog's own text-entry contract; only
+tab, the arrows, and ctrl+p/ctrl+n additionally serve the suggestion list
+while this field is open.

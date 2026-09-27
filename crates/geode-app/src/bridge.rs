@@ -2032,6 +2032,202 @@ role = "key"
         (services, tiles)
     }
 
+    type BlotterTiles = Rc<RefCell<Vec<Entity<geode_blotter::tile::BlotterTile>>>>;
+
+    /// Forwards to a blotter factory exactly as `main`'s handle does and
+    /// keeps every tile it builds, as [`KeepingPricer`] does for the
+    /// pricer.
+    struct KeepingBlotter {
+        factory: BlotterFactory,
+        tiles: BlotterTiles,
+    }
+
+    impl ModuleFactory for KeepingBlotter {
+        fn kind(&self) -> &'static str {
+            self.factory.kind()
+        }
+        fn register_actions(&self, registry: &mut ActionRegistry) {
+            self.factory.register_actions(registry)
+        }
+        fn contexts(&self) -> Vec<&'static str> {
+            self.factory.contexts()
+        }
+        fn default_keymap(&self) -> Option<&'static str> {
+            self.factory.default_keymap()
+        }
+        fn create(
+            &self,
+            tile: TileId,
+            restored: Option<&toml::Table>,
+            frame: Entity<geode_shell::frame::Frame>,
+            diagnostics: Entity<Diagnostics>,
+            window: &mut gpui::Window,
+            cx: &mut App,
+        ) -> geode_shell::module::TileOccupant {
+            let o = self
+                .factory
+                .create(tile, restored, frame, diagnostics, window, cx);
+            let view = o.view.clone().downcast().expect("a blotter tile");
+            self.tiles.borrow_mut().push(view);
+            o
+        }
+    }
+
+    /// Grid selection spec §5: a mouse-started selection leaves keyboard
+    /// focus on the tile. The click lands on a painted cell through the
+    /// real window, and the `j` after it travels the shell's real keymap
+    /// matcher and focus route — not `BlotterTile::dispatch` — so the
+    /// selection extending proves both that the press kept focus where
+    /// the shell looks for it and that the key reached the blotter.
+    #[gpui::test]
+    fn a_shift_click_selection_keeps_focus_so_a_typed_key_extends_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::grid::selection::SelectKind;
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        let (handle, rx) = DataHandle::for_tests();
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                 [[tree.columns]]\nname = \"delta01\"\nkind = \"measure\"\n",
+            )
+            .unwrap()],
+        ))
+        .0;
+        let tiles = BlotterTiles::default();
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(KeepingBlotter {
+            factory: BlotterFactory::new(
+                handle,
+                views,
+                NamedColours::default(),
+                SchemaSpec::default(),
+                DerivedDimensions::default(),
+                FindStyle::default(),
+                Duration::from_secs(900),
+            ),
+            tiles: tiles.clone(),
+        }));
+        roster.register_actions(&mut services.registry);
+        let (fragments, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        let layered = geode_shell::keymap::fragments::splice(
+            &[LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+            &fragments,
+        );
+        let (keymap, diags) = build_keymap(&layered, services.mod_alias, &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        let mut table = geode_shell::session::to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &geode_shell::palette_usage::PaletteUsage::new(),
+        );
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "blotter"
+            [tiles.1.state]
+            view = "tree"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        let window = open_shell_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let tile = tiles.borrow()[0].clone();
+
+        // Answer the tile's first query with three rows: root, L1, L2.
+        let tag = loop {
+            match rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the tile asks for its rows")
+            {
+                geode_data::Request::Query(p) => break p.tag,
+                _ => continue,
+            }
+        };
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: n == "delta01",
+        };
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Dict(vec![None, Some("L1".into()), Some("L2".into())]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        tile.update(&mut vcx, |t, cx| {
+            t.deliver(
+                geode_core::query::QueryOutcome {
+                    key: QueryKey(1),
+                    tag,
+                    snapshot: Ok(snap),
+                    submitted: std::time::Instant::now(),
+                },
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Shift+click the delta01 cell on L1: a block from the cursor.
+        let at = vcx
+            .debug_bounds("blotter-cell-1-1")
+            .expect("the L1 delta01 cell is painted")
+            .center();
+        vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::shift());
+        vcx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::shift());
+        vcx.run_until_parked();
+        let resolved = |vcx: &mut gpui::VisualTestContext| {
+            tile.read_with(vcx, |t, cx| t.table().read(cx).delegate().resolved.clone())
+        };
+        let r = resolved(&mut vcx).expect("the shift+click started a selection");
+        assert_eq!((r.kind, r.rows.clone()), (SelectKind::Block, 0..2));
+
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        let r = resolved(&mut vcx).expect("the selection is still live");
+        assert_eq!(
+            r.rows,
+            0..3,
+            "`j` typed after the click reached the blotter and extended the block"
+        );
+    }
+
     /// [`test_bridge`] with `pricer` as its pricer factory, and the sender
     /// of its mailbox so a test can post data events to the real drain.
     fn test_bridge_with_pricer(

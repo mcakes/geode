@@ -63,7 +63,27 @@ pub struct ShellModal {
     /// Optional key handler offered each key before the shell's modal fallback. See
     /// [`ModalKeyHandler`].
     pub on_key: Option<ModalKeyHandler>,
+    /// Optional pointer route for the dialog's one-screen back step. See
+    /// [`set_back`].
+    pub back: Option<ModalBack>,
 }
+
+/// A multi-screen dialog's back step for the title row's Back button. `available`
+/// reads the dialog's current state during rendering, with the same borrow contract as
+/// [`ShellModal::build`]; the button paints only while it returns `true`. `step`
+/// performs exactly the transition Escape's final back rung performs, discarding
+/// whatever earlier Escape rungs would discard, so one click leaves one whole screen.
+/// It must refuse by doing nothing when the state has no back step, because a click
+/// can arrive after the state changed under the painted button.
+#[derive(Clone)]
+pub struct ModalBack {
+    available: Rc<dyn Fn(&ShellView) -> bool>,
+    step: ModalBackStep,
+}
+
+/// The transition half of [`ModalBack`]. It receives the shell's own borrow from the
+/// click listener, so it must not update the shell entity again.
+type ModalBackStep = Rc<dyn Fn(&mut ShellView, &mut Window, &mut Context<ShellView>)>;
 
 /// Title-row builder with the same render-time borrow contract as `ModalBuilder`.
 pub type TitleExtraBuilder = Rc<dyn Fn(&ShellView, &mut App) -> AnyElement>;
@@ -76,6 +96,46 @@ pub fn set_title_extra(
     if let Some(modal) = view.modal.as_mut() {
         modal.title_extra = Some(Rc::new(build));
     }
+}
+
+/// Register the open modal's back step after opening it. Does nothing if no modal is
+/// open. See [`ModalBack`] for the contract of both closures.
+pub fn set_back(
+    view: &mut ShellView,
+    available: impl Fn(&ShellView) -> bool + 'static,
+    step: impl Fn(&mut ShellView, &mut Window, &mut Context<ShellView>) + 'static,
+) {
+    if let Some(modal) = view.modal.as_mut() {
+        modal.back = Some(ModalBack {
+            available: Rc::new(available),
+            step: Rc::new(step),
+        });
+    }
+}
+
+/// Whether the open modal currently offers a back step. Read during rendering to decide
+/// whether the title row paints its Back button.
+pub(crate) fn back_available(view: &ShellView) -> bool {
+    view.modal
+        .as_ref()
+        .and_then(|modal| modal.back.as_ref())
+        .is_some_and(|back| (back.available)(view))
+}
+
+/// The Back button's click: run the registered step when one is currently available,
+/// then synchronize the shared input's text and focus from the resulting state, as
+/// every pointer transition must.
+pub(crate) fn step_back(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    // Clone out of `view.modal` so the step can take the whole view.
+    let Some(back) = view.modal.as_ref().and_then(|modal| modal.back.clone()) else {
+        return;
+    };
+    if !(back.available)(view) {
+        return;
+    }
+    (back.step)(view, window, cx);
+    sync_dialog_text(view, window, cx);
+    cx.notify();
 }
 
 /// Suppress component bindings that compete with shell raw-key handling. Register after
@@ -180,6 +240,7 @@ pub fn open_shell_dialog_with_key<F>(
         title_extra: None,
         build: Rc::new(build),
         on_key,
+        back: None,
     });
 
     // Reuse the retained input, clearing text left by the previous dialog even if this
@@ -556,10 +617,12 @@ pub(crate) const MODAL_TOP_RATIO: f32 = 0.1;
 ///
 /// Backdrop mouse-down closes the modal; panel mouse-down stops propagation so clicking
 /// its content cannot also close it. Escape and other modal key routing belong to the
-/// shell's key handler.
+/// shell's key handler. `show_back` paints the Back button left of the title; the
+/// caller reads it from [`back_available`] each frame.
 pub(crate) fn render_modal(
     title: SharedString,
     title_extra: Option<AnyElement>,
+    show_back: bool,
     content: AnyElement,
     viewport_width: f32,
     viewport_height: f32,
@@ -582,10 +645,16 @@ pub(crate) fn render_modal(
         .px_4()
         .pt_4()
         .child(
-            div()
-                .text_lg()
-                .child(title)
-                .debug_selector(|| "shell-modal-title".to_string()),
+            h_flex()
+                .gap_1()
+                .items_center()
+                .when(show_back, |row| row.child(back_button(cx)))
+                .child(
+                    div()
+                        .text_lg()
+                        .child(title)
+                        .debug_selector(|| "shell-modal-title".to_string()),
+                ),
         )
         .child(
             h_flex().gap_2().items_center().children(title_extra).child(
@@ -648,6 +717,31 @@ pub(crate) fn render_modal(
             }),
         )
         .child(panel)
+}
+
+/// The title row's Back button: the pointer route for the registered back step. Its
+/// tooltip names Escape, the key whose final back rung the click performs. The click
+/// stops propagation so no surface beneath the button also handles it.
+fn back_button(cx: &mut Context<ShellView>) -> AnyElement {
+    div()
+        .id("shell-modal-back-site")
+        .debug_selector(|| "shell-modal-back".to_string())
+        .tooltip(crate::tips::tip_key(
+            "tip-shell-modal-back",
+            "Back",
+            "escape",
+        ))
+        .child(
+            Button::new("shell-modal-back")
+                .small()
+                .ghost()
+                .icon(IconName::ChevronLeft)
+                .on_click(cx.listener(|view, _event, window, cx| {
+                    cx.stop_propagation();
+                    step_back(view, window, cx);
+                })),
+        )
+        .into_any_element()
 }
 
 /// Render [`crate::footer`]'s categorized hint rows in stable order, preserving empty

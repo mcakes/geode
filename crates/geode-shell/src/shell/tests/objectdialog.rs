@@ -2206,6 +2206,177 @@ fn saved_scope_books(
     })
 }
 
+/// Walk the Scopes edit cursor to the Expression row with `j` and open it
+/// with `i`. Production keys only.
+fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+    open_scopes_field(shell, cx, "expression");
+}
+
+/// Open `mine`, walk the edit cursor to the `key` field with `j` and open
+/// it with `i`. Production keys only.
+fn open_scopes_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, key: &str) {
+    cx.simulate_keystrokes("enter"); // open `mine`
+    for _ in 0..12 {
+        let on_field = edit_draft(
+            shell,
+            cx,
+            |d| matches!(d.selected_row(), Some(objectdialog::EditRow::Field(i)) if d.fields[i].key == key),
+        );
+        if on_field {
+            break;
+        }
+        cx.simulate_keystrokes("j");
+    }
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+}
+
+/// The plain `text` field has no suggestions: nothing is painted under it
+/// and its tab still says there is nothing to complete.
+#[gpui::test]
+fn the_scopes_text_field_keeps_its_plain_tab(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_scopes_field(&shell, &mut cx, "text");
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the field is open"
+    );
+    assert!(
+        cx.debug_bounds("scope-expr-hint").is_none(),
+        "no suggestions"
+    );
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("nothing to complete here".to_string())
+    );
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "np");
+}
+
+/// The open `expression` field lists columns under it. Tab inserts one,
+/// and the draft's query follows, so the text survives the modal's text
+/// sync.
+#[gpui::test]
+fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    assert!(
+        cx.debug_bounds("scope-expr-row-npv").is_some(),
+        "columns listed under the field"
+    );
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "npv ");
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
+    cx.simulate_input("> 0");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.fields.iter().any(|f| f.key
+        == "expression"
+        && matches!(&f.kind, FieldKind::Text(t) if t == "npv > 0"))));
+}
+
+/// `cmd-z` takes a tab insertion back in the Scopes field, and the draft's
+/// query follows the input rather than restoring the insertion on the
+/// next text sync.
+#[gpui::test]
+fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "np");
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "np");
+}
+
+/// Enter on an unknown column refuses with the notice and keeps the field open.
+#[gpui::test]
+fn the_scopes_expression_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("bokk = 'A'");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "still open"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("expression: unknown column 'bokk'; did you mean 'book'?".to_string())
+    );
+}
+
+/// Values for the Scopes field are narrowed by that scope's own
+/// selections, not the frame's, and delivered under `EXPR_KEY`.
+#[gpui::test]
+fn the_scopes_expression_field_requests_values_under_the_edited_scope(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, app| {
+        let seen = seen.clone();
+        app.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                seen.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("book = ");
+    cx.run_until_parked();
+    let req = seen.borrow().last().cloned().expect("a request");
+    assert_eq!(req.key, crate::shell::EXPR_KEY);
+    assert_eq!(
+        req.scope.dimensions[0].values,
+        ["BK001"],
+        "the scope `mine` selects"
+    );
+    assert!(req.scope.expression.is_none());
+}
+
 /// `o` overwrites the selected saved scope from the current frame through the normal
 /// pending-batch and reload pipeline. The frame supplies the value but remains
 /// unchanged; only configuration is written.
@@ -9060,5 +9231,291 @@ fn the_footer_keeps_its_rows_when_the_selected_row_has_nothing_to_edit(
         "so nothing below it moves: {} vs {}",
         go.origin.y,
         go_before.origin.y
+    );
+}
+
+// The title row's Back button: the pointer route for Escape's back rung.
+
+/// Click the modal's Back button through a real pointer event.
+fn click_back(cx: &mut gpui::VisualTestContext) {
+    let back = cx
+        .debug_bounds("shell-modal-back")
+        .expect("the Back button paints");
+    cx.simulate_click(back.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// Draw a fresh frame, then report whether the Back button painted in it.
+fn back_paints(cx: &mut gpui::VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.debug_bounds("shell-modal-back").is_some()
+}
+
+/// Browse is the first screen: nothing to go back to, so no Back button.
+#[gpui::test]
+fn the_back_button_is_absent_in_browse(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(!back_paints(&mut cx), "browse has no parent screen");
+}
+
+/// A click leaves the edit stage for browse, as Escape's back rung does, with the
+/// dialog still open. Typing afterwards proves the keyboard route is live: `/` enters
+/// the browse filter and the typed text becomes its query.
+#[gpui::test]
+fn the_back_button_leaves_the_edit_stage_for_browse(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    assert!(back_paints(&mut cx), "the edit stage has a parent screen");
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()), "still open");
+    assert!(!back_paints(&mut cx), "browse paints no Back button");
+    assert!(cx.debug_bounds("objectdialog-row-tree").is_some());
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("tr");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "tr");
+}
+
+/// From a column stage one click returns to the view's fields, not to browse.
+#[gpui::test]
+fn the_back_button_leaves_a_column_stage_for_its_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "one screen back, not two"
+    );
+    assert!(back_paints(&mut cx), "the edit stage still has a parent");
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("np");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "np");
+}
+
+/// From the Values stage one click returns to the scope's fields.
+#[gpui::test]
+fn the_back_button_leaves_the_values_stage_for_the_scope(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter"); // open `mine`
+    cx.simulate_keystrokes("enter"); // Values stage on book
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Values { .. }
+    ));
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "mine".to_string()
+        }
+    );
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("bo");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "bo");
+}
+
+/// From naming one click returns to browse with the half-typed name dropped, and the
+/// field no longer owns the keys.
+#[gpui::test]
+fn the_back_button_cancels_naming(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("half");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(dialog_input_text(&shell, &cx), "", "the name is dropped");
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("tr");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "tr");
+}
+
+/// With a value field open and half typed, one click discards the typed text and
+/// leaves the screen, both Escape rungs in one step. Normal mode afterwards proves the
+/// field was cancelled rather than carried out of the stage: `/` is a command, not text.
+#[gpui::test]
+fn the_back_button_discards_an_open_field_and_leaves_in_one_click(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j j j");
+    cx.simulate_keystrokes("i");
+    cx.simulate_input(" minutes");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("l");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "l");
+}
+
+/// In a column stage with a field open, one click cancels the field and returns to the
+/// view with no field open and no leftover text.
+#[gpui::test]
+fn the_back_button_cancels_a_column_field_before_leaving(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("i");
+    cx.simulate_input("xyz");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "sanity: a field is open"
+    );
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        }
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "");
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+}
+
+/// With the edit filter active, one click leaves filter mode, drops the query, and
+/// leaves the stage.
+#[gpui::test]
+fn the_back_button_leaves_an_edit_stage_while_filtering(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("np");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("t");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "t");
+}
+
+/// A pending confirmation owns input: a Back click does nothing, and the question still
+/// takes its answer from the keyboard afterwards.
+#[gpui::test]
+fn the_back_button_is_ignored_while_a_confirm_is_pending(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert!(dialog_state(&shell, &cx, |s| s.confirm.is_some()));
+
+    click_back(&mut cx);
+    assert!(
+        matches!(
+            dialog_state(&shell, &cx, |s| s.stage.clone()),
+            objectdialog::Stage::Edit { .. }
+        ),
+        "the click did not leave the stage"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.confirm.is_some()),
+        "and the question is still asked"
+    );
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert!(dialog_state(&shell, &cx, |s| s.confirm.is_none()));
+    click_back(&mut cx);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+}
+
+/// Hovering the Back button names it and the key that takes the same step.
+#[gpui::test]
+fn hovering_the_back_button_names_escape(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let back = cx
+        .debug_bounds("shell-modal-back")
+        .expect("the Back button paints");
+    cx.simulate_mouse_move(
+        back.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tip-shell-modal-back-title").is_some());
+    assert!(
+        cx.debug_bounds("tip-shell-modal-back-chord-escape")
+            .is_some()
     );
 }

@@ -241,6 +241,17 @@ pub fn open(
         Some(Rc::new(handle_key)),
         true,
     );
+    // Values is the only stage with a parent screen.
+    dialog::set_back(
+        view,
+        |shell| {
+            matches!(
+                shell.picker.as_ref().map(|p| &p.stage),
+                Some(Stage::Values { .. })
+            )
+        },
+        back_to_columns,
+    );
 }
 
 /// Request distinct values under the current scope and as-of. Clear prior
@@ -323,8 +334,9 @@ fn commit_column(
 }
 
 /// Return Values to Columns, discarding query, results, and ticks and
-/// selecting the column just left. No scope change is applied. Columns
-/// itself leaves Escape to the shell, which closes the modal.
+/// selecting the column just left. No scope change is applied. Escape and
+/// the title row's Back button both take this step. Columns itself leaves
+/// Escape to the shell, which closes the modal.
 fn back_to_columns(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(Stage::Values { column }) = shell.picker.as_ref().map(|p| p.stage.clone()) else {
         return;

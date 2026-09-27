@@ -290,6 +290,7 @@ fn meta(name: &str) -> CompiledColumn {
         grain: None,
         attribution_by_depth: vec![Attribution::Additive],
         scope_semantics: ScopeSemantics::Direct,
+        summable: false,
     }
 }
 

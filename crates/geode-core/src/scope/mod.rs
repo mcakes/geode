@@ -6,9 +6,10 @@
 //! Shell state and data compilation use these types without depending on
 //! each other.
 
+pub mod complete;
 pub mod expr;
 
-pub use expr::{CompareOp, Expr, Literal, ParseError, parse_expr};
+pub use expr::{CompareOp, Expr, Literal, ParseError, derived_op_error, parse_expr};
 
 use crate::config::{Diagnostic, Severity};
 use crate::dimensions::DerivedDimensions;
@@ -153,12 +154,10 @@ impl Scope {
         // supported. Diagnose these at entry before the compiler rejects them.
         if let Some(e) = &self.expression {
             e.for_each_comparison(&mut |column, op| {
-                if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                    diags.push(bad(format!(
-                        "'{column}' is a derived dimension, so '{}' has no meaning on it; \
-                         use =, != or in",
-                        op.sql()
-                    )));
+                if dims.get(column).is_some()
+                    && let Some(message) = derived_op_error(column, op.grammar())
+                {
+                    diags.push(bad(message));
                 }
             });
         }

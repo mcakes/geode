@@ -129,6 +129,40 @@ pub fn open(
             )
             .into_any_element()
     });
+    // Every stage but Browse has a parent screen. The button stays painted under a
+    // pending confirmation; `step_back` ignores its click until the question is answered.
+    dialog::set_back(
+        view,
+        |shell| {
+            shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(ObjectDialogState::has_previous_stage)
+        },
+        |shell, _window, cx| step_back(shell, cx),
+    );
+}
+
+/// The Back button's step: leave exactly one screen through the transition Escape's
+/// back rung runs, after discarding what the earlier Escape rungs would (see
+/// [`ObjectDialogState::abandon_for_back`]). Does nothing while a confirmation is
+/// pending. The modal's click handler synchronizes the shared input afterwards.
+fn step_back(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    if !state.abandon_for_back() {
+        return;
+    }
+    match state.stage {
+        Stage::Naming => state.cancel_naming(),
+        Stage::Values { .. } => leave_values_stage(shell, cx),
+        Stage::Column { .. } => leave_column_stage(shell, cx),
+        Stage::Edit { .. } => leave_edit(shell, cx),
+        Stage::Browse => {}
+    }
+    // The key route settles the edit cursor after every transition; so does this one.
+    settle_edit_cursor(shell);
 }
 
 /// The title-row crumb: a count in browse and naming, the slot's chord in a Groupings
@@ -165,14 +199,14 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
     match shell.object_dialog.as_ref().map(|s| &s.stage) {
         // Column and Values stages use the edit key table over their projected draft
         // fields; their Enter and Escape targets depend on the current projection.
         Some(Stage::Edit { .. } | Stage::Column { .. } | Stage::Values { .. }) => {
-            handle_edit_key(shell, ks, cx)
+            handle_edit_key(shell, ks, window, cx)
         }
         Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
         _ => handle_browse_key(shell, ks, cx),
@@ -1055,11 +1089,16 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// Changes normally revalidate before committing. Reordering commits without
 /// revalidation because current reorderable domains have no order-sensitive draft
 /// diagnostic; adding one would require revalidation at that branch.
-fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_edit_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     // Settle after every return path, including mutations that add, remove, or re-rank
     // rows. Motion already snaps in its direction through move_selection; this final
     // settle preserves that stop and covers other selection changes.
-    let claimed = handle_edit_key_inner(shell, ks, cx);
+    let claimed = handle_edit_key_inner(shell, ks, window, cx);
     settle_edit_cursor(shell);
     claimed
 }
@@ -1082,6 +1121,7 @@ fn settle_edit_cursor(shell: &mut ShellView) {
 fn handle_edit_key_inner(
     shell: &mut ShellView,
     ks: &Keystroke,
+    window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
     // The same notice door `handle_browse_key` opens with, for the same
@@ -1116,7 +1156,7 @@ fn handle_edit_key_inner(
         .and_then(|state| state.draft.as_ref())
         .is_some_and(|draft| draft.text_entry.is_some());
     if text_entry {
-        return handle_text_key(shell, ks, cx);
+        return handle_text_key(shell, ks, window, cx);
     }
 
     // ---- Values stage -------------------------
@@ -1647,6 +1687,9 @@ fn open_text_field(shell: &mut ShellView) {
         };
         if step == Step::Changed {
             state.mode = DialogMode::Filter;
+            // A fresh completion per opening: the last one may hold values
+            // fetched under another scope's selections.
+            state.expr = None;
         }
     }
 }
@@ -1659,7 +1702,12 @@ fn open_text_field(shell: &mut ShellView) {
 /// its highlight. Grouping-chain entry uses chain completion and validation. Plain
 /// fields leave text insertion to the input. After closing, shared input
 /// synchronization applies the draft's new query and mode to text and focus.
-fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_text_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
     // ---- Choice field ------------------------
     //
     // Dispatched ahead of the chain and plain branches: `enter` here
@@ -1732,6 +1780,15 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         cx.notify();
         return true;
     }
+    // ---- Scopes expression field ---------------
+    //
+    // Its suggestion keys (tab, shift+tab, the ±1 moves) come before the
+    // plain field's, whose tab would otherwise report "nothing to complete".
+    if expression_entry_open_for(shell)
+        && super::super::expr_suggest::handle_key(shell, ks, window, cx)
+    {
+        return true;
+    }
     let completions = draft_mut(shell).is_some_and(|d| d.chain_entry());
     // Chain completion rows disappear when the field closes, so follow the reset
     // cursor. Plain entry retains its unfiltered row list and edited-row selection;
@@ -1754,12 +1811,27 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     let bare = ks.mods == Modifiers::NONE;
     if bare && ks.key == "enter" {
         let domain = shell.object_dialog.as_ref().map(|state| state.domain);
+        let vocab = shell.expr_vocab.clone();
         let step = draft_mut(shell).map(|draft| {
             if completions {
                 draft.apply_chain()
             } else {
                 let domain = domain.expect("a draft implies an open dialog");
-                draft.apply_text_entry(&|key, text| domain.parse_text(key, text))
+                draft.apply_text_entry(&|key, text| {
+                    let text = domain.parse_text(key, text)?;
+                    // A Scopes expression naming a column the schema lacks
+                    // parses, but its reader would drop the scope with a
+                    // warning later; refuse it here, with the field open.
+                    if domain == Domain::Scopes
+                        && key == "expression"
+                        && let Some(w) = geode_core::scope::complete::check(&text, &vocab, None)
+                            .into_iter()
+                            .next()
+                    {
+                        return Err(format!("expression: {}", w.message));
+                    }
+                    Ok(text)
+                })
             }
         });
         match step {
@@ -1898,6 +1970,14 @@ fn refuse_step(shell: &mut ShellView, reason: String) {
         _ => "",
     };
     set_notice(shell, format!("{reason}{hint}"));
+}
+
+/// Whether the Scopes `expression` field is the open text entry.
+fn expression_entry_open_for(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(super::expression_entry_open)
 }
 
 /// The draft under the cursor, mutably, if the edit stage is open.
@@ -3820,6 +3900,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 hints.push(Hint::new(HintRow::Go, &["tab"], "complete"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "choose"));
             }
+            // The Scopes expression field lists suggestions under it,
+            // so its keys are theirs rather than a plain field's.
+            Completions::None if super::expression_entry_open(state) => {
+                hints.push(Hint::new(HintRow::Move, &["up", "down"], "move"));
+                hints.push(Hint::new(HintRow::Go, &["tab"], "insert"));
+                hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
+            }
             Completions::None => {
                 hints.push(Hint::prose(HintRow::Move, "type a value"));
                 hints.push(Hint::new(HintRow::Go, &["enter"], "apply"));
@@ -4004,6 +4091,24 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     } else {
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
     };
+    // The Scopes expression field's suggestions sit between the field and
+    // the rows, as the frame's expression dialog paints them under its own.
+    let suggestions = super::expression_entry_open(state)
+        .then_some(state.expr.as_ref())
+        .flatten()
+        .map(|c| {
+            let entity = entity.clone();
+            super::super::expr_suggest::render(
+                c,
+                &shell.expr_scroll,
+                cx.theme(),
+                move |label, window, cx| {
+                    entity.update(cx, |shell, cx| {
+                        super::super::expr_suggest::accept_label(shell, label, window, cx)
+                    });
+                },
+            )
+        });
 
     v_flex()
         .gap_2()
@@ -4011,6 +4116,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .children(drift_note)
         .child(diagnostics)
         .child(filter)
+        .children(suggestions)
         .child(list)
         .child(action_block)
         .child(footer)

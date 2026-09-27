@@ -72,12 +72,14 @@ the measurement log for fixture and hardware details.
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
+| Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |
 | Market-data pivot build | 20 × 30 CVI grid | 285 µs |
 | Market-data flat build | 10,000 × five values | 8.18 ms |
 | Market-data cell patch | 10,000 × five values | 116 ns |
 | Line-pricer sheet shift + undo | 1,000 rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 rows | 6.66 µs |
 | Line-pricer grid build | 1,000 rows, every package open | 1.85 ms |
+| Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
 
 The flat 10,000-row market-data build sits at the UI budget boundary. Ordinary
 cell commits use the constant-time patch path; deliveries and structural row

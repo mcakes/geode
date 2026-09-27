@@ -867,3 +867,44 @@ fn a_column_filter_does_not_carry_into_the_values_stage(cx: &mut gpui::TestAppCo
     assert!(vcx.debug_bounds("picker-value-BK000").is_some());
     assert!(vcx.debug_bounds("picker-value-XX").is_some());
 }
+
+/// The Back button returns Values to Columns through `escape`'s own step, and paints
+/// only while there is a Values stage to leave. Typing afterwards lands in the still
+/// focused filter, and `enter` reopens the column the cursor was returned to.
+#[gpui::test]
+fn the_back_button_returns_values_to_columns(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    vcx.run_until_parked();
+    let back = vcx
+        .debug_bounds("shell-modal-back")
+        .expect("the Values stage paints a Back button");
+    vcx.simulate_click(back.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone())),
+        Some(picker::Stage::Columns)
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        vcx.debug_bounds("shell-modal-back").is_none(),
+        "Columns is the first screen"
+    );
+
+    vcx.simulate_input("bo");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().query.clone()),
+        "bo",
+        "the filter still hears the keyboard"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(matches!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone())),
+        Some(picker::Stage::Values { ref column }) if column == "book"
+    ));
+}

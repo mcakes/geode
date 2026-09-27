@@ -19,6 +19,12 @@ pub struct ColumnMeta {
     /// Indexed by depth; see [`Snapshot::depth_of_row`].
     pub attribution_by_depth: Vec<Attribution>,
     pub scope_semantics: ScopeSemantics,
+    /// Whether values in this column add up across sibling rows, as the
+    /// query compiler decided it: true only for a plain `sum` measure.
+    /// Attribution says whether a value belongs to its row, not whether
+    /// the column totals — a `max` measure is additive in attribution and
+    /// still must not be summed. Anything unmarked is not summable.
+    pub summable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -823,6 +829,7 @@ mod tests {
                 name: name.into(),
                 attribution_by_depth: vec![Attribution::Additive; 2],
                 scope_semantics: ScopeSemantics::Direct,
+                summable: false,
             })
             .collect()
     }
@@ -873,6 +880,7 @@ mod tests {
                     name: "cross_gamma".into(),
                     attribution_by_depth: vec![Attribution::NonAttributable, Attribution::Additive],
                     scope_semantics: ScopeSemantics::Direct,
+                    summable: false,
                 },
                 TestColumn::F64(vec![None, Some(0.0), Some(2.5)]),
             )],
@@ -899,6 +907,7 @@ mod tests {
                     name: "cross_gamma".into(),
                     attribution_by_depth: vec![Attribution::NonAttributable],
                     scope_semantics: ScopeSemantics::Direct,
+                    summable: false,
                 },
                 TestColumn::F64(vec![None]),
             )],
@@ -932,6 +941,7 @@ mod tests {
             name: name.into(),
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         }
     }
 

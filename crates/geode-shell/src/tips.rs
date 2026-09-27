@@ -125,6 +125,32 @@ pub fn tip_with(
     }
 }
 
+/// Build a tooltip closure whose chord is a fixed key the surface owns rather than a
+/// keymap action, such as a modal's Escape. `key` uses the footer hints' keystroke
+/// spelling; an unparsable spelling shows the title without a chord.
+pub fn tip_key(
+    selector: &'static str,
+    title: &'static str,
+    key: &'static str,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let title = SharedString::new_static(title);
+    let selector = SharedString::new_static(selector);
+    move |window, cx| {
+        let model = TipModel {
+            title: title.clone(),
+            chord: crate::keymap::parse_keystroke(key, crate::keymap::Modifiers::NONE)
+                .ok()
+                .map(|ks| vec![ks]),
+            detail: None,
+        };
+        Tooltip::element({
+            let selector = selector.clone();
+            move |_window, cx| render_tip(&model, selector.clone(), cx)
+        })
+        .build(window, cx)
+    }
+}
+
 /// The content: title, then the chord as `Kbd` chips (one per
 /// keystroke of a sequence), then the detail line, muted.
 /// Selectors: `{selector}` on the root, `{selector}-title` on the title,

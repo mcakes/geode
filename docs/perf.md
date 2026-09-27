@@ -1856,3 +1856,55 @@ re-decimating four 500,000-point slots with the path cache cleared, about
 well inside the 8 ms budget. At 100,000 points or more it is over budget for a
 live drag. This is a colour-only change invalidating cached geometry. It is
 not a cost of the picker itself.
+
+### Scope expression suggestions: ranking 20,000 values (2026-09-26)
+
+Every keystroke in an open scope expression field re-lexes the field's text,
+classifies the caret position, and — at a `Value` position — ranks that
+column's cached distinct values with the shared fuzzy matcher, capping the
+result at 50 rows. Columns and operators are always small sets; a categorical
+column can be large, so `bench_expr_complete`
+(`crates/geode-shell/benches/shell_cores.rs`) measures the worst realistic
+case: a `refresh` at a value position already holding 20,000 ranked values.
+
+Measured on Apple M5 Pro, rustc 1.96.0, `cargo bench -p geode-shell --bench
+shell_cores -- expr_complete` (criterion, 30 samples):
+
+| Benchmark | Median |
+|---|---|
+| `expr_complete/refresh_20k_values` | **6.82 ms** (range 6.78–6.87 ms) |
+
+This includes one lex of the field's (short) text, `context_at`'s grammar
+replay, and ranking 20,000 already-cached values down to 50 rows. It excludes
+paint: the row list itself only ever renders the capped 50, and the distinct
+query that first populated the 20,000 values is a separate, one-per-column
+async round trip, not part of this cost. At 6.82 ms the reading sits under
+the 8 ms pure-UI budget, but with little headroom — a key column can hold far
+more than 20,000 distinct values, which is exactly why the picker restricts
+value lists to categorical (dictionary-bounded) columns and never offers one
+for a key.
+
+### Grid selection: footer summary (2026-09-26)
+
+`geode_blotter::core::select::summarize` builds the footer aggregate strip
+(grid selection spec §3.3/§4.3): per selected measure column, an
+`Accumulator` pass over the selection's top-most rows only, after a
+`top_most` ancestor walk that drops any row whose parent is also selected.
+Benched at the same 720,881-row, fully expanded shape
+(`shape(80, 10, 900, 6)`) the `restore_by_path` benches above use, with a
+`Rows` selection spanning the whole grid (`V` then `G` from the top) and
+every one of the plan's measure columns — the worst case for both the
+ancestor walk (every row present, so the walk actually needs to run) and the
+accumulator loop (every measure column summed).
+
+Measured with `cargo bench -p geode-blotter --bench blotter -- summarize`
+(bench profile, `cargo bench`'s own defaults, no shortened sample window),
+on Apple M5 Pro (MacBook Pro) with rustc 1.96.0:
+
+| bench | median |
+| --- | ---: |
+| `summarize/720881 rows, all columns` | **1.2029 ms** |
+
+Well inside the 8 ms UI-action budget with headroom to spare, so a
+`V`-then-`G` top-of-grid selection over the demo's largest shape does not
+need the tile to summarize lazily or off the UI thread.

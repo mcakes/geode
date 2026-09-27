@@ -17,7 +17,7 @@ mod dataset_columns;
 mod groupings;
 pub mod render;
 mod schema;
-mod scopes;
+pub(crate) mod scopes;
 mod sources;
 mod views;
 
@@ -2943,6 +2943,21 @@ pub struct ObjectDialogState {
     /// (`render::enter_values_stage`); an outcome with any other tag is stale and
     /// dropped.
     pub values_tag: u64,
+    /// Suggestions for the Scopes `expression` field, created on the first
+    /// refresh after it opens and dropped when it opens again, so a reopened
+    /// field never shows values fetched under another scope. Read only while
+    /// [`expression_entry_open`] holds.
+    pub expr: Option<crate::exprcomplete::ExprCompletion>,
+}
+
+/// Whether the Scopes dialog's `expression` field is the open text entry,
+/// which is the condition for its suggestions to be shown and to claim keys.
+pub(crate) fn expression_entry_open(state: &ObjectDialogState) -> bool {
+    state.domain == Domain::Scopes
+        && state.draft.as_ref().is_some_and(|d| {
+            matches!(d.text_entry, Some(TextEntry { row: EditRow::Field(i), .. })
+                if d.fields.get(i).is_some_and(|f| f.key == "expression"))
+        })
 }
 
 impl ObjectDialogState {
@@ -2964,6 +2979,7 @@ impl ObjectDialogState {
             naming_dataset: None,
             naming_seed: NameSeed::Empty,
             values_tag: 0,
+            expr: None,
         }
     }
 
@@ -3193,6 +3209,37 @@ impl ObjectDialogState {
         self.disarm();
         self.naming_dataset = None;
         self.naming_seed = NameSeed::Empty;
+    }
+
+    /// Prepare the Back button's one-click step: discard what every Escape rung before
+    /// `PreviousStage` would discard, in the ladder's order (an open value field and its
+    /// typed text, filter mode with its query reverted, then any kept query), so the
+    /// caller's stage transition leaves the whole screen. Naming needs no preparation:
+    /// `cancel_naming` already drops the name and leaves text entry.
+    ///
+    /// Returns `false` and changes nothing while a confirmation is pending, because the
+    /// question owns input until answered, or when no parent stage exists.
+    pub fn abandon_for_back(&mut self) -> bool {
+        if self.confirm.is_some() || !self.has_previous_stage() {
+            return false;
+        }
+        self.notice = None;
+        if self.stage == Stage::Naming {
+            return true;
+        }
+        if let Some(draft) = self.draft.as_mut()
+            && draft.text_entry.is_some()
+        {
+            draft.cancel_text_entry();
+            self.mode = DialogMode::Normal;
+        }
+        if self.mode == DialogMode::Filter {
+            self.exit_filter(dialogmode::FilterExit::Revert);
+        }
+        if !self.effective_query().is_empty() {
+            self.set_query(String::new());
+        }
+        true
     }
 
     /// Whether Escape can return to a parent stage before closing the dialog.
@@ -6239,5 +6286,67 @@ mod tests {
             "another column's path lands nowhere here"
         );
         assert_eq!(draft.row_for_path("views", "views.tree.dataset"), None);
+    }
+
+    fn tree_edit_state() -> ObjectDialogState {
+        let config = config_from(&[(
+            Layer::Desk,
+            "views",
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+        )]);
+        let mut state = ObjectDialogState::new(Domain::Views);
+        state.enter_edit(&config, "tree");
+        state
+    }
+
+    /// The Back click's preparation discards an open field and its typed text, the
+    /// first Escape rung, and still permits the stage step in the same click.
+    #[test]
+    fn abandon_for_back_cancels_an_open_field() {
+        let mut state = tree_edit_state();
+        let draft = state.draft.as_mut().unwrap();
+        draft.text_entry = Some(TextEntry {
+            row: EditRow::Field(0),
+            completions: Completions::None,
+        });
+        draft.query = "half".to_string();
+        state.mode = DialogMode::Filter;
+
+        assert!(state.abandon_for_back());
+        let draft = state.draft.as_ref().unwrap();
+        assert!(draft.text_entry.is_none());
+        assert_eq!(state.mode, DialogMode::Normal);
+        assert_eq!(state.effective_query(), "");
+    }
+
+    /// Filter mode is left and the query, reverted or kept, is cleared.
+    #[test]
+    fn abandon_for_back_leaves_the_filter_and_clears_the_query() {
+        let mut state = tree_edit_state();
+        state.enter_filter();
+        state.set_query("np".to_string());
+        assert!(state.abandon_for_back());
+        assert_eq!(state.mode, DialogMode::Normal);
+        assert_eq!(state.effective_query(), "");
+
+        let mut state = tree_edit_state();
+        state.set_query("np".to_string());
+        assert!(state.abandon_for_back(), "a kept query is cleared too");
+        assert_eq!(state.effective_query(), "");
+    }
+
+    /// A pending confirmation refuses the back step and changes nothing; browse has no
+    /// back step at all.
+    #[test]
+    fn abandon_for_back_refuses_under_a_confirm_and_in_browse() {
+        let mut state = tree_edit_state();
+        state.set_query("np".to_string());
+        state.confirm = Some(Confirm::Revert);
+        assert!(!state.abandon_for_back());
+        assert_eq!(state.effective_query(), "np", "nothing was discarded");
+        assert_eq!(state.confirm, Some(Confirm::Revert));
+
+        let mut state = ObjectDialogState::new(Domain::Views);
+        assert!(!state.abandon_for_back());
     }
 }

@@ -259,6 +259,13 @@ impl ShellView {
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);
+                // An open expression field re-ranks against the new
+                // columns at once, not at its next keystroke.
+                self.expr_vocab = std::rc::Rc::new(super::expr_vocab(&self.services.config));
+                let vocab = self.expr_vocab.clone();
+                if let Some(c) = super::expr_suggest::completion_mut(self) {
+                    c.rebuild(&vocab);
+                }
             }
 
             if theme_changed {
