@@ -90,6 +90,38 @@ pub fn step(cursor: Cursor, last_grid_col: &mut usize, motion: Motion, grid: Gri
     }
 }
 
+/// One motion while a selection is live (grid selection spec §4.1):
+/// every move clamps at the grid's edges instead of wrapping, and none
+/// leaves the grid for the attribute strip, because wrapping past the
+/// anchor would silently invert the selection.
+pub fn step_clamped(cursor: Cursor, motion: Motion, grid: Grid) -> Cursor {
+    use geode_shell::vimnav::{NavCommand, apply_clamped};
+    let Cursor::Cell { row, col } = cursor else {
+        return cursor;
+    };
+    if grid.rows == 0 || grid.cols == 0 {
+        return Cursor::Cell { row: 0, col: 0 };
+    }
+    let max_col = grid.cols - 1;
+    match motion {
+        Motion::Rows(n) => Cursor::Cell {
+            row: apply_clamped(row, grid.rows, NavCommand::Move(n as i64)),
+            col,
+        },
+        Motion::Cols(n) => Cursor::Cell {
+            row,
+            col: add(col, n, max_col),
+        },
+        Motion::Top => Cursor::Cell { row: 0, col },
+        Motion::Bottom => Cursor::Cell {
+            row: grid.rows - 1,
+            col,
+        },
+        Motion::FirstCol => Cursor::Cell { row, col: 0 },
+        Motion::LastCol => Cursor::Cell { row, col: max_col },
+    }
+}
+
 fn add(at: usize, n: isize, max: usize) -> usize {
     (at as isize).saturating_add(n).clamp(0, max as isize) as usize
 }
@@ -205,6 +237,21 @@ mod tests {
         assert_eq!(
             step(Cursor::Attr(1), &mut last, Motion::Bottom, G),
             cell(4, 2)
+        );
+    }
+
+    #[test]
+    fn a_clamped_step_never_wraps_and_never_enters_the_strip() {
+        assert_eq!(step_clamped(cell(0, 1), Motion::Rows(-1), G), cell(0, 1));
+        assert_eq!(step_clamped(cell(4, 1), Motion::Rows(1), G), cell(4, 1));
+        assert_eq!(step_clamped(cell(1, 1), Motion::Rows(10), G), cell(4, 1));
+        assert_eq!(step_clamped(cell(1, 3), Motion::Cols(1), G), cell(1, 3));
+        assert_eq!(step_clamped(cell(1, 2), Motion::Top, G), cell(0, 2));
+        assert_eq!(step_clamped(cell(1, 2), Motion::LastCol, G), cell(1, 3));
+        // An attribute cursor has no selection to extend; it stays put.
+        assert_eq!(
+            step_clamped(Cursor::Attr(1), Motion::Rows(1), G),
+            Cursor::Attr(1)
         );
     }
 

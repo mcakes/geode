@@ -267,6 +267,24 @@ impl Draft {
         }
     }
 
+    /// Put back `before` — the open bulk editor's undo (grid selection spec
+    /// §4.4). A `Behind` this draft reached since is kept: a delivery that
+    /// landed while the editor was open is still news, and restoring the
+    /// older state would hide it. An empty result is `Clean`, since an empty
+    /// draft is never behind.
+    pub fn restore_from(&mut self, before: Draft) {
+        let behind = matches!(self.state, DraftState::Behind { .. }).then(|| self.state.clone());
+        *self = before;
+        match behind {
+            Some(state) if !self.is_empty() => self.state = state,
+            _ if self.is_empty() => {
+                self.state = DraftState::Clean;
+                self.base = None;
+            }
+            _ => {}
+        }
+    }
+
     /// Read an existing numeric edit; absent, date, and text edits return
     /// `None`. Callers use this before the painted document value so
     /// successive bumps compose, and the value keeps its type so an integer
@@ -2436,5 +2454,28 @@ mod tests {
         let back = Draft::from_toml(&d.to_toml());
         assert_eq!(back.rows, d.rows);
         assert_eq!(back.base, d.base);
+    }
+
+    #[test]
+    fn restore_from_puts_back_the_edits_and_keeps_a_behind_reached_meanwhile() {
+        let base = DocumentBase::default();
+        let mut before = Draft::default();
+        before.set((0, 0), ("a".into(), "x".into()), Value::F64(1.0), &base);
+        let mut now = before.clone();
+        now.set((0, 1), ("a".into(), "y".into()), Value::F64(2.0), &base);
+        let newer = DocumentBase {
+            as_of: "2026-09-27T10:00:00Z".into(),
+            generation: Some(8),
+        };
+        now.on_delivered(&newer);
+        assert!(now.is_behind());
+
+        now.restore_from(before.clone());
+        assert_eq!(now.len(), 1, "the step's edit is gone");
+        assert!(now.is_behind(), "the delivery is still news");
+
+        // Restoring to an empty draft is Clean: an empty draft is never behind.
+        now.restore_from(Draft::default());
+        assert!(now.is_empty() && !now.is_behind());
     }
 }
