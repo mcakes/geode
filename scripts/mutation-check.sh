@@ -21815,6 +21815,23 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
 
+# A view move under a running query waits for its answer. Superseding it
+# interrupts the query in the pool, so a pan faster than one query starves
+# the density strip and percentiles until the pan stops.
+run_mutation "timeseries: a view move waits for the query in flight" \
+  crates/geode-timeseries/src/tile/mod.rs \
+  '            if self.query_in_flight {' \
+  '            if false {' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
+# …and the answer releases the waiting view; without it the statistics
+# stay on the window the pan started from.
+run_mutation "timeseries: an answer releases the waiting view" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '        if !self.view_waiting || self.query_in_flight || self.staged.is_some() {' \
+  '        if true {' \
+  geode-timeseries a_view_move_while_a_query_is_out_waits_for_its_answer
+
 # ---- Scope expression suggestions: the caret reader.
 # After an operator the caret wants a value; reading it as a finished term
 # would offer and/or where values belong.
