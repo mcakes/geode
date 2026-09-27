@@ -13308,17 +13308,59 @@ run_mutation "mdstep: only a number cursor cell steps live" \
   geode-marketdata \
   an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell
 
-# A single-cell commit takes the live steps out before the close, so the
-# close never restores the pre-`i` draft over the written value. Mutated
-# away, a typed value equal to the stepped one leaves the draft as the
-# steps made it, the identity check passes, and the close undoes it all.
-run_mutation "mdstep: a typed single-cell commit keeps its value" \
+# A selection edit opens only on a member cell. Mutated away, `i` on a
+# slice value inside a row selection opens an editor whose typed value and
+# steps land in the vol ladder while the forward it showed stays as it was.
+run_mutation "mdsel: i refuses on a cell that is not a member" \
   crates/geode-marketdata/src/tile.rs \
-  '        drop(self.editor.as_mut().and_then(|e| e.bulk.take()));
-        self.close_editor(window, cx);' \
-  '        self.close_editor(window, cx);' \
+  '                if self.selection.is_some() && !self.selection_holds((row, col)) {' \
+  '                if false {' \
   geode-marketdata \
-  a_typed_commit_equal_to_the_stepped_value_keeps_every_step
+  i_on_a_slice_value_in_a_rows_selection_is_refused
+
+# While a selection editor is open, verbs that would move or end the
+# selection refuse. Mutated away, a palette motion or `V` changes the
+# members under the open editor, so its commit or steps land on cells it
+# was not opened over.
+run_mutation "mdsel: selection verbs refuse under an open selection editor" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.selection_editor_open() && self.changes_selection(verb) {' \
+  '        if false && self.changes_selection(verb) {' \
+  geode-marketdata \
+  selection_changing_verbs_refuse_while_a_selection_editor_is_open
+
+# With the selection lost to a delivery, the arrows are a single cell's
+# nudge again. Mutated away, they refuse a step over no members.
+run_mutation "mdstep: arrows nudge the text once the selection is gone" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        self.selection.as_ref()?;' \
+  '' \
+  geode-marketdata \
+  arrows_nudge_the_text_once_a_delivery_drops_the_selection
+
+# Undoing steps on a Sent draft restores the rows that were sent with it.
+# Mutated away, the draft reads Sent with nothing to compare, and a
+# matching echo lands as Behind instead of confirming.
+run_mutation "mdstep: an undo restores the sent rows with a Sent draft" \
+  crates/geode-marketdata/src/tile/select.rs \
+  '        if self.sent.is_none() && self.draft.is_sent() {' \
+  '        if false {' \
+  geode-marketdata \
+  escape_after_steps_on_a_sent_draft_keeps_its_echo_check
+
+# `:upload` closes an open editor before it reads the draft, since a
+# selection editor's close takes its live steps back out. Mutated away,
+# the document is assembled from the stepped draft and the steps go
+# upstream.
+run_mutation "mdupload: an open editor closes before the draft is read" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        let document = self.spec.document;' \
+  '        let document = self.spec.document;' \
+  geode-marketdata \
+  an_upload_armed_mid_step_sends_the_draft_as_it_was_before_i
 
 # A press inside the open editor's cell is the editor's (caret, text
 # selection, a date separator). The delegate reports no press for it, and

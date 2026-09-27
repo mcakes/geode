@@ -103,13 +103,21 @@ cargo bench -p geode-marketdata    # matrix model and draft
   gated by `held_refusal` then `edit_base`, and judges every member before it
   writes any: a step is all-or-nothing, and a bulk commit that nothing accepts
   is refused with the editor open.
+- A selection edit acts only from a member cell (`selection_holds`):
+  `begin_edit` refuses a slice value inside a `Rows` selection, and
+  `commit_bulk` and `bulk_step` check again. While a selection editor is
+  open, `dispatch` refuses every verb that would move or end the selection
+  (`changes_selection`). A delivery that loses the anchor still clears it;
+  `bulk_step` then answers `None` and the arrows nudge the text.
 - A selection editor carries a `Bulk` only on a number cursor cell. It holds
   the draft as `i` found it (`before`), as the last step left it (`after`),
-  and the painted base. Closing the editor restores `before` only while the
-  draft's work still equals `after` and the painted base is unchanged; a
-  moved base keeps the steps with `steps kept: the document moved`, any other
-  draft change closes silently. Every commit that keeps its value takes the
-  `Bulk` out before `close_editor`, which would otherwise undo it.
+  the painted base, and the upload state beside `before` (`sent`, the echo
+  line, an upload error). Closing the editor restores `before` and that
+  state only while the draft's work still equals `after` and the painted base
+  is unchanged; a moved base keeps the steps with `steps kept: the document
+  moved`, any other draft change closes silently. Every commit that keeps its
+  value takes the `Bulk` out before `close_editor`, which would otherwise
+  undo it, and every verb that reads the draft closes the editor first.
 
 ## Input and popup contracts
 

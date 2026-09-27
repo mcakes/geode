@@ -213,9 +213,9 @@ click on a header attribute leaves the grid and clears it without a notice.
 
 The selection tint, the theme's selection color, overlays each cell's own
 edited, sent, or deleted fill (it never replaces it) and sits under the text;
-the cursor keeps its border inside the tint. A row selection tints its labels and every column. The footer shows the
-extent alone (`2 rows × 3 cols`), with no totals: a vol or forward ladder does
-not add up.
+the cursor keeps its border inside the tint. A row selection tints its labels
+and every column. The footer shows the extent alone (`2 rows × 3 cols`), with
+no totals: a vol or forward ladder does not add up.
 
 In visual mode the verbs are single keys; the doubled normal-mode forms
 (`y y`, `y c`, `d d`) are not bound there.
@@ -231,16 +231,28 @@ In visual mode the verbs are single keys; the doubled normal-mode forms
 - `:bump <delta>` with no axis moves every selected number by `delta` and
   keeps the selection; `:bump <delta> row|col` keeps its cursor-relative
   meaning and ignores the selection. It notices `bumped N cells`. Like a live
-  step it is all-or-nothing: a fractional delta over a block that includes an
-  integer column writes nothing.
+  step it is all-or-nothing: a fractional delta over a selection that
+  includes an integer column writes nothing.
 - `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
-  that cell refuses (a deleted row, a document with nothing to edit); it does
-  not look for another member.
+  that cell refuses (a deleted row, a document with nothing to edit) or is
+  not a member of the selection (below); it does not look for another member.
 
-A row selection's edits skip each term's leading slice values (forward, atm,
-skew), which is `:bump row`'s rule: a term's ladder moves without its
-forward. A block is exactly its rectangle. The copy and the tint still cover
-the slice values.
+On a pivot panel, a row selection's edits skip each term's leading slice
+values (forward, atm, skew), which is `:bump row`'s rule: a term's ladder
+moves without its forward. A flat panel has no slice values, and a block is
+exactly its rectangle. The copy and the tint still cover the slice values.
+Because they are not members, `i` on a slice value inside a row selection
+opens no editor and says `slice values are not in a row selection — use v`:
+the typed value or the steps would otherwise land in the ladder while the
+cell the editor showed stayed as it was. A block over the slice columns
+edits them.
+
+While the selection editor is open, its members are the edit's operand. The
+verbs that would move or end the selection under it — a motion, `V`/`v`, the
+`escape` action and `y`, each reachable from the palette in insert mode —
+refuse with `finish the edit first — enter or escape`. A delivery that no
+longer paints the anchor still clears the selection; the editor then acts on
+its own cell, and its arrows nudge the text.
 
 **One typed value.** With a selection live, committing the editor — typed
 text, a date field, or a choice picked from the popup — writes the value to
@@ -263,13 +275,14 @@ current value by one unit of its column's displayed places, or by 1 on an
 integer column, and is never rounded to the painted grid: snapping would
 silently rewrite each cell's unpainted decimals. Empty, deleted, and
 non-number cells are skipped and counted. Each press is all-or-nothing: if
-any cell refuses (an overflow), nothing is written. A step refuses while the draft is Behind or its upload
-echo differs, as every edit does.
+any cell refuses (an overflow), nothing is written. A step refuses while the
+draft is Behind or its upload echo differs, as every edit does.
 
 - `enter` on the untouched text keeps the steps and the selection.
 - `escape` restores the draft exactly as `i` found it, provided the steps are
   still its last change and the painted document has not moved; a delivery
-  held Behind meanwhile stays reported. A click elsewhere, a row verb, or a
+  held Behind meanwhile stays reported, and a draft that was Sent comes back
+  Sent with its echo check. A click elsewhere, a row verb, or a
   switch of underlying closes the editor the same way. If an automatic rebase
   moved the painted document, the steps are kept and the header says `steps
   kept: the document moved`, because the pre-edit draft is keyed to a grid
@@ -280,7 +293,8 @@ echo differs, as every edit does.
   that refuses it returns to its pre-`i` value rather than keeping a
   half-step. The exception is a painted document that moved while the editor
   was open: then the steps stay, the typed value is written over them, and
-  the notice reads `set N cells; steps kept: the document moved`. From then on the arrows nudge the editor's text alone.
+  the notice reads `set N cells; steps kept: the document moved`. From then
+  on the arrows nudge the editor's text alone.
 
 **Mouse.** A shift+click makes a block from the cursor as it was before the
 press to the clicked cell, or a row selection when it lands on a row label
