@@ -95,7 +95,14 @@ column written as just a name is a measure, so if the primary dataset declares n
 measure of that name, the view is refused when queried instead of opening with
 that column blank. Writing `kind = "dimension"` where that was meant, or
 `required = false` to accept the column being dropped, is the fix, and the
-diagnostic names the view and the column. `required` has no effect on a
+diagnostic names the view and the column. A `dimension` column the grouping does
+not contain and no join supplies is shown by the unanimity rule — its value where
+every row beneath a tree row agrees, `mixed` where they disagree, blank where none
+has a value — when a declared grain of the primary dataset carries it alongside
+the whole grouping; otherwise it is refused with "is declared a dimension, but it
+is not in the grouping, no join carries it, and no declared grain of dataset …
+carries it alongside the grouping …". See [ungrouped dimension
+columns](data-path.md#ungrouped-dimension-columns). `required` has no effect on a
 `derived` column: nothing validates a derived expression at load — its SQL is
 the compiler's business — so there is no failure for the flag to downgrade. The same applies to a join whose keys
 no grain of the joined dataset carries, or which keys on a column the grouping
