@@ -37,10 +37,16 @@ pub enum Command {
     Name(String),
     /// `:rm <sheet>`: remove a sheet no tile holds (asks first).
     Remove(String),
+    /// `:autosize [reset]`: fit every column to its content, or return to
+    /// the view's widths.
+    Autosize {
+        reset: bool,
+    },
 }
 
-pub const VERBS: [&str; 11] = [
+pub const VERBS: [&str; 12] = [
     "view", "shift", "spot", "price", "refresh", "group", "ungroup", "e", "new", "name", "rm",
+    "autosize",
 ];
 
 const SHIFT_USAGE: &str = "usage: shift spot|vol <n>|clear";
@@ -130,6 +136,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["name", ..] => Err("usage: name <sheet>".into()),
         ["rm", name] => sheet_name("rm", name).map(Command::Remove),
         ["rm", ..] => Err("usage: rm <sheet>".into()),
+        ["autosize"] => Ok(Command::Autosize { reset: false }),
+        ["autosize", "reset"] => Ok(Command::Autosize { reset: true }),
+        ["autosize", ..] => Err("usage: autosize [reset]".into()),
         [other, ..] => Err(format!("unknown command '{other}'")),
     }
 }
@@ -166,6 +175,7 @@ pub fn completions(
         ["spot", _] => strs(&["clear"]),
         ["refresh"] => strs(&["off", "default"]),
         ["e"] | ["rm"] => sheets.to_vec(),
+        ["autosize"] => strs(&["reset"]),
         _ => Vec::new(),
     }
 }
@@ -174,6 +184,17 @@ pub fn completions(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn autosize_parses_an_optional_reset_and_completes_it() {
+        assert_eq!(parse("autosize"), Ok(Command::Autosize { reset: false }));
+        assert_eq!(
+            parse("autosize reset"),
+            Ok(Command::Autosize { reset: true })
+        );
+        assert!(parse("autosize wide").is_err());
+        assert_eq!(completions("autosize ", 9, &[], &[], &[]), vec!["reset"]);
+    }
 
     #[test]
     fn every_verb_parses_its_arguments() {

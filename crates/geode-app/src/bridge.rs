@@ -2393,7 +2393,7 @@ role = "key"
         vcx.simulate_keystrokes("k");
         vcx.run_until_parked();
         let cursor = |vcx: &gpui::VisualTestContext| {
-            tile.read_with(vcx, |t, _| t.serialize().get("cursor").cloned())
+            tile.read_with(vcx, |t, cx| t.serialize(cx).get("cursor").cloned())
         };
         let before = cursor(&vcx);
         vcx.simulate_keystrokes("j");

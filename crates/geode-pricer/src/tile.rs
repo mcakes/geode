@@ -36,6 +36,7 @@ use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -524,6 +525,8 @@ impl PricerTile {
         };
 
         let mut delegate = SheetDelegate::new(cx.theme(), cx.weak_entity());
+        // A missing or garbled record is an empty map, never a refusal.
+        delegate.fitted = record.widths.clone();
         delegate.line_numbers = cx
             .try_global::<UiSettings>()
             .map_or(LineNumbers::Off, |s| s.line_numbers);
@@ -758,8 +761,9 @@ impl PricerTile {
             .map(|e| e.input.read(cx).value().to_string())
     }
 
-    pub fn serialize(&self) -> toml::Table {
+    pub fn serialize(&self, cx: &App) -> toml::Table {
         Record {
+            widths: self.table.read(cx).delegate().fitted.clone(),
             sheet: Some(self.sheet.name.clone()),
             view: Some(self.sheet.view.clone()),
             refresh: Some(self.sheet.refresh),
@@ -2798,7 +2802,31 @@ impl PricerTile {
             }
             Command::Name(name) => self.rename(name, cx),
             Command::Remove(name) => self.arm_remove(name, window, cx),
+            Command::Autosize { reset } => {
+                self.autosize_columns(reset, window, cx);
+                Ok(())
+            }
         }
+    }
+
+    /// Fit every column to its header and every grid row's prepared text
+    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// re-reads `column()`. The one route behind both `:autosize` and the
+    /// shell's `tile::autosize_columns`; measured on the UI thread at the
+    /// window's current rem, never in render. The widths ride the session
+    /// record, not the sheet's stored document.
+    pub fn autosize_columns(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let metrics = FitMetrics::xsmall_mono(window.rem_size());
+        self.table.update(cx, |t, cx| {
+            let fitted = if reset {
+                FittedWidths::new()
+            } else {
+                t.delegate().fit_columns(&metrics)
+            };
+            t.delegate_mut().fitted = fitted;
+            t.refresh(cx);
+        });
+        cx.notify();
     }
 
     // ---- sheets: `:e`, `:new`, `:name`, `:rm` -------------------------
@@ -6438,6 +6466,8 @@ pub(crate) mod tests {
             "name fresh",
             "new",
             "e book",
+            "autosize",
+            "autosize reset",
         ];
         for word in crate::core::commands::VERBS {
             assert!(
@@ -6465,6 +6495,84 @@ pub(crate) mod tests {
             });
             assert!(level.is_none() && !overlay, "`:{line}` reached the app");
         }
+    }
+
+    /// The width the delegate hands the table for the column named `name`
+    /// (the vocabulary's name, or `__tree`).
+    fn width_of_column(h: &Harness, vcx: &VisualTestContext, name: &str) -> f32 {
+        use gpui_component::table::TableDelegate as _;
+        h.tile.read_with(vcx, |t, cx| {
+            let d = t.table.read(cx).delegate();
+            let ix = if name == crate::delegate::TREE_KEY {
+                crate::delegate::TREE_COL
+            } else {
+                1 + d
+                    .model
+                    .columns
+                    .iter()
+                    .position(|c| c.name == name)
+                    .unwrap_or_else(|| panic!("no column '{name}'"))
+            };
+            f32::from(d.column(ix, cx).width)
+        })
+    }
+
+    const WIDE_QTY: [&str; 2] = ["-1234567890 SPX Z26 5000 C", "SPX Z26 4000 P"];
+
+    /// `:autosize` through the content's command route fits a column whose
+    /// text outgrows the view's width; the fit survives the refresh every
+    /// rebuild runs; `:autosize reset` returns to the view's width.
+    #[gpui::test]
+    fn autosize_fits_every_row_survives_a_rebuild_and_resets(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &WIDE_QTY);
+        let default = width_of_column(&h, &vcx, "qty");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "qty");
+        let rem = vcx.update(|window, _| f32::from(window.rem_size()));
+        let text = "-1234567890".chars().count() as f32 * rem * 0.875 * 0.6;
+        assert!(fitted > default, "{fitted} > {default}");
+        assert!(fitted >= text, "{fitted} holds {text}px");
+
+        h.tile.update(&mut vcx, |t, cx| t.rebuild(cx));
+        assert_eq!(width_of_column(&h, &vcx, "qty"), fitted);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "qty"), default);
+    }
+
+    /// Fitted widths ride the session record and come back on restore; a
+    /// name the view lacks is ignored and a garbled value restores none.
+    #[gpui::test]
+    fn autosize_widths_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &WIDE_QTY);
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "qty");
+        let tree = width_of_column(&h, &vcx, crate::delegate::TREE_KEY);
+        let saved = h.serialize(&mut vcx);
+        let mut widths = saved[geode_shell::colfit::SESSION_KEY]
+            .as_table()
+            .expect("widths persisted")
+            .clone();
+        widths.insert("gone".into(), toml::Value::Float(300.0));
+
+        let (store, mut record) = seeded(&BOOK);
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h2, mut vcx2) = open_full(cx, Some(record), store, PricerSettings::default());
+        h2.visible(&mut vcx2, true);
+        assert_eq!(width_of_column(&h2, &vcx2, "qty"), fitted);
+        assert_eq!(width_of_column(&h2, &vcx2, crate::delegate::TREE_KEY), tree);
+
+        let (store, mut record) = seeded(&BOOK);
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::String("wide".into()),
+        );
+        let (h3, mut vcx3) = open_full(cx, Some(record), store, PricerSettings::default());
+        let saved = h3.serialize(&mut vcx3);
+        assert!(!saved.contains_key(geode_shell::colfit::SESSION_KEY));
     }
 
     // ---- loading guards, put into a closed package, menu clicks ----

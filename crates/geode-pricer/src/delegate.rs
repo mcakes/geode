@@ -10,6 +10,7 @@ use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
 use geode_shell::shell::control::{self, PointerStates as _};
@@ -39,6 +40,8 @@ const CHEVRON_SLOT: f32 = 14.0;
 pub(crate) const EMPTY_TEXT: &str = "No lines — press o to add one";
 pub(crate) const LOADING_TEXT: &str = "Loading sheet…";
 pub(crate) const TREE_COL: usize = 0;
+/// The tree column's stable key, in `column()` and in fitted widths.
+pub(crate) const TREE_KEY: &str = "__tree";
 
 /// The gutter number of every painted grid row. Relative mode measures
 /// from the cursor row; with no cursor row it numbers absolutely. Off
@@ -194,6 +197,12 @@ pub struct SheetDelegate {
     numbers: Vec<SharedString>,
     gutter: f32,
     numbers_stamp: Option<NumbersStamp>,
+    /// Widths `:autosize` fitted, keyed by the vocabulary's column name
+    /// ([`TREE_KEY`] for the tree), in pixels without the gutter.
+    /// `column()` prefers an entry over the view's width, so every
+    /// `install_model` refresh keeps it; a name the current view lacks is
+    /// ignored and a column with no entry keeps the view's width.
+    pub(crate) fitted: FittedWidths,
 }
 
 impl SheetDelegate {
@@ -210,7 +219,34 @@ impl SheetDelegate {
             numbers: Vec::new(),
             gutter: 0.0,
             numbers_stamp: None,
+            fitted: FittedWidths::new(),
         }
+    }
+
+    /// Fit the tree column and every plan column to its header and every
+    /// grid row's prepared text. The tree column adds each row's indent and
+    /// the chevron slot, both on the rem scale as `render_cell` paints them.
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> FittedWidths {
+        let design = |px: f32| px * m.rem_px / scale::DESIGN_REM;
+        let mut out = FittedWidths::new();
+        out.insert(
+            TREE_KEY.to_string(),
+            m.fit(
+                self.model
+                    .rows
+                    .iter()
+                    .map(|r| design(r.depth as f32 * INDENT + CHEVRON_SLOT) + m.text_px(&r.tag)),
+            ),
+        );
+        for (col, c) in self.model.columns.iter().enumerate() {
+            let cells = self
+                .model
+                .rows
+                .iter()
+                .filter_map(|r| r.cells.get(col).map(|cell| cell.text.as_ref()));
+            out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
+        }
+        out
     }
 
     /// Re-derive the gutter text and width when the model's shape, the
@@ -316,11 +352,13 @@ impl TableDelegate for SheetDelegate {
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
         let Some(c) = Self::plan_col(col_ix).and_then(|i| self.model.columns.get(i)) else {
             return Column {
-                key: SharedString::from("__tree"),
+                key: SharedString::from(TREE_KEY),
                 name: SharedString::from(""),
                 align: TextAlign::Left,
                 sort: None,
-                width: px(TREE_WIDTH + self.gutter_px()),
+                width: px(
+                    self.fitted.get(TREE_KEY).copied().unwrap_or(TREE_WIDTH) + self.gutter_px()
+                ),
                 fixed: Some(ColumnFixed::Left),
                 movable: false,
                 resizable: false,
@@ -336,7 +374,7 @@ impl TableDelegate for SheetDelegate {
                 TextAlign::Left
             },
             sort: None,
-            width: px(c.width),
+            width: px(self.fitted.get(c.name).copied().unwrap_or(c.width)),
             movable: false,
             resizable: false,
             ..Column::default()

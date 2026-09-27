@@ -25,7 +25,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
-| `commands` | The `:` vocabulary: parse and completions. |
+| `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
 
 The tile:
@@ -38,7 +38,7 @@ The tile:
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
 | `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
-| `session` | The tile's session record. |
+| `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
 
@@ -239,4 +239,7 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the same limitation.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
-  smaller steps.
+  smaller steps. `:autosize` (or the palette's "Autosize columns") fits
+  every column to every row at the current rem size. It stores the widths
+  by vocabulary name (`__tree` for the tree) in the session record. A font
+  change does not rescale fitted widths; run `:autosize` again.
