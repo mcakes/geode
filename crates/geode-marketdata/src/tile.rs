@@ -984,8 +984,8 @@ impl MarketDataTile {
             as_of,
         });
         self.query_in_flight = queued.is_ok();
-        if queued.is_err() {
-            self.notice = Some("document request refused: the data service is busy or gone".into());
+        if let Err(refusal) = queued {
+            self.notice = Some(format!("document request refused: {refusal}").into());
             // A refused submission has no future delivery. Arrive before clearing
             // acted, which arrival reads; clearing then permits a later frame change to
             // retry.
@@ -1337,8 +1337,8 @@ impl MarketDataTile {
             document: self.spec.document.into(),
             rows: pending.rows,
         });
-        if queued.is_err() {
-            self.notice = Some("upload refused: the data service is busy or gone".into());
+        if let Err(refusal) = queued {
+            self.notice = Some(format!("upload refused: {refusal}").into());
             self.sent = None;
             self.submitted = None;
             self.in_flight = None;
@@ -6086,6 +6086,19 @@ mod tests {
         assert!(second.tag > first.tag);
     }
 
+    #[gpui::test]
+    fn a_busy_document_refusal_says_busy(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.data.fill_for_tests();
+        h.command(&mut vcx, "key SPX.Z").unwrap();
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("document request refused: the data service is busy".to_string())
+        );
+    }
+
     /// A refused submission has no future outcome. It answers the barrier immediately
     /// and clears acted so the next frame change retries.
     #[gpui::test]
@@ -6106,7 +6119,7 @@ mod tests {
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("document request refused: the data service is busy or gone".to_string())
+            Some("document request refused: the data service has stopped".to_string())
         );
         // The next frame change tries again rather than reading as
         // already-answered.
@@ -13263,9 +13276,29 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(
             h.tile
                 .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
-            Some("upload refused: the data service is busy or gone".into())
+            Some("upload refused: the data service has stopped".into())
         );
         assert!(h.tile.read_with(&vcx, |t, _| t.sent.is_none()));
+    }
+
+    #[gpui::test]
+    fn a_busy_upload_refusal_says_busy_and_clears_in_flight(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_upload(cx);
+        h.with_document(&mut vcx);
+        h.edit_one_cell(&mut vcx);
+        h.command(&mut vcx, "upload").unwrap();
+        draw(&mut vcx);
+        h.data.fill_for_tests();
+        type_keys(&mut vcx, "y");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.notice().map(str::to_string)),
+            Some("upload refused: the data service is busy".into())
+        );
+        assert!(
+            h.tile
+                .read_with(&vcx, |t, _| t.sent.is_none() && t.in_flight.is_none())
+        );
     }
 
     #[gpui::test]

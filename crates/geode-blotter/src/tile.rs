@@ -844,11 +844,10 @@ impl BlotterTile {
             as_of,
             max_depth,
         });
-        if queued.is_err() {
-            self.error = Some((
-                "query refused: the data service is busy or gone".into(),
-                Tone::DangerText,
-            ));
+        if let Err(refusal) = queued {
+            // A stopped refusal retries on the next frame change too: each
+            // attempt costs nothing and re-reports the same kind.
+            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));
             self.in_flight = None;
             // A refused submit means nothing is ever coming for these
             // versions (market-data Part 3 Task 6 review, MIN-3, fixed at
@@ -2744,6 +2743,38 @@ mod tests {
         assert!(
             h.tile.read_with(&vcx, |t, _| t.acted.is_none()),
             "`acted` is cleared, so the next frame change is a real retry"
+        );
+    }
+
+    /// A refusal names its kind: a full queue is busy and a later change
+    /// can land; a stopped service is not coming back.
+    #[gpui::test]
+    fn a_refused_query_says_busy_or_stopped(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let first = next_query(&h.requests);
+        deliver(&h, &mut vcx, first.tag, Ok(snapshot()));
+        let change = |vcx: &mut gpui::VisualTestContext| {
+            h.frame.update(vcx, |f, cx| {
+                f.set_as_of(AsOf::At(chrono::Utc::now()));
+                cx.notify();
+            });
+        };
+        let error = |vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, _| t.error.as_ref().map(|e| e.0.to_string()))
+        };
+        h.data.fill_for_tests();
+        change(&mut vcx);
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("query refused: the data service is busy")
+        );
+        h.data.shutdown();
+        change(&mut vcx);
+        assert_eq!(
+            error(&vcx).as_deref(),
+            Some("query refused: the data service has stopped")
         );
     }
 

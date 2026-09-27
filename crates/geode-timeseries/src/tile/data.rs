@@ -132,16 +132,19 @@ impl TimeseriesTile {
                 from,
                 to,
             });
-            if queued.is_ok() {
-                self.in_flight.insert((source, identity));
-            } else {
+            match queued {
+                Ok(()) => {
+                    self.in_flight.insert((source, identity));
+                }
                 // Nothing is coming, and a chip left `Fetching` for ever
                 // would say the opposite.
-                self.model.set_pair_state(
-                    &source,
-                    &identity,
-                    SlotState::Failed("fetch refused: the data service is busy or gone".into()),
-                );
+                Err(refusal) => {
+                    self.model.set_pair_state(
+                        &source,
+                        &identity,
+                        SlotState::Failed(format!("fetch refused: {refusal}")),
+                    );
+                }
             }
         }
     }
@@ -185,12 +188,11 @@ impl TimeseriesTile {
         };
         let submitted = match params {
             Some(params) => {
-                let queued = self.data.series(params).is_ok();
-                if !queued {
-                    self.notice =
-                        Some("series request refused: the data service is busy or gone".into());
+                let queued = self.data.series(params);
+                if let Err(refusal) = queued {
+                    self.notice = Some(format!("series request refused: {refusal}").into());
                 }
-                queued
+                queued.is_ok()
             }
             // Nothing to ask about (no slot, or no dataset yet).
             None => false,

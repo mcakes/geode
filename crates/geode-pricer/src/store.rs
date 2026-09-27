@@ -100,9 +100,10 @@ pub struct MemorySheetStore {
     confirming: Rc<Cell<bool>>,
     forgets: Rc<RefCell<Vec<String>>>,
     saves: Rc<Cell<usize>>,
-    refusing: Rc<Cell<bool>>,
+    save_refusal: Rc<Cell<Option<Refusal>>>,
     pending: Rc<Cell<bool>>,
-    load_refused: Rc<Cell<bool>>,
+    load_refusal: Rc<Cell<Option<Refusal>>>,
+    forget_refusal: Rc<Cell<Option<Refusal>>>,
     loads: Rc<RefCell<Vec<(String, QueryKey, u64)>>>,
 }
 
@@ -116,8 +117,14 @@ impl MemorySheetStore {
         self.saves.get()
     }
 
+    /// Every later `save` is refused `Busy` (a full request channel).
     pub fn set_refusing(&self, refusing: bool) {
-        self.refusing.set(refusing);
+        self.save_refusal.set(refusing.then_some(Refusal::Busy));
+    }
+
+    /// Every later `save` is refused with this kind; `None` admits again.
+    pub fn set_save_refusal(&self, refusal: Option<Refusal>) {
+        self.save_refusal.set(refusal);
     }
 
     pub fn set_pending(&self, pending: bool) {
@@ -126,7 +133,19 @@ impl MemorySheetStore {
 
     /// Every later `load` answers `Refused(Busy)` (a full request channel).
     pub fn set_load_refused(&self, refused: bool) {
-        self.load_refused.set(refused);
+        self.load_refusal.set(refused.then_some(Refusal::Busy));
+    }
+
+    /// Every later `load` answers `Refused` with this kind; `None` answers
+    /// normally again.
+    pub fn set_load_refusal(&self, refusal: Option<Refusal>) {
+        self.load_refusal.set(refusal);
+    }
+
+    /// Every later `forget` is refused with this kind before it changes
+    /// anything; `None` admits again.
+    pub fn set_forget_refusal(&self, refusal: Option<Refusal>) {
+        self.forget_refusal.set(refusal);
     }
 
     /// Every `load` asked so far, as `(name, key, tag)`.
@@ -148,8 +167,8 @@ impl MemorySheetStore {
 impl SheetStore for MemorySheetStore {
     fn load(&self, name: &str, key: QueryKey, tag: u64) -> Loaded {
         self.loads.borrow_mut().push((name.to_string(), key, tag));
-        if self.load_refused.get() {
-            return Loaded::Refused(Refusal::Busy);
+        if let Some(refusal) = self.load_refusal.get() {
+            return Loaded::Refused(refusal);
         }
         if self.pending.get() {
             return Loaded::Pending;
@@ -161,8 +180,8 @@ impl SheetStore for MemorySheetStore {
     }
 
     fn save(&self, name: &str, rows: DocumentRows) -> Result<(), Refusal> {
-        if self.refusing.get() {
-            return Err(Refusal::Busy);
+        if let Some(refusal) = self.save_refusal.get() {
+            return Err(refusal);
         }
         self.sheets.borrow_mut().insert(name.to_string(), rows);
         self.saves.set(self.saves.get() + 1);
@@ -170,6 +189,9 @@ impl SheetStore for MemorySheetStore {
     }
 
     fn forget(&self, name: &str) -> Result<(), Refusal> {
+        if let Some(refusal) = self.forget_refusal.get() {
+            return Err(refusal);
+        }
         self.forgets.borrow_mut().push(name.to_string());
         self.sheets.borrow_mut().remove(name);
         if !self.confirming.get() {

@@ -142,6 +142,9 @@ struct Harness {
     /// which is exactly what [`Harness::close_channel`] does on
     /// purpose, and why this is an `Option`.
     rx: RefCell<Option<Receiver<Request>>>,
+    /// The tile's own handle: `fill_for_tests` on it makes the next
+    /// submission refused `Busy`.
+    data: DataHandle,
 }
 
 /// A `Box<dyn ModuleFactory>` over the harness's own `Rc` — the
@@ -324,7 +327,7 @@ fn open_full(
         })
     });
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(TimeseriesFactory::new(data, named_colors(0.0)));
+    let factory = Rc::new(TimeseriesFactory::new(data.clone(), named_colors(0.0)));
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx
@@ -385,6 +388,7 @@ fn open_full(
             shell_focus: built.shell_focus,
             factory,
             rx: RefCell::new(Some(rx)),
+            data,
         },
         vcx,
     )
@@ -1452,6 +1456,20 @@ fn a_delivery_becomes_the_chart_model_and_a_stale_tag_is_dropped(cx: &mut gpui::
 }
 
 #[gpui::test]
+fn a_refused_fetch_fails_the_chip_by_kind(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.visible(&mut vcx, true);
+    h.data.fill_for_tests();
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[0].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service is busy"));
+    h.close_channel();
+    h.command(&mut vcx, "add NDX.close").unwrap();
+    assert!(matches!(&h.model(&vcx).slots()[1].state,
+        SlotState::Failed(e) if e == "fetch refused: the data service has stopped"));
+}
+
+#[gpui::test]
 fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.visible(&mut vcx, true);
@@ -1464,12 +1482,10 @@ fn a_refused_submit_notices_and_still_answers_the_barrier(cx: &mut gpui::TestApp
     h.close_channel();
     let at = chrono::Utc::now() - chrono::Duration::days(30);
     open_barrier_on_as_of(&h, &mut vcx, &[QueryKey(TILE)], at);
-    assert!(
-        h.notice(&vcx)
-            .unwrap()
-            .starts_with("series request refused"),
-        "the refusal is named, not swallowed: {:?}",
-        h.notice(&vcx)
+    assert_eq!(
+        h.notice(&vcx).as_deref(),
+        Some("series request refused: the data service has stopped"),
+        "the refusal is named, not swallowed"
     );
     assert!(
         !h.frame.read_with(&vcx, |f, _| f.barrier_open()),

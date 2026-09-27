@@ -33,7 +33,7 @@ use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
-use geode_data::DataHandle;
+use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::frame::Frame;
@@ -71,14 +71,18 @@ fn retry_delay(refusals: u32) -> Duration {
     let doublings = refusals.saturating_sub(1).min(5);
     (RETRY_AFTER * 2u32.pow(doublings)).min(RETRY_CAP)
 }
-pub(crate) const REFUSED: &str =
-    "pricing request refused: the data service is busy or gone; retrying";
+pub(crate) const REFUSED: &str = "pricing request refused: the data service is busy; retrying";
+/// The data service has stopped: no retry can succeed, so none is armed.
+pub(crate) const STOPPED: &str = "pricing request refused: the data service has stopped";
 
 /// Spec §7.3: how long a change waits before the write-behind save fires.
 /// A change inside the window re-arms it (replacing the task drops the
 /// old one), so a burst saves once.
 pub(crate) const SAVE_IDLE: Duration = Duration::from_secs(1);
-pub(crate) const NOT_SAVED: &str = "sheet not saved: the store refused it; the next edit retries";
+pub(crate) const NOT_SAVED: &str =
+    "sheet not saved: the data service is busy; the next edit retries";
+/// The data service has stopped: later edits are not saved either.
+pub(crate) const SAVE_STOPPED: &str = "sheet not saved: the data service has stopped";
 
 /// The save slot after a queued save's outcome reported a failure.
 fn not_saved(reason: &str) -> SharedString {
@@ -86,8 +90,9 @@ fn not_saved(reason: &str) -> SharedString {
 }
 
 /// Why a load the store never submitted failed (`Loaded::Refused`).
-pub(crate) const LOAD_REFUSED: &str =
-    "the store refused the load: the data service is busy or gone";
+pub(crate) fn load_refused(refusal: Refusal) -> String {
+    format!("the store refused the load: {refusal}")
+}
 
 /// The save slot's standing notice after a failed load (see
 /// `PricerTile::save_blocked`).
@@ -289,6 +294,10 @@ pub struct PricerTile {
     /// without replacing it. Admission, or a submit with no further work needed, ends
     /// the streak and reveals the underlying notice.
     refusals: u32,
+    /// A pricing submission was refused `Stopped`. The service never comes
+    /// back, so no backoff is armed, no later submit asks again, and the
+    /// header says stopped from here on.
+    stopped: bool,
     /// The view fallback's standing notice (`resolve_plan`).
     view_notice: Option<SharedString>,
     /// The save state's own header slot (spec §7.3): `NOT_SAVED` after a
@@ -317,6 +326,8 @@ pub struct PricerTile {
     /// `Ok` arriving afterwards confirms an earlier save, not this one,
     /// so it must not clear that notice.
     save_refused: bool,
+    /// A save was refused `Stopped`: later edits do not ask the store again.
+    save_stopped: bool,
     /// The latest load's tag: a `Delivery::Query` under any other is an
     /// earlier (cancelled or superseded) load's and is dropped. Separate
     /// from the pricing `tag`; both ride this tile's `QueryKey`, but the
@@ -506,8 +517,8 @@ impl PricerTile {
             }
             // No load answer will arrive. Block saves immediately so the
             // empty fallback cannot overwrite the stored document.
-            Loaded::Refused(_) => {
-                blocked = Some(blocked_notice(&name, LOAD_REFUSED));
+            Loaded::Refused(refusal) => {
+                blocked = Some(blocked_notice(&name, &load_refused(refusal)));
                 (fallback(&name, &record), false)
             }
         };
@@ -626,12 +637,14 @@ impl PricerTile {
             held_expanded,
             notice: (!notices.is_empty()).then(|| notices.join("; ").into()),
             refusals: 0,
+            stopped: false,
             view_notice: None,
             save_blocked: blocked.is_some(),
             save_notice: blocked,
             dirty: false,
             save_failed: false,
             save_refused: false,
+            save_stopped: false,
             load_tag,
             load_cancelled: false,
             rename_from: None,
@@ -1726,10 +1739,16 @@ impl PricerTile {
         if self.save_blocked {
             return true;
         }
+        // A stopped store refuses every save; asking again on each edit only
+        // repeats the refusal.
+        if self.save_stopped {
+            return false;
+        }
         let Some(rows) = to_rows(&self.sheet) else {
             return true;
         };
-        if self.shared.store.save(&self.sheet.name, rows).is_ok() {
+        let saved = self.shared.store.save(&self.sheet.name, rows);
+        if saved.is_ok() {
             self.shared.save_queued(&self.sheet.name);
             self.shared
                 .save_origins
@@ -1742,6 +1761,10 @@ impl PricerTile {
         } else {
             self.save_refused = true;
             self.save_notice = Some(NOT_SAVED.into());
+            if saved == Err(Refusal::Stopped) {
+                self.save_stopped = true;
+                self.save_notice = Some(SAVE_STOPPED.into());
+            }
             false
         }
     }
@@ -1770,14 +1793,17 @@ impl PricerTile {
                         // delete a sheet in use. `:e` and a restore refuse
                         // a retiring name, so no route reaches this today.
                         self.shared.retiring.borrow_mut().remove(&old);
-                    } else if self.shared.store.forget(&old).is_ok() {
-                        // Reserved until the forget is answered.
-                        self.forgetting.push(old);
                     } else {
-                        self.shared.retiring.borrow_mut().remove(&old);
-                        self.notice = Some(
-                            format!("old sheet '{old}' not removed: the store refused it").into(),
-                        );
+                        match self.shared.store.forget(&old) {
+                            // Reserved until the forget is answered.
+                            Ok(()) => self.forgetting.push(old),
+                            Err(refused) => {
+                                self.shared.retiring.borrow_mut().remove(&old);
+                                self.notice = Some(
+                                    format!("old sheet '{old}' not removed: {refused}").into(),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1794,7 +1820,9 @@ impl PricerTile {
     /// already in flight at its current revision (spec §9.1, planning
     /// decision 4). A hidden or loading tile submits nothing.
     pub(crate) fn submit(&mut self, cx: &mut Context<Self>) {
-        if !self.visible || self.loading {
+        // A stopped service admits nothing again: a refresh tick or an edit
+        // asking it would only repeat the refusal the header already shows.
+        if !self.visible || self.loading || self.stopped {
             return;
         }
         let stale: Vec<usize> = self.sheet.stale_lines().collect();
@@ -1834,6 +1862,17 @@ impl PricerTile {
         if queued.is_ok() {
             self.in_flight = flight;
             self.end_refusals();
+        } else if queued == Err(Refusal::Stopped) {
+            // A stopped service does not come back: arming the backoff would
+            // retry for the life of the tile against a refusal that repeats.
+            tracing::warn!(
+                target: "geode::pricing",
+                tile = self.id.0,
+                "pricing request refused: the data service has stopped; not retrying"
+            );
+            self.in_flight.clear();
+            self.end_refusals();
+            self.stopped = true;
         } else {
             // Retry independently of periodic refresh. Log once per streak so a closed
             // channel does not produce a warning on every attempt.
@@ -1991,7 +2030,7 @@ impl PricerTile {
             Loaded::Missing => Ok(None),
             // Never submitted: nothing is coming, so this is the failed
             // load, not a `loading` that never resolves.
-            Loaded::Refused(_) => Err(LOAD_REFUSED.to_string()),
+            Loaded::Refused(refusal) => Err(load_refused(refusal)),
         };
         self.loaded(answer, cx);
     }
@@ -3057,21 +3096,21 @@ impl PricerTile {
         };
         if let Some(why) = refusal {
             self.footer = Some(format!("sheet '{}' not removed: {why}", pending.sheet).into());
-        } else if self.shared.store.forget(&pending.sheet).is_ok() {
-            // Reserved until the forget is answered.
-            self.shared
-                .retiring
-                .borrow_mut()
-                .insert(pending.sheet.clone());
-            self.forgetting.push(pending.sheet);
         } else {
-            self.footer = Some(
-                format!(
-                    "sheet '{}' not removed: the store refused it",
-                    pending.sheet
-                )
-                .into(),
-            );
+            match self.shared.store.forget(&pending.sheet) {
+                Ok(()) => {
+                    // Reserved until the forget is answered.
+                    self.shared
+                        .retiring
+                        .borrow_mut()
+                        .insert(pending.sheet.clone());
+                    self.forgetting.push(pending.sheet);
+                }
+                Err(refused) => {
+                    self.footer =
+                        Some(format!("sheet '{}' not removed: {refused}", pending.sheet).into());
+                }
+            }
         }
         self.rebuild_chrome();
         cx.notify();
@@ -3217,7 +3256,9 @@ impl PricerTile {
 
     pub(crate) fn rebuild_chrome(&mut self) {
         let settings: PricerSettings = self.shared.settings.borrow().clone();
-        let notice = if self.refusals > 0 {
+        let notice = if self.stopped {
+            Some(STOPPED.into())
+        } else if self.refusals > 0 {
             Some(REFUSED.into())
         } else {
             self.notice.clone().or_else(|| self.view_notice.clone())
@@ -4702,7 +4743,7 @@ pub(crate) mod tests {
     fn a_refused_submission_notices_and_retries_after_a_second(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
-        h.close_channel();
+        h.fill_queue();
         h.visible(&mut vcx, true);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
         let tag = h.tile.read_with(&vcx, |t, _| t.tag);
@@ -6896,7 +6937,7 @@ pub(crate) mod tests {
         for b in batches {
             h.answer(&mut vcx, &b, 12.5);
         }
-        h.close_channel();
+        h.fill_queue();
         h.dispatch(&mut vcx, "price", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
         assert_eq!(
@@ -7017,7 +7058,7 @@ pub(crate) mod tests {
     fn a_refusal_with_nothing_left_to_price_clears(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&["SPX Z26 5000 C"]);
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
-        h.close_channel();
+        h.fill_queue();
         h.visible(&mut vcx, true);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
         h.dispatch(&mut vcx, "delete", None);
@@ -7051,13 +7092,13 @@ pub(crate) mod tests {
         assert_eq!(h.notice(&vcx), gone);
     }
 
-    /// Each consecutive refusal doubles the wait: a closed channel asks
+    /// Each consecutive refusal doubles the wait: a full queue asks
     /// at 1 s, then 2 s later, not every second forever.
     #[gpui::test]
     fn consecutive_refusals_back_off(cx: &mut gpui::TestAppContext) {
         let (store, record) = seeded(&BOOK);
         let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
-        h.close_channel();
+        h.fill_queue();
         h.visible(&mut vcx, true);
         let tag = |vcx: &VisualTestContext| h.tile.read_with(vcx, |t, _| t.tag);
         let first = tag(&vcx);
@@ -7068,6 +7109,65 @@ pub(crate) mod tests {
         assert_eq!(tag(&vcx), second, "the second does not fire 1 s later");
         settle(&mut vcx, RETRY_AFTER);
         assert!(tag(&vcx) > second, "but does by 2 s");
+    }
+
+    /// A stopped service never comes back: the refusal arms no backoff, a
+    /// refresh tick asks nothing, and the header keeps saying why.
+    #[gpui::test]
+    fn a_stopped_service_stops_the_pricing_backoff(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.close_channel();
+        h.visible(&mut vcx, true);
+        assert_eq!(h.notice(&vcx).as_deref(), Some(STOPPED));
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.retry_task.is_none()),
+            "no backoff is armed"
+        );
+        let tag = h.tile.read_with(&vcx, |t, _| t.tag);
+        settle(&mut vcx, RETRY_CAP);
+        settle(&mut vcx, RETRY_CAP);
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.tag),
+            tag,
+            "nothing retries, and no refresh tick asks again"
+        );
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some(STOPPED),
+            "and it keeps saying why"
+        );
+    }
+
+    #[gpui::test]
+    fn a_stopped_service_stops_save_retries(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        let base = h.store.save_count();
+        h.store.set_save_refusal(Some(Refusal::Stopped));
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 2 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(SAVE_STOPPED));
+        h.store.set_save_refusal(None);
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 3 });
+        settle(&mut vcx, SAVE_IDLE);
+        assert_eq!(
+            h.store.save_count(),
+            base,
+            "no later edit asks a stopped store again"
+        );
+        assert_eq!(h.save_notice(&vcx).as_deref(), Some(SAVE_STOPPED));
+    }
+
+    #[gpui::test]
+    fn a_stopped_load_names_the_stopped_service(cx: &mut gpui::TestAppContext) {
+        let (store, record) = seeded(&BOOK);
+        store.set_load_refusal(Some(Refusal::Stopped));
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        h.visible(&mut vcx, true);
+        assert_eq!(
+            h.save_notice(&vcx),
+            Some(blocked_notice("book", &load_refused(Refusal::Stopped)).to_string())
+        );
     }
 
     #[test]
@@ -7626,7 +7726,7 @@ pub(crate) mod tests {
     fn a_load_starting_clears_a_refusal_streak(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         answer_all(&h, &mut vcx, 1.0);
-        h.close_channel();
+        h.fill_queue();
         h.dispatch(&mut vcx, "price", None);
         assert_eq!(h.notice(&vcx).as_deref(), Some(REFUSED));
         h.store.set_pending(true);
@@ -7645,7 +7745,7 @@ pub(crate) mod tests {
         h.visible(&mut vcx, true);
         assert_eq!(
             h.save_notice(&vcx),
-            Some(blocked_notice("book", LOAD_REFUSED).to_string())
+            Some(blocked_notice("book", &load_refused(Refusal::Busy)).to_string())
         );
         assert_ne!(
             h.notice(&vcx).as_deref(),
@@ -8384,6 +8484,32 @@ pub(crate) mod tests {
         vcx.update(|_, cx| h.factory.forget_answered("old", Ok(()), cx));
         assert!(!h.store.contains("old"));
         assert!(!completions(&h, &mut vcx, "e ").contains(&"old".to_string()));
+    }
+
+    #[gpui::test]
+    fn a_stopped_remove_names_the_stopped_service(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _second) = rm_fixture(cx);
+        h.store.set_forget_refusal(Some(Refusal::Stopped));
+        h.command(&mut vcx, "rm old").unwrap();
+        h.draw(&mut vcx);
+        vcx.simulate_keystrokes("y");
+        assert_eq!(
+            h.footer(&vcx).as_deref(),
+            Some("sheet 'old' not removed: the data service has stopped")
+        );
+    }
+
+    /// The old name's forget after `:name` is refused by kind too.
+    #[gpui::test]
+    fn a_stopped_rename_forget_names_the_stopped_service(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        assert_eq!(h.command(&mut vcx, "name fresh"), Ok(()));
+        h.store.set_forget_refusal(Some(Refusal::Stopped));
+        save_answered(&h, &mut vcx, "fresh", Ok(()));
+        assert_eq!(
+            h.notice(&vcx).as_deref(),
+            Some("old sheet 'book' not removed: the data service has stopped")
+        );
     }
 
     /// A removed sheet stays removed when the catalog the diagnostics
