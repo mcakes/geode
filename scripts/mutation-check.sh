@@ -13143,6 +13143,20 @@ run_mutation "mdedit: bump walks the cursor's row by default" \
   geode-marketdata \
   bump_adds_to_the_cursors_row_by_default_and_to_its_column_on_request
 
+# With a selection live, only a bare `:bump` acts on the selection; a
+# typed `row` or `col` keeps its meaning. Mutated so an explicit axis also
+# goes to the selection, `:bump 1 row` moves the selected block and leaves
+# the cursor's row outside it untouched, reporting success on cells the
+# trader did not name.
+run_mutation "mdbump: an explicit axis bypasses the selection" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if axis.is_none() && self.selection.is_some() {
+            return self.bump_selection(delta, cx);' \
+  '        if self.selection.is_some() {
+            return self.bump_selection(delta, cx);' \
+  geode-marketdata \
+  bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection
+
 # The grid can move under an open editor: a delivery lands while a trader
 # is typing and a shorter generation clamps the cursor, so the cell the
 # editor was opened on may now carry another term's labels. Mutated away,

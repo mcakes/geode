@@ -5,7 +5,7 @@
 //! neighbour.
 
 use super::*;
-use crate::core::bulk::{Skip, Skips};
+use crate::core::bulk::{self, Skip, Skips};
 use crate::core::draft::bumped;
 use geode_core::grid::selection::{Lost, Selection};
 
@@ -303,7 +303,7 @@ impl MarketDataTile {
             numbers.get(col).copied().unwrap_or(false).then_some(delta)
         })?;
         self.rebuild_model(cx);
-        self.notice = Some(format!("bumped {n} cells{}", skips.describe()).into());
+        self.notice = Some(format!("bumped {}{}", bulk::cells(n), skips.describe()).into());
         self.changed(cx);
         Ok(())
     }

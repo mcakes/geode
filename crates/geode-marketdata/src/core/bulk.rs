@@ -61,7 +61,8 @@ impl Skips {
     }
 }
 
-fn cells(n: usize) -> String {
+/// `N cell` or `N cells`: every bulk notice counts through this one door.
+pub(crate) fn cells(n: usize) -> String {
     format!("{n} cell{}", if n == 1 { "" } else { "s" })
 }
 

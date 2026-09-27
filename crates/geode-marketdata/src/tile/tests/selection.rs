@@ -383,6 +383,22 @@ fn bump_with_no_axis_moves_every_selected_number_and_keeps_the_selection(
         "4510.00",
         "a row bump never moves the slice values"
     );
+    // Column 5 is outside the block, so only a real row bump reaches it.
+    assert_eq!(
+        h.row_texts(&vcx, 1)[5],
+        "1.6000",
+        "an explicit axis bypasses the selection"
+    );
+}
+
+#[gpui::test]
+fn a_one_cell_selection_bump_says_cell(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32));
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.command(&mut vcx, "bump 0.01").unwrap();
+    assert_eq!(notice_of(&h, &vcx).as_deref(), Some("bumped 1 cell"));
 }
 
 #[gpui::test]

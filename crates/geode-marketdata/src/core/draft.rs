@@ -1600,9 +1600,9 @@ mod tests {
     }
 
     /// `:bump` only ever reaches a `Number` cell — the tile decides that
-    /// through `MatrixModel::kind_of`, before it ever builds the iterator
-    /// `bump` takes — and `numeric_edit` is the door `MarketDataTile::bump`
-    /// reads an existing edit's CURRENT value through: `F64`/`I64` keep
+    /// through `MatrixModel::kind_of` before reading any value — and
+    /// `numeric_edit` is the door `MarketDataTile::current_numeric` reads
+    /// an existing edit's CURRENT value through: `F64`/`I64` keep
     /// their own type, a `Date`/`Utf8` edit (or no edit at all) answers
     /// `None` rather than being coerced.
     #[test]
