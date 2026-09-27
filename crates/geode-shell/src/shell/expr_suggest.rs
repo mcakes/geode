@@ -38,7 +38,11 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     let current = view.frame.read(cx).scope();
     if let Some(state) = view.scope_expr_dialog.as_ref() {
-        return Some(scope_expr_view::request_scope(&state.mode, current));
+        return Some(scope_expr_view::request_scope(
+            &state.mode,
+            current,
+            &state.staged,
+        ));
     }
     let state = view
         .object_dialog
@@ -210,10 +214,10 @@ pub(crate) fn accept(
 }
 
 /// Add `name` to the open frame expression dialog's staged names, so
-/// Enter applies it beside the parsed text. Only that dialog offers named
-/// rows; it does nothing yet.
+/// Enter applies it beside the parsed text, and stop offering it. Only
+/// that dialog offers named rows.
 fn stage_named(view: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
-    let _ = (view, name, cx);
+    scope_expr_view::stage(view, name, cx);
 }
 
 /// A pointer accept: accept the ranked row of this kind labelled `label`

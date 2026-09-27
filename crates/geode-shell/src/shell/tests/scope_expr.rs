@@ -143,6 +143,22 @@ fn opened_from_the_text_field_focus_returns_to_it(cx: &mut gpui::TestAppContext)
 /// the derived `desk`. The keymap doc is re-added because the config is
 /// rebuilt from these layers alone.
 fn services_with_schema() -> ShellServices {
+    services_with_schema_and(Vec::new())
+}
+
+/// [`services_with_schema`] plus two named expressions, `liq` and `hedges`.
+fn services_with_named() -> ShellServices {
+    services_with_schema_and(vec![
+        LayerDoc::builtin(
+            "expressions",
+            "[liq]\nexpression = \"npv > 0\"\n[hedges]\nexpression = \"npv < 0\"\n",
+        )
+        .unwrap(),
+    ])
+}
+
+/// [`services_with_schema`] with `extra` builtin layers after its own.
+fn services_with_schema_and(extra: Vec<LayerDoc>) -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -157,12 +173,14 @@ fn services_with_schema() -> ShellServices {
         "[desk]\nfrom = \"book\"\n[desk.values]\nEQ = [\"BK000\"]\n",
     )
     .unwrap();
+    let mut builtin = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        datasets,
+        dims,
+    ];
+    builtin.extend(extra);
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
-        builtin: vec![
-            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
-            datasets,
-            dims,
-        ],
+        builtin,
         desk: None,
         user: None,
     });
@@ -453,4 +471,190 @@ fn a_reload_rebuilds_the_vocab_under_an_open_dialog(cx: &mut gpui::TestAppContex
     shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-row-region").is_some());
+}
+
+fn named_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    let frame = shell.read_with(vcx, |s, _| s.frame().clone());
+    frame.read_with(vcx, |f, _| f.scope().named.clone())
+}
+
+/// A shell over [`services_with_named`] whose frame scope names `named`
+/// and holds `expression`.
+fn named_shell(
+    cx: &mut gpui::TestAppContext,
+    named: &[&str],
+    expression: Option<&str>,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_named());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            named: named.iter().map(ToString::to_string).collect(),
+            expression: expression.map(|t| parse_expr(t).unwrap()),
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    (shell, vcx)
+}
+
+/// Tab on a named row erases the typed prefix and stages the name as a
+/// chip; Enter on the then-empty field applies the name alone.
+#[gpui::test]
+fn tab_stages_a_named_row_and_enter_applies_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "", "the token is erased");
+    assert!(
+        vcx.debug_bounds("scope-expr-staged-liq").is_some(),
+        "the staged chip paints"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert_eq!(named_of(&shell, &vcx), vec!["liq".to_string()]);
+}
+
+/// Whole mode opens with the frame's names staged. Backspace at offset 0
+/// removes the last chip, Enter applies names and text in one undoable
+/// step, and one `frame::scope_undo` brings both names back.
+#[gpui::test]
+fn backspace_at_the_start_unstages_the_last_name_and_undo_restores(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], Some("npv > 5"));
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_some());
+    vcx.simulate_keystrokes("home backspace");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert_eq!(field(&shell, &vcx), "npv > 5", "the text is untouched");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(named_of(&shell, &vcx), vec!["liq".to_string()]);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f
+            .scope()
+            .expression
+            .as_ref()
+            .map(ToString::to_string)),
+        Some("npv > 5".to_string())
+    );
+    dispatch_action(&shell, "frame::scope_undo", &mut vcx);
+    assert_eq!(
+        named_of(&shell, &vcx),
+        vec!["liq".to_string(), "hedges".to_string()],
+        "one undo restores both names"
+    );
+}
+
+/// Backspace away from offset 0 stays the field's: it deletes a
+/// character and every staged chip stays.
+#[gpui::test]
+fn backspace_past_the_start_edits_the_text(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], Some("npv > 5"));
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.simulate_keystrokes("backspace");
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "npv > ");
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+}
+
+/// A staged name is no longer offered.
+#[gpui::test]
+fn a_staged_name_leaves_the_named_rows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], None);
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    let row = vcx
+        .debug_bounds("scope-expr-named-row-liq")
+        .expect("liq is offered");
+    vcx.simulate_click(row.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-liq").is_none(),
+        "staged, so not offered"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_some());
+    assert_eq!(field(&shell, &vcx), "");
+}
+
+/// Term mode edits one term: it offers no named rows and stages nothing.
+#[gpui::test]
+fn term_mode_offers_no_named_rows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq"], Some("npv > 5 and live = true"));
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.as_ref().is_some_and(
+            |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
+        ))
+    );
+    vcx.simulate_keystrokes("cmd-a backspace");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-row-book").is_some(),
+        "a column position"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-named-row-hedges").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+}
+
+/// A click on a staged chip's `×` removes that name alone.
+#[gpui::test]
+fn clicking_a_staged_chips_close_unstages_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &["liq", "hedges"], None);
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    vcx.run_until_parked();
+    let close = vcx
+        .debug_bounds("scope-expr-staged-close-liq")
+        .expect("the close paints");
+    vcx.simulate_click(close.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+    assert!(vcx.debug_bounds("scope-expr-staged-hedges").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-named-row-liq").is_some(),
+        "unstaged, so offered again"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(named_of(&shell, &vcx), vec!["hedges".to_string()]);
+}
+
+/// A named expression sharing a column's name: its named row stages it,
+/// and the column row still inserts the column.
+#[gpui::test]
+fn a_named_row_and_a_column_row_of_one_name_click_apart(cx: &mut gpui::TestAppContext) {
+    let services = services_with_schema_and(vec![
+        LayerDoc::builtin("expressions", "[book]\nexpression = \"npv > 0\"\n").unwrap(),
+    ]);
+    let (shell, mut vcx) = dialog_test_shell_with(cx, services, "frame::add_expression");
+    vcx.run_until_parked();
+    let named = vcx
+        .debug_bounds("scope-expr-named-row-book")
+        .expect("the named row paints");
+    vcx.simulate_click(named.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-staged-book").is_some());
+    assert_eq!(field(&shell, &vcx), "", "a named row writes no text");
+    let column = vcx
+        .debug_bounds("scope-expr-row-book")
+        .expect("the column row paints");
+    vcx.simulate_click(column.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(field(&shell, &vcx), "book ");
+    assert!(vcx.debug_bounds("scope-expr-staged-book").is_some());
 }

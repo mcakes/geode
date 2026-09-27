@@ -21973,6 +21973,31 @@ run_mutation "expr suggest: accepting a named row stages it" \
   geode-shell \
   accepting_a_named_row_stages_it_and_erases_the_token
 
+# Whole mode's Enter replaces the frame's names with the staged ones; left
+# out, a removed chip would stay in the scope.
+run_mutation "scope expr: whole apply sets the staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            scope.named = staged.to_vec();' \
+  '            let _ = staged;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# Backspace at the field's start removes the last staged chip.
+run_mutation "scope expr: backspace at the start unstages" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return backspace_unstages(shell, cx);' \
+  '        return false;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# A staged name is not offered again.
+run_mutation "scope expr: offers exclude staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        .filter(|name| !staged.iter().any(|s| s == name))' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  a_staged_name_leaves_the_named_rows
+
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.
 run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \

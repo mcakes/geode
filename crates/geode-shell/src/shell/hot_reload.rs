@@ -334,6 +334,9 @@ impl ShellView {
                         cx.notify();
                     }
                 });
+                // An open expression dialog offers the new definitions at
+                // once, not at its next staging.
+                super::scope_expr_view::sync_named_offers(self, cx);
             }
             // Every applied reload advances the config revision, including changes
             // that do not emit the view-specific `ConfigReloaded` event.
