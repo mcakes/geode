@@ -357,8 +357,8 @@ Enter; they do not use Normal/Filter mode's keep-query Enter.
 ## Frame expression
 
 [`shell/scope_expr_view.rs`](../../crates/geode-shell/src/shell/scope_expr_view.rs)
-edits the frame's expression, and in two of its modes the frame's
-named-expression references, in one of three modes chosen by the door that
+edits the frame's expression and the frame's named-expression references
+(Whole and Add through staged names, Term by naming the term), in one of three modes chosen by the door that
 opens it. Bare Enter trims and parses the draft in every mode.
 
 | Mode | Opened by | Seed | Enter | Empty Enter, nothing staged |
@@ -414,15 +414,19 @@ A save writes `[name] expression = "<text>"` to the user layer of
 `expressions.toml` through the object dialog's write path, rebuilds the
 frame's named expressions from the pending configuration at once (so the new
 name resolves before the write reaches disk), empties the field, and stages
-the name. Nothing reaches the frame scope until Enter.
+the name. In Whole and Add nothing reaches the frame scope until Enter.
 
-In Term mode the save names the term: Enter on a name writes the field's
+In Term mode the save names the term (the entry reads `Name this term ·
+name`, the footer chip `name this term`): Enter on a name writes the field's
 text (edits included) as above, then replaces the term with the name in one
 `set_scope` (the term leaves the expression and the name joins the frame's
 named list) and closes the dialog. One undo puts the plain term back; the
 definition stays. The term is checked before anything is written, so a term
 that changed underneath refuses with the term dialog's usual message and
-writes nothing.
+writes nothing. A write that fails later rolls the configuration back but not
+the swap: the tile then refuses to query with a missing-name error rather
+than drop the filter, and one undo restores the term, as with a staged name
+in Add.
 
 The toolbar's `+` opens a two-row menu, "Dimension…" (`frame::pick`) and
 "Expression…" (`frame::add_expression`), each row showing its action's live binding

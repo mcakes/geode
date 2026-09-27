@@ -23,7 +23,7 @@
 //! removes the last chip; a chip's `×` removes that chip. Term mode offers
 //! and stages no names.
 //!
-//! `mod+s` in Whole and Add turns the field into a name entry for the
+//! `mod+s` in every mode turns the field into a name entry for the
 //! typed text (suggestions off, staged chips kept); on an empty field it
 //! refuses at once and opens no entry. Enter refuses an invalid, reserved
 //! or taken name, an empty text, one Enter itself would refuse, or a
@@ -31,8 +31,9 @@
 //! otherwise it writes `[name] expression = "<text>"` to the user layer of
 //! `expressions.toml`, refreshes the frame's definitions from the pending
 //! config (so the name resolves before the write lands), empties the field
-//! and stages the name. Escape puts the text back. In Term mode `mod+s` only says where
-//! saving lives.
+//! and stages the name. Escape puts the text back. In Term mode there is
+//! nothing to stage: the name replaces the term in one `set_scope` and the
+//! dialog closes.
 //!
 //! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
 //! error stays inline in every mode, and editing clears the error. Escape
@@ -137,8 +138,11 @@ pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 /// A save with an empty (or whitespace-only) field, which names nothing.
 pub const SAVE_EMPTY: &str = "nothing to save — the expression is empty";
 
-/// The name entry's label.
+/// The name entry's label in Whole and Add.
 const NAMING_LABEL: &str = "Save this expression as a named expression · name";
+
+/// The name entry's label in Term mode, where the name replaces the term.
+const NAMING_TERM_LABEL: &str = "Name this term · name";
 
 /// The dialog's state: its mode, the named expressions staged beside the
 /// text, the last failed commit's message, and the field's suggestions.
@@ -735,11 +739,12 @@ fn save_named(
     }
     if let Some((index, seeded)) = term {
         // The term was checked above and nothing between changes the
-        // frame, so the swap cannot refuse here.
+        // frame's scope, so the swap cannot refuse here; a refusal would
+        // close with the definition written and the term left in place.
         shell.frame.update(cx, |f, cx| {
-            if let Ok(true) = f.name_expression_term(index, &seeded, &name) {
-                cx.notify();
-            }
+            let swapped = f.name_expression_term(index, &seeded, &name);
+            debug_assert_eq!(swapped, Ok(true), "the term was checked before the write");
+            cx.notify();
         });
         shell.close_modal(window, cx);
         return Ok(());
@@ -768,7 +773,11 @@ fn build(
         column = column.child(staged_chips(shell, &state.staged, entity, cx));
     }
     column = column.child(if state.naming.is_some() {
-        dialog::name_row(&shell.dialog_input, NAMING_LABEL, cx)
+        let label = match state.mode {
+            Mode::Term { .. } => NAMING_TERM_LABEL,
+            Mode::Whole | Mode::Add => NAMING_LABEL,
+        };
+        dialog::name_row(&shell.dialog_input, label, cx)
     } else {
         dialog::filter_row(&shell.dialog_input, None, cx)
     });
@@ -814,9 +823,15 @@ fn build(
         };
         let extra = vec![
             div().child("·").into_any_element(),
-            super::kbd::hint(&[ks], "save as named")
-                .debug_selector(|| "scope-expr-save-hint".to_string())
-                .into_any_element(),
+            super::kbd::hint(
+                &[ks],
+                match state.mode {
+                    Mode::Term { .. } => "name this term",
+                    Mode::Whole | Mode::Add => "save as named",
+                },
+            )
+            .debug_selector(|| "scope-expr-save-hint".to_string())
+            .into_any_element(),
         ];
         (hints, extra)
     };

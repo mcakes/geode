@@ -1325,6 +1325,14 @@ mod tests {
         assert!(f.undo_scope(), "one step");
         assert_eq!(term_texts(&f), vec!["a = 1", "b = 2", "c = 3"]);
         assert_eq!(f.scope().named, Vec::<String>::new());
+
+        // A scope may already list the name (a reference whose definition
+        // is missing); naming a term after it lists it once.
+        let mut s = f.scope().clone();
+        s.named = vec!["gone".to_string()];
+        f.set_scope(s);
+        assert_eq!(f.name_expression_term(0, &p("a = 1"), "gone"), Ok(true));
+        assert_eq!(f.scope().named, vec!["gone".to_string()]);
     }
 
     #[test]

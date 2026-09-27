@@ -1123,6 +1123,10 @@ fn mod_s_in_term_mode_names_the_term(cx: &mut gpui::TestAppContext) {
     assert_eq!(named_of(&shell, &vcx), vec!["big".to_string()]);
     assert_eq!(term_texts(&shell, &vcx), vec!["live = true".to_string()]);
     assert!(vcx.debug_bounds("scope-expr-chip-1").is_none());
+    assert!(
+        vcx.debug_bounds("scope-named-chip-big").is_some(),
+        "the term's chip is now a named chip"
+    );
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert!(
         matches!(

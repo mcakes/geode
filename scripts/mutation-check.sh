@@ -22691,6 +22691,15 @@ run_mutation "scope expr: naming a term drops it without joining the name" \
   geode-shell \
   mod_s_in_term_mode_names_the_term
 
+# A scope may already list the name (its definition missing); naming a term
+# after it must not list it twice.
+run_mutation "scope expr: naming a term lists an already-listed name twice" \
+  crates/geode-shell/src/frame.rs \
+  '            && !s.named.iter().any(|n| n == name)' \
+  '            && true' \
+  geode-shell \
+  name_expression_term_swaps_the_term_for_the_name_in_one_undo_step
+
 # A reserved name belongs to a built-in row; saving under it would shadow it.
 run_mutation "scope expr: saving refuses a reserved name" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
