@@ -22020,6 +22020,23 @@ run_mutation "scope expr: saving refuses a taken name" \
   geode-shell \
   mod_s_refuses_a_taken_name
 
+# An empty field names nothing; opening the entry for it would ask for a
+# name that can only be refused.
+run_mutation "scope expr: mod+s on an empty field opens the name entry" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '    if text.trim().is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  mod_s_on_an_empty_field_refuses_and_writes_nothing
+
+# A reserved name belongs to a built-in row; saving under it would shadow it.
+run_mutation "scope expr: saving refuses a reserved name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.is_reserved(&name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_reserved_name
+
 # The name entry shares the field; suggestions there would write an
 # expression into a name.
 run_mutation "expr suggest: no suggestions while naming" \

@@ -24,9 +24,10 @@
 //! and stages no names.
 //!
 //! `mod+s` in Whole and Add turns the field into a name entry for the
-//! typed text (suggestions off, staged chips kept). Enter refuses an
-//! invalid or taken name, an empty text or one Enter itself would refuse,
-//! each inline with the entry still open; otherwise it writes
+//! typed text (suggestions off, staged chips kept); on an empty field it
+//! refuses at once and opens no entry. Enter refuses an invalid, reserved
+//! or taken name, an empty text, one Enter itself would refuse, or a
+//! missing user config directory, each inline with the entry still open; otherwise it writes
 //! `[name] expression = "<text>"` to the user layer of `expressions.toml`,
 //! refreshes the frame's definitions from the pending config (so the name
 //! resolves before the write lands), empties the field and stages the
@@ -135,6 +136,9 @@ pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 
 /// `mod+s` in Term mode, which edits one term and has nothing whole to name.
 pub const SAVE_FROM_TERM: &str = "save a named expression from the whole or add dialog";
+
+/// A save with an empty (or whitespace-only) field, which names nothing.
+pub const SAVE_EMPTY: &str = "nothing to save — the expression is empty";
 
 /// The name entry's label.
 const NAMING_LABEL: &str = "Save this expression as a named expression · name";
@@ -599,7 +603,9 @@ fn naming_key(
 }
 
 /// Stash the text and turn the field into a name entry. Term mode edits
-/// one term, so it refuses with [`SAVE_FROM_TERM`] and changes nothing.
+/// one term, so it refuses with [`SAVE_FROM_TERM`] and changes nothing;
+/// an empty field refuses with [`SAVE_EMPTY`] before any name is asked
+/// for, since no name could be saved for it.
 fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let text = shell.dialog_input.read(cx).value().to_string();
     let Some(state) = shell.scope_expr_dialog.as_mut() else {
@@ -607,6 +613,11 @@ fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<She
     };
     if matches!(state.mode, Mode::Term { .. }) {
         state.error = Some(SAVE_FROM_TERM.to_string());
+        cx.notify();
+        return;
+    }
+    if text.trim().is_empty() {
+        state.error = Some(SAVE_EMPTY.to_string());
         cx.notify();
         return;
     }
@@ -677,7 +688,7 @@ fn save_named(
         .trim()
         .to_string();
     if text.is_empty() {
-        return Err("nothing to save — the expression is empty".to_string());
+        return Err(SAVE_EMPTY.to_string());
     }
     commit_text(&text, &shell.expr_vocab)?;
     let mut object = toml::Table::new();
@@ -770,7 +781,9 @@ fn build(
                 };
                 vec![
                     div().child("·").into_any_element(),
-                    super::kbd::hint(&[ks], "save as named").into_any_element(),
+                    super::kbd::hint(&[ks], "save as named")
+                        .debug_selector(|| "scope-expr-save-hint".to_string())
+                        .into_any_element(),
                 ]
             }
         };

@@ -784,15 +784,14 @@ fn mod_s_saves_the_text_as_a_named_expression_and_stages_it(cx: &mut gpui::TestA
     );
 }
 
-/// Naming an empty field refuses inline, the name entry stays open, and
-/// nothing is written.
+/// `mod+s` on an empty field refuses at once: the error line says the
+/// expression is empty, no name entry opens, and nothing is written.
 #[gpui::test]
 fn mod_s_on_an_empty_field_refuses_and_writes_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("   ");
     vcx.simulate_keystrokes("alt-s");
-    vcx.simulate_input("liq2");
-    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert_eq!(
         expr_error(&shell, &vcx).as_deref(),
@@ -800,11 +799,126 @@ fn mod_s_on_an_empty_field_refuses_and_writes_nothing(cx: &mut gpui::TestAppCont
     );
     assert!(vcx.debug_bounds("scope-expr-error").is_some());
     assert!(
+        vcx.debug_bounds("dialog-name-row").is_none(),
+        "no name entry opens"
+    );
+    assert_eq!(field(&shell, &vcx), "   ", "the field is left alone");
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// A reserved name refuses inline, the entry stays open, nothing is written.
+#[gpui::test]
+fn mod_s_refuses_a_reserved_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    let reserved = geode_core::scopes::RESERVED_NAMES[0];
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input(reserved);
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx),
+        Some(format!("'{reserved}' is reserved"))
+    );
+    assert!(
         vcx.debug_bounds("dialog-name-row").is_some(),
         "naming stays open"
     );
+    assert!(shell.read_with(&vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .is_some_and(|d| d.staged.is_empty())
+    }));
     flush_config_write(&mut vcx);
     assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// Without a writable user config directory a save refuses inline with
+/// the object dialog's wording; nothing is staged and the frame's named
+/// expressions are unchanged.
+#[gpui::test]
+fn mod_s_without_a_user_dir_refuses(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_named(), "frame::scope_expression");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let before = frame.read_with(&vcx, |f, _| f.named_expressions().clone());
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("liq2");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("no writable user config directory — nothing was changed")
+    );
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "naming stays open"
+    );
+    assert!(vcx.debug_bounds("scope-expr-staged-liq2").is_none());
+    assert!(shell.read_with(&vcx, |s, _| {
+        s.scope_expr_dialog
+            .as_ref()
+            .is_some_and(|d| d.staged.is_empty())
+    }));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.named_expressions().clone()),
+        before
+    );
+}
+
+/// The `mod+s` footer chip paints in Whole and Add modes, and is gone in
+/// Term mode and while naming.
+#[gpui::test]
+fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_some(),
+        "whole mode"
+    );
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_none(),
+        "not while naming"
+    );
+    vcx.simulate_keystrokes("escape escape");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    dispatch_action(&shell, "frame::add_expression", &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_some(),
+        "add mode"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(expr_scope("npv > 5 and live = true"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.as_ref().is_some_and(
+            |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
+        ))
+    );
+    assert!(
+        vcx.debug_bounds("scope-expr-save-hint").is_none(),
+        "term mode"
+    );
 }
 
 /// A name already defined refuses inline and the entry stays open.
@@ -854,6 +968,8 @@ fn escape_while_naming_restores_the_text(cx: &mut gpui::TestAppContext) {
 fn naming_offers_no_suggestions(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (_shell, mut vcx) = saving_shell(cx, &dir);
+    // Text at a column position: an empty field would refuse `mod+s`.
+    vcx.simulate_input("npv > 0 and ");
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-row-book").is_some());
     vcx.simulate_keystrokes("alt-s");
