@@ -128,7 +128,7 @@ fn the_plus_menu_answers_j_k_enter_and_escape(cx: &mut gpui::TestAppContext) {
             .add_filter_menu
             .as_ref()
             .map(|m| m.highlighted)),
-        Some(2),
+        Some(1),
         "k from the first row wraps to the last"
     );
     vcx.simulate_keystrokes("j");
@@ -512,10 +512,11 @@ fn shell_with_named_liq(
     (shell, vcx)
 }
 
-/// The `+` menu's third row, "Named expression…", opens the add dialog
-/// with the named rows offered, and the dialog takes the typing.
+/// The `+` menu has two rows. Named expressions have no row of their own:
+/// "Expression…" opens the add dialog with the named rows offered beside
+/// the columns, and the dialog takes the typing.
 #[gpui::test]
-fn the_plus_menus_named_row_opens_the_add_dialog_on_named_rows(cx: &mut gpui::TestAppContext) {
+fn the_plus_menus_expression_row_offers_named_rows(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = shell_with_named_liq(cx);
     click(&mut vcx, "scope-pick-chip");
     assert_eq!(
@@ -523,9 +524,10 @@ fn the_plus_menus_named_row_opens_the_add_dialog_on_named_rows(cx: &mut gpui::Te
             .add_filter_menu
             .as_ref()
             .map(|m| m.rows.len())),
-        Some(3)
+        Some(2)
     );
-    click(&mut vcx, "scope-add-menu-row-named");
+    assert!(vcx.debug_bounds("scope-add-menu-row-named").is_none());
+    click(&mut vcx, "scope-add-menu-row-expression");
     assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()));
     assert_eq!(
         modal_title(&shell, &vcx).as_deref(),
@@ -542,24 +544,4 @@ fn the_plus_menus_named_row_opens_the_add_dialog_on_named_rows(cx: &mut gpui::Te
         "npv",
         "typing after the click reaches the field"
     );
-}
-
-/// `frame::add_named_expression` from the palette opens the same dialog.
-#[gpui::test]
-fn the_add_named_expression_action_from_the_palette(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = shell_with_named_liq(cx);
-    vcx.simulate_keystrokes("ctrl-k");
-    vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
-    // "named" rules out "Add scope expression…" (it has no `m`), so the
-    // only match is the new action.
-    vcx.simulate_input("add named");
-    vcx.simulate_keystrokes("enter");
-    vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
-    assert_eq!(
-        modal_title(&shell, &vcx).as_deref(),
-        Some("Add scope expression")
-    );
-    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_some());
 }

@@ -204,11 +204,12 @@ parses and is not empty. Escape before that Enter writes nothing. A copy
 starts from its source's text as usual, since it is never empty.
 
 The frame's scope expression dialog is a second way to create a named
-expression: `mod+s` in its Whole or Add mode names the typed text, applying
+expression: `mod+s` in any of its modes names the typed text, applying
 the same name checks as creation here (malformed, reserved, or already held)
 and the dialog's own Enter checks on the text, and writes
 `[name] expression = "<text>"` to the user layer of `expressions.toml`
-through this dialog's write path (see
+through this dialog's write path. In the term editor the name then
+replaces the term (see
 [input and dialogs](input-and-dialogs.md#frame-expression)). The
 Expressions dialog is also where a scope-bar named chip's click lands: a
 defined name opens in its edit stage, and a missing one opens Browse with

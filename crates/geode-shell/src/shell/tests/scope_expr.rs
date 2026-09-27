@@ -949,8 +949,7 @@ fn mod_s_without_a_user_dir_refuses(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// The `mod+s` footer chip paints in Whole and Add modes, and is gone in
-/// Term mode and while naming.
+/// The `mod+s` footer chip paints in every mode, and is gone while naming.
 #[gpui::test]
 fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -996,8 +995,8 @@ fn the_save_chip_paints_only_where_saving_works(cx: &mut gpui::TestAppContext) {
         ))
     );
     assert!(
-        vcx.debug_bounds("scope-expr-save-hint").is_none(),
-        "term mode"
+        vcx.debug_bounds("scope-expr-save-hint").is_some(),
+        "term mode names the term"
     );
 }
 
@@ -1060,25 +1059,151 @@ fn naming_offers_no_suggestions(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
 }
 
-/// Term mode edits one term, so `mod+s` there only says where saving
-/// lives and changes nothing.
-#[gpui::test]
-fn mod_s_in_term_mode_shows_the_notice(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = named_shell(cx, &[], Some("npv > 5 and live = true"));
+/// A [`saving_shell`] with the dialog closed and `text` as the frame's
+/// expression, then its term chip `index` clicked open in Term mode.
+fn term_saving_shell(
+    cx: &mut gpui::TestAppContext,
+    dir: &tempfile::TempDir,
+    text: &str,
+    index: usize,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (shell, mut vcx) = saving_shell(cx, dir);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(expr_scope(text));
+        cx.notify();
+    });
+    vcx.run_until_parked();
     let chip = vcx
-        .debug_bounds("scope-expr-chip-0")
+        .debug_bounds(format!("scope-expr-chip-{index}").leak())
         .expect("the term chip paints");
     vcx.simulate_click(chip.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.scope_expr_dialog.as_ref().is_some_and(
+            |d| matches!(d.mode, crate::shell::scope_expr_view::Mode::Term { .. })
+        ))
+    );
+    (shell, vcx)
+}
+
+fn term_texts(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    shell.read_with(vcx, |s, cx| {
+        s.frame()
+            .read(cx)
+            .scope()
+            .expression
+            .as_ref()
+            .map(|e| e.conjuncts().iter().map(|t| t.to_string()).collect())
+            .unwrap_or_default()
+    })
+}
+
+/// Naming an existing term: `mod+s` in Term mode asks for a name, and Enter
+/// saves the field's text under it and swaps the term for the name in one
+/// scope change. The dialog closes, the term's chip becomes a named chip,
+/// and one undo puts the plain term back (the definition stays).
+#[gpui::test]
+fn mod_s_in_term_mode_names_the_term(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = term_saving_shell(cx, &dir, "npv > 5 and live = true", 0);
     vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "the name entry paints"
+    );
+    vcx.simulate_input("big");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(expr_error(&shell, &vcx), None);
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()), "closes");
+    assert_eq!(named_of(&shell, &vcx), vec!["big".to_string()]);
+    assert_eq!(term_texts(&shell, &vcx), vec!["live = true".to_string()]);
+    assert!(vcx.debug_bounds("scope-expr-chip-1").is_none());
+    assert!(
+        vcx.debug_bounds("scope-named-chip-big").is_some(),
+        "the term's chip is now a named chip"
+    );
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert!(
+        matches!(
+            frame.read_with(&vcx, |f, _| f.named_expressions().get("big").cloned()),
+            Some(geode_core::named::NamedExpr::Valid { .. })
+        ),
+        "the name resolves before the write flushes"
+    );
+    flush_config_write(&mut vcx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[big]\nexpression = \"npv > 5\""),
+        "{written}"
+    );
+    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()), "one step");
+    assert_eq!(
+        term_texts(&shell, &vcx),
+        vec!["npv > 5".to_string(), "live = true".to_string()]
+    );
+    assert!(named_of(&shell, &vcx).is_empty());
+}
+
+/// The saved definition is the field's text when `mod+s` is pressed, so an
+/// edit made in Term mode before naming is what the name stands for.
+#[gpui::test]
+fn naming_a_term_saves_the_edited_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = term_saving_shell(cx, &dir, "npv > 5 and live = true", 1);
+    vcx.simulate_input(" or npv > 9");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("mixed");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(expr_error(&shell, &vcx), None);
+    assert_eq!(term_texts(&shell, &vcx), vec!["npv > 5".to_string()]);
+    assert_eq!(named_of(&shell, &vcx), vec!["mixed".to_string()]);
+    flush_config_write(&mut vcx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[mixed]\nexpression = \"live = true or npv > 9\""),
+        "{written}"
+    );
+}
+
+/// A term that changed underneath the open dialog refuses the save before
+/// anything is written: the frame keeps its scope, no definition is queued,
+/// and the name entry stays open with the term-gone message.
+#[gpui::test]
+fn naming_a_changed_term_refuses_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = term_saving_shell(cx, &dir, "npv > 5 and live = true", 0);
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("big");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(expr_scope("npv > 7 and live = true"));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     assert_eq!(
         expr_error(&shell, &vcx).as_deref(),
-        Some("save a named expression from the whole or add dialog")
+        Some(crate::shell::scope_expr_view::TERM_GONE)
     );
-    assert!(vcx.debug_bounds("dialog-name-row").is_none());
-    assert_eq!(field(&shell, &vcx), "npv > 5");
-    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
+    assert!(vcx.debug_bounds("dialog-name-row").is_some(), "stays open");
+    assert!(named_of(&shell, &vcx).is_empty());
+    assert_eq!(
+        term_texts(&shell, &vcx),
+        vec!["npv > 7".to_string(), "live = true".to_string()]
+    );
+    assert!(
+        frame.read_with(&vcx, |f, _| f.named_expressions().get("big").is_none()),
+        "no definition"
+    );
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
 }
 
 /// Every expression field requests values under one pool key, and the pool keeps

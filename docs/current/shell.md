@@ -269,10 +269,9 @@ only content is a name is not empty: the chips row and the save glyph paint
 for it.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
-dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
-"Named expression…" dispatches `frame::add_named_expression` (the same Add
-dialog, whose empty field lists the named expressions first), and each row
-shows its action's live binding, if any. The `+` holds its
+dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression` (whose dialog offers the
+named expressions beside typed text), and each row shows its action's live
+binding, if any. The `+` holds its
 pressed fill while the menu is open. The menu is shell-owned transient state
 (`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
 dispatch the shell's string actions and label them from the shell keymap.
