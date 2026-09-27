@@ -131,7 +131,10 @@ that occupant intentionally holds an insert-mode input.
 
 An occupant that closes a focused input must blur it before dropping its
 handle. Switching workspaces also restores focus immediately when the old
-occupant remains alive but is no longer mounted. Without these steps GPUI can
+occupant remains alive but is no longer mounted. Likewise, the render that
+takes a tile off screen returns focus to the shell root unless a shell input
+or a still-painted occupant (through `holds_focus`) owns it, so a pull into a
+tile that is typing leaves its editor focused. Without these steps GPUI can
 retain or fall back from a handle that no longer receives the shell's key
 listeners, leaving subsequent chords ineffective.
 
