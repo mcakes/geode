@@ -23,7 +23,7 @@
 //! removes the last chip; a chip's `×` removes that chip. Term mode offers
 //! and stages no names.
 //!
-//! `mod+s` in Whole and Add turns the field into a name entry for the
+//! `mod+s` in every mode turns the field into a name entry for the
 //! typed text (suggestions off, staged chips kept); on an empty field it
 //! refuses at once and opens no entry. Enter refuses an invalid, reserved
 //! or taken name, an empty text, one Enter itself would refuse, or a
@@ -31,8 +31,9 @@
 //! otherwise it writes `[name] expression = "<text>"` to the user layer of
 //! `expressions.toml`, refreshes the frame's definitions from the pending
 //! config (so the name resolves before the write lands), empties the field
-//! and stages the name. Escape puts the text back. In Term mode `mod+s` only says where
-//! saving lives.
+//! and stages the name. Escape puts the text back. In Term mode there is
+//! nothing to stage: the name replaces the term in one `set_scope` and the
+//! dialog closes.
 //!
 //! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
 //! error stays inline in every mode, and editing clears the error. Escape
@@ -134,14 +135,14 @@ impl Mode {
 /// The inline refusal when a term commit finds its term gone or changed.
 pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 
-/// `mod+s` in Term mode, which edits one term and has nothing whole to name.
-pub const SAVE_FROM_TERM: &str = "save a named expression from the whole or add dialog";
-
 /// A save with an empty (or whitespace-only) field, which names nothing.
 pub const SAVE_EMPTY: &str = "nothing to save — the expression is empty";
 
-/// The name entry's label.
+/// The name entry's label in Whole and Add.
 const NAMING_LABEL: &str = "Save this expression as a named expression · name";
+
+/// The name entry's label in Term mode, where the name replaces the term.
+const NAMING_TERM_LABEL: &str = "Name this term · name";
 
 /// The dialog's state: its mode, the named expressions staged beside the
 /// text, the last failed commit's message, and the field's suggestions.
@@ -622,20 +623,14 @@ fn naming_key(
     }
 }
 
-/// Stash the text and turn the field into a name entry. Term mode edits
-/// one term, so it refuses with [`SAVE_FROM_TERM`] and changes nothing;
-/// an empty field refuses with [`SAVE_EMPTY`] before any name is asked
-/// for, since no name could be saved for it.
+/// Stash the text and turn the field into a name entry. An empty field
+/// refuses with [`SAVE_EMPTY`] before any name is asked for, since no
+/// name could be saved for it.
 fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let text = shell.dialog_input.read(cx).value().to_string();
     let Some(state) = shell.scope_expr_dialog.as_mut() else {
         return;
     };
-    if matches!(state.mode, Mode::Term { .. }) {
-        state.error = Some(SAVE_FROM_TERM.to_string());
-        cx.notify();
-        return;
-    }
     if text.trim().is_empty() {
         state.error = Some(SAVE_EMPTY.to_string());
         cx.notify();
@@ -676,6 +671,11 @@ fn leave_naming(
 /// name is checked before the text, and every refusal leaves the entry
 /// open with nothing written.
 ///
+/// Term mode has nothing to stage: the name replaces the term it was
+/// opened on, in one `set_scope`, and the dialog closes. The term is
+/// checked before the write, so a term changed underneath refuses with
+/// [`TERM_GONE`] rather than saving a definition nothing then uses.
+///
 /// The frame's definitions are refreshed from the pending config at once:
 /// the write promotes on a timer, and until then the staged name would
 /// resolve as missing, painting its chip broken and refusing the tile's
@@ -711,6 +711,15 @@ fn save_named(
         return Err(SAVE_EMPTY.to_string());
     }
     commit_text(&text, &shell.expr_vocab)?;
+    let term = match shell.scope_expr_dialog.as_ref().map(|s| &s.mode) {
+        Some(Mode::Term { index, seeded }) => Some((*index, seeded.clone())),
+        _ => None,
+    };
+    if let Some((index, seeded)) = &term
+        && !shell.frame.read(cx).expression_term_is(*index, seeded)
+    {
+        return Err(TERM_GONE.to_string());
+    }
     let mut object = toml::Table::new();
     object.insert("expression".to_string(), toml::Value::String(text));
     apply::queue_object(
@@ -727,6 +736,18 @@ fn save_named(
                 cx.notify();
             }
         });
+    }
+    if let Some((index, seeded)) = term {
+        // The term was checked above and nothing between changes the
+        // frame's scope, so the swap cannot refuse here; a refusal would
+        // close with the definition written and the term left in place.
+        shell.frame.update(cx, |f, cx| {
+            let swapped = f.name_expression_term(index, &seeded, &name);
+            debug_assert_eq!(swapped, Ok(true), "the term was checked before the write");
+            cx.notify();
+        });
+        shell.close_modal(window, cx);
+        return Ok(());
     }
     if let Some(state) = shell.scope_expr_dialog.as_mut()
         && !state.staged.contains(&name)
@@ -752,7 +773,11 @@ fn build(
         column = column.child(staged_chips(shell, &state.staged, entity, cx));
     }
     column = column.child(if state.naming.is_some() {
-        dialog::name_row(&shell.dialog_input, NAMING_LABEL, cx)
+        let label = match state.mode {
+            Mode::Term { .. } => NAMING_TERM_LABEL,
+            Mode::Whole | Mode::Add => NAMING_LABEL,
+        };
+        dialog::name_row(&shell.dialog_input, label, cx)
     } else {
         dialog::filter_row(&shell.dialog_input, None, cx)
     });
@@ -790,23 +815,24 @@ fn build(
         (NAMING_HINTS, Vec::new())
     } else {
         let hints = state.mode.hints(!state.staged.is_empty());
-        let extra = match state.mode {
-            Mode::Term { .. } => Vec::new(),
-            // The chip shows the user's own alias, so it is built here
-            // rather than as a `Hint::Key`, which parses with none.
-            Mode::Whole | Mode::Add => {
-                let ks = Keystroke {
-                    key: "s".to_string(),
-                    mods: shell.services.mod_alias,
-                };
-                vec![
-                    div().child("·").into_any_element(),
-                    super::kbd::hint(&[ks], "save as named")
-                        .debug_selector(|| "scope-expr-save-hint".to_string())
-                        .into_any_element(),
-                ]
-            }
+        // The chip shows the user's own alias, so it is built here rather
+        // than as a `Hint::Key`, which parses with none.
+        let ks = Keystroke {
+            key: "s".to_string(),
+            mods: shell.services.mod_alias,
         };
+        let extra = vec![
+            div().child("·").into_any_element(),
+            super::kbd::hint(
+                &[ks],
+                match state.mode {
+                    Mode::Term { .. } => "name this term",
+                    Mode::Whole | Mode::Add => "save as named",
+                },
+            )
+            .debug_selector(|| "scope-expr-save-hint".to_string())
+            .into_any_element(),
+        ];
         (hints, extra)
     };
     column
