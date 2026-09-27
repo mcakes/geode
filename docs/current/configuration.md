@@ -93,7 +93,9 @@ column written as just a name is a measure, so if the primary dataset declares n
 measure of that name, the view is refused when queried instead of opening with
 that column blank. Writing `kind = "dimension"` where that was meant, or
 `required = false` to accept the column being dropped, is the fix, and the
-diagnostic names the view and the column. The same applies to a join whose keys
+diagnostic names the view and the column. `required` has no effect on a
+`derived` column: nothing validates a derived expression at load — its SQL is
+the compiler's business — so there is no failure for the flag to downgrade. The same applies to a join whose keys
 no grain of the joined dataset carries, or which keys on a column the grouping
 does not include. See [queries and time
 travel](data-path.md#queries-and-time-travel) for what a refusal looks like at

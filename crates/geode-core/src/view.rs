@@ -395,19 +395,24 @@ impl ViewSpec {
     /// still left to the compiler.
     pub fn validate(&self, schema: &SchemaSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
+        // Addressed to the view, so a dialog can open the object the refusal
+        // is about. The message names the column or join within it; carrying a
+        // deeper path would mean threading an index through every check here,
+        // and the object is enough to reach the place to edit.
+        let at = || Some(format!("views.{}", self.name));
         let bad = |m: String| Diagnostic {
             severity: Severity::Error,
             layer: None,
             file: None,
             message: format!("view '{}': {m}", self.name),
-            path: None,
+            path: at(),
         };
         let warn = |m: String| Diagnostic {
             severity: Severity::Warning,
             layer: None,
             file: None,
             message: format!("view '{}': {m}", self.name),
-            path: None,
+            path: at(),
         };
         // A required declaration that cannot be honoured refuses the view; an
         // optional one is dropped and said so. The author chose which, so

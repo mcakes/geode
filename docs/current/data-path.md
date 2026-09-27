@@ -294,11 +294,16 @@ corrected serves again without a restart. A refused view stays registered and
 its siblings still serve; one unhonourable view does not take the desk down or
 disappear from the dialogs that would fix it.
 
-The refusal replaced a worse outcome. Previously the query compiled regardless:
-a column the view could not supply came back **absent** from the row, which
-paints blank in the blotter — indistinguishable from a genuine NULL, and with no
-diagnostic anywhere a trader would be looking. The error names the view and the
-reason, which is the whole remedy.
+The refusal replaced two worse outcomes. Previously the query compiled
+regardless: a column the view could not supply came back **absent** from the row,
+which paints blank in the blotter — indistinguishable from a genuine NULL, and
+with no diagnostic anywhere a trader would be looking. And a column declared a
+measure that was really a grain-bearing attribute reached a `Sum` default and was
+totalled: because an attribute repeats across every row of its grain, that total
+was plausible and wrong, which is worse than blank because the desk would have
+acted on it. The aggregate now comes from the column's own declared role, so
+there is no default left to fall into. The error names the view and the reason,
+which is the whole remedy.
 
 A join or a column may declare `required = false`. Its failure is then a warning
 saying the declaration was dropped because it is optional, and the view still
