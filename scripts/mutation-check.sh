@@ -16577,6 +16577,32 @@ run_mutation "toggle stack: a conversion dirties the session" \
   geode-shell \
   mod_s_splits_the_focused_stack_and_stacks_it_back
 
+run_mutation "toggle stack: a split stack takes the add direction" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .toggle_stack(orientation)' \
+  '            let _ = rect;
+            let orientation = crate::tiling::Orientation::Horizontal;
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .toggle_stack(orientation)' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).toggle_stack(orientation)' \
+  '        self.tree_for_mut(FocusRegion::Main).toggle_stack(orientation)' \
+  geode-shell \
+  toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone
+
 run_mutation "toggle stack: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
   '                self.notice = Some(NOTHING_TO_STACK);' \

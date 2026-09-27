@@ -1600,6 +1600,20 @@ mod tests {
     }
 
     #[test]
+    fn toggle_stack_acts_in_the_focused_dock_and_leaves_main_alone() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let remaining = ws.active().tree().focused().expect("one tile left in main");
+        assert!(ws.active_mut().focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let main_before = ws.active().tree().clone();
+        assert!(ws.active_mut().toggle_stack(Orientation::Vertical));
+        let dock = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock.visible_tiles().len(), 1, "the dock's split stacked");
+        assert_eq!(ws.active().tree(), &main_before);
+    }
+
+    #[test]
     fn drag_dock_divider_resizes_within_the_docks_own_tree() {
         let mut ws = two_tiles();
         // Park both tiles in the left dock so its tree has a split (a

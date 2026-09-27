@@ -175,12 +175,34 @@ fn mod_s_splits_the_focused_stack_and_stacks_it_back(cx: &mut gpui::TestAppConte
         })
     };
     // The fixture's own adds dirtied the session; only the chord may now.
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    // A fixed add direction makes the orientation independent of the
+    // test window's shape.
+    shell.update(&mut cx, |shell, _| {
+        shell.session_dirty = false;
+        shell.add_direction = crate::tileadd::AddDirection::Vertical;
+    });
     cx.simulate_keystrokes("alt-s");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
     assert_eq!(visible(&cx), vec![left, right, top], "every member painted");
+    let rect = |id: TileId| {
+        shell.read_with(&cx, |s, _| {
+            s.services
+                .workspaces
+                .active()
+                .tree()
+                .layout(crate::tiling::Rect::UNIT)
+                .into_iter()
+                .find(|(t, _)| *t == id)
+                .map(|(_, r)| r)
+                .expect("painted")
+        })
+    };
+    assert!(
+        rect(top).y > rect(right).y,
+        "the add direction was honoured"
+    );
     assert_eq!(stack_events(&log, right).last(), Some(&None));
     assert_eq!(stack_events(&log, top).last(), Some(&None));
     assert!(shell.read_with(&cx, |s, _| s.session_dirty));
