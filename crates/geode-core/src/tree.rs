@@ -259,6 +259,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 4],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
 

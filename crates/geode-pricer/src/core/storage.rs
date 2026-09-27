@@ -1081,6 +1081,7 @@ pub(crate) mod tests {
             attribution_by_depth: vec![Attribution::DeterminedNonAdditive],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
 
