@@ -1241,3 +1241,173 @@ fn an_untouched_commit_on_a_text_cell_writes_the_seed_to_every_accepting_cell(
         Some("set 2 cells, skipped 2 (2 wrong type)")
     );
 }
+
+// Mouse: shift+click and drag, through the same doors the keys use.
+
+fn drag(vcx: &mut gpui::VisualTestContext, from: &str, to: &str) {
+    let (a, b) = (centre_of(vcx, from), centre_of(vcx, to));
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: a,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseMoveEvent {
+        position: b,
+        pressed_button: Some(gpui::MouseButton::Left),
+        modifiers: gpui::Modifiers::default(),
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: b,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+    draw(vcx);
+}
+
+fn shift_press(vcx: &mut gpui::VisualTestContext, selector: &str) {
+    let at = centre_of(vcx, selector);
+    let shift = gpui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers: shift,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers: shift,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+}
+
+/// The anchor is the cursor from before the press: the pointer's press
+/// reaches the tile ahead of the table's own `SelectCell`, which only
+/// comes on the release.
+#[gpui::test]
+fn shift_click_anchors_at_the_cursor_and_extends_a_block_to_the_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(SLICE as u32)); // cursor on (0, 3)
+    let clicks = h.host_clicks();
+    shift_press(&mut vcx, "marketdata-cell-1-6"); // model (1, 5)
+    assert_eq!(resolved(&h, &vcx).map(|r| (r.1, r.2)), Some((0..2, 3..6)));
+    // Focus stays on the tile: the shell's own tile-level press (the
+    // host's stand-in, which bubbles after the table's) still arrives,
+    // and it is what puts the keyboard back on the tile.
+    assert_eq!(h.host_clicks(), clicks + 1, "the press still propagates");
+    h.dispatch(&mut vcx, "yank", None);
+    assert!(clipboard(&mut vcx).is_some_and(|t| t.lines().count() == 3));
+}
+
+#[gpui::test]
+fn a_plain_click_clears_the_selection_and_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None);
+    let at = centre_of(&mut vcx, "marketdata-cell-1-6");
+    click_at(&mut vcx, at, 1);
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor()),
+        Cursor::Cell { row: 1, col: 5 }
+    );
+}
+
+#[gpui::test]
+fn a_drag_across_cells_selects_a_block_from_the_press(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    // Table column 4 is model column 3 (the label column leads).
+    drag(&mut vcx, "marketdata-cell-0-4", "marketdata-cell-1-6");
+    assert_eq!(resolved(&h, &vcx), Some((SelectKind::Block, 0..2, 3..6)));
+    let at = centre_of(&mut vcx, "marketdata-cell-0-1");
+    click_at(&mut vcx, at, 1); // clears
+    drag(&mut vcx, "marketdata-cell-0-0", "marketdata-cell-1-0");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..2)),
+        "a drag that starts on a row label selects rows"
+    );
+}
+
+#[gpui::test]
+fn a_shift_click_on_a_row_label_selects_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    shift_press(&mut vcx, "marketdata-cell-1-0");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..2))
+    );
+    assert_eq!(h.mode(&vcx), "visual");
+}
+
+/// A press that came down somewhere else (here the header) and only
+/// passes over the cells with the button held never selects.
+#[gpui::test]
+fn a_drag_that_started_off_the_cells_selects_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    drag(&mut vcx, "marketdata-th-4", "marketdata-cell-1-6");
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.mode(&vcx), "normal");
+}
+
+/// A plain press on a row beside its last cell (the table's trailing
+/// filler) is still a plain click: it clears the selection and moves the
+/// cursor's row, keeping its column.
+#[gpui::test]
+fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "right", Some(2));
+    h.dispatch(&mut vcx, "visual_block", None);
+    draw(&mut vcx);
+    let last = vcx
+        .debug_bounds("marketdata-cell-1-6")
+        .expect("the last cell is painted");
+    let beside = gpui::point(last.right() + gpui::px(20.), last.center().y);
+    click_at(&mut vcx, beside, 1);
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor()),
+        Cursor::Cell { row: 1, col: 2 }
+    );
+}
+
+/// Under a hidden row label the line-number gutter is the row's handle:
+/// a shift press there selects rows, one on the value cell beside it a
+/// block.
+#[gpui::test]
+fn on_a_hidden_label_panel_the_gutter_selects_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_spec(cx, &test_fixtures::HIDDEN_SCHEDULE, None);
+    h.with_flat_document(&mut vcx);
+    vcx.update(|_, cx| {
+        cx.set_global(UiSettings {
+            line_numbers: LineNumbers::On,
+        })
+    });
+    shift_press(&mut vcx, "marketdata-gutter-1");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..2))
+    );
+    let at = centre_of(&mut vcx, "marketdata-cell-0-0");
+    click_at(&mut vcx, at, 1); // clears
+    assert_eq!(resolved(&h, &vcx), None);
+    shift_press(&mut vcx, "marketdata-cell-1-0");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1, r.2)),
+        Some((SelectKind::Block, 0..2, 0..1))
+    );
+}

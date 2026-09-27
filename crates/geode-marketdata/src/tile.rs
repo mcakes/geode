@@ -30,7 +30,9 @@ use crate::core::{
     MatrixModel, PanelSpec, Precision, Segment, SegmentText, UpdatePolicy, attr_text, parse_attr,
     parse_cell, route,
 };
-use crate::delegate::{DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate};
+use crate::delegate::{
+    CellPointer, DelegateChoice, DelegateEditor, DelegateEditorPaint, MatrixDelegate,
+};
 use crate::header::{self, HeaderInputs, HeaderModel, Tone};
 use crate::popup::{
     ChoicePopup, MenuState, PickerRows, PickerState, Popup, render_menu, render_picker,
@@ -750,6 +752,15 @@ impl MarketDataTile {
                 _ => {}
             }
         })
+        .detach();
+        // Shift+click and drag: the delegate's own pointer events, which
+        // reach `pointer` ahead of the table's `SelectCell` (that one is
+        // emitted on the release). Window access for the editor's blur.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
+        )
         .detach();
         cx.observe(&frame, |this, _frame, cx| {
             // Promote staged results on flip even if the tile became hidden after
@@ -2017,6 +2028,78 @@ impl MarketDataTile {
         self.cursor = Cursor::Cell { row, col };
         self.sync_cursor(cx);
         cx.notify();
+    }
+
+    /// Every mouse selection gesture lands here and goes through the same
+    /// `start_selection`/`clear_selection` doors the keys use, so the mouse
+    /// never reaches a selection the keys could not. A plain press clears
+    /// and moves the cursor (the table's `SelectCell` on the release moves
+    /// it again, to the same cell); a shift press or a drag starts a
+    /// selection only when none is live — `Rows` from a row label or the
+    /// gutter, `Block` from a value cell — then moves the cursor, which
+    /// extends it.
+    ///
+    /// Ordering: the delegate emits the press on mouse-down and the table
+    /// emits `SelectCell` only on the click (the release), so a shift
+    /// press starts the selection at the PRE-press cursor with no capture
+    /// of it needed. A drag anchors at its press cell because the plain
+    /// press already moved the cursor there.
+    ///
+    /// Any gesture that gets here closes an open editor first: a click is
+    /// a cancel (`close_editor`'s rule), and a drag never gets the
+    /// `SelectCell` that would otherwise close it.
+    fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        let kind_for = |label: bool| {
+            if label {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        let (row, col, start) = match event {
+            CellPointer::Press {
+                row,
+                col,
+                shift: false,
+            } => {
+                self.clear_selection();
+                (row, col, None)
+            }
+            CellPointer::Press {
+                row,
+                col,
+                shift: true,
+            } => (row, col, Some(kind_for(col.is_none()))),
+            CellPointer::Drag { row, col, label } => {
+                // Still inside the cell the cursor is on (a label or the
+                // gutter keeps the column): nothing to start or extend.
+                let here = matches!(
+                    self.cursor,
+                    Cursor::Cell { row: r, col: c } if r == row && col.is_none_or(|x| x == c)
+                );
+                if here {
+                    return;
+                }
+                (row, col, Some(kind_for(label)))
+            }
+        };
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if let Some(kind) = start
+            && self.selection.is_none()
+        {
+            // From the header strip there is no grid cursor to anchor at
+            // (`start_selection` would refuse): the press cell is the anchor.
+            if matches!(self.cursor, Cursor::Attr(_)) {
+                self.cursor_to(row, col, cx);
+            }
+            self.start_selection(kind);
+        }
+        // Ends in `sync_cursor`, which re-resolves the selection.
+        self.cursor_to(row, col, cx);
+        // The header's mode and footer extent follow the selection.
+        self.changed(cx);
     }
 
     /// Select an attribute without opening it. Cancel an existing editor first,
