@@ -22003,6 +22003,32 @@ run_mutation "scope expr: offers exclude staged names" \
   geode-shell \
   a_staged_name_leaves_the_named_rows
 
+# A saved name must resolve at once: the write promotes on a timer, and
+# until then the staged name would read as missing.
+run_mutation "scope expr: saving refreshes the frame's definitions at once" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            if f.replace_named_expressions(named) {' \
+  '            if false && f.replace_named_expressions(named) {' \
+  geode-shell \
+  mod_s_saves_the_text_as_a_named_expression_and_stages_it
+
+# Saving under a defined name would overwrite that definition.
+run_mutation "scope expr: saving refuses a taken name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.name_taken(config, &name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_taken_name
+
+# The name entry shares the field; suggestions there would write an
+# expression into a name.
+run_mutation "expr suggest: no suggestions while naming" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        if state.naming.is_some() {' \
+  '        if false {' \
+  geode-shell \
+  naming_offers_no_suggestions
+
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.
 run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \

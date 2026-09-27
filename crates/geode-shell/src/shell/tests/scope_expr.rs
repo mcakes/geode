@@ -684,3 +684,178 @@ fn a_reload_offers_a_new_named_expression_under_an_open_dialog(cx: &mut gpui::Te
         "a removed definition is no longer offered"
     );
 }
+
+/// Let the zero-delay config write promote and reach the file.
+fn flush_config_write(vcx: &mut gpui::VisualTestContext) {
+    vcx.executor().advance_clock(
+        crate::shell::objectdialog::apply::WRITE_DEBOUNCE + std::time::Duration::from_millis(10),
+    );
+    vcx.run_until_parked();
+}
+
+fn expr_error(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(vcx, |s, _| {
+        s.scope_expr_dialog.as_ref().and_then(|d| d.error.clone())
+    })
+}
+
+/// A frame dialog over [`services_with_named`] with a writable user dir.
+fn saving_shell(
+    cx: &mut gpui::TestAppContext,
+    dir: &tempfile::TempDir,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    dialog_test_shell_in_dir(
+        cx,
+        services_with_named(),
+        dir.path(),
+        "frame::scope_expression",
+    )
+}
+
+/// `mod+s` (the test config's alias is alt) names the typed text: Enter
+/// writes `[liq2] expression = "npv > 0"` to the user file, empties the
+/// field and stages the name. The frame knows the name at once, so the
+/// Enter that applies it resolves before the write has even flushed.
+#[gpui::test]
+fn mod_s_saves_the_text_as_a_named_expression_and_stages_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "the name entry paints"
+    );
+    assert_eq!(field(&shell, &vcx), "", "the name entry starts empty");
+    vcx.simulate_input("liq2");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(expr_error(&shell, &vcx), None);
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "", "the field is cleared");
+    assert!(
+        vcx.debug_bounds("scope-expr-staged-liq2").is_some(),
+        "the saved name is staged"
+    );
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert_eq!(named_of(&shell, &vcx), vec!["liq2".to_string()]);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let resolved = frame.read_with(&vcx, |f, _| f.effective_scope(&Scope::default()));
+    assert!(
+        resolved.is_ok(),
+        "the new name resolves before the write flushes: {resolved:?}"
+    );
+    flush_config_write(&mut vcx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[liq2]\nexpression = \"npv > 0\""),
+        "{written}"
+    );
+}
+
+/// Naming an empty field refuses inline, the name entry stays open, and
+/// nothing is written.
+#[gpui::test]
+fn mod_s_on_an_empty_field_refuses_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("liq2");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("nothing to save — the expression is empty")
+    );
+    assert!(vcx.debug_bounds("scope-expr-error").is_some());
+    assert!(
+        vcx.debug_bounds("dialog-name-row").is_some(),
+        "naming stays open"
+    );
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// A name already defined refuses inline and the entry stays open.
+#[gpui::test]
+fn mod_s_refuses_a_taken_name(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("'liq' already exists")
+    );
+    assert!(vcx.debug_bounds("dialog-name-row").is_some());
+    assert!(vcx.debug_bounds("scope-expr-staged-liq").is_none());
+    flush_config_write(&mut vcx);
+    assert!(!dir.path().join("expressions.toml").exists());
+}
+
+/// Escape leaves the name entry and restores the text; the dialog stays.
+#[gpui::test]
+fn escape_while_naming_restores_the_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.simulate_input("npv > 0");
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("half");
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "stays open"
+    );
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "npv > 0");
+    assert!(
+        dialog_filter_is_focused(&shell, &mut vcx),
+        "the field keeps the keyboard"
+    );
+}
+
+/// The name entry offers no suggestions: a name is not an expression.
+#[gpui::test]
+fn naming_offers_no_suggestions(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut vcx) = saving_shell(cx, &dir);
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("scope-expr-row-book").is_some());
+    vcx.simulate_keystrokes("alt-s");
+    vcx.simulate_input("bo");
+    vcx.run_until_parked();
+    assert!(vcx.debug_bounds("dialog-name-row").is_some());
+    assert!(
+        vcx.debug_bounds("scope-expr-row-book").is_none(),
+        "no column rows on a name"
+    );
+    assert!(vcx.debug_bounds("scope-expr-named-row-liq").is_none());
+}
+
+/// Term mode edits one term, so `mod+s` there only says where saving
+/// lives and changes nothing.
+#[gpui::test]
+fn mod_s_in_term_mode_shows_the_notice(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = named_shell(cx, &[], Some("npv > 5 and live = true"));
+    let chip = vcx
+        .debug_bounds("scope-expr-chip-0")
+        .expect("the term chip paints");
+    vcx.simulate_click(chip.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-s");
+    vcx.run_until_parked();
+    assert_eq!(
+        expr_error(&shell, &vcx).as_deref(),
+        Some("save a named expression from the whole or add dialog")
+    );
+    assert!(vcx.debug_bounds("dialog-name-row").is_none());
+    assert_eq!(field(&shell, &vcx), "npv > 5");
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+}

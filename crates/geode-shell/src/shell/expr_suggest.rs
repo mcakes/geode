@@ -24,6 +24,11 @@ use super::{EXPR_KEY, ShellEvent, ShellView, chip, scale, scope_expr_view};
 /// The open expression field's completion, whichever surface holds it.
 pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion> {
     if let Some(state) = view.scope_expr_dialog.as_mut() {
+        // The name entry shares the field; suggesting columns for a name
+        // would offer to write an expression into it.
+        if state.naming.is_some() {
+            return None;
+        }
         return Some(&mut state.completion);
     }
     let state = view.object_dialog.as_mut()?;

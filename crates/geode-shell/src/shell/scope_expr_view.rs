@@ -23,6 +23,16 @@
 //! removes the last chip; a chip's `×` removes that chip. Term mode offers
 //! and stages no names.
 //!
+//! `mod+s` in Whole and Add turns the field into a name entry for the
+//! typed text (suggestions off, staged chips kept). Enter refuses an
+//! invalid or taken name, an empty text or one Enter itself would refuse,
+//! each inline with the entry still open; otherwise it writes
+//! `[name] expression = "<text>"` to the user layer of `expressions.toml`,
+//! refreshes the frame's definitions from the pending config (so the name
+//! resolves before the write lands), empties the field and stages the
+//! name. Escape puts the text back. In Term mode `mod+s` only says where
+//! saving lives.
+//!
 //! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
 //! error stays inline in every mode, and editing clears the error. Escape
 //! closes without applying. Each open seeds a fresh draft from the current
@@ -52,7 +62,7 @@ use super::ShellView;
 use super::chip;
 use super::control::{self, PointerStates as _};
 use super::dialog;
-use super::picker::{Hint, hint_row};
+use super::picker::{Hint, hint_row_with};
 use super::scale;
 
 // ---------------------------------------------------------------------
@@ -123,6 +133,12 @@ impl Mode {
 /// The inline refusal when a term commit finds its term gone or changed.
 pub const TERM_GONE: &str = "This term is no longer in the scope expression";
 
+/// `mod+s` in Term mode, which edits one term and has nothing whole to name.
+pub const SAVE_FROM_TERM: &str = "save a named expression from the whole or add dialog";
+
+/// The name entry's label.
+const NAMING_LABEL: &str = "Save this expression as a named expression · name";
+
 /// The dialog's state: its mode, the named expressions staged beside the
 /// text, the last failed commit's message, and the field's suggestions.
 #[derive(Debug)]
@@ -131,6 +147,9 @@ pub struct ScopeExprState {
     /// Names Enter applies with the text, in order and without repeats.
     /// Always empty in Term mode, which edits one term of the text.
     pub staged: Vec<String>,
+    /// `Some(text)` while the field takes a name for `text` (`mod+s`):
+    /// the expression waits here so Escape can put it back.
+    pub naming: Option<String>,
     pub error: Option<String>,
     pub completion: ExprCompletion,
 }
@@ -140,6 +159,7 @@ impl ScopeExprState {
         Self {
             mode,
             staged: Vec::new(),
+            naming: None,
             error: None,
             completion: ExprCompletion::default(),
         }
@@ -332,6 +352,13 @@ const WHOLE_STAGED_HINTS: &[Hint] = &[
     Hint::Text("close"),
 ];
 
+const NAMING_HINTS: &[Hint] = &[
+    Hint::Key("enter"),
+    Hint::Text("save ·"),
+    Hint::Key("escape"),
+    Hint::Text("back"),
+];
+
 const ADD_STAGED_HINTS: &[Hint] = &[
     Hint::Key("tab"),
     Hint::Text("insert ·"),
@@ -403,6 +430,10 @@ pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView
     let Some(state) = view.scope_expr_dialog.as_mut() else {
         return;
     };
+    // The name entry paints no suggestions; leaving it re-syncs.
+    if state.naming.is_some() {
+        return;
+    }
     let offers = named_offers(
         &state.mode,
         view.frame.read(cx).named_expressions(),
@@ -468,6 +499,17 @@ fn handle_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
+    if shell
+        .scope_expr_dialog
+        .as_ref()
+        .is_some_and(|s| s.naming.is_some())
+    {
+        return naming_key(shell, ks, window, cx);
+    }
+    if is_mod_s(shell, ks) {
+        begin_naming(shell, window, cx);
+        return true;
+    }
     if super::expr_suggest::handle_key(shell, ks, window, cx) {
         return true;
     }
@@ -506,6 +548,164 @@ fn handle_key(
     true
 }
 
+/// `mod+s` as the user's alias spells it.
+fn is_mod_s(shell: &ShellView, ks: &Keystroke) -> bool {
+    ks.key == "s" && ks.mods == shell.services.mod_alias
+}
+
+/// Keys while the field takes a name. Enter saves and Escape goes back,
+/// both claimed so the modal stays open; tab is claimed so focus never
+/// leaves the entry, and `mod+s` again does nothing. Every other key is
+/// the field's.
+fn naming_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    if is_mod_s(shell, ks) {
+        return true;
+    }
+    if ks.key == "tab" && !ks.mods.is_chord() {
+        return true;
+    }
+    if ks.mods != Modifiers::NONE {
+        return false;
+    }
+    match ks.key.as_str() {
+        "enter" => {
+            if let Err(message) = save_named(shell, window, cx)
+                && let Some(state) = shell.scope_expr_dialog.as_mut()
+            {
+                state.error = Some(message);
+            }
+            cx.notify();
+            true
+        }
+        "escape" => {
+            let text = shell
+                .scope_expr_dialog
+                .as_mut()
+                .and_then(|s| {
+                    s.error = None;
+                    s.naming.take()
+                })
+                .unwrap_or_default();
+            leave_naming(shell, text, window, cx);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Stash the text and turn the field into a name entry. Term mode edits
+/// one term, so it refuses with [`SAVE_FROM_TERM`] and changes nothing.
+fn begin_naming(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let text = shell.dialog_input.read(cx).value().to_string();
+    let Some(state) = shell.scope_expr_dialog.as_mut() else {
+        return;
+    };
+    if matches!(state.mode, Mode::Term { .. }) {
+        state.error = Some(SAVE_FROM_TERM.to_string());
+        cx.notify();
+        return;
+    }
+    state.naming = Some(text);
+    state.error = None;
+    // A fresh completion paints nothing: the text's rows would otherwise
+    // stay on screen under the name, and `completion_mut` feeds it
+    // nothing until the entry closes.
+    state.completion = ExprCompletion::default();
+    shell
+        .dialog_input
+        .update(cx, |input, cx| input.set_value("", window, cx));
+    cx.notify();
+}
+
+/// Close the name entry with `text` in the field, and rebuild the
+/// suggestions the entry dropped.
+fn leave_naming(
+    shell: &mut ShellView,
+    text: String,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.scope_expr_dialog.as_mut() {
+        state.naming = None;
+    }
+    shell
+        .dialog_input
+        .update(cx, |input, cx| input.set_value(text, window, cx));
+    sync_named_offers(shell, cx);
+    super::expr_suggest::refresh(shell, cx);
+    cx.notify();
+}
+
+/// Save the stashed text under the typed name, then stage the name. The
+/// name is checked before the text, and every refusal leaves the entry
+/// open with nothing written.
+///
+/// The frame's definitions are refreshed from the pending config at once:
+/// the write promotes on a timer, and until then the staged name would
+/// resolve as missing, painting its chip broken and refusing the tile's
+/// query if Enter applied it.
+fn save_named(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> Result<(), String> {
+    use super::objectdialog::{Domain, apply};
+    let typed = shell.dialog_input.read(cx).value().to_string();
+    let name = geode_core::config::check_object_name(&typed)
+        .map_err(|reason| format!("name: {reason}"))?
+        .to_string();
+    {
+        let pending = apply::config_with_pending(shell);
+        let config = pending.as_ref().unwrap_or(&shell.services.config);
+        if Domain::Expressions.is_reserved(&name) {
+            return Err(format!("'{name}' is reserved"));
+        }
+        if Domain::Expressions.name_taken(config, &name) {
+            return Err(format!("'{name}' already exists"));
+        }
+    }
+    let text = shell
+        .scope_expr_dialog
+        .as_ref()
+        .and_then(|s| s.naming.as_deref())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err("nothing to save — the expression is empty".to_string());
+    }
+    commit_text(&text, &shell.expr_vocab)?;
+    let mut object = toml::Table::new();
+    object.insert("expression".to_string(), toml::Value::String(text));
+    apply::queue_object(
+        shell,
+        geode_core::config::EXPRESSIONS_DOC,
+        &name,
+        toml::Value::Table(object),
+        cx,
+    )?;
+    if let Some(config) = apply::config_with_pending(shell) {
+        let named = super::hot_reload::rebuild_named_expressions(&config);
+        shell.frame.update(cx, |f, cx| {
+            if f.replace_named_expressions(named) {
+                cx.notify();
+            }
+        });
+    }
+    if let Some(state) = shell.scope_expr_dialog.as_mut()
+        && !state.staged.contains(&name)
+    {
+        state.staged.push(name);
+    }
+    leave_naming(shell, String::new(), window, cx);
+    Ok(())
+}
+
 fn build(
     shell: &ShellView,
     entity: &Entity<ShellView>,
@@ -520,7 +720,11 @@ fn build(
     if !state.staged.is_empty() {
         column = column.child(staged_chips(shell, &state.staged, entity, cx));
     }
-    column = column.child(dialog::filter_row(&shell.dialog_input, None, cx));
+    column = column.child(if state.naming.is_some() {
+        dialog::name_row(&shell.dialog_input, NAMING_LABEL, cx)
+    } else {
+        dialog::filter_row(&shell.dialog_input, None, cx)
+    });
     let entity = entity.clone();
     column = column.child(super::expr_suggest::render(
         &state.completion,
@@ -551,9 +755,31 @@ fn build(
                 .child(err.clone()),
         );
     }
+    let (hints, extra) = if state.naming.is_some() {
+        (NAMING_HINTS, Vec::new())
+    } else {
+        let hints = state.mode.hints(!state.staged.is_empty());
+        let extra = match state.mode {
+            Mode::Term { .. } => Vec::new(),
+            // The chip shows the user's own alias, so it is built here
+            // rather than as a `Hint::Key`, which parses with none.
+            Mode::Whole | Mode::Add => {
+                let ks = Keystroke {
+                    key: "s".to_string(),
+                    mods: shell.services.mod_alias,
+                };
+                vec![
+                    div().child("·").into_any_element(),
+                    super::kbd::hint(&[ks], "save as named").into_any_element(),
+                ]
+            }
+        };
+        (hints, extra)
+    };
     column
-        .child(hint_row(
-            state.mode.hints(!state.staged.is_empty()),
+        .child(hint_row_with(
+            hints,
+            extra,
             "scope-expr-hints",
             WIDTH,
             theme.muted_foreground,

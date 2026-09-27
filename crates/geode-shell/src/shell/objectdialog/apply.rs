@@ -392,6 +392,25 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     None
 }
 
+/// Queue one whole object (`[name]` in `doc`'s user layer) with zero delay, for a surface
+/// outside the object dialog that creates a definition. It joins any pending batch, so
+/// an object-dialog edit in flight is written with it rather than raced. Refuses, with
+/// nothing queued, when there is no writable user directory.
+pub(crate) fn queue_object(
+    shell: &mut ShellView,
+    doc: &'static str,
+    name: &str,
+    value: toml::Value,
+    cx: &mut Context<ShellView>,
+) -> Result<(), String> {
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Err("no writable user config directory — nothing was changed".to_string());
+    };
+    let edits = BTreeMap::from([((doc, name.to_string()), Some(value))]);
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    Ok(())
+}
+
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers
 /// resolve the writable directory before advancing any draft baseline.
 fn queue_batch(
