@@ -3,5 +3,6 @@
 //! and close, precedence) as well as paint. The shell hosts tiles and never
 //! depends on this crate.
 
+pub mod menu;
 pub mod notice;
 pub mod popover;

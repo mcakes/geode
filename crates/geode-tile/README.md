@@ -13,8 +13,18 @@ Current architecture:
 
 | Module | Holds |
 |---|---|
+| `menu` | The `.` action menu: `Row` (`Action`/`Separator`/`Section`), `ActionRow` (pick, title, `Hint` resolved to a `Lane` through the live keymap, `enabled` with its reason, optional short reason, `checked` tick slot read back as `tick()`), `Menu` (highlight, `step`, `highlight`, `pick`, `replace_rows`, `rehint`), and `render_menu` over a `MenuHost`. Stepping lands only on enabled actions, and from a non-action row on the first enabled one; an all-disabled menu has no cursor; a rebuild snaps the highlight to the nearest action. Which keys step and pick stays the module's. |
 | `notice` | `Notice` (prepared text and a `Tone`: `Status`, `Warning`, `Danger`) and its one paint in theme tokens. Precedence between a tile's notice slots stays the tile's. |
 | `popover` | Popup geometry (`ROW_HEIGHT`, `ROW_INSET`, `MIN_WIDTH`, `SNAP_MARGIN`), the popover `surface`, `anchor_popup` (deferred, anchored, snapped, priority 1), and the `row_shell`/`empty_row` row frames. |
+
+## Menu hints
+
+A row's hint is an action identity, not a string. `Menu::new`,
+`replace_rows` and `rehint` resolve it against the bindings they are given —
+modules pass `menu::live_bindings(cx)`, the shell's last `Chords` publish —
+so a user rebind shows. A module re-resolves an open menu from its `Chords`
+observer. An action bound nowhere shows its `Unbound` form: nothing, its `:`
+verb, or a key its surface handles itself.
 
 ## Commands
 
