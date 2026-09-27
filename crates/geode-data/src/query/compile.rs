@@ -1150,6 +1150,46 @@ kind = "dimension"
         );
     }
 
+    /// The other half of the same refusal, and the arm the unknown-dataset case
+    /// above cannot reach: the joined dataset exists, its keys are on the
+    /// materialized spine, and still no grain of it is keyed by them. There is
+    /// no table to read, so dropping the join here would leave every column it
+    /// was to supply missing from the row — blank in the blotter, with nothing
+    /// on screen to distinguish it from a genuine NULL.
+    #[test]
+    fn a_join_no_grain_of_the_joined_dataset_can_serve_is_an_error_naming_its_keys() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+
+        // `instrument_ref` declares one grain, instrument, whose dimension key
+        // stops at `instrument_ref`; `underlying_ref` is neither in that key nor
+        // a column of the dataset at all. Grouping by it puts it on the spine,
+        // so the depth guard passes and the missing grain is what fails.
+        let mut unservable = joined_view();
+        unservable.grouping = vec!["underlying_ref".to_string()];
+        unservable.joins[0].on = vec!["underlying_ref".to_string()];
+
+        let err = compile_view(
+            store.writer(),
+            &unservable,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("[\"underlying_ref\"]") && message.contains("instrument_ref"),
+            "the error must name the keys no grain carries and the dataset it \
+             tried to join: {message}"
+        );
+    }
+
     #[test]
     fn a_join_puts_reference_columns_on_the_row() {
         let (_d, store) = fixture();

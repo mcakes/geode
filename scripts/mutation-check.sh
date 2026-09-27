@@ -811,6 +811,23 @@ run_mutation "views: the compiler refuses a join naming an unknown dataset" \
   geode-data \
   a_join_the_compiler_cannot_honour_is_an_error_not_a_silent_drop
 
+# The other half of the same backstop. The joined dataset exists and its keys
+# are on the spine, but no grain of it is keyed by them, so there is no table
+# to read: dropping the join leaves every reference column it was to supply out
+# of the statement, blank on the row and indistinguishable from a real NULL.
+run_mutation "views: the compiler refuses a join no grain can serve" \
+  crates/geode-data/src/query/compile.rs \
+  '            return Err(compile_error(
+                view,
+                format!(
+                    "join on {:?} names keys no grain of dataset '"'"'{}'"'"' carries",
+                    join.on, join.dataset
+                ),
+            ));' \
+  '            continue;' \
+  geode-data \
+  a_join_no_grain_of_the_joined_dataset_can_serve_is_an_error_naming_its_keys
+
 run_mutation "validation: a scope column is checked against the dataset" \
   crates/geode-core/src/scope/mod.rs \
   '                None if ds.column(&c).is_none() => {' \
