@@ -4,7 +4,7 @@
 # detect the broken behavior. A surviving mutation identifies a behavior the
 # selected package's tests did not distinguish from the original code.
 #
-# Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
+# Usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]
 #
 # --anchors-only runs no Cargo commands and changes no source files. It checks
 # every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
@@ -40,10 +40,14 @@
 # means the declared filter matched no tests. Correct either mismatch before
 # relying on the entry as evidence for its named test.
 #
-# A failed Cargo command is reported as caught; this script does not distinguish
-# compilation failure from a failing assertion. Inspect the failure when
-# validating an entry. Repeating a deterministic fixture does not add coverage;
-# the fixture must exercise the behavior the mutation changes.
+# A mutation that does not compile is reported as BUILD, not caught: cargo
+# failed before any test ran, so the entry defends nothing. BUILD is an error
+# and makes the run exit 1. --build-check applies each selected mutation and
+# compiles it with `cargo check --tests` without running tests. It audits for
+# replacements left stale by signature changes, which --anchors-only cannot
+# see because it never compiles anything. Repeating a deterministic fixture
+# does not add coverage; the fixture must exercise the behavior the mutation
+# changes.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -99,6 +103,10 @@ trap 'cleanup; exit 143' TERM
 #                                           a test other than '$test_filter'"
 #     (the "caught for the wrong reason" case the header above warns
 #     about, now visible — fix it by naming the right test)
+#   - any failing cargo run whose log
+#     says "could not compile"          -> "BUILD     $name  <-- mutation does
+#                                           not compile; no test ran" in place
+#                                           of caught or caught*; an error
 #   - the filtered run passes and the
 #     full suite also passes            -> "SURVIVED  $name  <-- no test
 #                                           sees this"
@@ -109,8 +117,12 @@ trap 'cleanup; exit 143' TERM
 #                                           plain caught/SURVIVED verdict
 # Omitting `test_filter` runs the full crate suite.
 anchors_only=0
+build_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
+  shift
+elif [[ "${1:-}" == --build-check ]]; then
+  build_only=1
   shift
 fi
 changed_ref=""
@@ -121,16 +133,26 @@ elif [[ "${1:-}" == --changed=* ]]; then
   changed_ref="${1#--changed=}"
   shift
 fi
+usage="usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]"
 only="${1:-}"
 if [[ "$only" == --* ]]; then
-  # Flags are positional: --anchors-only first, then --changed, then the
+  # Flags are positional: a mode flag first, then --changed, then the
   # substring. A flag in the wrong slot used to become the substring, match
   # no entry, and exit 0 having checked nothing.
-  echo "usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]" >&2
+  echo "$usage" >&2
   echo "unexpected argument in the substring slot: $only" >&2
   exit 2
 fi
+if (( $# > 1 )); then
+  # An argument after the substring used to be ignored, so a trailing
+  # `--anchors-only` started a real mutation run that edits source.
+  echo "$usage" >&2
+  echo "unexpected extra argument: $2" >&2
+  exit 2
+fi
 skipped=0
+build_failures=0
+built=0
 changed_files=""
 
 if [[ -n "$changed_ref" ]]; then
@@ -143,6 +165,27 @@ if [[ -n "$changed_ref" ]]; then
     git ls-files --others --exclude-standard
   )
 fi
+
+# A mutation that does not compile fails cargo before any test runs.
+# Reading that exit as a catch reports success for an entry that defends
+# nothing, forever: the anchor still matches, so no static gate sees it.
+# Keyed on cargo's compile-failure line, not the exit status: a failing
+# assertion also exits nonzero and is a genuine catch.
+compile_failed() {
+  grep -q "could not compile" "$log"
+}
+
+# Prints the verdict for a failed cargo run: BUILD if it never compiled,
+# otherwise the catch line given.
+report_failure() {
+  local name="$1" caught_line="$2"
+  if compile_failed; then
+    echo "BUILD     $name  <-- mutation does not compile; no test ran"
+    build_failures=$((build_failures + 1))
+  else
+    echo "$caught_line"
+  fi
+}
 
 run_mutation() {
   local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}" filter="${6:-}"
@@ -206,6 +249,17 @@ import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
+  if (( build_only )); then
+    # --tests builds the lib and bin unit-test targets under cfg(test), the
+    # same code cargo test compiles, without linking or running it.
+    built=$((built + 1))
+    if ! cargo check -p "$pkg" --tests >"$log" 2>&1; then
+      echo "BUILD     $name  <-- mutation does not compile; no test ran"
+      build_failures=$((build_failures + 1))
+    fi
+    restore
+    return 0
+  fi
   if [[ -n "$filter" ]]; then
     if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
@@ -213,7 +267,7 @@ PY
         filter=""
       fi
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
       restore
       return 0
     fi
@@ -224,13 +278,13 @@ PY
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught*   $name  <-- caught by a test other than '$filter'"
+      report_failure "$name" "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
     fi
   fi
   restore
@@ -21927,6 +21981,12 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
+fi
+if (( build_only )); then
+  echo "build-checked $built mutations: $build_failures do not compile"
+fi
+if (( build_failures )); then
+  exit 1
 fi
 if (( anchors_only )); then
   # Static checks over every selected entry; see scripts/mutation_anchors.py.

@@ -525,7 +525,11 @@ to the report time if adding the interval overflows.
   name, an entry with no filter, a replacement equal to its anchor, and a
   mutation repeated under the same test. The checker,
   [`mutation_anchors.py`](../../scripts/mutation_anchors.py), has its own
-  unittest suite in `scripts/test_mutation_anchors.py`.
+  unittest suite in `scripts/test_mutation_anchors.py`. A mutation that
+  does not compile is reported as `BUILD`, not caught, and fails the run;
+  `--build-check` compiles each selected mutation without running tests, to
+  find replacements left stale by signature changes that the static check
+  cannot see.
 
 The code linked above is the implementation authority. If this guide and the
 code disagree, correct the guide and assess whether the behavior is an

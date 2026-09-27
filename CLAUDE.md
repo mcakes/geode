@@ -47,6 +47,7 @@ cargo check -p geode-shell --features test-support --all-targets
 zsh scripts/mutation-check.sh "name substring"   # targeted mutation entries
 zsh scripts/mutation-check.sh --changed           # entries for changed files
 zsh scripts/mutation-check.sh --anchors-only      # validate anchors, filters and entries, no Cargo
+zsh scripts/mutation-check.sh --build-check "name substring"  # compile mutations, no tests
 ```
 
 CI runs formatting, Clippy, tests, benchmark compilation, and the shell
