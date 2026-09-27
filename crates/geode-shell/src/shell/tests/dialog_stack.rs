@@ -200,3 +200,54 @@ fn a_covered_picker_receives_its_delivery(cx: &mut gpui::TestAppContext) {
     assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Picker]);
     assert!(vcx.debug_bounds("picker-value-BK000").is_some());
 }
+
+/// A `ScopeExpr` dialog pushed over the Scopes object dialog's open
+/// `expression` field: accepting a suggestion in the top field must write
+/// only the top field's own completion, never the covered field's draft.
+/// Popping reveals the covered field exactly as it was left.
+#[gpui::test]
+fn accept_in_a_pushed_dialog_does_not_touch_a_covered_object_draft(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut vcx) = dialog_test_shell_in_dir(
+        cx,
+        super::objectdialog::services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    super::objectdialog::open_expression_field(&shell, &mut vcx);
+    vcx.simulate_input("boo");
+    vcx.run_until_parked();
+    assert_eq!(
+        super::objectdialog::edit_draft(&shell, &vcx, |d| d.query.clone()),
+        "boo"
+    );
+
+    dispatch_action(&shell, "frame::scope_expression", &mut vcx);
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object, DialogKind::ScopeExpr]
+    );
+
+    vcx.simulate_input("np");
+    vcx.simulate_keystrokes("tab");
+    vcx.run_until_parked();
+    assert_eq!(
+        input_text(&shell, &mut vcx),
+        "npv ",
+        "the top field accepted its own suggestion"
+    );
+    assert_eq!(
+        super::objectdialog::edit_draft(&shell, &vcx, |d| d.query.clone()),
+        "boo",
+        "an accept in the top dialog must not overwrite the covered object draft"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+    assert_eq!(
+        input_text(&shell, &mut vcx),
+        "boo",
+        "the revealed field has its typed text back, not the top field's accepted text"
+    );
+}

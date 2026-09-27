@@ -192,9 +192,12 @@ pub(crate) fn accept(
     // `sync_dialog_text` runs after the key and would put the old query
     // back unless the draft already holds the new text. A pointer accept
     // passes no key branch, so it syncs here; with the texts equal, the
-    // sync writes nothing.
+    // sync writes nothing. Gated on the top kind: a covered object dialog's
+    // draft belongs to it, not to whichever completion the accept above
+    // just wrote through the shared input.
     let text = view.dialog_input.read(cx).value().to_string();
-    if let Some(state) = view.object_dialog.as_mut()
+    if view.top_kind() == Some(DialogKind::Object)
+        && let Some(state) = view.object_dialog.as_mut()
         && super::objectdialog::expression_entry_open(state)
         && let Some(draft) = state.draft.as_mut()
     {

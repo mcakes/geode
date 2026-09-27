@@ -431,7 +431,7 @@ fn presentation_of(
     })
 }
 
-fn edit_draft<T>(
+pub(super) fn edit_draft<T>(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
     f: impl FnOnce(&objectdialog::Draft) -> T,
@@ -2130,7 +2130,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
 /// A `scopes` doc with one saved scope, `mine`, selecting `book = BK001`
 /// — deliberately different from whatever a test then puts on the
 /// frame, so an assertion that the doc changed cannot pass by accident.
-fn services_with_a_saved_scope() -> ShellServices {
+pub(super) fn services_with_a_saved_scope() -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -2208,7 +2208,7 @@ fn saved_scope_books(
 
 /// Walk the Scopes edit cursor to the Expression row with `j` and open it
 /// with `i`. Production keys only.
-fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+pub(super) fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
     open_scopes_field(shell, cx, "expression");
 }
 
