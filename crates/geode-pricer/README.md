@@ -284,8 +284,6 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Known limitations
 
-- The market-data action list's key hints are still the default bindings; a
-  user rebind is not reflected there.
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits

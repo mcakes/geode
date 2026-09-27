@@ -14613,20 +14613,9 @@ run_mutation "mdmenu: an unrelated action closes the popup first" \
 # `Ok` arm's own close-and-dispatch, a greyed "Upload" row would close
 # the popup and dispatch `marketdata::upload` anyway.
 run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
-  crates/geode-marketdata/src/tile.rs \
-  '            Err(reason) => {
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-            }' \
-  '            Err(reason) => {
-                let id = id.clone();
-                self.notice = Some((*reason).into());
-                self.rebuild_chrome();
-                cx.notify();
-                self.close_popup_with_window(window, cx);
-                self.dispatch(&id, None, window, cx);
-            }' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            Err(reason) => Err(reason.clone()),' \
+  '            Err(_) => Ok(action.pick.clone()),' \
   geode-marketdata enter_on_a_greyed_row_notices_and_keeps_the_menu
 
 # Fix round 1, IMPORTANT-1: the `⋯` button's capture-phase handler must
@@ -14683,18 +14672,10 @@ run_mutation "mdmenu: a command line closes the popup" \
 # every one of them — a dead row over a live door.
 run_mutation "mdpark: the menu's load row stays live on a dirty draft" \
   crates/geode-marketdata/src/core/menu.rs \
-  '        action(
-            "marketdata::load_underlying",
-            "Load underlying…",
-            "u",
-            Ok(()),
-        ),' \
-  '        action(
-            "marketdata::load_underlying",
-            "Load underlying…",
-            "u",
-            if dirty { Err("revert or upload first") } else { Ok(()) },
-        ),' \
+  '            Hint::chord("marketdata::load_underlying"),
+            Ok(()),' \
+  '            Hint::chord("marketdata::load_underlying"),
+            if dirty { Err("revert or upload first") } else { Ok(()) },' \
   geode-marketdata a_dirty_draft_leaves_load_live_and_a_built_upload_is_live
 
 # Blur, THEN drop (`close_editor`'s own order, here for the picker):
@@ -15787,21 +15768,21 @@ run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
 # The host's hover-gated counter detects the leak; keyboard tests do not
 # exercise this hit-testing boundary.
 run_mutation "mdmenu: the popup occludes what is painted beneath it" \
-  crates/geode-marketdata/src/popup.rs \
-  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))
-        // Occlude the grid so popup hover and press events do not also hit its rows.
+  crates/geode-tile/src/menu/render.rs \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.
         .occlude()' \
-  '        .debug_selector(move || format!("marketdata-menu-{tile_id}"))' \
+  '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
 # Hovering a row moves the highlight. Mutated to a no-op, the row still
 # paints and clicks; only the highlight stays where the keys left it.
 run_mutation "mdmenu: hovering a menu row moves the highlight" \
-  crates/geode-marketdata/src/tile.rs \
-  '        m.highlighted = index;
-        cx.notify();' \
-  '        let _ = index;' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        self.highlighted = Some(index);
+        true' \
+  '        let _ = index;
+        false' \
   geode-marketdata \
   hovering_a_menu_row_moves_the_highlight_and_occludes_the_grid
 
@@ -15996,33 +15977,33 @@ run_mutation "mdauto: an empty new document never auto-rebases a draft away" \
 # menu no longer says which policy is in force.
 run_mutation "mdauto: exactly one policy row is checked" \
   crates/geode-marketdata/src/core/menu.rs \
-  '            checked: Some(p == policy),' \
-  '            checked: Some(true),' \
+  '        Row::Action(ActionRow::new(ActionId(id.to_string()), title).checked(p == policy))' \
+  '        Row::Action(ActionRow::new(ActionId(id.to_string()), title).checked(true))' \
   geode-marketdata \
   exactly_one_policy_row_is_checked_and_it_follows_the_policy
 
 # `j` steps over a disabled row as over a separator (user report
 # 2026-09-25); mutated, a downward step lands on greyed `Upload`.
 run_mutation "mdmenu: stepping skips disabled rows" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
   navigation_skips_disabled_rows
 
 # The same mutation seen through the tile's `menu_down` route: two steps
 # from `Load underlying…` no longer reach `rebase edits`.
 run_mutation "mdmenu: menu_down skips disabled rows in the tile" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
-  '            (at + 1..rows.len()).find(|&i| matches!(rows[i], MenuRow::Action { .. }))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-marketdata \
   the_menu_ticks_the_policy_and_a_pick_sets_it
 
 # Stepping never lands on a separator or a section heading.
 run_mutation "mdmenu: stepping skips separators and sections" \
-  crates/geode-marketdata/src/core/menu.rs \
-  '            (at + 1..rows.len()).find(|&i| lands(&rows[i]))' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
   '            (at + 1..rows.len()).next()' \
   geode-marketdata \
   navigation_skips_separators_and_starts_on_the_first_enabled_row
@@ -20138,9 +20119,10 @@ run_mutation "panel: upload refused while Behind" \
 # must not also bubble to the shell root and move the cursor or feed the
 # keymap.
 run_mutation "panel: the confirm consumes a non-y key" \
-  crates/geode-marketdata/src/header.rs \
-  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
-  '                    if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) && false {' \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-marketdata \
   any_other_key_cancels_the_confirm_and_is_consumed
 
@@ -20171,8 +20153,8 @@ run_mutation "panel: upload y cancels when the draft changed under the question"
 # prompt painted over the newer header.
 run_mutation "panel: a rebase under the confirm withdraws it" \
   crates/geode-marketdata/src/tile.rs \
-  '        let moved = |p: &PendingUpload| p.draft != self.draft || now != painted;' \
-  '        let moved = |p: &PendingUpload| !same_edits(&p.draft, &self.draft);' \
+  '        let moved = |c: &Confirm<PendingUpload>| c.payload().draft != self.draft || now != painted;' \
+  '        let moved = |c: &Confirm<PendingUpload>| !same_edits(&c.payload().draft, &self.draft);' \
   geode-marketdata \
   a_rebase_under_the_question_withdraws_the_confirm
 
@@ -20259,9 +20241,9 @@ run_mutation "panel: the confirmed line clears at the next edit" \
 # keyboard up with `disable_focus` (which also forbids any later focus), the
 # net cannot restore it and `j` goes nowhere.
 run_mutation "panel: the tile answers keys after the upload confirm ends" \
-  crates/geode-marketdata/src/tile.rs \
-  '        if pending.focus.is_focused(window) {' \
-  '        if pending.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {' \
+  '        if self.focus.is_focused(window) { window.disable_focus(cx); } if false {' \
   geode-marketdata \
   the_tile_answers_keys_after_the_upload_confirm_ends
 
@@ -20370,11 +20352,11 @@ run_mutation "panel: the confirm counts attribute edits" \
 # Focus leaving the tile cancels the confirm (spec §6). Mutated to ignore
 # the blur, the question stands behind whatever took the keyboard.
 run_mutation "panel: focus loss cancels the upload confirm" \
-  crates/geode-marketdata/src/tile.rs \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.pending_upload.is_some() {' \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if false && this.pending_upload.is_some() {' \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
   geode-marketdata \
   focus_leaving_the_tile_cancels_the_confirm
 
@@ -24421,6 +24403,14 @@ run_mutation "tile confirm: a withdrawal is heard as a no" \
   '    drop(_blur);' \
   '    std::mem::forget(_blur);' \
   geode-tile a_question_armed_behind_a_withdrawal_stands
+
+# The market-data action list's hints are the live keymap's. Mutated to
+# drop the republished keymap, an open menu keeps the hints it opened with.
+run_mutation "mdmenu: a rebind does not reach the menu" \
+  crates/geode-marketdata/src/tile.rs \
+  '            this.chords = geode_tile::menu::live_bindings(cx);' \
+  '            let _ = geode_tile::menu::live_bindings(cx);' \
+  geode-marketdata an_open_menu_follows_a_keymap_reload
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

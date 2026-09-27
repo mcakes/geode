@@ -240,7 +240,8 @@ refuse fractional deltas or integer overflow; all candidate results are
 validated before any edit is written. Bump deltas themselves are parsed as
 `f64`, so their precision is limited by that representation. See the
 [crate guide](../../crates/geode-marketdata/README.md) for grid, popup, and
-command-parser contracts.
+command-parser contracts. The `.` action list's key hints are the live
+keymap's and follow a keymap reload while it is open.
 
 A panel opened through an add (palette, tile picker, `open_with`, duplicate)
 with no underlying opens the underlying picker at once; a restored panel does
@@ -407,8 +408,9 @@ shows the target and counts of changed cells, attributes, added rows, and
 removed rows. Bare unmodified `y` submits that snapshot after rechecking the
 live frame, live painted generation, and full draft equality. Every other key
 cancels and is consumed, including chords. A pointer press on the tile or loss
-of focus also cancels. A delivery that changes the draft or painted generation
-withdraws the prompt.
+of focus also cancels. A delivery that changes the draft or painted generation,
+or a switch of underlying, withdraws the prompt unanswered. The prompt is the
+shared `geode_tile::confirm` door.
 
 Transport success marks the draft `sent HH:MM` only if the current draft is
 still Editing and equals the submitted draft, including its base. Failure

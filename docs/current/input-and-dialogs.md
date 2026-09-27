@@ -226,9 +226,8 @@ so `g` reads `G` and `shift+g` reads `⇧G`.
   is what a user types into a keymap file.
 
 Hardcoded hints name the shipped key. A user rebinding does not change the
-empty-state hint's `ctrl+k` or the market-data menu's hints; the palette,
-keybinding rows, tooltips, the timeseries footer, and the timeseries and pricer
-menus read the live keymap.
+empty-state hint's `ctrl+k`; the palette, keybinding rows, tooltips, the
+timeseries footer, and every module's action menu read the live keymap.
 
 ## Per-tile command and find lines
 
