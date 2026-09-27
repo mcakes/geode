@@ -8,5 +8,6 @@ pub mod expansion;
 pub mod find;
 pub mod flatten;
 pub mod format;
+pub mod launch;
 pub mod plan;
 pub mod yank;

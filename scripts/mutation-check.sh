@@ -21435,6 +21435,20 @@ run_mutation "launch: a panel with a key is prompted anyway" \
   '        if self.popup.is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
+# The two entries below share an anchor (`--anchors-only` reports DUP as a
+# non-failing warning): they mutate different behaviours of the same line.
+run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
+  crates/geode-blotter/src/core/launch.rs \
+  '    path.get(level)?.clone()' \
+  '    path.get(level).or(path.last())?.clone()' \
+  geode-blotter rows_above_the_level_and_groupings_without_it_are_empty
+
+run_mutation "launch: blotter turns a NULL underlying into text" \
+  crates/geode-blotter/src/core/launch.rs \
+  '    path.get(level)?.clone()' \
+  '    Some(path.get(level)?.clone().unwrap_or_else(|| "NULL".into()))' \
+  geode-blotter a_null_underlying_is_empty_not_a_made_up_key
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

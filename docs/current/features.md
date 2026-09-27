@@ -44,6 +44,10 @@ recompile columns or format the whole dataset. Publication watches are scoped
 to the datasets the view reads, and global frame changes are staged through
 the flip barrier.
 
+`g m` opens a panel on the cursor row's `underlying_ref` (the column name is
+fixed); a row above that level, a grouping without it, or a NULL value opens
+the plain tile picker.
+
 ## Market-data documents
 
 `geode-documents` owns typed wire-format parsers and writers. A parser produces
