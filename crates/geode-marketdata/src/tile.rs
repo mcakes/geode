@@ -42,6 +42,9 @@ use geode_core::schema::ColumnType;
 use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
+use geode_shell::colfit::{
+    FitMetrics, FittedWidths, SESSION_KEY, widths_from_record, widths_to_toml,
+};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
@@ -655,6 +658,8 @@ impl MarketDataTile {
         let table = cx.new(|cx| {
             let mut delegate = MatrixDelegate::new(spec, weak_tile, id.0, tones);
             delegate.line_numbers = line_numbers;
+            // A missing or garbled record is an empty map, never a refusal.
+            delegate.fitted = widths_from_record(restored);
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
@@ -3931,7 +3936,32 @@ impl MarketDataTile {
                 self.toggle_menu(window, cx);
                 Ok(())
             }
+            Command::Autosize { reset } => {
+                self.autosize_columns(reset, window, cx);
+                Ok(())
+            }
         }
+    }
+
+    /// Fit every column to its header and every row's prepared text
+    /// (`reset`: drop the fitted widths), then refresh so the table
+    /// re-reads `column()`. The one route behind both `:autosize` and the
+    /// shell's `tile::autosize_columns`; measured on the UI thread at the
+    /// window's current rem, never in render. The widths persist in the
+    /// session record; a column a later document lacks is ignored and a new
+    /// one gets the default width.
+    pub fn autosize_columns(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let metrics = FitMetrics::xsmall_mono(window.rem_size());
+        self.table.update(cx, |t, cx| {
+            let fitted = if reset {
+                FittedWidths::new()
+            } else {
+                t.delegate().fit_columns(&metrics)
+            };
+            t.delegate_mut().fitted = fitted;
+            t.refresh(cx);
+        });
+        cx.notify();
     }
 
     /// Set the policy used by a future new generation. Existing Behind state and
@@ -4151,7 +4181,7 @@ impl MarketDataTile {
         self.request_catalog(cx);
     }
 
-    pub fn serialize(&self) -> toml::Table {
+    pub fn serialize(&self, cx: &App) -> toml::Table {
         let mut t = toml::Table::new();
         if let Some(key) = &self.key {
             t.insert(
@@ -4191,6 +4221,9 @@ impl MarketDataTile {
                 "auto".into(),
                 toml::Value::String(self.policy.as_str().to_string()),
             );
+        }
+        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {
+            t.insert(SESSION_KEY.into(), w);
         }
         t
     }
@@ -6230,12 +6263,14 @@ mod tests {
         assert!(h.tile.read_with(&vcx, |t, _| t.header_dirty()));
 
         assert_eq!(h.command(&mut vcx, "underlying NKY.Z"), Ok(()));
-        let (dirty, len, parked, key) = h.tile.read_with(&vcx, |t, _| {
+        let (dirty, len, parked, key) = h.tile.read_with(&vcx, |t, cx| {
             (
                 t.header_dirty(),
                 t.draft().len(),
                 t.parked(),
-                t.serialize()["underlying"][0].as_str().map(str::to_string),
+                t.serialize(cx)["underlying"][0]
+                    .as_str()
+                    .map(str::to_string),
             )
         });
         assert!(!dirty, "the dot reads the current draft, which is empty");
@@ -6436,7 +6471,7 @@ mod tests {
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
         h.command(&mut vcx, "set spot_ref 4520").unwrap();
 
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert!(
             written.get("draft").is_none(),
             "the legacy key is not written"
@@ -6528,9 +6563,10 @@ mod tests {
         h.set_picker_text(&mut vcx, "sp");
         h.dispatch(&mut vcx, "commit", None);
         assert_eq!(
-            h.tile.read_with(&vcx, |t, _| t.serialize()["underlying"][0]
-                .as_str()
-                .map(str::to_string)),
+            h.tile
+                .read_with(&vcx, |t, cx| t.serialize(cx)["underlying"][0]
+                    .as_str()
+                    .map(str::to_string)),
             Some("SPX.Z".to_string()),
             "`sp` ranked the bare key and enter loaded it"
         );
@@ -6804,7 +6840,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         .parse()
         .unwrap();
         let (h, vcx) = open_with(cx, Some(restored.clone()));
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(
             written, restored,
             "the underlying and the draft survive a restart, labels and all"
@@ -6828,7 +6864,7 @@ edits = [["2026-11-20", "-1", 9.5]]
         let (h, vcx) = open_with(cx, Some(legacy.clone()));
         let (len, written) = h
             .tile
-            .read_with(&vcx, |t, _| (t.draft().len(), t.serialize()));
+            .read_with(&vcx, |t, cx| (t.draft().len(), t.serialize(cx)));
         assert_eq!(len, 1, "the legacy draft is the current draft");
         assert!(written.get("draft").is_none());
         assert_eq!(written["drafts"]["SPX.Z"], legacy["draft"]);
@@ -11587,11 +11623,11 @@ auto = "replace"
             UpdatePolicy::Replace,
             "read from the session"
         );
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert_eq!(written, restored);
 
         h.command(&mut vcx, "auto hold").unwrap();
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         assert!(
             !written.contains_key("auto"),
             "the default writes no key: {written:?}"
@@ -11969,6 +12005,8 @@ edits = [["2026-11-20", "-1", 9.5]]
             "set spot 100",
             "auto hold",
             "menu",
+            "autosize",
+            "autosize reset",
         ];
         for word in crate::commands::VERBS {
             assert!(
@@ -11999,6 +12037,79 @@ edits = [["2026-11-20", "-1", 9.5]]
             // revert); the rule is about what it did NOT touch.
         }
     }
+    /// The width the delegate hands the table for the column headed `name`.
+    fn width_of_column(h: &Harness, vcx: &gpui::VisualTestContext, name: &str) -> f32 {
+        let ix = h
+            .headers(vcx)
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or_else(|| panic!("no column '{name}'"));
+        h.tile.read_with(vcx, |t, cx| {
+            f32::from(
+                gpui_component::table::TableDelegate::column(t.table().read(cx).delegate(), ix, cx)
+                    .width,
+            )
+        })
+    }
+
+    const LONG_STATUS: &str = "provisionally estimated by the desk";
+
+    /// `:autosize` through the content's command route fits a column whose
+    /// text outgrows the default width; the fit survives the refresh every
+    /// model install runs; `:autosize reset` returns to the default.
+    #[gpui::test]
+    fn autosize_fits_every_row_survives_a_model_install_and_resets(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[
+                ("D1", "2026-12-18", 1.25, "declared"),
+                ("D2", "2027-03-19", 0.5, LONG_STATUS),
+            ]),
+        );
+        let default = width_of_column(&h, &vcx, "status");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "status");
+        let rem = vcx.update(|window, _| f32::from(window.rem_size()));
+        let text = LONG_STATUS.chars().count() as f32 * rem * 0.875 * 0.6;
+        assert!(fitted > default, "{fitted} > {default}");
+        assert!(fitted >= text, "{fitted} holds the last row's {text}px");
+
+        h.tile.update(&mut vcx, |t, cx| t.install_model(cx));
+        assert_eq!(width_of_column(&h, &vcx, "status"), fitted);
+
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert_eq!(width_of_column(&h, &vcx, "status"), default);
+    }
+
+    /// Fitted widths ride the session record. On restore a key the model
+    /// still has is used, one it lacks is ignored, and a column with no
+    /// entry keeps the default.
+    #[gpui::test]
+    fn autosize_widths_round_trip_the_session(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_flat(cx);
+        h.with_flat_document_with(
+            &mut vcx,
+            test_fixtures::schedule_snapshot(&[("D1", "2026-12-18", 1.25, LONG_STATUS)]),
+        );
+        let default_amount = width_of_column(&h, &vcx, "amount");
+        h.command(&mut vcx, "autosize").unwrap();
+        let fitted = width_of_column(&h, &vcx, "status");
+        let mut record = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
+        let widths = record
+            .get_mut(geode_shell::colfit::SESSION_KEY)
+            .and_then(|v| v.as_table_mut())
+            .expect("widths persisted");
+        widths.remove("amount");
+        widths.insert("gone".into(), toml::Value::Float(300.0));
+
+        let (h2, mut vcx2) = open_spec(cx, &test_fixtures::SCHEDULE, Some(record));
+        h2.with_flat_document(&mut vcx2);
+        assert_eq!(width_of_column(&h2, &vcx2, "status"), fitted);
+        assert_eq!(width_of_column(&h2, &vcx2, "amount"), default_amount);
+        assert_eq!(h2.headers(&vcx2).len(), h.headers(&vcx).len());
+    }
+
     // ---- Row insertion and deletion ----------------------------------
 
     /// The model's row labels in painted order.
@@ -12389,7 +12500,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             "{yanked:?}"
         );
 
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
         let rows = written["drafts"]["SPX.Z"]["rows"]
             .as_table()
             .expect("a rows table");
@@ -13896,7 +14007,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         h.with_document(&mut vcx);
         h.edit_one_cell(&mut vcx);
         h.upload_ok(&mut vcx);
-        let written = h.tile.read_with(&vcx, |t, _| t.serialize());
+        let written = h.tile.read_with(&vcx, |t, cx| t.serialize(cx));
 
         let (h, mut vcx) = open_spec_with_egress(
             cx,
