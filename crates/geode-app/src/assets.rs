@@ -13,13 +13,10 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};
 
-gpui_kit_assets::icon_assets!(
-    ExtraIcons,
-    [
-        // The scope bar's save chip (`shell::toolbar`).
-        Save,
-    ]
-);
+// `Save`: the scope bar's save chip (`shell::toolbar`). `Activity`: the
+// diagnostics page's sidebar button. `Copy`: the diagnostics page's log
+// detail copy button (`geode_diagnostics::page_chrome`).
+gpui_kit_assets::icon_assets!(ExtraIcons, [Save, Activity, Copy]);
 
 /// [`ExtraIcons`] over [`gpui_kit_assets::Assets`].
 pub struct AppAssets;
@@ -45,12 +42,16 @@ impl AssetSource for AppAssets {
 mod tests {
     use super::*;
 
-    /// The save icon selected for the scope bar must resolve to nonempty bytes.
+    /// Every icon selected outside the default bundle must resolve to
+    /// nonempty bytes: a missing one paints nothing and reports nothing.
     #[test]
     fn the_extra_icons_the_shell_paints_are_served() {
-        let path = gpui_kit_assets::IconName::Save.path();
-        let bytes = AppAssets.load(&path).unwrap();
-        assert!(bytes.is_some_and(|b| !b.is_empty()), "{path} is not served");
+        use gpui_kit_assets::IconName;
+        for icon in [IconName::Save, IconName::Activity, IconName::Copy] {
+            let path = icon.path();
+            let bytes = AppAssets.load(&path).unwrap();
+            assert!(bytes.is_some_and(|b| !b.is_empty()), "{path} is not served");
+        }
     }
 
     /// Default component icons remain loadable, and listings include extras.

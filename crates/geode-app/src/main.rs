@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
-use geode_diagnostics::DiagnosticsFactory;
+use geode_diagnostics::DiagnosticsPageFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
-    register_builtin_actions, register_pick_actions, register_scope_actions,
+    register_builtin_actions, register_page_actions, register_pick_actions, register_scope_actions,
 };
 use geode_shell::diagnostics::ActionTail;
 use geode_shell::fonts;
@@ -279,10 +279,10 @@ fn main() {
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
-                    // Register this observer before diagnostics tiles register theirs.
-                    // GPUI invokes observers in registration order: the shared factory
-                    // configuration must be current before a tile consumes the same
-                    // version bump and rebuilds its config section.
+                    // Register this observer before the diagnostics page registers its
+                    // own. GPUI invokes observers in registration order: the shared
+                    // factory configuration must be current before the page consumes
+                    // the same version bump and rebuilds its config section.
                     cx.observe(&frame, move |frame, cx| {
                         let now = frame.read(cx).versions().config;
                         if now != last_config_version.get() {
@@ -447,7 +447,7 @@ fn build_shell_services(
     Option<PathBuf>,
     Option<PathBuf>,
     Option<bridge::Bridge>,
-    Rc<DiagnosticsFactory>,
+    Rc<DiagnosticsPageFactory>,
 ) {
     let (desk, user) = config_dirs();
     let builtin = builtin_layer(demo_root);
@@ -486,10 +486,14 @@ fn build_shell_services(
     // placeholder; a deprecated modules.default setting is diagnosed below.
     let mut roster = ModuleRoster::new();
 
+    let mut pages = PageRoster::new();
     // Diagnostics needs no data handle and is always registered. Return its
     // shared factory so the window's frame-config observer can refresh it.
-    let diagnostics_factory = Rc::new(DiagnosticsFactory::new(log_ring.clone(), config.clone()));
-    roster.add(Box::new(diagnostics_factory.clone()));
+    let diagnostics_factory = Rc::new(DiagnosticsPageFactory::new(
+        log_ring.clone(),
+        config.clone(),
+    ));
+    pages.add(Box::new(diagnostics_factory.clone()));
 
     // Data-backed factories require a successful data setup. If setup is absent,
     // those kinds have no add-tile actions and restored tiles remain placeholders.
@@ -512,6 +516,10 @@ fn build_shell_services(
     register_add_actions(&mut registry, &roster.kinds());
     // Register module actions before resolving their keybindings.
     roster.register_actions(&mut registry);
+    // Page toggles and each page's own actions, likewise before the keymap.
+    let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+    register_page_actions(&mut registry, &page_titles);
+    pages.register_actions(&mut registry);
 
     // Log modifier-alias and deprecated-setting diagnostics here. ShellView
     // recomputes these for its diagnostics entity; they are separate from the
@@ -527,7 +535,12 @@ fn build_shell_services(
     // Insert validated module bindings above builtin defaults and below desk/user
     // layers. Their diagnostics depend on the completed roster and registry, so
     // carry them into ShellServices alongside keymap compilation diagnostics.
-    let (fragments, frag_diags) = roster.keymap_fragments();
+    let (mut fragments, mut frag_diags) = roster.keymap_fragments();
+    // Page fragments after module fragments: the toggle bindings are
+    // shell-generated docs the roster emits unchecked.
+    let (page_fragments, page_diags) = pages.keymap_fragments();
+    fragments.extend(page_fragments);
+    frag_diags.extend(page_diags);
     for diag in &frag_diags {
         print_diagnostic(diag);
     }
@@ -581,7 +594,7 @@ fn build_shell_services(
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
-        pages: PageRoster::new(),
+        pages,
         restored_pages: std::collections::BTreeMap::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
@@ -914,15 +927,22 @@ mod tests {
         let bridge =
             cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
         let mut roster = ModuleRoster::new();
-        roster.add(Box::new(Rc::new(DiagnosticsFactory::new(
+        add_bridge_modules(&mut roster, &bridge);
+        let mut pages = PageRoster::new();
+        pages.add(Box::new(Rc::new(DiagnosticsPageFactory::new(
             Arc::new(Ring::new(16)),
             config.clone(),
         ))));
-        add_bridge_modules(&mut roster, &bridge);
         register_add_actions(&mut registry, &roster.kinds());
         roster.register_actions(&mut registry);
+        let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
+        register_page_actions(&mut registry, &page_titles);
+        pages.register_actions(&mut registry);
 
-        let (fragments, frag_diags) = roster.keymap_fragments();
+        let (mut fragments, mut frag_diags) = roster.keymap_fragments();
+        let (page_fragments, page_diags) = pages.keymap_fragments();
+        fragments.extend(page_fragments);
+        frag_diags.extend(page_diags);
         assert!(frag_diags.is_empty(), "{frag_diags:?}");
         let layered = fragments::splice(config.layered_docs("keymap"), &fragments);
         let (mod_alias, mod_diags) = mod_alias_from_config(&config);

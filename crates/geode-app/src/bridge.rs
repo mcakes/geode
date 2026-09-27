@@ -1214,13 +1214,13 @@ mod tests {
     use geode_core::log::Ring;
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot, QueryKey};
     use geode_data::source::SourceSpec;
-    use geode_diagnostics::DiagnosticsFactory;
+    use geode_diagnostics::DiagnosticsPageFactory;
     use geode_pricer::store::MemorySheetStore;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
     use geode_shell::module::recording::{Recorded, RecordingFactory};
-    use geode_shell::module::{ModuleFactory, ModuleRoster};
+    use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
     use geode_shell::tiling::{TileId, Workspaces};
@@ -4288,12 +4288,12 @@ role = "key"
         }
     }
 
-    /// Open a real diagnostics tile through its factory and bridge. After the
-    /// initial catalog request completes, changing frame as-of must produce a
-    /// second request carrying the new value. A pending-bit assertion alone would
+    /// Open the real diagnostics page through its factory and bridge. After
+    /// the initial catalog request completes, changing frame as-of must
+    /// produce a second request carrying the new value. A pending-bit assertion alone would
     /// not prove that the observer submits the request.
     #[gpui::test]
-    fn an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of(
+    fn an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of(
         cx: &mut gpui::TestAppContext,
     ) {
         let window = open_test_window(cx, test_shell_services());
@@ -4345,16 +4345,16 @@ role = "key"
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
 
-        // A real diagnostics tile, created through the real factory, the
-        // same door `main.rs`'s roster and `ensure_occupants` use.
+        // The real diagnostics page, created through the real factory, the
+        // same door `main.rs`'s page roster and `open_page` use.
         let diagnostics_factory =
-            DiagnosticsFactory::new(Arc::new(Ring::new(64)), Config::default());
+            DiagnosticsPageFactory::new(Arc::new(Ring::new(64)), Config::default());
         let occupant = vcx.update(|window, cx| {
             diagnostics_factory.create(
-                TileId(999),
                 None,
                 frame.clone(),
                 diagnostics.clone(),
+                Rc::new(|_, _, _| {}),
                 window,
                 cx,
             )

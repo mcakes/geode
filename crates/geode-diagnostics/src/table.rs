@@ -35,6 +35,9 @@ impl SectionDelegate {
         self.table = table;
     }
 
+    /// The page keeps its own `Rc` of the table; tests read the delegate's
+    /// copy to check what a table paints.
+    #[cfg(test)]
     pub fn table(&self) -> &Rc<PreparedTable> {
         &self.table
     }

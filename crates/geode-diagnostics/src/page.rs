@@ -1,0 +1,971 @@
+//! The diagnostics page entity: one section at a time over the shell's
+//! `Diagnostics` entity, the log ring, the loaded config, and the frame's
+//! requery stats. Observers rebuild only the selected section from its own
+//! inputs; the table paints a shared prepared table; the detail strip shows
+//! the cursor row.
+
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::SystemTime;
+
+use geode_core::config::Config;
+use geode_core::log::Ring;
+use geode_shell::actions::ActionId;
+use geode_shell::diagnostics::{DiagVersions, Diagnostics};
+use geode_shell::frame::{Frame, FrameVersions};
+use geode_shell::keymap::KeyContext;
+use geode_shell::module::ShellActions;
+use geode_shell::shell::{chip, scale};
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, SharedString, Task, WeakEntity,
+    Window, div,
+};
+use gpui_component::button::Button;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::table::{DataTable, TableEvent, TableState};
+use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, Size, h_flex, v_flex};
+
+use crate::log::{LogFilter, LogTail};
+use crate::model::{self, Badges, Tone};
+use crate::prepared::{self, PreparedTable};
+use crate::section::Section;
+use crate::table::SectionDelegate;
+
+/// Width of the filter input, in pixels at the design rem.
+const FILTER_WIDTH: f32 = 240.0;
+
+/// The diagnostics counter each section's builder reads. Comparing only
+/// this counter keeps an unrelated change, such as a perf tick, from
+/// rebuilding the config rows. The log observer also asks the tail whether
+/// the ring has new records, because the ring lives outside `Diagnostics`.
+fn diag_version_for(section: Section, v: DiagVersions) -> u64 {
+    match section {
+        Section::Sources => v.sources,
+        Section::Data => v.data,
+        Section::Config => v.config,
+        Section::Log => v.log_levels,
+        Section::Perf => v.perf,
+    }
+}
+
+fn title_for(section: Section) -> SharedString {
+    SharedString::from(format!("Diagnostics · {}", section.title()))
+}
+
+pub struct DiagnosticsPage {
+    pub(crate) frame: Entity<Frame>,
+    pub(crate) diagnostics: Entity<Diagnostics>,
+    config: Rc<RefCell<Config>>,
+    actions: ShellActions,
+    focus_handle: FocusHandle,
+    section: Section,
+    /// Cursor row per section, kept across switches.
+    cursors: [usize; 5],
+    /// Filter text per section; the one input shows the selected section's.
+    filters: [String; 5],
+    filter_input: Entity<InputState>,
+    /// Set by a windowless section change: the input still shows the old
+    /// section's text until `sync_filter_input` runs with a window.
+    filter_input_stale: bool,
+    table: Entity<TableState<SectionDelegate>>,
+    prepared: Rc<PreparedTable>,
+    /// The rem the delegate's column widths were prepared at; `refresh`
+    /// runs only when the window's rem moves off it.
+    last_rem: f32,
+    collapsed_datasets: BTreeSet<String>,
+    collapsed_docs: BTreeSet<String>,
+    config_history: bool,
+    /// Whether the catalog was taken under the frame's as-of; the Data
+    /// toolbar chip. Cached at rebuild: both inputs rebuild the section.
+    catalog_matches: bool,
+    log: LogTail,
+    log_filter: LogFilter,
+    follow: bool,
+    badges: Badges,
+    /// Rail badge text per section, formatted with the badges.
+    rail_texts: [SharedString; 5],
+    header_chips: Vec<(SharedString, Tone)>,
+    /// The Config toolbar's History label, formatted with the badges.
+    history_label: SharedString,
+    /// The log cursor row's detail joined for the copy button, cached
+    /// with every cursor or table change so paint formats nothing.
+    copy_text: Option<SharedString>,
+    /// [`Self::title`]'s cache, replaced only on a section change.
+    title: SharedString,
+    perf: Option<model::PerfModel>,
+    visible: bool,
+    /// A page input holds focus; see `key_context`.
+    insert_mode: bool,
+    #[allow(dead_code)]
+    ages_timer: Option<Task<()>>,
+    #[allow(dead_code)]
+    ages_now: SystemTime,
+    last_diag_versions: DiagVersions,
+    last_frame_versions: FrameVersions,
+    #[cfg(test)]
+    pub(crate) rebuild_count: u32,
+}
+
+impl DiagnosticsPage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        ring: Arc<Ring>,
+        config: Rc<RefCell<Config>>,
+        actions: ShellActions,
+        restored: Option<&toml::Table>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let section = restored
+            .and_then(|t| t.get("section"))
+            .and_then(|v| v.as_str())
+            .and_then(Section::from_name)
+            .unwrap_or(Section::Sources);
+
+        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter…"));
+        cx.subscribe_in(
+            &filter_input,
+            window,
+            |this, input, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => {
+                    let text = input.read(cx).value();
+                    let ix = this.section as usize;
+                    if this.filters[ix] != text.as_ref() {
+                        this.filters[ix] = text.to_string();
+                        this.rebuild(cx);
+                    }
+                }
+                InputEvent::Focus => {
+                    this.insert_mode = true;
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    this.insert_mode = false;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {}
+            },
+        )
+        .detach();
+
+        let table = cx.new(|cx| {
+            TableState::new(SectionDelegate::new(), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .col_resizable(true)
+                .col_movable(false)
+                .sortable(false)
+                .loop_selection(false)
+        });
+        // `set_selected_row` echoes `SelectRow`; `set_cursor` returns early
+        // when the row is already the cursor, so the echo is inert.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _table, event: &TableEvent, _window, cx| {
+                if let TableEvent::SelectRow(ix) = event {
+                    this.set_cursor(*ix, cx);
+                }
+            },
+        )
+        .detach();
+
+        let last_diag_versions = diagnostics.read(cx).versions();
+        let last_frame_versions = frame.read(cx).versions();
+
+        cx.observe(&diagnostics, |this, diagnostics, cx| {
+            let now = diagnostics.read(cx).versions();
+            let relevant = if this.section == Section::Log {
+                this.log.has_new() || now.log_levels != this.last_diag_versions.log_levels
+            } else {
+                diag_version_for(this.section, now)
+                    != diag_version_for(this.section, this.last_diag_versions)
+            };
+            // Badges read every counter: refresh them on any counter change.
+            let any = now != this.last_diag_versions;
+            this.last_diag_versions = now;
+            if relevant {
+                this.rebuild(cx);
+            } else if any {
+                this.refresh_badges(cx);
+            }
+        })
+        .detach();
+        // Timestamps are formatted at rebuild, so a clock-setting change
+        // rebuilds the selected section.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| this.rebuild(cx))
+            .detach();
+        // The app registers its config-refresh frame observer before pages
+        // are created; it must update the shared `Config` before this
+        // observer rebuilds config rows on the same version change.
+        cx.observe(&frame, |this, frame, cx| {
+            let now = frame.read(cx).versions();
+            let as_of_changed = now.as_of != this.last_frame_versions.as_of;
+            let config_changed = now.config != this.last_frame_versions.config;
+            // Only data rows read the frame's as-of; only config rows read
+            // the loaded config. Scope and grouping keystrokes rebuild
+            // nothing here.
+            let relevant = match this.section {
+                Section::Data => as_of_changed,
+                Section::Config => config_changed,
+                Section::Sources | Section::Log | Section::Perf => false,
+            };
+            this.last_frame_versions = now;
+            if relevant {
+                this.rebuild(cx);
+            }
+            // The catalog resolves generation markers under the request's
+            // as-of: a visible page needs a fresh snapshot when it changes.
+            // A hidden page requests one when it becomes visible.
+            if as_of_changed && this.visible {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog_refresh();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        // The tail owns the ring; the page reads records through it.
+        let log = LogTail::new(ring);
+        let mut this = DiagnosticsPage {
+            frame,
+            diagnostics,
+            config,
+            actions,
+            focus_handle: cx.focus_handle(),
+            section,
+            cursors: [0; 5],
+            filters: Default::default(),
+            filter_input,
+            filter_input_stale: false,
+            table,
+            prepared: Rc::new(PreparedTable::empty()),
+            last_rem: scale::DESIGN_REM,
+            collapsed_datasets: BTreeSet::new(),
+            collapsed_docs: BTreeSet::new(),
+            config_history: false,
+            catalog_matches: false,
+            log,
+            log_filter: LogFilter::all(),
+            follow: true,
+            badges: Badges {
+                sources: (None, 0),
+                datasets: 0,
+                config: (0, 0),
+                log_errors: 0,
+                perf_p95: String::new(),
+            },
+            rail_texts: Default::default(),
+            header_chips: Vec::new(),
+            history_label: SharedString::default(),
+            copy_text: None,
+            title: title_for(section),
+            perf: None,
+            visible: false,
+            insert_mode: false,
+            ages_timer: None,
+            ages_now: SystemTime::now(),
+            last_diag_versions,
+            last_frame_versions,
+            #[cfg(test)]
+            rebuild_count: 0,
+        };
+        this.rebuild(cx);
+        this
+    }
+
+    pub fn section(&self) -> Section {
+        self.section
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursors[self.section as usize]
+    }
+
+    pub fn prepared(&self) -> &Rc<PreparedTable> {
+        &self.prepared
+    }
+
+    /// Module test fixtures may omit `AppClock`; the machine clock then.
+    fn clock(cx: &App) -> geode_core::clock::Clock {
+        cx.try_global::<geode_shell::clock::AppClock>()
+            .map(|c| c.0)
+            .unwrap_or_else(|| geode_core::clock::Clock::machine().0)
+    }
+
+    /// Rebuild the selected section's prepared table, the badges, and the
+    /// header chips. Only the selected section's builder runs.
+    fn rebuild(&mut self, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        {
+            self.rebuild_count += 1;
+        }
+        let clock = Self::clock(cx);
+        let now = SystemTime::now();
+        self.ages_now = now;
+        if self.section == Section::Log {
+            self.log.drain();
+        }
+        let filter = self.filters[self.section as usize].clone();
+        let prepared = {
+            let d = self.diagnostics.read(cx);
+            let frame = self.frame.read(cx);
+            match self.section {
+                Section::Sources => {
+                    prepared::sources_table(&model::source_rows(d, clock), now, &filter)
+                }
+                Section::Data => {
+                    self.catalog_matches = model::catalog_matches_frame(d, frame.as_of());
+                    prepared::data_table(
+                        &model::dataset_rows(d, frame.as_of(), clock),
+                        &self.collapsed_datasets,
+                        &filter,
+                    )
+                }
+                Section::Config => prepared::config_table(
+                    &model::config_docs(&self.config.borrow(), &filter),
+                    &self.collapsed_docs,
+                ),
+                Section::Log => {
+                    // The one input is the log's message filter.
+                    self.log_filter.text = filter;
+                    prepared::log_table(
+                        &model::log_rows(self.log.records(), &self.log_filter, clock),
+                        self.log.lost(),
+                    )
+                }
+                Section::Perf => {
+                    self.perf = Some(model::perf_model(d, &frame.requery));
+                    PreparedTable::empty()
+                }
+            }
+        };
+        self.prepared = Rc::new(prepared);
+        let len = self.prepared.rows.len();
+        let ix = self.section as usize;
+        if self.section == Section::Log && self.follow {
+            self.cursors[ix] = len.saturating_sub(1);
+        } else {
+            self.cursors[ix] = self.cursors[ix].min(len.saturating_sub(1));
+        }
+        let cursor = self.cursors[ix];
+        let shared = self.prepared.clone();
+        // `column()` is read only when the table prepares its layout, so
+        // every new table needs a `refresh` before it paints.
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set(shared);
+            t.refresh(cx);
+            if len > 0 {
+                t.set_selected_row(cursor, cx);
+            }
+        });
+        self.refresh_copy_text();
+        self.refresh_badges(cx);
+        cx.notify();
+    }
+
+    /// Only the log offers a copy of the cursor row's detail.
+    fn refresh_copy_text(&mut self) {
+        self.copy_text = (self.section == Section::Log)
+            .then(|| self.prepared.rows.get(self.cursor()))
+            .flatten()
+            .map(|r| SharedString::from(r.detail.join("\n")));
+    }
+
+    fn refresh_badges(&mut self, cx: &mut Context<Self>) {
+        let clock = Self::clock(cx);
+        let d = self.diagnostics.read(cx);
+        let log_errors = self
+            .log
+            .records()
+            .filter(|r| r.level == geode_core::log::Level::ERROR)
+            .count();
+        self.badges = model::badges(d, log_errors);
+        self.header_chips = model::header_chips(d, clock)
+            .into_iter()
+            .map(|(s, t)| (SharedString::from(s), t))
+            .collect();
+        self.rail_texts = crate::page_chrome::rail_texts(&self.badges);
+        self.history_label =
+            SharedString::from(format!("History ({} batches)", d.config_history.len()));
+        cx.notify();
+    }
+
+    pub fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if self.section == section {
+            return;
+        }
+        self.section = section;
+        self.title = title_for(section);
+        // The input needs a `Window` to take the new section's text; the
+        // next caller with one (`dispatch`, a rail click, render) syncs it.
+        self.filter_input_stale = true;
+        self.rebuild(cx);
+        self.sync_ages_timer(cx);
+    }
+
+    /// Show the selected section's filter text in the one input. Setting
+    /// the value emits no `Change`, so the section is not rebuilt again.
+    pub(crate) fn sync_filter_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.filter_input_stale {
+            return;
+        }
+        self.filter_input_stale = false;
+        let text = self.filters[self.section as usize].clone();
+        self.filter_input.update(cx, |input, cx| {
+            if input.value().as_ref() != text {
+                input.set_value(text, window, cx);
+            }
+        });
+    }
+
+    fn set_cursor(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let len = self.prepared.rows.len();
+        let ix = ix.min(len.saturating_sub(1));
+        let slot = self.section as usize;
+        if self.cursors[slot] == ix {
+            return;
+        }
+        self.cursors[slot] = ix;
+        if self.section == Section::Log {
+            self.follow = false;
+        }
+        if len > 0 {
+            self.table.update(cx, |t, cx| t.set_selected_row(ix, cx));
+        }
+        self.refresh_copy_text();
+        cx.notify();
+    }
+
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let cur = self.cursor() as isize;
+        let target = (cur + delta).max(0) as usize;
+        self.set_cursor(target, cx);
+    }
+
+    fn toggle_expansion_at_cursor(&mut self, expand: Option<bool>, cx: &mut Context<Self>) {
+        let Some(key) = self
+            .prepared
+            .parent_key_at(self.cursor())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let set = match self.section {
+            Section::Data => &mut self.collapsed_datasets,
+            Section::Config => &mut self.collapsed_docs,
+            Section::Sources | Section::Log | Section::Perf => return,
+        };
+        let collapsed_now = set.contains(&key);
+        let collapse = match expand {
+            Some(e) => !e,
+            None => !collapsed_now,
+        };
+        if collapse {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
+        self.rebuild(cx);
+    }
+
+    /// Collapse every dataset (`collapse = true`) or none.
+    fn set_all_datasets_collapsed(&mut self, collapse: bool, cx: &mut Context<Self>) {
+        self.collapsed_datasets = if collapse {
+            self.diagnostics.read(cx).datasets.keys().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
+        self.rebuild(cx);
+    }
+
+    /// `mode = insert` while a page input owns focus, tracked by the input
+    /// subscription's `Focus`/`Blur` events because the shell asks for the
+    /// context without a `Window` (the market-data panel does the same
+    /// with its editor flag). The shell's insert branch confirms with
+    /// `holds_focus`.
+    pub fn key_context(&self) -> KeyContext {
+        KeyContext::new("diagnostics")
+            .pair("section", self.section.name())
+            .pair("mode", if self.insert_mode { "insert" } else { "normal" })
+            .counts()
+    }
+
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.filter_input.focus_handle(cx).is_focused(window)
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    pub fn dispatch(
+        &mut self,
+        action: &ActionId,
+        count: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(name) = action.0.strip_prefix("diagnostics::") else {
+            return false;
+        };
+        let n = count.unwrap_or(1).max(1) as isize;
+        match name {
+            "down" => self.move_cursor(n, cx),
+            "up" => self.move_cursor(-n, cx),
+            "top" => self.set_cursor(0, cx),
+            "bottom" => {
+                let last = self.prepared.rows.len().saturating_sub(1);
+                self.set_cursor(last, cx);
+                if self.section == Section::Log {
+                    self.follow = true;
+                }
+            }
+            "page_down" => self.move_cursor(5 * n, cx),
+            "page_up" => self.move_cursor(-5 * n, cx),
+            "page_down_full" => self.move_cursor(10 * n, cx),
+            "page_up_full" => self.move_cursor(-10 * n, cx),
+            "next_section" => {
+                self.set_section(self.section.next(), cx);
+                self.sync_filter_input(window, cx);
+            }
+            "prev_section" => {
+                self.set_section(self.section.prev(), cx);
+                self.sync_filter_input(window, cx);
+            }
+            "expand" => self.toggle_expansion_at_cursor(Some(true), cx),
+            "collapse" => self.toggle_expansion_at_cursor(Some(false), cx),
+            "activate" => self.toggle_expansion_at_cursor(None, cx),
+            "filter" => self.filter_input.update(cx, |i, cx| i.focus(window, cx)),
+            "blur" => self.focus_handle.focus(window, cx),
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    /// Visibility drives watched demand: a watch queues the initial
+    /// catalog, and the shell's unwatch cancels it when the page closes.
+    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if self.visible == visible {
+            return;
+        }
+        self.visible = visible;
+        self.diagnostics.update(cx, |d, cx| {
+            if visible {
+                d.watch();
+            } else {
+                d.unwatch();
+            }
+            cx.notify();
+        });
+        if visible {
+            self.rebuild(cx);
+        }
+        self.sync_ages_timer(cx);
+    }
+
+    /// Only the section is saved; filters, cursors, and expansion are
+    /// transient.
+    pub fn serialize(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        t.insert(
+            "section".into(),
+            toml::Value::String(self.section.name().to_string()),
+        );
+        t
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    fn sync_ages_timer(&mut self, cx: &mut Context<Self>) {
+        // The Sources ages timer lands with the Perf section; no timer yet.
+        let _ = cx;
+    }
+
+    fn filter_input_el(&self) -> Input {
+        Input::new(&self.filter_input)
+            .cleanable(true)
+            .w(scale::design(FILTER_WIDTH))
+    }
+
+    fn render_toolbar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let weak: WeakEntity<Self> = cx.weak_entity();
+        match self.section {
+            Section::Sources | Section::Log => h_flex()
+                .gap_2()
+                .p_2()
+                .child(self.filter_input_el())
+                .into_any_element(),
+            Section::Data => {
+                let theme = cx.theme();
+                let (text, tone) = if self.catalog_matches {
+                    ("catalog as-of = frame", chip::Tone::Neutral)
+                } else {
+                    ("catalog pending", chip::Tone::Warning)
+                };
+                let paint = chip::chip_paint(theme, tone);
+                let diagnostics = self.diagnostics.clone();
+                let (expand, collapse) = (weak.clone(), weak);
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .items_center()
+                    .child(self.filter_input_el())
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded(theme.radius)
+                            .text_xs()
+                            .when_some(paint.fill, |el, fill| el.bg(fill))
+                            .text_color(paint.text)
+                            .child(text),
+                    )
+                    .child(
+                        Button::new("diagnostics-refresh-catalog")
+                            .outline()
+                            .xsmall()
+                            .label("Refresh catalog")
+                            .on_click(move |_, _window, cx| {
+                                diagnostics.update(cx, |d, cx| {
+                                    d.request_catalog();
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("diagnostics-expand-all")
+                            .outline()
+                            .xsmall()
+                            .label("Expand all")
+                            .on_click(move |_, _window, cx| {
+                                let _ = expand
+                                    .update(cx, |p, cx| p.set_all_datasets_collapsed(false, cx));
+                            }),
+                    )
+                    .child(
+                        Button::new("diagnostics-collapse-all")
+                            .outline()
+                            .xsmall()
+                            .label("Collapse all")
+                            .on_click(move |_, _window, cx| {
+                                let _ = collapse
+                                    .update(cx, |p, cx| p.set_all_datasets_collapsed(true, cx));
+                            }),
+                    )
+                    .into_any_element()
+            }
+            Section::Config => {
+                let actions = self.actions.clone();
+                let (current, history) = (weak.clone(), weak);
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("diagnostics-diag-current")
+                            .debug_selector(|| "diagnostics-diag-current".to_string())
+                            .child(
+                                Button::new("diagnostics-diag-current")
+                                    .xsmall()
+                                    .selected(!self.config_history)
+                                    .label("Current")
+                                    .on_click(move |_, _window, cx| {
+                                        let _ = current.update(cx, |p, cx| {
+                                            p.config_history = false;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("diagnostics-diag-history")
+                            .debug_selector(|| "diagnostics-diag-history".to_string())
+                            .child(
+                                Button::new("diagnostics-diag-history")
+                                    .xsmall()
+                                    .selected(self.config_history)
+                                    .label(self.history_label.clone())
+                                    .on_click(move |_, _window, cx| {
+                                        let _ = history.update(cx, |p, cx| {
+                                            p.config_history = true;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(self.filter_input_el())
+                    .child(
+                        div()
+                            .id("diagnostics-open-config-dir")
+                            .debug_selector(|| "diagnostics-open-config-dir".to_string())
+                            .child(
+                                Button::new("diagnostics-open-config-dir")
+                                    .outline()
+                                    .xsmall()
+                                    .label("Open config directory")
+                                    .on_click(move |_, window, cx| {
+                                        actions(
+                                            &ActionId("config::open_directory".into()),
+                                            window,
+                                            cx,
+                                        );
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            Section::Perf => div().into_any_element(),
+        }
+    }
+}
+
+impl gpui::Render for DiagnosticsPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Column widths follow the rem scale. The delegate's `column()` is
+        // read only on `refresh`, so a rem change needs one; an unchanged
+        // rem must not refresh per frame.
+        let rem = f32::from(window.rem_size());
+        if rem != self.last_rem {
+            self.last_rem = rem;
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().set_rem(rem);
+                t.refresh(cx);
+            });
+        }
+        // A windowless section change left the input on the old text.
+        self.sync_filter_input(window, cx);
+
+        let weak = cx.weak_entity();
+        let header = crate::page_chrome::header(&self.header_chips, self.actions.clone(), cx);
+        let rail = crate::page_chrome::rail(
+            self.section,
+            &self.badges,
+            &self.rail_texts,
+            weak.clone(),
+            cx,
+        );
+        let toolbar = self.render_toolbar(cx);
+        let body: AnyElement = match self.section {
+            Section::Perf => {
+                crate::perf_view::render(self.perf.as_ref(), weak, cx).into_any_element()
+            }
+            _ => {
+                let row = self.prepared.rows.get(self.cursor());
+                let copy = self.copy_text.clone();
+                v_flex()
+                    .size_full()
+                    .child(
+                        div().flex_1().min_h_0().w_full().child(
+                            DataTable::new(&self.table)
+                                .with_size(Size::XSmall)
+                                .bordered(false)
+                                .stripe(false),
+                        ),
+                    )
+                    .child(crate::page_chrome::detail_strip(row, copy, cx))
+                    .into_any_element()
+            }
+        };
+        v_flex()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .debug_selector(|| "diagnostics-page".to_string())
+            .child(header)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .child(rail)
+                    .child(v_flex().flex_1().min_w_0().child(toolbar).child(body)),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::groupings::GroupingSlots;
+    use geode_core::log::LogLevels;
+    use geode_core::scopes::SavedScopes;
+    use geode_shell::diagnostics::Health;
+
+    struct Host {
+        page: Entity<DiagnosticsPage>,
+    }
+    impl gpui::Render for Host {
+        fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.page.clone())
+        }
+    }
+
+    pub(super) struct Harness {
+        pub page: Entity<DiagnosticsPage>,
+        #[allow(dead_code)]
+        pub frame: Entity<Frame>,
+        pub diagnostics: Entity<Diagnostics>,
+        #[allow(dead_code)]
+        pub ring: Arc<Ring>,
+        pub actions: Rc<RefCell<Vec<String>>>,
+    }
+
+    pub(super) fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_with(cx, None)
+    }
+
+    pub(super) fn open_with(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+    ) -> (Harness, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        let ring = Arc::new(Ring::new(64));
+        let config = Rc::new(RefCell::new(Config::default()));
+        let dispatched: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorder = dispatched.clone();
+        let actions: ShellActions = Rc::new(move |a: &ActionId, _w: &mut Window, _cx: &mut App| {
+            recorder.borrow_mut().push(a.0.clone());
+        });
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let frame =
+                        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
+                    let (ring2, config2, actions2) =
+                        (ring.clone(), config.clone(), actions.clone());
+                    cx.new(|cx| {
+                        let page = cx.new(|cx| {
+                            DiagnosticsPage::new(
+                                frame.clone(),
+                                diagnostics.clone(),
+                                ring2,
+                                config2,
+                                actions2,
+                                restored,
+                                window,
+                                cx,
+                            )
+                        });
+                        Host { page }
+                    })
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let page = window
+            .root(&mut vcx)
+            .unwrap()
+            .read_with(&vcx, |h, _| h.page.clone());
+        let (frame, diagnostics) =
+            page.read_with(&vcx, |p, _| (p.frame.clone(), p.diagnostics.clone()));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            Harness {
+                page,
+                frame,
+                diagnostics,
+                ring,
+                actions: dispatched,
+            },
+            vcx,
+        )
+    }
+
+    #[gpui::test]
+    fn visibility_watches_and_requests_a_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.page.update(&mut vcx, |p, cx| p.set_visible(true, cx));
+        assert_eq!(h.diagnostics.read_with(&vcx, |d, _| d.watchers()), 1);
+        assert!(
+            h.diagnostics
+                .update(&mut vcx, |d, _| d.take_pending_catalog_request())
+        );
+        h.page.update(&mut vcx, |p, cx| p.set_visible(false, cx));
+        assert_eq!(h.diagnostics.read_with(&vcx, |d, _| d.watchers()), 0);
+    }
+
+    #[gpui::test]
+    fn sections_cycle_with_the_bracket_actions_and_persist(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.section()), Section::Sources);
+        vcx.update(|window, cx| {
+            h.page.update(cx, |p, cx| {
+                assert!(p.dispatch(
+                    &ActionId("diagnostics::next_section".into()),
+                    None,
+                    window,
+                    cx
+                ));
+            });
+        });
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.section()), Section::Data);
+        let t = h.page.read_with(&vcx, |p, _| p.serialize());
+        assert_eq!(t.get("section").and_then(|v| v.as_str()), Some("data"));
+        assert!(t.get("filter").is_none(), "filters are transient");
+    }
+
+    #[gpui::test]
+    fn an_unknown_saved_section_restores_as_sources(cx: &mut gpui::TestAppContext) {
+        let mut t = toml::Table::new();
+        t.insert("section".into(), toml::Value::String("database".into()));
+        let (h, vcx) = open_with(cx, Some(&t));
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.section()), Section::Sources);
+    }
+
+    #[gpui::test]
+    fn an_unchanged_entity_does_not_rebuild(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let before = h.page.read_with(&vcx, |p, _| p.rebuild_count);
+        h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_health("risk", Health::Ok, String::new(), SystemTime::now());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+        // A perf tick does not rebuild the Sources section.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let mut hist = geode_shell::perf::FrameHistogram::new();
+            hist.record_micros(1);
+            d.refresh_frame_hist(&hist);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(h.page.read_with(&vcx, |p, _| p.rebuild_count), before + 1);
+    }
+
+    #[gpui::test]
+    fn the_open_config_directory_button_goes_through_the_shell_actions_handle(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        h.page
+            .update(&mut vcx, |p, cx| p.set_section(Section::Config, cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = vcx
+            .debug_bounds("diagnostics-open-config-dir")
+            .expect("button painted");
+        vcx.simulate_click(b.center(), gpui::Modifiers::default());
+        assert_eq!(
+            *h.actions.borrow(),
+            vec!["config::open_directory".to_string()]
+        );
+    }
+}
