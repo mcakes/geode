@@ -360,7 +360,10 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(w.request(FetchWork::Identities));
-        match rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap() {
+        match rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the listing's panic is an outcome")
+        {
             FetchOutcome::IdentitiesPanicked(payload) => {
                 assert!(payload.contains("the listing fell over"), "{payload}")
             }

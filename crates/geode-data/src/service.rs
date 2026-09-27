@@ -2914,20 +2914,23 @@ mod tests {
             geode_core::snapshot::Provenance::default(),
         )
         .unwrap();
-        let event = result_event(
-            crate::query::pool::QueryResult {
-                id: 1,
-                key: QueryKey(3),
-                tag: 2,
-                submitted: Instant::now(),
-                view: crate::query::pool::ViewId("distinct".into()),
-                payload: Ok(Payload::Snapshot(empty)),
-                kind: RequestKind::Distinct {
-                    column: "book".into(),
+        let event = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            result_event(
+                crate::query::pool::QueryResult {
+                    id: 1,
+                    key: QueryKey(3),
+                    tag: 2,
+                    submitted: Instant::now(),
+                    view: crate::query::pool::ViewId("distinct".into()),
+                    payload: Ok(Payload::Snapshot(empty)),
+                    kind: RequestKind::Distinct {
+                        column: "book".into(),
+                    },
                 },
-            },
-            &HealthTracker::default(),
-        );
+                &HealthTracker::default(),
+            )
+        }))
+        .expect("a distinct answer without its columns is an Err, not a panic");
         match event {
             DataEvent::Distinct(o) => {
                 assert_eq!((o.key, o.tag, o.column.as_str()), (QueryKey(3), 2, "book"));
@@ -2942,18 +2945,21 @@ mod tests {
 
     #[test]
     fn a_panic_building_a_result_event_answers_its_key_with_an_error() {
-        let event = contained_result_event(
-            crate::query::pool::QueryResult {
-                id: 1,
-                key: QueryKey(4),
-                tag: 7,
-                submitted: Instant::now(),
-                view: crate::query::pool::ViewId("v".into()),
-                payload: Err("unused".into()),
-                kind: RequestKind::Query,
-            },
-            |_| panic!("the event builder fell over"),
-        );
+        let event = std::panic::catch_unwind(|| {
+            contained_result_event(
+                crate::query::pool::QueryResult {
+                    id: 1,
+                    key: QueryKey(4),
+                    tag: 7,
+                    submitted: Instant::now(),
+                    view: crate::query::pool::ViewId("v".into()),
+                    payload: Err("unused".into()),
+                    kind: RequestKind::Query,
+                },
+                |_| panic!("the event builder fell over"),
+            )
+        })
+        .expect("the build's panic is contained, not propagated");
         match event {
             DataEvent::Query(o) => {
                 assert_eq!((o.key, o.tag), (QueryKey(4), 7));
