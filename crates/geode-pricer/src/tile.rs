@@ -1363,18 +1363,18 @@ impl PricerTile {
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
-        let answer = cell::commit(&self.sheet, row, kind, &value);
+        let answer = cell::commit_edits(&self.sheet, row, kind, &value);
         self.finish_commit(answer, window, cx);
     }
 
     /// Settle an editor's parsed commit: a refusal keeps the editor open
-    /// with the reason; `Ok(None)` — the value the line already holds —
-    /// closes it with no edit (no undo entry, no reprice, no save); an
-    /// edit closes it (blur first, so the rebuild never paints a dead
-    /// field) and then applies through `apply_edit`.
+    /// with the reason; no edits — every value unchanged — closes it with
+    /// no undo entry, reprice or save; edits close it (blur first, so the
+    /// rebuild never paints a dead field) and apply as ONE undo entry
+    /// (a package commit edits each leg that changes).
     fn finish_commit(
         &mut self,
-        answer: Result<Option<Edit>, String>,
+        answer: Result<Vec<Edit>, String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1384,14 +1384,19 @@ impl PricerTile {
                 self.rebuild_chrome();
                 cx.notify();
             }
-            Ok(None) => {
+            Ok(edits) if edits.is_empty() => {
                 self.close_editor(window, cx);
                 self.rebuild_chrome();
                 cx.notify();
             }
-            Ok(Some(edit)) => {
+            Ok(mut edits) => {
                 self.close_editor(window, cx);
-                if let Err(e) = self.apply_edit(edit, cx) {
+                let result = if edits.len() == 1 {
+                    self.apply_edit(edits.pop().expect("one"), cx)
+                } else {
+                    self.apply_edits(edits, cx)
+                };
+                if let Err(e) = result {
                     self.footer = Some(e.to_string().into());
                     self.rebuild_chrome();
                     cx.notify();
@@ -1459,7 +1464,7 @@ impl PricerTile {
             return;
         };
         let answer = cell::commit_date(&self.sheet, row, date);
-        self.finish_commit(answer, window, cx);
+        self.finish_commit(answer.map(|e| e.into_iter().collect()), window, cx);
     }
 
     /// A key on the focused date field, before it bubbles to the shell.
@@ -5531,6 +5536,82 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
+    }
+
+    /// Put the cursor on `column` of the current row: `first_col`, then
+    /// `right` by the column's planned index.
+    fn goto_column(h: &Harness, vcx: &mut VisualTestContext, column: &str) {
+        let at = h
+            .columns(vcx)
+            .iter()
+            .position(|c| c == column)
+            .unwrap_or_else(|| panic!("no {column} column"));
+        h.dispatch(vcx, "first_col", None);
+        if at > 0 {
+            h.dispatch(vcx, "right", Some(at as u32));
+        }
+    }
+
+    /// Replace the open editor's text through keystrokes: select all,
+    /// then type.
+    fn select_all_and_type(h: &Harness, vcx: &mut VisualTestContext, text: &str) {
+        vcx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a"
+        } else {
+            "ctrl-a"
+        });
+        typed(h, vcx, text);
+    }
+
+    /// Spec §3–§5: a package strike's `/` list moves each leg's strike,
+    /// and the whole commit is one reprice and one undo step.
+    #[gpui::test]
+    fn editing_a_package_strike_moves_both_legs_in_one_undo_step(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["-5 SPX Z26 7400/7800 CS", "SPX Z26 4000 P"]);
+        let _ = h.prices();
+        goto_column(&h, &mut vcx, "strike");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("7400/7800"));
+        select_all_and_type(&h, &mut vcx, "7500/7900");
+        assert_eq!(editor_text(&h, &vcx).as_deref(), Some("7500/7900"));
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        let spread = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
+        assert_eq!(spread, "-5 SPX Z26 7500/7900 CS");
+        assert_eq!(h.prices().len(), 1, "one reprice for the whole commit");
+        h.dispatch(&mut vcx, "undo", None);
+        let spread = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
+        assert_eq!(
+            spread, "-5 SPX Z26 7400/7800 CS",
+            "one undo restores both legs"
+        );
+    }
+
+    /// Spec §3, §6: a package expiry opens a plain text editor, not the
+    /// date field; a list with the wrong part count keeps the editor open
+    /// and names the count and the current cell.
+    #[gpui::test]
+    fn a_package_expiry_opens_a_text_editor_and_a_bad_count_says_so(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open_seeded(cx, &["-5 SPX Z26 7400/7800 CS"]);
+        goto_column(&h, &mut vcx, "expiry");
+        h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.date_field().is_none()),
+            "not the date field"
+        );
+        assert!(editor_text(&h, &vcx).is_some(), "a text editor is open");
+        h.dispatch(&mut vcx, "cancel", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
+        goto_column(&h, &mut vcx, "strike");
+        h.dispatch(&mut vcx, "edit", None);
+        select_all_and_type(&h, &mut vcx, "1/2/3");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.footer(&vcx).as_deref(), Some("2 values: 7400/7800"));
+        assert_eq!(h.mode(&mut vcx), "insert", "the editor stays open");
+        let spread = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(0));
+        assert_eq!(spread, "-5 SPX Z26 7400/7800 CS", "nothing applied");
     }
 
     #[gpui::test]

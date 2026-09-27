@@ -20,7 +20,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `shorthand` | Parsing and rendering lines and packages against a `TemplateSet`. |
 | `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
-| `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template. |
+| `package` | A package row's aggregated cells: its legs' distinct values in leg order joined with `/`, and the package quantity while the legs fit its template; how an edit to one of those cells maps onto its legs. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, the entry bar's label, and the entry history. |
 | `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
@@ -80,6 +80,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   and the cell paints inherited only when every leg inherits. Qty is the package quantity (first leg qty over the
   template's first weight) while the legs fit the template, else the list
   of distinct leg quantities.
+- A package cell's edit maps by position onto the distinct values it shows,
+  validates every part through the line cell's `edit_for` before anything
+  applies, and applies as one undo entry (one reprice). A commit that
+  changes no leg is no edit. Package rows open a plain text editor, even
+  for expiry and type.
 - Shorthand rendering uses a template only while the legs still match its
   current table (an overflowing quantity never matches); otherwise it prints
   the legs one per line. The grid keeps

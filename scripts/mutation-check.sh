@@ -23244,6 +23244,13 @@ run_mutation "pricer package: a list nudges its first number" \
   $'    if false {\n        return Err("a list does not nudge".into());' \
   geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
 
+# A package commit's edits apply as one undo entry.
+run_mutation "pricer tile: a package commit applies only its first edit" \
+  crates/geode-pricer/src/tile.rs \
+  '                    self.apply_edits(edits, cx)' \
+  '                    self.apply_edit(edits.remove(0), cx)' \
+  geode-pricer editing_a_package_strike_moves_both_legs_in_one_undo_step
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

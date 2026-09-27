@@ -562,8 +562,15 @@ Shift columns group legs by the shift as the cell spells it, show a leg with
 no shift as `—` beside set ones (`+2.0/—`), and paint muted only when every
 leg inherits the sheet's. Its
 qty is the package quantity while the legs fit the template, otherwise the
-list of distinct leg quantities. Package rows are read-only in every
-column.
+list of distinct leg quantities. These cells edit (`i`, `enter`,
+double-click open a plain text editor, even for expiry and type): one
+value goes to every leg; a `/` list with one part per shown value replaces
+each where it appears (`7500/7900` moves a spread's two strikes; a fly's
+body moves once); a package quantity rescales every leg by its weight. A
+list with the wrong part count is refused naming the count and the cell
+(`2 values: 7400/7800`) and the editor stays open. Every part is checked
+first, and the whole edit is one undo step and one reprice. Result columns
+stay read-only.
 
 The shorthand's package types come from the `pricer_templates` configuration
 document: the seven built-ins (`CS`, `PS`, `STRD`, `STRG`, `RR`, `FLY`,
