@@ -3730,6 +3730,68 @@ mod tests {
     }
 
     #[test]
+    fn a_reload_replaces_the_refusals_rather_than_keeping_the_ones_from_open() {
+        // Both directions of the same fact. If a reload merged into the
+        // refusals instead of replacing them, a view the author has just
+        // corrected would stay refused until the desk restarted the app, and a
+        // view the author has just broken would keep serving the blank columns
+        // this refusal exists to stop.
+        let (db, _src, _svc, _rx) = service();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let good = crate::ingest::load::tests_support::tree_view();
+        let mut broken = good.clone();
+        broken.name = "broken".into();
+        broken.grouping.push("nosuchcolumn".into());
+
+        let (mut svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![good.clone(), broken],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+            adapters: Default::default(),
+            documents: Default::default(),
+            egress: Vec::new(),
+            pricer: PricerConfig::default(),
+        })
+        .expect("a broken view must not stop the service opening");
+        assert!(
+            svc.query(&params(1, "broken", &Scope::default(), AsOf::Live, 1))
+                .is_err(),
+            "the view is refused at open"
+        );
+
+        // The author fixes it: same name, honourable grouping.
+        let mut fixed = good.clone();
+        fixed.name = "broken".into();
+        svc.replace_views(
+            vec![good.clone(), fixed.clone()],
+            DerivedDimensions::default(),
+        );
+        assert!(
+            svc.query(&params(2, "broken", &Scope::default(), AsOf::Live, 1))
+                .is_ok(),
+            "a view corrected in the configuration serves without a restart"
+        );
+
+        // And the other way: a reload that breaks a view that was serving.
+        let mut now_broken = good.clone();
+        now_broken.grouping.push("nosuchcolumn".into());
+        svc.replace_views(vec![now_broken, fixed], DerivedDimensions::default());
+        assert!(
+            svc.query(&params(3, "tree", &Scope::default(), AsOf::Live, 1))
+                .is_err(),
+            "a view broken by the reload stops serving at once"
+        );
+
+        svc.shutdown();
+    }
+
+    #[test]
     fn a_scope_naming_an_unknown_column_is_reported_against_the_scope() {
         let (_db, _src, svc, _rx) = service();
         let scope = Scope {

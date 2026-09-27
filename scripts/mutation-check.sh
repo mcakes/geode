@@ -725,6 +725,92 @@ run_mutation "validation: views are checked when the service opens" \
   geode-data \
   a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later
 
+# ---- view strictness: a view that cannot be honoured is refused, not painted
+#
+# Validation reported these situations for a long time and nothing acted on
+# them: the query compiled anyway, the columns it could not supply came back
+# absent, and an absent column paints blank forever with nothing on the tile
+# saying why. A trader reading a blank delta column has no way to tell it from
+# a genuine zero-risk row. These entries guard the refusal, the two new
+# checks, and the author's opt-out from it.
+
+run_mutation "views: an error diagnostic refuses the query" \
+  crates/geode-data/src/service.rs \
+  '        if let Some(why) = self.refused_views.get(view) {' \
+  '        if let Some(why) = None::<&String> {' \
+  geode-data \
+  a_view_with_an_error_diagnostic_is_refused_by_name_not_compiled
+
+# The refusals must come from the configuration in force, not the one the app
+# started with. Keeping the old set means a view the author has just corrected
+# stays refused until the desk restarts, and a view the author has just broken
+# keeps serving blank columns through the rest of the session.
+run_mutation "views: a reload replaces the refusals instead of keeping them" \
+  crates/geode-data/src/service.rs \
+  '        self.refused_views = refused_views;' \
+  '        let _ = refused_views;' \
+  geode-data \
+  a_reload_replaces_the_refusals_rather_than_keeping_the_ones_from_open
+
+# The compiler joins at the first grain of the joined dataset that carries
+# every key. With none, there is no table to read: without this check the join
+# is dropped and every reference column it was to supply is missing from the
+# row rather than NULL.
+run_mutation "views: a join's keys must be carried by a grain" \
+  crates/geode-core/src/view.rs \
+  '                .any(|g| keys.iter().all(|k| joined.carries(g, k)))' \
+  '                .any(|g| keys.iter().all(|k| joined.carries(g, k) || true))' \
+  geode-core \
+  a_join_whose_keys_no_grain_carries_refuses_the_view
+
+# A join can only run at a depth whose spine groups by its keys, so a key the
+# grouping never names puts it on the spine at no depth at all. Without this
+# check the join is silently never performed and the columns it feeds are blank
+# for the life of the view.
+run_mutation "views: a join keyed outside the grouping is refused" \
+  crates/geode-core/src/view.rs \
+  '            let Some(ungrouped) = j.on.iter().find(|k| !self.grouping.contains(k)) else {' \
+  '            let Some(ungrouped) = j.on.iter().find(|_k| false) else {' \
+  geode-core \
+  a_join_keyed_outside_the_grouping_refuses_the_view_when_it_supplies_a_column
+
+# The aggregate comes from the column's declared role. A column that is not a
+# measure of the primary dataset has no aggregate to take, and an attribute
+# repeats across every row of its grain — so the total on screen looks like a
+# number and is not one. `kind` defaults to "measure", so this is the mistake
+# the shorthand form makes.
+run_mutation "views: a measure column must really be a measure" \
+  crates/geode-core/src/view.rs \
+  '                            .is_some_and(|c| matches!(c.role, ColumnRole::Measure { .. }))' \
+  '                            .is_some_and(|_c| true)' \
+  geode-core \
+  a_measure_column_over_an_attribute_refuses_the_view
+
+# The author decides whether a declaration is load-bearing. Refusing an
+# optional one takes the whole blotter away over a column its author already
+# said was nice-to-have; the warning is what the trader gets instead.
+run_mutation "views: required = false is dropped rather than refused" \
+  crates/geode-core/src/view.rs \
+  '        let report = |required: bool, message: String| {
+            if required {' \
+  '        let report = |required: bool, message: String| {
+            if true {' \
+  geode-core \
+  an_optional_unreachable_column_is_dropped_with_an_info_naming_it
+
+# The compiler's own backstop for the same defect, for a view that reaches it
+# without having been through validation: dropping the join here is what made
+# the joined columns paint blank in the first place.
+run_mutation "views: the compiler refuses a join naming an unknown dataset" \
+  crates/geode-data/src/query/compile.rs \
+  '            return Err(compile_error(
+                view,
+                format!("join names unknown dataset '"'"'{}'"'"'", join.dataset),
+            ));' \
+  '            continue;' \
+  geode-data \
+  a_join_the_compiler_cannot_honour_is_an_error_not_a_silent_drop
+
 run_mutation "validation: a scope column is checked against the dataset" \
   crates/geode-core/src/scope/mod.rs \
   '                None if ds.column(&c).is_none() => {' \
