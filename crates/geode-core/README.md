@@ -25,7 +25,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `scopes` | Saved scopes (`scopes.toml`). |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
-| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. |
+| `view` | View definitions: dataset, joins, columns, derived columns, grouping and sort, as config. `ViewSpec::validate` resolves every reference the compiler will resolve: the primary and join datasets, each join's keys against the joined dataset's grains and against the grouping, selected columns, a measure column's role, a dimension column's reachability, and grouping columns. Derived SQL and sort keys remain the compiler's. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
 | `query` | Requests and outcomes for views, distinct values, catalogs, and documents; request keys, tags, and as-of parsing. |
 | `snapshot` | Immutable, `Arc`-shared columnar results, attribution and freshness metadata, and typed cell access. Feature modules can read cells without an Arrow dependency; construction and raw array access also expose Arrow types. |
@@ -70,6 +70,14 @@ for its readiness strategy; the data service checks those boundaries.
 - Configuration readers return diagnostics with usable values. Depending on
   the rule, invalid input is skipped, defaulted, or retained with a warning;
   a diagnostic does not imply that the entire document was rejected.
+- `ViewSpec::validate` is the exception, and it is a gate rather than advice: an
+  error there means the view cannot be honoured, and the data service refuses it
+  by name instead of querying it. A warning means the author declared the failing
+  join or column `required = false` and it was dropped, or that a join supplies
+  no column and is dead weight; the view still serves. A column's `kind` defaults
+  to `measure` and `required` defaults to true, so a declaration that says
+  nothing says "I meant this". What validate still leaves to the compiler is
+  derived SQL, which DuckDB's binder rejects, and sort keys.
 - `Snapshot` and `DocumentRows` store columns; the tree index stores parallel
   arrays. Snapshot construction prepares concatenated columns and the tree
   before UI delivery.

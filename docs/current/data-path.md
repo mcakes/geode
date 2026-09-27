@@ -283,6 +283,44 @@ validation, grain meaning, scope composition, and checks deferred to query
 compilation. A typed reader returning a value does not prove every requested
 query can be served by the dataset's actual storage grains.
 
+Every view is validated when the service opens and again on every reload,
+through one helper both paths call, so open and a reload cannot disagree about
+which views can be honoured. A view carrying an error diagnostic is **refused by
+name** when queried: `query` answers with that view's first error message
+instead of compiling it. The refusal is decided before a grouping override is
+considered, so regrouping a refused view is not a way in, and a reload replaces
+the refusal set rather than merging into it, so a view the author has just
+corrected serves again without a restart. A refused view stays registered and
+its siblings still serve; one unhonourable view does not take the desk down or
+disappear from the dialogs that would fix it.
+
+The refusal replaced a worse outcome. Previously the query compiled regardless:
+a column the view could not supply came back **absent** from the row, which
+paints blank in the blotter — indistinguishable from a genuine NULL, and with no
+diagnostic anywhere a trader would be looking. The error names the view and the
+reason, which is the whole remedy.
+
+A join or a column may declare `required = false`. Its failure is then a warning
+saying the declaration was dropped because it is optional, and the view still
+opens; only an **error** refuses. A join keyed outside the grouping that supplies
+no column of the view warns whichever way `required` is set: nothing is denied,
+the join is simply never performed.
+
+The same checks run against a **per-query grouping override**, which validates a
+copy of the view with the override's grouping in place. Regrouping away from a
+`dimension` column that the view's own grouping supplied therefore refuses that
+query, rather than painting the column blank for as long as the override lasts.
+The remedy is in the message: group by the column again, or declare it
+`required = false`. No shipped view declares a dimension column, so nothing
+meets this today.
+
+The compiler no longer absorbs the same defects itself. A join naming an unknown
+dataset, or keyed on columns no grain of the joined dataset carries, is a
+compile error naming the dataset; validation refuses both earlier, so reaching
+them means a caller skipped the gate. A measure's aggregate comes from its
+declared role with no fallback, so a column that is not a measure cannot reach
+one.
+
 The read pool coalesces by the **caller's key**, usually a tile, rather than
 by view name. Two tiles showing one view therefore do not supersede each
 other. A newer request interrupts an older one for the same key; request and

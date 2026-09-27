@@ -84,6 +84,21 @@ typed values. Series datasets describe identities and time/value columns.
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
+A view column carries a `kind` — `measure`, `dimension`, or `derived` — and the
+key **defaults to `measure`**. A view join and a view column also take
+`required`, a boolean defaulting to true; a non-bool value is ignored, as it is
+for a sort key's `descending` and for the schema's own `required`. Together those
+two defaults are the upgrade consequence of view validation becoming a gate: a
+column written as just a name is a measure, so if the primary dataset declares no
+measure of that name, the view is refused when queried instead of opening with
+that column blank. Writing `kind = "dimension"` where that was meant, or
+`required = false` to accept the column being dropped, is the fix, and the
+diagnostic names the view and the column. The same applies to a join whose keys
+no grain of the joined dataset carries, or which keys on a column the grouping
+does not include. See [queries and time
+travel](data-path.md#queries-and-time-travel) for what a refusal looks like at
+query time.
+
 ## Validation boundaries
 
 Typed readers in `geode-core` interpret supplied documents without I/O and
