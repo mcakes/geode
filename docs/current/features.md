@@ -48,6 +48,63 @@ the flip barrier.
 fixed); a row above that level, a grouping without it, or a NULL value opens
 the plain tile picker.
 
+### Selection
+
+`V` (`blotter::visual_rows`) selects whole rows from the cursor; `v`
+(`blotter::visual_block`) selects a rectangular block of cells. Pressing the
+other key while a selection is live switches its kind at the same anchor;
+pressing the same key again clears it. Every motion extends the selection to
+the new cursor position instead of moving alone, and a bare `j`/`k` that
+would otherwise wrap clamps at the grid's ends instead — wrapping past the
+anchor would silently invert the selection. `y` yanks the selection as TSV: a
+row selection copies every column with its header row, and a cell block
+copies only its own columns, still with their header.
+
+The anchor is a tree path plus a column name, not a display index, so a
+re-sort, a column move, or a live redelivery keeps the same data selected.
+The anchor is the end the selection started from, which may be the range's
+last row. If the anchor's row is no longer shown — collapsed, filtered out,
+narrowed away — the selection clears and the tile reports "selection cleared:
+anchor row no longer shown"; if a block's anchor column is hidden or removed
+from the view, it reports "selection cleared: anchor column no longer shown".
+No neighbouring row or column is guessed. A row selection never depends on a
+column, so hiding one leaves it in place.
+
+While a selection is live, the footer leads with its extent (`12 rows × 3
+cols`) and then shows each selected measure column's label and total, parted
+by hairlines. The label takes the column's own color, as its header does; the
+total is painted the way that column's cells paint the same number (bullish or
+bearish for a `sign` column, the sign variant of a sign-tinted named color), in
+the grid's monospace face. The footer shows the total only — no count, mean,
+or extremes. The total is computed over the selection's top-most rows only: a
+group row already carries its children's total, so counting a child as well
+would double it. A column carrying a `DeterminedNonAdditive` value anywhere in
+the selection shows a muted `—†` instead of a total — an explicit refusal
+rather than a plausible but wrong one — and a column with no values in the
+selection shows `—`.
+
+Whether a column adds up at all is a separate fact, decided by the query
+compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
+only a plain measure whose schema aggregate is `sum` is summable. A `min`,
+`max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
+a joined column, and anything unmarked are not. Such a column shows a muted
+`—‡`, and the footer adds "‡ this column does not add up". Attribution alone
+cannot decide this: a `max` measure's values belong to their rows, yet the
+total of two maxima is meaningless.
+
+The mouse reaches the same states the keyboard does. A plain click anywhere
+on a row, including the empty space beside its cells, clears any selection
+and moves the cursor; shift+click extends one, starting a block
+from the cursor or, from the line-number gutter, rows. A drag selects
+continuously, and whether it selects rows or a block is decided by where the
+press that started it landed — the gutter starts rows, a cell starts a
+block — so a drag that did not begin with a press on a cell or the gutter
+selects nothing. The first `escape` clears the selection alone; a second
+escape falls through to clearing narrowing or find, as it always did.
+
+Limitations: a selection is always one contiguous row range or rectangle —
+there is no multi-range selection — and there is no paste; `y` is yank-only.
+
 ## Market-data documents
 
 `geode-documents` owns typed wire-format parsers and writers. A parser produces

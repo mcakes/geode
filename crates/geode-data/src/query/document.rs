@@ -154,6 +154,7 @@ pub fn compile_document(
                 _ => Attribution::Additive,
             }],
             scope_semantics: ScopeSemantics::Direct,
+            summable: false,
         })
         .collect();
 

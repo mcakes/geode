@@ -2206,6 +2206,177 @@ fn saved_scope_books(
     })
 }
 
+/// Walk the Scopes edit cursor to the Expression row with `j` and open it
+/// with `i`. Production keys only.
+fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+    open_scopes_field(shell, cx, "expression");
+}
+
+/// Open `mine`, walk the edit cursor to the `key` field with `j` and open
+/// it with `i`. Production keys only.
+fn open_scopes_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, key: &str) {
+    cx.simulate_keystrokes("enter"); // open `mine`
+    for _ in 0..12 {
+        let on_field = edit_draft(
+            shell,
+            cx,
+            |d| matches!(d.selected_row(), Some(objectdialog::EditRow::Field(i)) if d.fields[i].key == key),
+        );
+        if on_field {
+            break;
+        }
+        cx.simulate_keystrokes("j");
+    }
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+}
+
+/// The plain `text` field has no suggestions: nothing is painted under it
+/// and its tab still says there is nothing to complete.
+#[gpui::test]
+fn the_scopes_text_field_keeps_its_plain_tab(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_scopes_field(&shell, &mut cx, "text");
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the field is open"
+    );
+    assert!(
+        cx.debug_bounds("scope-expr-hint").is_none(),
+        "no suggestions"
+    );
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("nothing to complete here".to_string())
+    );
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "np");
+}
+
+/// The open `expression` field lists columns under it. Tab inserts one,
+/// and the draft's query follows, so the text survives the modal's text
+/// sync.
+#[gpui::test]
+fn the_scopes_expression_field_suggests_and_tab_inserts(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    assert!(
+        cx.debug_bounds("scope-expr-row-npv").is_some(),
+        "columns listed under the field"
+    );
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "npv ");
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
+    cx.simulate_input("> 0");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.fields.iter().any(|f| f.key
+        == "expression"
+        && matches!(&f.kind, FieldKind::Text(t) if t == "npv > 0"))));
+}
+
+/// `cmd-z` takes a tab insertion back in the Scopes field, and the draft's
+/// query follows the input rather than restoring the insertion on the
+/// next text sync.
+#[gpui::test]
+fn the_scopes_expression_field_undoes_an_insertion(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("np");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "npv ");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string());
+    assert_eq!(text, "np");
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "np");
+}
+
+/// Enter on an unknown column refuses with the notice and keeps the field open.
+#[gpui::test]
+fn the_scopes_expression_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("bokk = 'A'");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "still open"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("expression: unknown column 'bokk'; did you mean 'book'?".to_string())
+    );
+}
+
+/// Values for the Scopes field are narrowed by that scope's own
+/// selections, not the frame's, and delivered under `EXPR_KEY`.
+#[gpui::test]
+fn the_scopes_expression_field_requests_values_under_the_edited_scope(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, app| {
+        let seen = seen.clone();
+        app.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                seen.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+    open_expression_field(&shell, &mut cx);
+    cx.simulate_input("book = ");
+    cx.run_until_parked();
+    let req = seen.borrow().last().cloned().expect("a request");
+    assert_eq!(req.key, crate::shell::EXPR_KEY);
+    assert_eq!(
+        req.scope.dimensions[0].values,
+        ["BK001"],
+        "the scope `mine` selects"
+    );
+    assert!(req.scope.expression.is_none());
+}
+
 /// `o` overwrites the selected saved scope from the current frame through the normal
 /// pending-batch and reload pipeline. The frame supplies the value but remains
 /// unchanged; only configuration is written.

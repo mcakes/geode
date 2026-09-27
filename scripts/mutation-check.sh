@@ -677,8 +677,8 @@ run_mutation "enum: a stale value degrades rather than failing the query" \
 
 run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
   crates/geode-core/src/scope/mod.rs \
-  'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
-  'if false {' \
+  '                if dims.get(column).is_some()' \
+  '                if false' \
   geode-core \
   an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry
 
@@ -3230,8 +3230,10 @@ run_mutation "delegate: narrowing invalidates the cache" \
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), cols);
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), cols);
+        self.refresh_selection();
     }' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
@@ -3247,8 +3249,10 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
         self.invalidate_cells();
+        self.refresh_selection();
     }' \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.refresh_selection();
     }' \
   geode-blotter \
   apply_snapshot_invalidates_the_cache_and_refills_it
@@ -3404,9 +3408,11 @@ run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
   '        // same tree, and the window is only ever tens of rows.
         self.invalidate_cells();
+        self.refresh_selection();
         cx.notify();
     }' \
   '        // same tree, and the window is only ever tens of rows.
+        self.refresh_selection();
         cx.notify();
     }' \
   geode-blotter \
@@ -14903,11 +14909,12 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
 
 # Spec §20.5 at the blotter tile's own derivation (the final review's
 # I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from the mode. Mutated to always wrap, a bare `j` in
-# visual mode leaps from the last row to row 0 and inverts the selection.
+# what decides it from whether a selection is live (grid selection spec
+# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
+# with a selection live leaps from the last row to row 0 and inverts it.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
-  '                    let wrap = matches!(d.mode, Mode::Normal);' \
+  '                    let wrap = d.selection.is_none();' \
   '                    let wrap = true;' \
   geode-blotter \
   a_bare_j_wraps_in_normal_mode_and_clamps_in_visual
@@ -21161,6 +21168,195 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
+# ---- grid selection (grid selection spec) ---------------------------------
+
+run_mutation "grid selection: an ancestor in the selection hides the row" \
+  crates/geode-core/src/grid/selection.rs \
+  '                    return false;' \
+  '                    return true;' \
+  geode-core \
+  a_group_and_its_children_count_once_as_the_group
+
+run_mutation "grid selection: a non-additive value suppresses the sum" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.unsummable;' \
+  geode-core \
+  a_non_additive_value_suppresses_sum_and_mean_but_not_extremes
+
+run_mutation "grid selection: an unsummable column never totals" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
+  '        let totals = self.count > 0 && !self.non_additive;' \
+  geode-core \
+  an_unsummable_column_never_totals
+
+run_mutation "grid selection: a lost anchor row resolves to Lost::Row" \
+  crates/geode-core/src/grid/selection.rs \
+  '        let row = find_row(&self.anchor_row).ok_or(Lost::Row)?;' \
+  '        let row = find_row(&self.anchor_row).unwrap_or(0);' \
+  geode-core \
+  resolution_goes_through_identity_and_names_the_lost_anchor
+
+run_mutation "grid selection: a lost anchor column is named as the column" \
+  crates/geode-core/src/grid/selection.rs \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Column)?,' \
+  '            SelectKind::Block => find_col(&self.anchor_col).ok_or(Lost::Row)?,' \
+  geode-core \
+  resolution_goes_through_identity_and_names_the_lost_anchor
+
+# ---- blotter selection (grid selection spec) -------------------------------
+
+run_mutation "blotter selection: escape clears the selection before find" \
+  crates/geode-blotter/src/tile.rs \
+  '                if self.with_delegate(cx, |d| d.selection.is_some()) {' \
+  '                if false {' \
+  geode-blotter \
+  escape_clears_the_selection_before_find
+
+run_mutation "blotter selection: a lost anchor clears and raises the notice" \
+  crates/geode-blotter/src/delegate.rs \
+  '                self.selection_lost = Some(lost);' \
+  '                self.selection_lost = None;' \
+  geode-blotter \
+  a_selection_whose_anchor_row_vanishes_clears_with_a_notice
+
+run_mutation "blotter selection: a lost anchor column says column" \
+  crates/geode-blotter/src/tile.rs \
+  '                Lost::Column => "selection cleared: anchor column no longer shown",' \
+  '                Lost::Column => "selection cleared: anchor row no longer shown",' \
+  geode-blotter \
+  a_block_whose_anchor_column_is_hidden_clears_with_a_column_notice
+
+run_mutation "blotter selection: summarize goes through top_most" \
+  crates/geode-blotter/src/core/select.rs \
+  '    let rows = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  '    let _ = top_most(&rows, snapshot.rows(), |r| tree.parent(r));' \
+  geode-blotter \
+  a_group_with_its_child_sums_the_group_once
+
+run_mutation "blotter selection: only a summable column totals" \
+  crates/geode-blotter/src/core/select.rs \
+  '            let mut acc = if column.summable {' \
+  '            let mut acc = if true {' \
+  geode-blotter \
+  a_max_measure_over_sibling_groups_shows_no_sum
+
+run_mutation "blotter selection: the plan carries the summable mark" \
+  crates/geode-blotter/src/core/plan.rs \
+  '                summable: meta.is_some_and(|m| m.summable),' \
+  '                summable: meta.is_some(),' \
+  geode-blotter \
+  a_derived_column_shows_no_sum
+
+run_mutation "grid selection: only a plain sum measure compiles summable" \
+  crates/geode-data/src/query/compile.rs \
+  '                summable: matches!(' \
+  '                summable: true || matches!(' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
+
+run_mutation "grid selection: the snapshot keeps the compiler's summable mark" \
+  crates/geode-data/src/query/pool.rs \
+  '            summable: c.summable,' \
+  '            summable: true,' \
+  geode-data \
+  only_a_plain_sum_measure_is_marked_summable
+
+run_mutation "blotter selection: a press beside the cells is a plain click" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    if d.drag_origin.is_some() {' \
+  '                    if true {' \
+  geode-blotter \
+  a_plain_click_beside_the_cells_clears_the_selection
+
+run_mutation "blotter selection: the retired visual id renames to visual_rows" \
+  crates/geode-blotter/src/content.rs \
+  '            let _ = registry.register_rename(old, new);' \
+  '            let _ = (old, new);' \
+  geode-blotter \
+  a_user_binding_on_the_retired_visual_id_binds_visual_rows
+
+run_mutation "blotter selection: every live selection prepares its extent" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.selection_extent = resolved.as_ref().map(|r| {' \
+  '        self.selection_extent = resolved.as_ref().filter(|_| self.summary.is_empty()).map(|r| {' \
+  geode-blotter \
+  a_selection_prepares_its_extent
+
+# The footer's totals paint as the column's signed cells do: a sign
+# column's negative total in bearish. Crossed, a short position's Σ
+# reads as a gain.
+run_mutation "blotter selection: a sign column's footer total takes the cells' sign colors" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    negative: theme.chart_bearish,' \
+  '                    negative: theme.chart_bullish,' \
+  geode-blotter \
+  a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary
+
+# A named column's footer label takes the header's color, not muted.
+run_mutation "blotter selection: a named column's footer label takes its header color" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        label: Some(r.base),' \
+  '                        label: None,' \
+  geode-blotter \
+  a_named_column_paints_its_footer_group_like_its_header_and_cells
+
+# The paint memo rebuilds only when the summary or the theme moved.
+run_mutation "blotter selection: a steady footer resolves no colors" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if self.summary_paint_stamp == Some((self.summary_generation, signature)) {' \
+  '        if false {' \
+  geode-blotter \
+  a_sign_column_paints_its_totals_by_sign_and_the_memo_follows_the_summary
+
+# The tile's render is the only caller of the footer paint memo; drop it
+# and every group paints plain whatever its column's color.
+run_mutation "blotter selection: the tile's render resolves the footer colors" \
+  crates/geode-blotter/src/tile.rs \
+  '            t.delegate_mut().ensure_summary_paint(cx.theme());' \
+  '            let _ = t;' \
+  geode-blotter \
+  painting_the_tile_resolves_the_footer_colors
+
+# A colors.toml reload repaints the footer's named groups too.
+run_mutation "blotter selection: a colors reload invalidates the footer paint" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.summary_paint_stamp = None;' \
+  '            let _ = ();' \
+  geode-blotter \
+  a_colors_reload_repaints_the_footer
+
+# A refusal mark is muted; only a signed total takes a sign color.
+run_mutation "aggregates: a refusal mark paints muted" \
+  crates/geode-shell/src/shell/aggregates.rs \
+  '        if cell.refused {' \
+  '        if false {' \
+  geode-shell \
+  a_total_takes_its_sign_color_and_a_refusal_is_muted
+
+# The footer total carries its sign, so it can paint as the cells do.
+run_mutation "grid selection: the footer total carries its sign" \
+  crates/geode-core/src/grid/selection.rs \
+  '            sign: Some(f.sign),' \
+  '            sign: None,' \
+  geode-core \
+  describe_shows_the_sum_in_the_column_format_and_marks_refusals
+
+run_mutation "blotter selection: a shift press starts a selection" \
+  crates/geode-blotter/src/tile.rs \
+  '                } => (row, col, Some(kind_for(gutter))),' \
+  '                } => (row, col, None),' \
+  geode-blotter \
+  shift_click_extends_a_block_from_the_cursor
+
+run_mutation "blotter selection: a drag without a recorded press selects nothing" \
+  crates/geode-blotter/src/delegate.rs \
+  '            let Some(started_on_gutter) = d.drag_origin else {' \
+  '            let Some(started_on_gutter) = d.drag_origin.or(Some(gutter)) else {' \
+  geode-blotter \
+  a_drag_that_never_pressed_a_cell_selects_nothing
+
 # ---- timeseries expression field: series-name completion ----
 # The name at the caret follows the expression tokenizer. Dropped, the
 # `@source` part is not part of the name, and a Tab would complete only
@@ -21358,6 +21554,133 @@ run_mutation "timeseries completion: nothing loaded says so" \
   '    if c.nothing_loaded() {' \
   '    if false {' \
   geode-timeseries the_expression_field_says_when_no_series_is_loaded
+
+# ---- Scope expression suggestions: the caret reader.
+# After an operator the caret wants a value; reading it as a finished term
+# would offer and/or where values belong.
+run_mutation "expr suggest: after an operator comes a value" \
+  crates/geode-core/src/scope/complete.rs \
+  '            (St::Op(_), _, Some(_)) => St::Term,' \
+  '            (St::Op(_), _, Some(_)) => St::Operand,' \
+  geode-core \
+  context_agrees_with_the_parser_on_every_prefix
+
+# A derived dimension refuses ordering; accepting it would let `desk < 'EQ'`
+# through to a query the compiler then rejects.
+run_mutation "expr suggest: derived ordering is flagged" \
+  crates/geode-core/src/scope/expr.rs \
+  '    (!matches!(op, "=" | "!=" | "<>")).then(|| {' \
+  '    (false).then(|| {' \
+  geode-core \
+  check_flags_unknown_columns_and_derived_ordering
+
+# A reply from a superseded request must never fill the list.
+run_mutation "expr suggest: a stale values reply is dropped" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        if self.values.get(column) != Some(&Values::Loading { tag }) {' \
+  '        if self.values.get(column).is_none() {' \
+  geode-shell \
+  a_categorical_value_position_requests_once_and_lists_after_delivery
+
+# Quotes inside a value are doubled; a bare quote would end the string early.
+run_mutation "expr suggest: an inserted value escapes its quotes" \
+  crates/geode-shell/src/exprcomplete.rs \
+  "    format!(\"'{}'\", value.replace('\\'', \"''\"))" \
+  "    format!(\"'{}'\", value)" \
+  geode-shell \
+  a_value_with_a_quote_is_escaped_when_inserted
+
+# Operators follow the column type: a bool column offers no ordering.
+run_mutation "expr suggest: operators follow the column type" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        Some(ValueKind::Bool) => &["=", "!="],' \
+  '        Some(ValueKind::Bool) => &["=", "!=", "<"],' \
+  geode-shell \
+  operators_follow_the_column_type
+
+# The input observer is what follows a caret moved without typing.
+run_mutation "expr suggest: the list follows a moved caret" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            expr_suggest::refresh(view, cx)' \
+  '            let _ = (view, cx);' \
+  geode-shell \
+  a_moved_caret_is_followed_before_tab_writes
+
+# Add mode keeps the frame's expression in the values request.
+run_mutation "expr suggest: add mode narrows by the current expression" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => current.expression.clone(),' \
+  '        Mode::Add => None,' \
+  geode-shell \
+  add_mode_requests_values_under_the_current_expression
+
+# Enter refuses an unknown column once a schema exists.
+run_mutation "expr suggest: enter refuses an unknown column" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return Err(w.message);' \
+  '        let _ = w;' \
+  geode-shell \
+  enter_refuses_an_unknown_column
+
+# A row click inserts it.
+run_mutation "expr suggest: a row click inserts" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    on_click(&label, window, cx);' \
+  '                    let _ = (&label, window, cx);' \
+  geode-shell \
+  clicking_a_row_inserts_it_and_typing_continues
+
+# The Scopes draft must learn the inserted text, or sync_dialog_text
+# restores the old query after the key.
+run_mutation "expr suggest: a Scopes insert reaches the draft" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        draft.set_query(text);' \
+  '        let _ = text;' \
+  geode-shell \
+  the_scopes_expression_field_suggests_and_tab_inserts
+
+# A Scopes expression naming an unknown column is refused at Enter, not
+# saved for the reader to drop later.
+run_mutation "expr suggest: a Scopes expression refuses an unknown column" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        return Err(format!("expression: {}", w.message));' \
+  '                        let _ = w;' \
+  geode-shell \
+  the_scopes_expression_field_refuses_an_unknown_column
+
+# One pool key, newest request wins: another column left Loading never
+# gets a reply, so it must be forgotten and asked again on return.
+run_mutation "expr suggest: a second column's request forgets the first" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            .retain(|c, v| c == column || !matches!(v, Values::Loading { .. }));' \
+  '            .retain(|_, _| true);' \
+  geode-shell \
+  a_second_columns_request_forgets_the_first_so_it_is_asked_again
+
+# A double-click's second press must not accept a row of the rebuilt list.
+run_mutation "expr suggest: a double-click inserts once" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '                    if event.click_count > 1 {' \
+  '                    if event.click_count > 99 {' \
+  geode-shell \
+  double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# The old expression is blanked before the draft's scope is read, or an
+# unreadable one drops the selections from the values narrowing.
+run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \
+  crates/geode-shell/src/shell/objectdialog/scopes.rs \
+  '    blanked.source.remove("expression");' \
+  '    let _ = &mut blanked;' \
+  geode-shell \
+  expression_scope_keeps_the_selections_under_an_unreadable_expression
+
+# An accept is a range replace so it stays in the input's undo history.
+run_mutation "expr suggest: a Scopes insertion undoes" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        s.replace(write.text.clone(), window, cx);' \
+  '        s.set_value(write.text.clone(), window, cx);' \
+  geode-shell \
+  the_scopes_expression_field_undoes_an_insertion
 
 # ---- Modal Back button: the pointer route for Escape's back rung
 

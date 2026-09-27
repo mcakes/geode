@@ -10,6 +10,7 @@ pub mod dimensions;
 pub mod document;
 pub mod egress_config;
 pub mod format;
+pub mod grid;
 pub mod groupings;
 pub mod health;
 pub mod launch;
