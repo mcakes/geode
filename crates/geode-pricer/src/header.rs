@@ -15,6 +15,7 @@ use geode_core::clock::Clock;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::module::StackHandle;
+use geode_shell::shell::aggregates::{self, AggregateCell};
 use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
@@ -342,18 +343,29 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
 }
 
 /// Reserve footer height even without text so the table does not resize. Errors and
-/// line failures use danger text at the status-line font size.
-pub(crate) fn render_footer(text: Option<&SharedString>, theme: &Theme) -> impl IntoElement {
-    h_flex()
+/// line failures use danger text at the status-line font size. With no text and a
+/// live selection (`extent`), the same row paints the selection's extent and its
+/// prepared position totals instead; a refusal always wins the row.
+pub(crate) fn render_footer(
+    text: Option<&SharedString>,
+    extent: Option<&SharedString>,
+    totals: &[AggregateCell],
+    theme: &Theme,
+) -> impl IntoElement {
+    let row = h_flex()
         .w_full()
         .h(scale::design(FOOTER_HEIGHT))
         .px_2()
         .text_xs()
         .border_t_1()
         .border_color(theme.border)
-        .text_color(chip_paint(theme, Tone::DangerText).text)
-        .debug_selector(|| "pricer-footer".into())
-        .children(text.cloned())
+        .debug_selector(|| "pricer-footer".into());
+    match (text, extent) {
+        (None, Some(extent)) => row.child(aggregates::strip(Some(extent), totals, &[], theme)),
+        _ => row
+            .text_color(chip_paint(theme, Tone::DangerText).text)
+            .children(text.cloned()),
+    }
 }
 
 /// Shorthand entry between the header and table. A muted label identifies the

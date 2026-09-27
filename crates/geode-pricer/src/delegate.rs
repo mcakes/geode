@@ -10,6 +10,7 @@ use crate::grid::{GridModel, GridRowKind};
 use crate::paint::Paints;
 use crate::popup::{ChoicePaint, render_choice};
 use crate::tile::PricerTile;
+use geode_core::grid::selection::{Resolved, SelectKind};
 use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number, gutter_px};
@@ -175,6 +176,10 @@ pub struct SheetDelegate {
     pub(crate) model: Rc<GridModel>,
     /// `(grid row, plan column)`; `None` with no cursor row.
     pub(crate) cursor: Option<(usize, usize)>,
+    /// The tile's resolved selection, mirrored by `sync_cursor`: grid
+    /// rows × plan columns. The tree column is never a member; it tints
+    /// only as a whole selected row's handle.
+    pub(crate) selected: Option<Resolved>,
     pub(crate) paints: Paints,
     /// The tile's `loading`, mirrored by `install_model`: the empty table
     /// says `Loading sheet…` rather than inviting an `o` the tile would
@@ -209,6 +214,7 @@ impl SheetDelegate {
         SheetDelegate {
             model: Rc::new(GridModel::default()),
             cursor: None,
+            selected: None,
             paints: Paints::derive(theme),
             loading: false,
             chevron: None,
@@ -488,6 +494,13 @@ impl TableDelegate for SheetDelegate {
     }
 }
 
+/// The selection tint: an absolute overlay painted as a cell's first
+/// child, so it sits under the text, a package row's ground (painted on
+/// the row) still shows through, and the cursor's border paints over it.
+fn selection_tint(theme: &Theme) -> Div {
+    div().absolute().inset_0().bg(theme.selection.opacity(0.35))
+}
+
 impl SheetDelegate {
     /// Build a cell's elements from prepared text and colours. Cell values are
     /// `SharedString` clones; palette values are copied from the tile's theme cache.
@@ -520,6 +533,14 @@ impl SheetDelegate {
             .whitespace_nowrap()
             .overflow_hidden()
             .debug_selector(|| format!("pricer-cell-{row_ix}-{col_ix}"));
+        let tinted = self
+            .selected
+            .as_ref()
+            .is_some_and(|s| match Self::plan_col(col_ix) {
+                Some(c) => s.contains(row_ix, c),
+                None => s.kind == SelectKind::Rows && s.contains_row(row_ix),
+            });
+        let base = base.when(tinted, |el| el.relative().child(selection_tint(cx.theme())));
         let Some(plan_col) = Self::plan_col(col_ix) else {
             // The tree column: indent by depth, then the fixed chevron
             // slot (a chevron on a package, empty otherwise), then the

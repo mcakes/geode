@@ -43,6 +43,9 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::page_up_full", "Full page up"),
     ("pricer::yank_row", "Yank row"),
     ("pricer::yank_col", "Yank column"),
+    ("pricer::yank", "Yank selection"),
+    ("pricer::visual_rows", "Select rows"),
+    ("pricer::visual_block", "Select cells"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
     ("pricer::escape", "Clear find and dismissible notice"),
@@ -98,6 +101,13 @@ pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
 /// exact match dispatches at once, so it would make `y y` and `y c`
 /// unreachable. `g` alone is not bound for the same reason (`g g`, `g p`,
 /// `g u`, `g m`).
+///
+/// `v` and `shift+v` start a selection, and the tile then reports
+/// `mode == visual`, whose block repeats the motions (the cursor is the
+/// selection's moving corner). There the verbs are single keys: `y`,
+/// `d`, `shift+j`/`shift+k`, `g p`, `g u`, `i` and `enter` act on the
+/// whole selection, so no doubled `y y` or `d d` has to stay reachable.
+/// `escape` there clears only the selection.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "pricer && mode == normal"
@@ -147,6 +157,43 @@ context = "pricer && mode == normal"
 "z c" = "pricer::collapse"
 "z shift+r" = "pricer::expand_all"
 "z shift+m" = "pricer::collapse_all"
+"v" = "pricer::visual_block"
+"shift+v" = "pricer::visual_rows"
+
+[[bindings]]
+context = "pricer && mode == visual"
+[bindings.keys]
+"j" = "pricer::down"
+"k" = "pricer::up"
+"h" = "pricer::left"
+"l" = "pricer::right"
+"down" = "pricer::down"
+"up" = "pricer::up"
+"left" = "pricer::left"
+"right" = "pricer::right"
+"g g" = "pricer::top"
+"shift+g" = "pricer::bottom"
+"^" = "pricer::first_col"
+"$" = "pricer::last_col"
+"home" = "pricer::first_col"
+"end" = "pricer::last_col"
+"ctrl+d" = "pricer::page_down"
+"ctrl+u" = "pricer::page_up"
+"ctrl+f" = "pricer::page_down_full"
+"ctrl+b" = "pricer::page_up_full"
+"pagedown" = "pricer::page_down_full"
+"pageup" = "pricer::page_up_full"
+"y" = "pricer::yank"
+"d" = "pricer::delete"
+"shift+j" = "pricer::move_down"
+"shift+k" = "pricer::move_up"
+"g p" = "pricer::group"
+"g u" = "pricer::ungroup"
+"i" = "pricer::edit"
+"enter" = "pricer::edit"
+"v" = "pricer::visual_block"
+"shift+v" = "pricer::visual_rows"
+"escape" = "pricer::escape"
 
 [[bindings]]
 context = "pricer && mode == insert"
@@ -861,6 +908,39 @@ mod tests {
             Some("pricer::insert_up_big")
         );
         assert_eq!(resolve(".", "menu").as_deref(), Some("pricer::menu_close"));
+    }
+
+    #[test]
+    fn v_and_shift_v_start_selections_in_normal_mode() {
+        assert_eq!(
+            resolve("v", "normal").as_deref(),
+            Some("pricer::visual_block")
+        );
+        assert_eq!(
+            resolve("shift+v", "normal").as_deref(),
+            Some("pricer::visual_rows")
+        );
+    }
+
+    #[test]
+    fn visual_mode_binds_single_key_verbs_and_the_motions() {
+        for (key, action) in [
+            ("j", "pricer::down"),
+            ("y", "pricer::yank"),
+            ("d", "pricer::delete"),
+            ("shift+j", "pricer::move_down"),
+            ("shift+k", "pricer::move_up"),
+            ("g p", "pricer::group"),
+            ("g u", "pricer::ungroup"),
+            ("g g", "pricer::top"),
+            ("i", "pricer::edit"),
+            ("enter", "pricer::edit"),
+            ("v", "pricer::visual_block"),
+            ("shift+v", "pricer::visual_rows"),
+            ("escape", "pricer::escape"),
+        ] {
+            assert_eq!(resolve(key, "visual").as_deref(), Some(action), "{key}");
+        }
     }
 
     #[test]

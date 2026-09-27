@@ -31,6 +31,7 @@ use crate::store::Loaded;
 use chrono::Utc;
 use geode_core::clock::Clock;
 use geode_core::document::DocumentRows;
+use geode_core::grid::selection::{Resolved, SelectKind, Selection};
 use geode_core::pricing::{PriceLine, PriceOutcome, PriceParams};
 use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::{DataHandle, Refusal};
@@ -41,6 +42,7 @@ use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
+use geode_shell::shell::aggregates::AggregateCell;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
@@ -57,6 +59,8 @@ use gpui_component::{ActiveTheme as _, Sizable as _, Size, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+mod select;
 
 pub(crate) const LOADING: &str = "loading…";
 
@@ -408,6 +412,20 @@ pub struct PricerTile {
     /// read). Re-read only when the revision moves.
     underlyings: Rc<[SharedString]>,
     underlyings_rev: Option<u64>,
+    /// The live `V`/`v` selection, anchored by line and plan column name
+    /// so a rebuild re-finds the same cells. `None` outside visual mode.
+    pub(crate) selection: Option<Selection<LineId, &'static str>>,
+    /// `selection` resolved against the model and cursor at the last
+    /// change point; render and the delegate only read it.
+    pub(crate) resolved: Option<Resolved>,
+    /// The footer's `R rows × C cols`, prepared with `resolved`.
+    pub(crate) selection_extent: Option<SharedString>,
+    /// The footer's position totals, prepared with `resolved`.
+    pub(crate) totals: Vec<AggregateCell>,
+    /// Counts recorded sheet changes, so an open step editor can tell
+    /// whether its steps are still the sheet's last change.
+    #[allow(dead_code)]
+    pub(crate) edit_seq: u64,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -674,6 +692,11 @@ impl PricerTile {
             pressed: None,
             underlyings: Rc::from([]),
             underlyings_rev: None,
+            selection: None,
+            resolved: None,
+            selection_extent: None,
+            totals: Vec::new(),
+            edit_seq: 0,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -692,9 +715,15 @@ impl PricerTile {
 
     // ---- what the shell reads ----------------------------------------
 
-    /// `normal`, `insert` or `menu`.
+    /// `normal`, `insert`, `menu` or `visual`, with `select = rows|block`
+    /// while a selection is live.
     pub fn key_context(&self) -> KeyContext {
-        KeyContext::new("pricer").pair("mode", self.mode()).counts()
+        let cx = KeyContext::new("pricer").pair("mode", self.mode()).counts();
+        match self.selection.as_ref().map(|s| s.kind) {
+            Some(SelectKind::Rows) => cx.pair("select", "rows"),
+            Some(SelectKind::Block) => cx.pair("select", "block"),
+            None => cx,
+        }
     }
 
     /// `insert` while EITHER field is open — the entry field or the cell
@@ -707,11 +736,16 @@ impl PricerTile {
     ///
     /// An armed `:rm` confirm is `insert` too: its prompt holds the
     /// keyboard exactly as a field does.
+    ///
+    /// `visual` while a selection is live and neither a field nor the
+    /// menu holds the keys: the selection's own single-key verbs apply.
     pub(crate) fn mode(&self) -> &'static str {
         if self.confirm.is_some() || self.entry.is_some() || self.editor.is_some() {
             "insert"
         } else if self.menu.is_some() {
             "menu"
+        } else if self.selection.is_some() {
+            "visual"
         } else {
             "normal"
         }
@@ -2147,6 +2181,8 @@ impl PricerTile {
             Ok(Some(rows)) => match from_rows(&name, &rows) {
                 Ok(mut s) => {
                     s.mark_all_stale();
+                    // The anchor's line id names a line of the old sheet.
+                    self.clear_selection();
                     self.sheet = s;
                     self.adopt_templates();
                     // Fallback edits have inverses against different rows. Replaying
@@ -2303,12 +2339,22 @@ impl PricerTile {
             }
             "find_next" => self.repeat_find(FindDirection::Forward, n),
             "find_prev" => self.repeat_find(FindDirection::Backward, n),
+            // A live selection takes the first `escape` alone, so leaving
+            // visual mode never also drops the find or a notice.
+            "escape" if self.selection.is_some() => self.clear_selection(),
             "escape" => {
                 self.find = None;
                 // "loading…" is the only sign a load is pending; `loaded`
                 // clears it when the rows (or the refusal) arrive.
                 if !self.loading {
                     self.notice = None;
+                }
+            }
+            "visual_rows" => self.start_selection(SelectKind::Rows),
+            "visual_block" => self.start_selection(SelectKind::Block),
+            "yank" => {
+                if self.selection.is_none() {
+                    self.footer = Some("select with V or v first".into());
                 }
             }
             "price" => {
@@ -2966,6 +3012,8 @@ impl PricerTile {
         self.data.cancel(QueryKey(self.id.0));
         self.tag += 1;
         self.in_flight.clear();
+        // Line ids restart per sheet: the anchor would name a new line.
+        self.clear_selection();
         self.sheet = Sheet::new(&name);
         self.adopt_templates();
         self.undo.clear();
@@ -3409,12 +3457,20 @@ impl PricerTile {
 
     /// Mirror the cursor into the table: column before row, so the component ends
     /// in row mode. The delegate paints the cell cursor separately.
+    ///
+    /// The selection re-resolves here first: the cursor is its moving
+    /// corner, so every cursor change is a selection change point.
     pub(crate) fn sync_cursor(&mut self, cx: &mut Context<Self>) {
         self.reconcile_cursor();
+        if self.refresh_selection() {
+            self.rebuild_chrome();
+        }
         let row = self.cursor_row();
         let col = self.cursor.col;
+        let selected = self.resolved.clone();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().cursor = row.map(|r| (r, col));
+            t.delegate_mut().selected = selected;
             t.delegate_mut().refresh_numbers();
             match row {
                 Some(r) => {
@@ -3591,7 +3647,14 @@ impl gpui::Render for PricerTile {
                 cx,
             )
         });
-        let footer = header::render_footer(self.footer_text.as_ref(), theme);
+        // A refusal or a line failure takes the footer while it stands.
+        let strip = self.footer_text.is_none();
+        let footer = header::render_footer(
+            self.footer_text.as_ref(),
+            self.selection_extent.as_ref().filter(|_| strip),
+            &self.totals,
+            theme,
+        );
         // A pointer press anywhere on the tile cancels an armed `:rm`
         // confirm — capture phase, so it runs before the press reaches
         // whatever it was aimed at, and it never stops propagation.
@@ -9389,4 +9452,6 @@ pub(crate) mod tests {
         save_answered(&h, &mut vcx, "other", Ok(()));
         assert!(h.notice(&vcx).is_none());
     }
+
+    mod selection;
 }
