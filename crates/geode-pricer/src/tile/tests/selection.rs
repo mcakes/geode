@@ -1211,3 +1211,287 @@ fn a_flush_before_any_step_keeps_the_open_editors_live_step(cx: &mut gpui::TestA
     assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
     assert!(!can_undo(&h, &vcx), "no undo entry");
 }
+
+// ---- the mouse: shift+click and drag, through the doors the keys use ----
+
+/// The table column of plan column `name` (the tree column leads).
+fn table_col(h: &Harness, vcx: &VisualTestContext, name: &str) -> usize {
+    1 + h
+        .columns(vcx)
+        .iter()
+        .position(|c| c == name)
+        .unwrap_or_else(|| panic!("no {name} column"))
+}
+
+fn plan_col(h: &Harness, vcx: &VisualTestContext, name: &str) -> usize {
+    table_col(h, vcx, name) - 1
+}
+
+fn press(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, shift: bool) {
+    let modifiers = gpui::Modifiers {
+        shift,
+        ..Default::default()
+    };
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: at,
+        modifiers,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: at,
+        modifiers,
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+}
+
+fn shift_press(vcx: &mut VisualTestContext, selector: &str) {
+    let at = centre_of(vcx, selector);
+    press(vcx, at, true);
+}
+
+fn drag(vcx: &mut VisualTestContext, from: &str, to: &str) {
+    let (a, b) = (centre_of(vcx, from), centre_of(vcx, to));
+    vcx.simulate_event(gpui::MouseDownEvent {
+        position: a,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui::MouseMoveEvent {
+        position: b,
+        pressed_button: Some(gpui::MouseButton::Left),
+        modifiers: gpui::Modifiers::default(),
+    });
+    vcx.simulate_event(gpui::MouseUpEvent {
+        position: b,
+        modifiers: gpui::Modifiers::default(),
+        button: gpui::MouseButton::Left,
+        click_count: 1,
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+/// The anchor is the cursor from before the press: the pointer's press
+/// reaches the tile on mouse-down, ahead of the table's own
+/// `SelectCell`, which only comes with the release.
+#[gpui::test]
+fn a_shift_click_anchors_at_the_cursor_and_extends_a_block_to_the_click(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    let s = plan_col(&h, &vcx, "strike");
+    let presses = h.host_presses.get();
+    shift_press(&mut vcx, &format!("pricer-cell-2-{}", s + 2));
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Block, 0..3, s..s + 2))
+    );
+    assert_eq!(h.mode(&mut vcx), "visual");
+    // The keyboard stays with the tile: the press still bubbles to the
+    // shell's tile-level press (the host's stand-in), and no field took
+    // focus from it.
+    assert_eq!(h.host_presses.get(), presses + 1, "the press propagates");
+    assert!(!vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    h.dispatch(&mut vcx, "yank", None);
+    let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(
+        clip.map(|t| t.lines().count()),
+        Some(4),
+        "the verb acts on the block: its header and three rows"
+    );
+    assert_eq!(resolved(&h, &vcx), None, "y ends the selection");
+}
+
+#[gpui::test]
+fn a_plain_click_clears_the_selection_and_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    let s = plan_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "visual_block", None);
+    let at = centre_of(&mut vcx, &format!("pricer-cell-2-{}", s + 2));
+    click_at(&mut vcx, at, 1);
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(h.cursor(&vcx), Some((2, s + 1)));
+}
+
+#[gpui::test]
+fn a_drag_across_cells_selects_a_block_and_from_the_tree_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let t = table_col(&h, &vcx, "strike");
+    drag(
+        &mut vcx,
+        &format!("pricer-cell-0-{t}"),
+        &format!("pricer-cell-2-{}", t + 1),
+    );
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Block, 0..3, t - 1..t + 1)),
+        "anchored at the press cell"
+    );
+    let at = centre_of(&mut vcx, &format!("pricer-cell-1-{t}"));
+    click_at(&mut vcx, at, 1); // clears
+    assert_eq!(resolved(&h, &vcx), None);
+    drag(&mut vcx, "pricer-cell-0-0", "pricer-cell-2-0");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..3)),
+        "a drag that starts on the tree cell selects rows"
+    );
+    assert_eq!(
+        h.cursor(&vcx),
+        Some((2, t - 1)),
+        "the tree cell keeps the cursor's column"
+    );
+}
+
+#[gpui::test]
+fn a_shift_click_on_the_tree_cell_selects_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    shift_press(&mut vcx, "pricer-cell-2-0");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..3))
+    );
+    assert_eq!(h.mode(&mut vcx), "visual");
+}
+
+/// The line-number gutter beside the tree cell is the row's handle too.
+#[gpui::test]
+fn a_shift_click_on_the_gutter_selects_rows(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    vcx.update(|_, cx| {
+        cx.set_global(UiSettings {
+            line_numbers: LineNumbers::On,
+        })
+    });
+    shift_press(&mut vcx, "pricer-gutter-2");
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| (r.0, r.1)),
+        Some((SelectKind::Rows, 0..3))
+    );
+}
+
+/// A press that came down somewhere else (here the header) and only
+/// passes over the cells with the button held never selects.
+#[gpui::test]
+fn a_drag_that_started_off_the_cells_selects_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let t = table_col(&h, &vcx, "strike");
+    drag(
+        &mut vcx,
+        &format!("pricer-th-{t}"),
+        &format!("pricer-cell-2-{t}"),
+    );
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+}
+
+/// A plain press on a row beside its last cell (the table's trailing
+/// filler) is still a plain click: it clears the selection and moves the
+/// cursor's row, keeping its column. A two-column view leaves room.
+#[gpui::test]
+fn a_plain_press_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    let views = slim_views("\"qty\", \"strike\"");
+    vcx.update(|_, cx| {
+        h.factory.reload(
+            views,
+            TemplateSet::builtin(),
+            None,
+            std::time::Duration::from_secs(60),
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_block", None);
+    let _ = centre_of(&mut vcx, "pricer-cell-2-2");
+    let bounds = vcx
+        .debug_bounds("pricer-cell-2-2")
+        .expect("the last cell is painted");
+    let beside = gpui::point(bounds.right() + gpui::px(20.), bounds.center().y);
+    click_at(&mut vcx, beside, 1);
+    assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(h.cursor(&vcx), Some((2, 1)));
+}
+
+/// Caret placement: a press inside the open editor's own cell is the
+/// editor's. It neither cancels the edit nor writes anything.
+#[gpui::test]
+fn a_click_inside_the_open_editor_keeps_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    let t = table_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    let at = centre_of(&mut vcx, &format!("pricer-editor-0-{t}"));
+    click_at(&mut vcx, at, 1);
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.mode(&mut vcx),
+        "insert",
+        "the click did not cancel the edit"
+    );
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
+    assert!(!can_undo(&h, &vcx));
+}
+
+/// The live step's editor: a press inside it is not a cancel, so the
+/// steps are not rolled back and the selection stays.
+#[gpui::test]
+fn a_click_or_double_click_inside_the_stepped_editor_keeps_the_steps(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx); // the editor on the 4000 P's strike
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001");
+    let t = table_col(&h, &vcx, "strike");
+    let at = centre_of(&mut vcx, &format!("pricer-editor-2-{t}"));
+    click_at(&mut vcx, at, 1);
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&mut vcx), "insert");
+    assert!(resolved(&h, &vcx).is_some(), "the selection stays");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001", "the steps stay");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4801/5201");
+    // A double-click there (a word selection) reopens nothing either.
+    click_at(&mut vcx, at, 1);
+    click_at(&mut vcx, at, 2);
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&mut vcx), "insert");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001", "still stepped");
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("4001"));
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5001");
+    assert!(can_undo(&h, &vcx), "enter still keeps them as one entry");
+}
+
+/// A chevron press is a plain press on its row: it toggles the package
+/// and clears a live selection, as any plain click does (the blotter's
+/// chevron does the same). It never starts one, even held with shift.
+#[gpui::test]
+fn a_chevron_click_toggles_the_package_and_never_starts_a_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "visual_block", None);
+    let at = centre_of(&mut vcx, "pricer-chevron-1");
+    click_at(&mut vcx, at, 1);
+    h.draw(&mut vcx);
+    assert_eq!(h.tree(&vcx).len(), 5, "the package opened");
+    assert_eq!(resolved(&h, &vcx), None, "a plain press clears");
+    shift_press(&mut vcx, "pricer-chevron-1");
+    h.draw(&mut vcx);
+    assert_eq!(h.tree(&vcx).len(), 3, "the package closed");
+    assert_eq!(
+        resolved(&h, &vcx),
+        None,
+        "shift on a chevron starts nothing"
+    );
+    assert_eq!(h.mode(&mut vcx), "normal");
+}

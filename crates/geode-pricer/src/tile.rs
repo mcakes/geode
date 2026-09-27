@@ -22,7 +22,9 @@ use crate::core::tree::Expansion;
 use crate::core::undo::UndoStack;
 use crate::core::views::ColumnPlan;
 use crate::core::{Place, RowSpec};
-use crate::delegate::{ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate};
+use crate::delegate::{
+    CellPointer, ChevronClicked, DateFieldPaint, EditorField, EditorPaint, SheetDelegate,
+};
 use crate::grid::GridModel;
 use crate::header::{self, HeaderInputs, HeaderModel};
 use crate::popup::{Menu, MenuItem, choice_paint, render_menu};
@@ -615,6 +617,15 @@ impl PricerTile {
             &table,
             window,
             |this, _, event: &ChevronClicked, window, cx| this.chevron_clicked(event.0, window, cx),
+        )
+        .detach();
+        // Shift+click and drag: the delegate's own pointer events, which
+        // reach `pointer` on mouse-down, ahead of the table's `SelectCell`
+        // (emitted on the release). Window access for the editor's blur.
+        cx.subscribe_in(
+            &table,
+            window,
+            |this, _, event: &CellPointer, window, cx| this.pointer(*event, window, cx),
         )
         .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
@@ -3740,6 +3751,103 @@ impl PricerTile {
         }
     }
 
+    /// The `(grid row, plan column)` the open editor sits on.
+    fn editor_cell(&self) -> Option<(usize, usize)> {
+        let (line, col, _) = self.editor.as_ref()?.target();
+        Some((self.model.grid_row_of(line)?, col))
+    }
+
+    /// Every mouse selection gesture lands here and goes through the same
+    /// `start_selection`/`clear_selection` doors the keys use, so the mouse
+    /// never reaches a selection the keys could not. A plain press clears
+    /// and moves the cursor (the table's `SelectCell` on the release moves
+    /// it again, to the same cell); a shift press or a drag starts a
+    /// selection only when none is live — `Rows` from the tree cell or the
+    /// gutter, `Block` from a value cell — then moves the cursor, which
+    /// extends it. The tree cell keeps the cursor's column: the cursor
+    /// never enters the tree column.
+    ///
+    /// Ordering: the delegate emits the press on mouse-down and the table
+    /// emits `SelectCell` only on the click (the release), so a shift
+    /// press starts the selection at the PRE-press cursor with no capture
+    /// of it needed. A drag anchors at its press cell because the plain
+    /// press already moved the cursor there.
+    ///
+    /// Any gesture that gets here closes an open editor first: a click is
+    /// a cancel (`close_editor`'s rule, which takes live steps back), and
+    /// a drag never gets the `SelectCell` that would otherwise close it.
+    /// A press inside the editor's own cell never gets here. A press
+    /// leaves the entry bar to `SelectCell`, whose click hand-off needs
+    /// the table where the press found it; a drag has no such click, so
+    /// it closes the bar itself.
+    fn pointer(&mut self, event: CellPointer, window: &mut Window, cx: &mut Context<Self>) {
+        // What the chrome shows (mode, footer extent, notice) moves only
+        // with one of these; a plain press that changes none of them (the
+        // cursor cell, nothing selected) skips the rebuild.
+        let snapshot = |t: &Self| {
+            (
+                t.selection.is_some(),
+                t.cursor_row(),
+                t.cursor.col,
+                t.editor.is_some(),
+                t.entry.is_some(),
+                t.footer.clone(),
+            )
+        };
+        let before = snapshot(self);
+        let kind_for = |tree: bool| {
+            if tree {
+                SelectKind::Rows
+            } else {
+                SelectKind::Block
+            }
+        };
+        let (row, col, start) = match event {
+            CellPointer::Press {
+                row,
+                col,
+                shift: false,
+            } => {
+                self.clear_selection();
+                (row, col, None)
+            }
+            CellPointer::Press {
+                row,
+                col,
+                shift: true,
+            } => (row, col, Some(kind_for(col.is_none()))),
+            CellPointer::Drag { row, col, tree } => {
+                // Still inside the cell the cursor is on (the tree cell or
+                // the gutter keeps the column): nothing to start or extend.
+                if self.cursor_row() == Some(row) && col.is_none_or(|c| c == self.cursor.col) {
+                    return;
+                }
+                self.close_entry(window, cx);
+                (row, col, Some(kind_for(tree)))
+            }
+        };
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
+        if let Some(kind) = start
+            && self.selection.is_none()
+        {
+            self.start_selection(kind);
+        }
+        if let Some(id) = self.line_at(row) {
+            self.cursor.line = Some(id);
+            if let Some(c) = col {
+                self.cursor.col = c;
+            }
+        }
+        // Re-resolves the selection against the moved cursor.
+        self.sync_cursor(cx);
+        if snapshot(self) != before {
+            self.rebuild_chrome();
+            cx.notify();
+        }
+    }
+
     fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             TableEvent::SelectCell(row, col) => {
@@ -3756,6 +3864,16 @@ impl PricerTile {
                 self.pressed = self.click_anchor.take();
                 if self.entry.is_some() {
                     self.click_anchor = Some(line);
+                }
+                // A click inside the open editor's own cell is the
+                // editor's (caret, text selection): never a cancel, which
+                // would also take a live step's steps back, and the cursor
+                // is already there. After the hand-off, which every press
+                // takes part in.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
                 }
                 self.close_entry(window, cx);
                 self.close_editor(window, cx);
@@ -3778,6 +3896,14 @@ impl PricerTile {
                     Some(line) => line,
                     None => self.line_at(*row),
                 };
+                // A double-click inside the open editor (a word selection
+                // there) reopens nothing: reopening would reseed the typed
+                // text and take a live step's steps back.
+                if SheetDelegate::plan_col(*col)
+                    .is_some_and(|c| self.editor_cell() == Some((*row, c)))
+                {
+                    return;
+                }
                 self.close_entry(window, cx);
                 let Some(id) = line else {
                     return;
@@ -3925,6 +4051,27 @@ pub(crate) mod tests {
         diagnostics: Entity<Diagnostics>,
     }
 
+    /// The window's view between `Root` and the tile. Its bubble-phase
+    /// press counter stands in for the shell's tile-level press, which
+    /// puts the keyboard back on the tile: a tile listener that stopped
+    /// a press's propagation would leave the shell deaf to it.
+    struct Host {
+        tile: Entity<PricerTile>,
+        presses: Rc<std::cell::Cell<u32>>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            let presses = self.presses.clone();
+            div()
+                .size_full()
+                .on_mouse_down(gpui::MouseButton::Left, move |_, _, _| {
+                    presses.set(presses.get() + 1);
+                })
+                .child(self.tile.clone())
+        }
+    }
+
     // Not every field and method has a reader in every build.
     #[allow(dead_code)]
     pub(crate) struct Harness {
@@ -3936,6 +4083,8 @@ pub(crate) mod tests {
         pub store: MemorySheetStore,
         pub data: DataHandle,
         rx: RefCell<Option<Receiver<Request>>>,
+        /// Left presses that bubbled out of the tile to the host.
+        pub host_presses: Rc<std::cell::Cell<u32>>,
     }
 
     /// A sheet named `book` in a fresh store, built from shorthand lines,
@@ -4037,9 +4186,11 @@ pub(crate) mod tests {
         }
         let factory = Rc::new(factory);
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
+        let host_presses = Rc::new(std::cell::Cell::new(0));
         let window = cx
             .update(|cx| {
                 let slot = slot.clone();
+                let presses = host_presses.clone();
                 let factory = factory.clone();
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let frame =
@@ -4060,9 +4211,10 @@ pub(crate) mod tests {
                         frame,
                         diagnostics,
                     });
+                    let host = cx.new(|_| Host { tile, presses });
                     // `Root` is load-bearing: gpui-component registers the
                     // focused `InputState` on it (the entry field and editor).
-                    cx.new(|cx| gpui_component::Root::new(tile, window, cx))
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
                 })
             })
             .unwrap();
@@ -4081,6 +4233,7 @@ pub(crate) mod tests {
                 store,
                 data,
                 rx: RefCell::new(Some(rx)),
+                host_presses,
             },
             vcx,
         )
