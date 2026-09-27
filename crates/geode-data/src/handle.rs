@@ -2164,6 +2164,10 @@ mod tests {
         let (tx, rx) = channel();
         let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
         let h = DataService::spawn_with_probe(config, sink, panic_marked_cancel_outside);
+        // Rebound after `h` so a failing assertion drops it first: the held
+        // pricer is released before `h`'s drop joins the dying loop, and a
+        // failure is reported instead of hanging.
+        let release = release;
         h.price(crate::pricing::worker::tests::params(5, 1, &["SPX"]))
             .unwrap();
         started
