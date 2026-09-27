@@ -190,7 +190,7 @@ impl Render for ShellView {
         // Layout uses the viewport minus toolbar, sidebar, and status bar. A
         // historical frame adds a warning stripe below the toolbar; subtract its
         // height before sizing the tile surface so content fits below it.
-        let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));
+        let is_historical = matches!(self.target_frame().read(cx).as_of(), AsOf::At(_));
         let stripe_height = if is_historical {
             AS_OF_STRIPE_HEIGHT
         } else {
@@ -766,7 +766,10 @@ impl Render for ShellView {
         // Share the cached scope bar model between toolbar and status bar.
         // Use the poll-updated date and configured clock, avoiding a fresh
         // clock read during rendering.
-        let bar_model = self.frame.read(cx).bar_model(self.clock(cx), self.today);
+        let bar_model = self
+            .target_frame()
+            .read(cx)
+            .bar_model(self.clock(cx), self.today);
         // Read the cached diagnostics summary. Cloning its shared string
         // increments a reference count without copying its buffer.
         let diagnostics_read = self.diagnostics.read(cx);
@@ -825,7 +828,7 @@ impl Render for ShellView {
         let chip_close_entity = cx.entity();
         let on_chip_close = move |column: &str, _window: &mut Window, cx: &mut App| {
             chip_close_entity.update(cx, |view, cx| {
-                view.frame.update(cx, |f, cx| {
+                view.target_frame().update(cx, |f, cx| {
                     if f.drop_dimension(column) {
                         cx.notify();
                     }
@@ -908,7 +911,7 @@ impl Render for ShellView {
         let term_close_entity = cx.entity();
         let on_term_close = move |i: usize, _window: &mut Window, cx: &mut App| {
             term_close_entity.update(cx, |view, cx| {
-                view.frame.update(cx, |f, cx| {
+                view.target_frame().update(cx, |f, cx| {
                     if f.drop_expression_term(i) {
                         cx.notify();
                     }
@@ -933,7 +936,7 @@ impl Render for ShellView {
         let named_close_entity = cx.entity();
         let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
             named_close_entity.update(cx, |view, cx| {
-                view.frame.update(cx, |f, cx| {
+                view.target_frame().update(cx, |f, cx| {
                     if f.drop_named(name) {
                         cx.notify();
                     }

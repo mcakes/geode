@@ -5137,7 +5137,7 @@ mod tests {
             }
         }
         fn versions(&self, vcx: &gpui::VisualTestContext) -> geode_shell::frame::FrameVersions {
-            self.frame.read_with(vcx, |f, _| f.versions())
+            self.frame.read_with(vcx, |f, _| f.shared().versions())
         }
         fn barrier_open(&self, vcx: &gpui::VisualTestContext) -> bool {
             self.frame.read_with(vcx, |f, _| f.barrier_open())
@@ -5733,10 +5733,10 @@ mod tests {
     ) {
         let keys = keys.to_vec();
         h.frame.update(vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(
                 chrono::Utc::now() - chrono::Duration::seconds(secs as i64),
             ));
-            f.open_flip(keys, Instant::now());
+            f.shared_mut().open_flip(keys, Instant::now());
             cx.notify();
         });
     }
@@ -6180,11 +6180,11 @@ mod tests {
         h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(geode_core::scope::Scope {
+            f.shared_mut().set_scope(geode_core::scope::Scope {
                 text: Some("spx".into()),
                 ..Default::default()
             });
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         assert!(
@@ -6214,8 +6214,8 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         let second = h
@@ -6245,8 +6245,8 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
-            f.open_flip([QueryKey(TILE)], Instant::now());
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().open_flip([QueryKey(TILE)], Instant::now());
             cx.notify();
         });
         let second = h.document_request().unwrap().tag;
@@ -9503,8 +9503,9 @@ edits = [["2026-09-18#2", "amount", 9.0]]
         // the NEW scope. The panel follows neither `scope` nor
         // `grouping`, so it never requeries — it self-arrives on B2.
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_text(Some("SPX".into()));
-            f.open_flip([QueryKey(TILE), other], Instant::now());
+            f.shared_mut().set_text(Some("SPX".into()));
+            f.shared_mut()
+                .open_flip([QueryKey(TILE), other], Instant::now());
             cx.notify();
         });
         assert!(
@@ -12017,14 +12018,14 @@ edits = [["2026-11-20", "-1", 9.5]]
                 "no sweep line for `:{word}`"
             );
         }
-        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         for line in lines {
             assert!(
                 crate::commands::parse(line).is_ok(),
                 "`{line}` no longer parses"
             );
             let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
-            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
             assert_eq!(
                 (after.scope, after.grouping, after.as_of),
                 (before.scope, before.grouping, before.as_of),
@@ -12747,8 +12748,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         publish_document_for(&h, &mut vcx, "cvi_params", "NDX.Z");
         assert!(h.document_request().is_none());
         assert!(
-            h.frame
-                .read_with(&vcx, |f, _| f.barrier_wants(QueryKey(TILE), f.versions())),
+            h.frame.read_with(&vcx, |f, _| f
+                .barrier_wants(QueryKey(TILE), f.shared().versions())),
             "the real query is still in flight"
         );
         h.deliver(
@@ -13161,7 +13162,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
             now - chrono::Duration::days(3),
         ] {
             h.frame.update(&mut vcx, |f, cx| {
-                f.set_as_of(geode_core::query::AsOf::At(at));
+                f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
                 cx.notify();
             });
             vcx.run_until_parked();
@@ -13179,7 +13180,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         assert_eq!(older.len(), "YYYY-MM-DD HH:MM".len(), "{older}");
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::Live);
+            f.shared_mut().set_as_of(geode_core::query::AsOf::Live);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -13204,14 +13205,14 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         let at = chrono::Utc::now() - chrono::Duration::seconds(60);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();
         let tag = h.document_request().expect("the historical request").tag;
         h.deliver(&mut vcx, tag, Arc::new(cvi_requested_at(BASE, at)));
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::Live);
+            f.shared_mut().set_as_of(geode_core::query::AsOf::Live);
             cx.notify();
         });
         vcx.run_until_parked();
@@ -13257,7 +13258,7 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         let clock = h.tile.read_with(&vcx, |t, _| t.clock);
         let at = chrono::Utc::now() - chrono::Duration::seconds(60);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(geode_core::query::AsOf::At(at));
+            f.shared_mut().set_as_of(geode_core::query::AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();

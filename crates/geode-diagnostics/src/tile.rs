@@ -841,11 +841,12 @@ mod tests {
     fn the_tile_answers_a_flip_barrier_it_has_nothing_coming_for(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 text: Some("spx".into()),
                 ..Default::default()
             });
-            f.open_flip([QueryKey(9)], std::time::Instant::now());
+            f.shared_mut()
+                .open_flip([QueryKey(9)], std::time::Instant::now());
             cx.notify();
         });
         assert!(
@@ -920,7 +921,7 @@ mod tests {
                 "no sweep line for `:{word}`"
             );
         }
-        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         for line in lines {
             let result = h.tile.update(&mut vcx, |t, cx| t.command(line, cx));
             if line.starts_with("level") {
@@ -935,7 +936,7 @@ mod tests {
             });
             assert!(level.is_none(), "`:{line}` queued a log-level change");
             assert!(!overlay, "`:{line}` queued an overlay toggle");
-            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
             assert_eq!(
                 (after.scope, after.grouping, after.as_of),
                 (before.scope, before.grouping, before.as_of),
@@ -1541,7 +1542,7 @@ mod tests {
         let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 text: Some("x".into()),
                 ..Scope::default()
             });
@@ -1607,7 +1608,7 @@ mod tests {
             .update(&mut vcx, |d, _| d.take_pending_catalog_request());
 
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         vcx.update(|window, cx| {
@@ -1627,7 +1628,7 @@ mod tests {
     fn an_as_of_change_while_invisible_does_not_request_a_catalog(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
             cx.notify();
         });
         vcx.update(|window, cx| {

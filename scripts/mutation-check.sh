@@ -4981,7 +4981,7 @@ run_mutation "toolbar: the chip body click never opens the picker" \
 
 run_mutation "as-of: the stripe is painted only when historical" \
   crates/geode-shell/src/shell/render.rs \
-  '        let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));' \
+  '        let is_historical = matches!(self.target_frame().read(cx).as_of(), AsOf::At(_));' \
   '        let is_historical = true;' \
   geode-shell typing_eod_and_enter_commits_eod_t_minus_one
 
@@ -8828,7 +8828,7 @@ run_mutation "scope-save: save_current is matched before the scope:: prefix arm"
 # refuses at all.
 run_mutation "scope-save: an empty frame scope refuses naming" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if shell.frame.read(cx).scope().is_empty() {' \
+  '    if shell.target_frame().read(cx).scope().is_empty() {' \
   '    if false {' \
   geode-shell \
   scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice
@@ -16736,6 +16736,17 @@ run_mutation "occupants: a tile is framed by its own workspace" \
   geode-shell \
   a_tile_restored_into_a_hidden_workspace_is_framed_by_it
 
+run_mutation "shell: a dialog targets the workspace it opened from" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let ws = self
+            .modals
+            .first()
+            .map(|m| m.workspace)
+            .unwrap_or_else(|| self.active_ix());' \
+  '        let ws = self.active_ix();' \
+  geode-shell \
+  a_frame_dialog_commits_into_the_workspace_it_opened_from
+
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
   '                self.notice = Some(NO_TILE_THAT_WAY);' \
@@ -22726,8 +22737,15 @@ run_mutation "scope expr: mod+s on an empty field opens the name entry" \
 # would otherwise save a definition the refused swap then never uses.
 run_mutation "scope expr: naming a changed term writes the definition anyway" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        && !shell.frame.read(cx).expression_term_is(*index, seeded)' \
-  '        && (false && !shell.frame.read(cx).expression_term_is(*index, seeded))' \
+  '        && !shell
+            .target_frame()
+            .read(cx)
+            .expression_term_is(*index, seeded)' \
+  '        && (false
+            && !shell
+                .target_frame()
+                .read(cx)
+                .expression_term_is(*index, seeded))' \
   geode-shell \
   naming_a_changed_term_refuses_and_writes_nothing
 

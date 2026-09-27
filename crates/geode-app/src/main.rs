@@ -276,13 +276,13 @@ fn main() {
                         .expect("the window's root view is the shell");
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
-                        std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
+                        std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).config_version()));
                     // Register this observer before diagnostics tiles register theirs.
                     // GPUI invokes observers in registration order: the shared factory
                     // configuration must be current before a tile consumes the same
                     // version bump and rebuilds its config section.
                     cx.observe(&frame, move |frame, cx| {
-                        let now = frame.read(cx).versions().config;
+                        let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
                             last_config_version.set(now);
                             diagnostics_factory.set_config(shell.read(cx).config().clone());

@@ -58,7 +58,7 @@ use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
 use crate::diagnostics::{ActionTail, Diagnostics};
 use crate::fontsize::FontSize;
-use crate::frame::{Frame, FrameVersions};
+use crate::frame::{Frame, FrameRef, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::log_persist;
 use crate::module::{ModuleRoster, TileOccupant};
@@ -67,7 +67,7 @@ use crate::perf::FrameHistogram;
 use crate::reload;
 use crate::session;
 use crate::theme::ThemeService;
-use crate::tiling::{TileId, Workspaces};
+use crate::tiling::{TileId, WorkspaceIx, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
@@ -398,7 +398,7 @@ pub struct ShellView {
     palette_usage: crate::palette_usage::PaletteUsage,
     /// Bumped by every `palette_usage` mutation; `take_dirty_session_write`
     /// compares it against `last_palette_usage_written`, the same shape
-    /// as `last_frame_versions_written`, so a palette dispatch that
+    /// as `last_frame_generation_written`, so a palette dispatch that
     /// mutates nothing else still reaches the flush.
     palette_usage_version: u64,
     last_palette_usage_written: u64,
@@ -468,10 +468,11 @@ pub struct ShellView {
     /// initially empty. Compared every tick to catch module-only state changes.
     /// Updated before disk I/O; a failed write does not reset this baseline.
     last_tiles_written: crate::session::TileRecords,
-    /// Frame `(scope, grouping, as_of)` versions captured by the last
-    /// successfully serialized periodic snapshot, initially zero. Detects
+    /// The frame's generation counter captured by the last successfully
+    /// serialized periodic snapshot, initially zero. Every scope, grouping,
+    /// as-of, pin, and unpin change in any lane advances it, so it detects
     /// frame-only changes; updated before the disk write completes.
-    last_frame_versions_written: (u64, u64, u64),
+    last_frame_generation_written: u64,
     /// Deferred focus restoration for paths without a `Window`, such as hot
     /// reload closing the palette. `render` consumes it before painting. Waiting
     /// for a key event is unsafe: dropping a focused overlay can leave no live
@@ -746,11 +747,12 @@ impl ShellView {
             |view, input, event, window, cx| match event {
                 InputEvent::Focus => {
                     view.filter_session_base = Some(input.read(cx).value().to_string());
-                    view.frame.update(cx, |f, _| f.begin_scope_session());
+                    view.active_frame()
+                        .update(cx, |f, _| f.begin_scope_session());
                 }
                 InputEvent::Change => {
                     let text = input.read(cx).value().to_string();
-                    view.frame.update(cx, |f, cx| {
+                    view.active_frame().update(cx, |f, cx| {
                         let mut s = f.scope().clone();
                         s.text = (!text.trim().is_empty()).then_some(text);
                         if f.set_scope_in_session(s) {
@@ -760,13 +762,13 @@ impl ShellView {
                 }
                 InputEvent::PressEnter { .. } => {
                     view.filter_session_base = None;
-                    view.frame.update(cx, |f, _| f.end_scope_session());
+                    view.active_frame().update(cx, |f, _| f.end_scope_session());
                     view.focus_handle.focus(window, cx);
                     cx.notify();
                 }
                 InputEvent::Blur => {
                     view.filter_session_base = None;
-                    view.frame.update(cx, |f, _| f.end_scope_session());
+                    view.active_frame().update(cx, |f, _| f.end_scope_session());
                 }
             },
         )
@@ -1161,18 +1163,24 @@ impl ShellView {
         // undo back to the initial empty scope.
         let palette_usage = services.restored_palette_usage.clone();
         if let Some(record) = services.restored_frame.clone() {
+            // `[frame]` is the shared lane's record; pinned lanes restore
+            // from their own workspace records.
             frame.update(cx, |f, _cx| {
-                f.set_scope(record.scope);
-                f.set_active_slot(record.active_slot);
-                f.set_as_of(record.as_of);
-                f.clear_history();
+                let mut s = f.shared_mut();
+                s.set_scope(record.scope);
+                s.set_active_slot(record.active_slot);
+                s.set_as_of(record.as_of);
+                s.clear_history();
             });
         }
         // Seeded from the just-built frame (see the field's own doc
         // comment) so a restored session's scope/slot/as-of is never
         // itself read as "just changed" by the first real
         // `on_frame_changed`.
-        let last_flip_versions = frame.read(cx).versions();
+        let last_flip_versions = frame
+            .read(cx)
+            .view(services.workspaces.active_ix())
+            .versions();
 
         // The docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -1214,7 +1222,7 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),
-            last_frame_versions_written: (0, 0, 0),
+            last_frame_generation_written: 0,
             pending_focus_restore: false,
             overlay_return_to_filter: false,
             divider_drag: None,
@@ -1368,14 +1376,17 @@ impl ShellView {
         // independently and do not open a barrier. This observer is registered
         // before occupants, ensuring the full key set is ready before their
         // frame callbacks run, including non-following tiles that self-arrive.
-        let now_v = frame.read(cx).versions();
+        // Visible tiles are the active workspace's, so the flip compares and
+        // opens against the active lane, not a dialog's target lane.
+        let active = self.active_frame();
+        let now_v = active.read(cx).versions();
         let last = self.last_flip_versions;
         if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
         {
             self.last_flip_versions = now_v;
             let mut keys = std::mem::take(&mut self.scratch_visible_keys);
             self.visible_tile_keys(&mut keys);
-            frame.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
+            active.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
             self.scratch_visible_keys = keys;
             // The shared reload poll sweeps the deadline; no timer is needed
             // for each frame mutation.
@@ -1384,7 +1395,7 @@ impl ShellView {
         // and as-of edits do not rebuild rows while the user is filtering.
         if self.as_of_dialog.is_some() && now_v.data != self.as_of_data_version {
             self.as_of_data_version = now_v.data;
-            let as_of = frame.read(cx).as_of().clone();
+            let as_of = self.target_frame().read(cx).as_of().clone();
             let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
             if let Some(state) = self.as_of_dialog.as_mut() {
                 state.refresh(&as_of, &publishes, chrono::Utc::now());
@@ -1427,7 +1438,13 @@ impl ShellView {
             .focus_handle(cx)
             .is_focused(window)
         {
-            let frame_text = frame.read(cx).scope().text.clone().unwrap_or_default();
+            let frame_text = self
+                .active_frame()
+                .read(cx)
+                .scope()
+                .text
+                .clone()
+                .unwrap_or_default();
             let field_text = self.filter_input.read(cx).value().to_string();
             if field_text != frame_text {
                 self.filter_input.update(cx, |i, cx| {
@@ -1497,9 +1514,36 @@ impl ShellView {
         &self.services.config
     }
 
-    /// The shared frame entity every occupant holds.
+    /// The shared frame entity every occupant holds. Lane state (scope,
+    /// grouping, as-of) is reached through `target_frame` or
+    /// [`Self::active_frame`], which name the workspace.
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
+    }
+
+    pub(crate) fn active_ix(&self) -> WorkspaceIx {
+        self.services.workspaces.active_ix()
+    }
+
+    pub(crate) fn frame_at(&self, ws: WorkspaceIx) -> FrameRef {
+        FrameRef::new(self.frame.clone(), ws)
+    }
+
+    /// The lane every shell surface reads and writes: the workspace the
+    /// open modal stack was opened from, else the active one. A dialog
+    /// therefore commits where it was opened, whatever is active later.
+    pub(crate) fn target_frame(&self) -> FrameRef {
+        let ws = self
+            .modals
+            .first()
+            .map(|m| m.workspace)
+            .unwrap_or_else(|| self.active_ix());
+        self.frame_at(ws)
+    }
+
+    /// The active workspace's frame, for the app's catalog as-of.
+    pub fn active_frame(&self) -> FrameRef {
+        self.frame_at(self.active_ix())
     }
 
     /// The shared diagnostics entity available to occupants.

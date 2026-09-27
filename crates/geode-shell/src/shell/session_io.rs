@@ -10,9 +10,10 @@ use crate::session::{self, FrameRecord};
 use super::ShellView;
 
 impl ShellView {
-    /// Capture the frame fields shared by periodic and shutdown saves.
+    /// Capture the shared lane's `[frame]` record for periodic and shutdown
+    /// saves. Pinned lanes are workspace-owned and never written here.
     fn frame_record(&self, cx: &App) -> FrameRecord {
-        let frame = self.frame.read(cx);
+        let frame = self.frame.read(cx).shared();
         FrameRecord {
             scope: frame.scope().clone(),
             active_slot: frame.active_slot(),
@@ -32,9 +33,8 @@ impl ShellView {
     /// No configured path or no detected change returns `None` silently.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
-        let versions = self.frame.read(cx).versions();
-        let frame_versions = (versions.scope, versions.grouping, versions.as_of);
-        let frame_dirty = frame_versions != self.last_frame_versions_written;
+        let frame_generation = self.frame.read(cx).generation();
+        let frame_dirty = frame_generation != self.last_frame_generation_written;
         let usage_dirty = self.palette_usage_version != self.last_palette_usage_written;
         // Module state changes do not set the layout flag. Compare serialized
         // records and frame/usage versions to catch independent changes.
@@ -52,7 +52,7 @@ impl ShellView {
         ) {
             Ok(text) => {
                 self.last_tiles_written = tiles;
-                self.last_frame_versions_written = frame_versions;
+                self.last_frame_generation_written = frame_generation;
                 self.last_palette_usage_written = self.palette_usage_version;
                 Some((path, text))
             }

@@ -1185,7 +1185,7 @@ fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
 // Saved scopes in the palette.
 
 /// A saved scope appears as `Scope: {name}` (category "Scope") and
-/// selecting it loads it onto the frame via `Frame::load_scope`, bumping
+/// selecting it loads it onto the frame via `FrameViewMut::load_scope`, bumping
 /// the scope version exactly once.
 #[gpui::test]
 fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui::TestAppContext) {
@@ -1224,7 +1224,7 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
         "sanity: the scope loaded from config before the palette is even opened"
     );
 
-    let v0 = shell.read_with(&cx, |s, cx| s.frame().read(cx).versions().scope);
+    let v0 = shell.read_with(&cx, |s, cx| s.frame().read(cx).shared().versions().scope);
 
     cx.simulate_keystrokes("ctrl-k");
     cx.simulate_input("Scope: eu");
@@ -1245,12 +1245,12 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
 
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame().read(cx).scope().clone()),
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).shared().scope().clone()),
         eu_scope,
         "selecting the row must load the saved scope onto the frame"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame().read(cx).versions().scope),
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).shared().versions().scope),
         v0 + 1,
         "loading the scope must bump the scope version exactly once"
     );

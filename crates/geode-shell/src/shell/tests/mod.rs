@@ -604,6 +604,7 @@ mod occupants;
 mod palette;
 mod perf;
 mod picker;
+mod pin;
 mod reload;
 mod scope_expr;
 mod scopebar;

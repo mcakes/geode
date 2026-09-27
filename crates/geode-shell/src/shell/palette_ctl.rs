@@ -114,7 +114,7 @@ impl ShellView {
             PaletteItem::Scope(name) => {
                 // Load the live saved scope, notifying only when the frame changed.
                 let name = name.clone();
-                self.frame.update(cx, |f, cx| {
+                self.target_frame().update(cx, |f, cx| {
                     if let Ok(true) = f.load_scope(&name) {
                         cx.notify();
                     }

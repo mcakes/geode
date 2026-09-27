@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn a_chip_carries_the_full_selection_beside_its_elided_summary() {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
                 values: vec!["A".into(), "B".into(), "C".into()],
@@ -278,7 +278,7 @@ mod tests {
     fn each_and_term_is_its_own_chip_elided_with_its_full_text() {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
         let long = "npv > 1000000 and (delta < -50000 or book = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')";
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             expression: Some(parse_expr(long).unwrap()),
             ..Scope::default()
         });
@@ -321,7 +321,7 @@ mod tests {
         f.replace_named_expressions(named_exprs(
             "[liq]\nexpression = \"npv > 0\"\n[bad]\nexpression = \"npv >\"\n",
         ));
-        f.set_scope(Scope {
+        f.shared_mut().set_scope(Scope {
             named: vec!["liq".into(), "gone".into(), "bad".into()],
             ..Scope::default()
         });
@@ -362,7 +362,7 @@ mod tests {
         let mut slots = GroupingSlots::default();
         slots.set(1, vec!["book".into(), "lhu".into()]);
         let mut f = Frame::new(slots, SavedScopes::new(), None);
-        f.set_active_slot(Some(1));
+        f.shared_mut().set_active_slot(Some(1));
         let s = Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
@@ -371,10 +371,10 @@ mod tests {
             text: Some("spx".into()),
             ..Scope::default()
         };
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         let clock = geode_core::clock::Clock::utc();
         let at = chrono::Utc.with_ymd_and_hms(2026, 9, 8, 14, 5, 0).unwrap();
-        f.set_as_of(AsOf::At(at));
+        f.shared_mut().set_as_of(AsOf::At(at));
         let today = clock.today(at);
 
         let m = build_model(&f.shared(), clock, today);
@@ -404,7 +404,7 @@ mod tests {
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
         let clock = geode_core::clock::Clock::utc();
         let at = chrono::Utc.with_ymd_and_hms(2026, 9, 8, 14, 5, 30).unwrap();
-        f.set_as_of(AsOf::At(at));
+        f.shared_mut().set_as_of(AsOf::At(at));
         let today = clock.today(at);
 
         let m = build_model(&f.shared(), clock, today);
@@ -435,7 +435,7 @@ mod tests {
         use chrono::TimeZone;
         let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
         let t = chrono::Utc.with_ymd_and_hms(2026, 9, 18, 22, 0, 0).unwrap();
-        f.set_as_of(geode_core::query::AsOf::At(t));
+        f.shared_mut().set_as_of(geode_core::query::AsOf::At(t));
         let utc = geode_core::clock::Clock::utc();
         let m = build_model(&f.shared(), utc, utc.today(t));
         assert_eq!(

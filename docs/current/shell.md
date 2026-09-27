@@ -194,7 +194,7 @@ A named reference is not itself expression syntax — the grammar has no token
 for it — so it cannot combine with `or` or `not`, and a named expression
 cannot itself reference another one.
 
-`Frame::effective_scope` composes the frame and tile layers and then resolves
+`FrameView::effective_scope` composes the frame and tile layers and then resolves
 every named reference through `Scope::resolve` against the frame's own
 `NamedExpressions` (read from `expressions.toml`; see
 [configuration](configuration.md#documents)), folding each into `expression`
@@ -245,7 +245,7 @@ then the contradiction chip. The frame still holds one `Expr`; the terms are
 a view of it, and an edit rebuilds a left-folded `and` chain from the
 remaining terms (`Expr::from_conjuncts`). A term chip's body opens the
 expression dialog on that term; the `×` inside it drops that term alone
-(`Frame::drop_expression_term`). As on a dimension chip, the `×` occludes the
+(`FrameViewMut::drop_expression_term`). As on a dimension chip, the `×` occludes the
 body's hitbox, which is what keeps its press from also opening the dialog.
 Term chips are addressed by index, which is stable within one scope version;
 the term dialog also carries the term it was seeded with and refuses inline
@@ -257,7 +257,7 @@ A named chip's tooltip is the expression text. A name the frame's
 `≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
 `Scope::resolve` gives; every tile that scope reaches refuses to query until
 the name is defined again or removed. The `×` inside a named chip removes that
-name (`Frame::drop_named`, undoable through `set_scope`) and does nothing
+name (`FrameViewMut::drop_named`, undoable through `set_scope`) and does nothing
 else. Named chips are keyed by name, so their element ids survive a
 neighbour's removal. The chip body has the chips' hover and pressed fills,
 and a click on it opens the Expressions dialog on that name

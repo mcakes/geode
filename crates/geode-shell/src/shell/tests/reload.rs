@@ -383,10 +383,10 @@ fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_versi
         root.view().clone().downcast::<ShellView>().unwrap()
     });
 
-    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
-    let v1 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let v1 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     assert!(
         v1.config > v0.config,
         "views/dimensions untouched, but the config version must still bump \
@@ -989,20 +989,23 @@ fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestApp
     let shell = shell_of(&window, &mut cx);
     cx.simulate_keystrokes("ctrl-2");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().active_slot()),
         Some(2)
     );
-    let v = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let v = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     cx.simulate_keystrokes("ctrl-5");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().active_slot()),
         Some(2),
         "an empty slot is ignored"
     );
-    assert_eq!(shell.read_with(&cx, |s, cx| s.frame.read(cx).versions()), v);
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions()),
+        v
+    );
     cx.simulate_keystrokes("ctrl-0");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().active_slot()),
         None
     );
     cx.update(|window, cx| {
@@ -1039,14 +1042,14 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
         ],
         ..ConfigSources::default()
     });
-    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     shell.update(&mut cx, |s, cx| {
         s.apply_reload(std::mem::take(&mut new_config), cx)
     });
     let (slots, versions) = shell.read_with(&cx, |s, cx| {
         (
             s.frame.read(cx).slots().clone(),
-            s.frame.read(cx).versions(),
+            s.frame.read(cx).shared().versions(),
         )
     });
     assert_eq!(slots.label(3).as_deref(), Some("book"));
@@ -1639,7 +1642,7 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
     let shell = shell_of(&window, &mut vcx);
     let before = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
-    let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+    let versions_before = shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().versions());
 
     // Choose a zone different from the machine's current zone so the test observes a
     // change on any host.
@@ -1664,7 +1667,7 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
         shell.read_with(&vcx, |s, _| s.today),
         after.today(chrono::Utc::now())
     );
-    let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).versions());
+    let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().versions());
     assert_eq!(versions_before.data, versions_after.data);
     assert_eq!(versions_before.as_of, versions_after.as_of);
 }

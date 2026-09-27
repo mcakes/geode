@@ -61,21 +61,21 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_the_scope(cx: &mut gpui::TestAppContext
     let b = book_scope("B");
     shell.update(&mut cx, |shell, cx| {
         shell.frame().update(cx, |f, _| {
-            f.set_scope(a.clone());
-            f.set_scope(b.clone());
+            f.shared_mut().set_scope(a.clone());
+            f.shared_mut().set_scope(b.clone());
         });
     });
 
     cx.simulate_keystrokes("ctrl-z");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame().read(cx).scope().clone()),
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).shared().scope().clone()),
         a,
         "ctrl-z must restore the scope before the last set_scope"
     );
 
     cx.simulate_keystrokes("ctrl-shift-z");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.frame().read(cx).scope().clone()),
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).shared().scope().clone()),
         b,
         "ctrl-shift-z must return to the scope ctrl-z just undid"
     );
@@ -105,27 +105,30 @@ fn typing_in_the_field_sets_the_frame_text_per_keystroke_and_enter_blurs(
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("sp")
     );
-    let v_after_two = frame.read_with(&vcx, |f, _| f.versions().scope);
+    let v_after_two = frame.read_with(&vcx, |f, _| f.shared().versions().scope);
     vcx.simulate_input("x");
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().scope),
+        frame.read_with(&vcx, |f, _| f.shared().versions().scope),
         v_after_two + 1
     );
     vcx.simulate_keystrokes("enter");
     assert!(!filter_is_focused(&shell, &mut vcx));
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("spx")
     );
     // One undo entry for the whole session.
-    frame.update(&mut vcx, |f, _| assert!(f.undo_scope()));
-    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+    frame.update(&mut vcx, |f, _| assert!(f.shared_mut().undo_scope()));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None
+    );
 }
 
 #[gpui::test]
@@ -139,7 +142,7 @@ fn escape_restores_the_text_the_field_had_when_focused(cx: &mut gpui::TestAppCon
     // into `filter_input` never runs, so the field would still be empty
     // when Escape captures its base value, as the third test below does.
     frame.update(&mut vcx, |f, cx| {
-        if f.set_text(Some("old".into())) {
+        if f.shared_mut().set_text(Some("old".into())) {
             cx.notify();
         }
     });
@@ -156,7 +159,7 @@ fn escape_restores_the_text_the_field_had_when_focused(cx: &mut gpui::TestAppCon
     assert!(!filter_is_focused(&shell, &mut vcx));
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("old")
     );
@@ -174,7 +177,7 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
     // Set the pre-session text through the normal history path. Canceling the later
     // editing session must not push the abandoned text as another undo entry.
     frame.update(&mut vcx, |f, cx| {
-        if f.set_text(Some("old".into())) {
+        if f.shared_mut().set_text(Some("old".into())) {
             cx.notify();
         }
     });
@@ -188,7 +191,7 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
     vcx.simulate_keystrokes("escape");
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("old"),
         "escape must restore the pre-focus text"
@@ -197,11 +200,14 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
     // Escape restores the session's original scope and removes its now-redundant undo
     // entry. One undo must skip the whole canceled editing session, with neither the
     // abandoned value nor a no-op step in history.
-    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
-    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+    assert!(frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None
+    );
 
     // Nothing further to undo.
-    assert!(!frame.update(&mut vcx, |f, _| f.undo_scope()));
+    assert!(!frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()));
 }
 
 #[gpui::test]
@@ -212,13 +218,13 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        let mut s = f.scope().clone();
+        let mut s = f.shared().scope().clone();
         s.text = Some("from-tile".into());
         s.dimensions.push(geode_core::scope::DimensionSelection {
             column: "book".into(),
             values: vec!["BK001".into()],
         });
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         cx.notify();
     });
     vcx.run_until_parked();
@@ -228,7 +234,7 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
         .debug_bounds("scope-chip-close-book")
         .expect("chip painted");
     vcx.simulate_click(close.center(), gpui::Modifiers::default());
-    assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().dimensions.is_empty()));
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
 }
 
@@ -246,7 +252,7 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     );
 
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(book_scope("BK000"));
+        f.shared_mut().set_scope(book_scope("BK000"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -294,7 +300,7 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
 fn the_pick_chip_is_always_present_and_its_menu_opens_the_picker(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
-    assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).scope().is_empty()));
+    assert!(shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().scope().is_empty()));
 
     let pick = vcx
         .debug_bounds("scope-pick-chip")
@@ -397,7 +403,10 @@ fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_saved_scope());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
-    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None
+    );
 
     vcx.update(|window, cx| {
         shell.update(cx, |s, cx| {
@@ -407,7 +416,7 @@ fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
 
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("eu"),
         "dispatching scope::eu must load the saved scope"
@@ -537,12 +546,15 @@ fn a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it(
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     assert_eq!(
         frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
             .as_deref(),
         Some("sp")
     );
     vcx.simulate_keystrokes("alt-z"); // mod+z under the default mod
-    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None
+    );
     assert!(filter_is_focused(&shell, &mut vcx));
     assert_eq!(
         shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string()),
@@ -687,7 +699,7 @@ fn the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker(
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(book_scope("BK000"));
+        f.shared_mut().set_scope(book_scope("BK000"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -708,7 +720,7 @@ fn the_close_glyph_lives_inside_its_chip_and_drops_without_opening_the_picker(
 
     vcx.simulate_click(close.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().dimensions.is_empty()));
     assert!(
         shell.read_with(&vcx, |s, _| s.picker.is_none()),
         "dropping a chip must not also open the picker its body opens"
@@ -751,7 +763,7 @@ fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui:
     frame.update(&mut vcx, |f, cx| {
         let mut s = book_scope("BK000");
         s.text = Some("spx".into());
-        f.set_scope(s);
+        f.shared_mut().set_scope(s);
         cx.notify();
     });
     vcx.run_until_parked();
@@ -770,14 +782,14 @@ fn the_text_layer_lives_in_the_field_and_its_clear_glyph_drops_it(cx: &mut gpui:
     vcx.simulate_click(at, gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.scope().text.clone()),
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
         None,
         "the clear glyph drops the text layer"
     );
     let value = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string());
     assert_eq!(value, "");
     assert!(
-        frame.read_with(&vcx, |f, _| !f.scope().dimensions.is_empty()),
+        frame.read_with(&vcx, |f, _| !f.shared().scope().dimensions.is_empty()),
         "only the text layer went"
     );
 }
@@ -823,7 +835,7 @@ fn dragging_from_a_toolbar_control_does_not_move_the_window(cx: &mut gpui::TestA
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        f.set_scope(book_scope("BK000"));
+        f.shared_mut().set_scope(book_scope("BK000"));
         cx.notify();
     });
     vcx.run_until_parked();
@@ -916,12 +928,12 @@ fn a_named_chips_close_glyph_drops_the_name_undoably(cx: &mut gpui::TestAppConte
         "the × sits inside its chip: chip {chip:?}, × {close:?}"
     );
     click_selector(&mut vcx, "scope-named-chip-close-liq");
-    assert!(frame.read_with(&vcx, |f, _| f.scope().named.is_empty()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().named.is_empty()));
     assert!(vcx.debug_bounds("scope-named-chip-liq").is_none());
     dispatch_action(&shell, "frame::scope_undo", &mut vcx);
     vcx.run_until_parked();
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.scope().named.clone()),
+        frame.read_with(&vcx, |f, _| f.shared().scope().named.clone()),
         vec!["liq".to_string()],
         "the drop went through set_scope"
     );
@@ -1041,6 +1053,6 @@ fn a_named_chips_close_glyph_opens_nothing(cx: &mut gpui::TestAppContext) {
     dispatch_action(&shell, "scope::mine", &mut vcx);
     vcx.run_until_parked();
     click_selector(&mut vcx, "scope-named-chip-close-liq");
-    assert!(frame.read_with(&vcx, |f, _| f.scope().named.is_empty()));
+    assert!(frame.read_with(&vcx, |f, _| f.shared().scope().named.is_empty()));
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open() && s.object_dialog.is_none()));
 }

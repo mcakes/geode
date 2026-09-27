@@ -52,7 +52,7 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     match view.top_kind() {
         Some(DialogKind::ScopeExpr) => {
-            let current = view.frame.read(cx).scope();
+            let current = view.target_frame().read(cx).scope();
             let state = view.scope_expr_dialog.as_ref()?;
             Some(scope_expr_view::request_scope(
                 &state.mode,
@@ -126,7 +126,7 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     let Some(scope) = values_scope(view, cx) else {
         return;
     };
-    let as_of = view.frame.read(cx).as_of().clone();
+    let as_of = view.target_frame().read(cx).as_of().clone();
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
     let vocab = view.expr_vocab.clone();

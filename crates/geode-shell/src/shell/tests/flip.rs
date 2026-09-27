@@ -52,13 +52,13 @@ fn a_scope_change_opens_a_barrier_over_exactly_the_visible_tiles(cx: &mut gpui::
     // A scope change: opens a barrier over tile 1's key only — tile 2
     // belongs to workspace 2, not on screen right now.
     frame.update(&mut vcx, |f, cx| {
-        if f.set_text(Some("spx".into())) {
+        if f.shared_mut().set_text(Some("spx".into())) {
             cx.notify();
         }
     });
 
     assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
-    let v = frame.read_with(&vcx, |f, _| f.versions());
+    let v = frame.read_with(&vcx, |f, _| f.shared().versions());
     assert!(
         frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(1), v)),
         "tile 1 is visible"
@@ -77,7 +77,7 @@ fn a_scope_change_opens_a_barrier_over_exactly_the_visible_tiles(cx: &mut gpui::
             + std::time::Duration::from_millis(1)
     )));
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().flip),
+        frame.read_with(&vcx, |f, _| f.shared().versions().flip),
         flip_before + 1
     );
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
@@ -151,10 +151,10 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
         - crate::frame::FLIP_DEADLINE
         - std::time::Duration::from_millis(1);
     frame.update(&mut vcx, |f, _| {
-        f.open_flip([QueryKey(1)], past);
+        f.shared_mut().open_flip([QueryKey(1)], past);
     });
     assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
-    let flip_before = frame.read_with(&vcx, |f, _| f.versions().flip);
+    let flip_before = frame.read_with(&vcx, |f, _| f.shared().versions().flip);
 
     // `run_until_parked` first so the reload-poll loop (spawned in
     // `ShellView::new`) actually reaches its `.timer(..).await` and
@@ -174,7 +174,7 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
         "one reload-poll tick must sweep a barrier already past its deadline"
     );
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.versions().flip),
+        frame.read_with(&vcx, |f, _| f.shared().versions().flip),
         flip_before + 1
     );
     assert_eq!(
@@ -304,7 +304,7 @@ fn barrier_opens_before_any_occupant_could_deliver(cx: &mut gpui::TestAppContext
 
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
-        if f.set_text(Some("spx".into())) {
+        if f.shared_mut().set_text(Some("spx".into())) {
             cx.notify();
         }
     });

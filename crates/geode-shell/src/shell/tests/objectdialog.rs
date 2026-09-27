@@ -1931,7 +1931,7 @@ fn d_on_an_empty_slot_says_there_is_nothing_to_delete(cx: &mut gpui::TestAppCont
 
 /// Reordering a grouping slot reaches the frame through the draft, pending batch,
 /// flush, reload, and slot rebuild. A later `ctrl+3` must regroup using the new
-/// dimension order. Assert `Frame::active_grouping`, the value following tiles consume,
+/// dimension order. Assert `FrameView::active_grouping`, the value following tiles consume,
 /// rather than only the persisted file.
 #[gpui::test]
 fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpui::TestAppContext) {
@@ -1978,7 +1978,11 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     cx.run_until_parked();
 
     let active = shell.read_with(&cx, |s, cx| {
-        s.frame.read(cx).active_grouping().map(<[String]>::to_vec)
+        s.frame
+            .read(cx)
+            .shared()
+            .active_grouping()
+            .map(<[String]>::to_vec)
     });
     assert_eq!(
         active,
@@ -2040,7 +2044,7 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
 
 /// Refuse to untick a grouping slot's last dimension: empty chains are unsupported, and
 /// removing the user entry would reveal an inherited chain instead of representing no
-/// grouping. Assert agreement between the edit-stage rows and `Frame::active_grouping`,
+/// grouping. Assert agreement between the edit-stage rows and `FrameView::active_grouping`,
 /// beyond the refusal notice or file contents alone.
 #[gpui::test]
 fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing(
@@ -2106,7 +2110,11 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     cx.run_until_parked();
 
     let active = shell.read_with(&cx, |s, cx| {
-        s.frame.read(cx).active_grouping().map(<[String]>::to_vec)
+        s.frame
+            .read(cx)
+            .shared()
+            .active_grouping()
+            .map(<[String]>::to_vec)
     });
     assert_eq!(
         active,
@@ -2651,7 +2659,7 @@ fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestA
     };
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(frame_scope.clone());
+            f.shared_mut().set_scope(frame_scope.clone());
         });
     });
 
@@ -2681,7 +2689,7 @@ fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestA
 
     // The frame itself is unchanged — `o` writes config, never frame
     // state.
-    let frame_after = shell.read_with(&cx, |s, cx| s.frame.read(cx).scope().clone());
+    let frame_after = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().scope().clone());
     assert_eq!(frame_after, frame_scope);
 }
 
@@ -2705,7 +2713,7 @@ fn o_confirms_before_overwriting(cx: &mut gpui::TestAppContext) {
     };
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(frame_scope.clone());
+            f.shared_mut().set_scope(frame_scope.clone());
         });
     });
 
@@ -2774,7 +2782,7 @@ fn o_on_a_desk_owned_scope_forks_without_asking_and_says_so(cx: &mut gpui::TestA
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 dimensions: vec![DimensionSelection {
                     column: "book".to_string(),
                     values: vec!["BK009".to_string()],
@@ -2921,7 +2929,7 @@ fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppCon
     // Exactly what the saved scope already holds.
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 dimensions: vec![DimensionSelection {
                     column: "book".to_string(),
                     values: vec!["BK001".to_string()],
@@ -3169,7 +3177,7 @@ fn n_on_scopes_creates_an_empty_scope(cx: &mut gpui::TestAppContext) {
     );
     shell.update(&mut cx, |shell, cx| {
         shell.frame.update(cx, |f, _| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 dimensions: vec![DimensionSelection {
                     column: "book".to_string(),
                     values: vec!["BK007".to_string()],
@@ -3324,7 +3332,7 @@ fn c_is_not_a_verb_on_views(cx: &mut gpui::TestAppContext) {
 fn set_frame_book_scope(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, book: &str) {
     shell.update(cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 dimensions: vec![DimensionSelection {
                     column: "book".to_string(),
                     values: vec![book.to_string()],
@@ -3385,7 +3393,7 @@ fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
     let dir = tempfile::tempdir().unwrap();
     let (window, mut cx) = open_shell_with_user_dir(cx, services_with_a_saved_scope(), dir.path());
     let shell = shell_of(&window, &mut cx);
-    assert!(shell.read_with(&cx, |s, cx| s.frame.read(cx).scope().is_empty()));
+    assert!(shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().scope().is_empty()));
 
     dispatch_action(&shell, "scope::save_current", &mut cx);
     cx.run_until_parked();
@@ -7580,7 +7588,7 @@ fn deleting_a_named_expression_names_its_users(cx: &mut gpui::TestAppContext) {
     );
     shell.update(&mut cx, |s, cx| {
         s.frame.update(cx, |f, _| {
-            f.set_scope(Scope {
+            f.shared_mut().set_scope(Scope {
                 named: vec!["liq".to_string()],
                 ..Scope::default()
             });

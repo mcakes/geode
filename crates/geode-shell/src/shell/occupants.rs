@@ -246,6 +246,12 @@ impl ShellView {
             let from_add = matched.is_none() && pending_factory.is_some();
             // The tile's own workspace, not the active one: an occupant
             // restored into a hidden workspace reads that workspace's lane.
+            // Every tile reaching here is placed in some workspace's tree;
+            // the active fallback only keeps a release build running.
+            debug_assert!(
+                self.services.workspaces.workspace_of(*id).is_some(),
+                "occupant for unplaced tile {id:?}"
+            );
             let ws = self
                 .services
                 .workspaces

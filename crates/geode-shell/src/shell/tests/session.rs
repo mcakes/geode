@@ -511,13 +511,16 @@ fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_
 
     let (scope, as_of) = shell.read_with(&cx, |shell, cx| {
         let frame = shell.frame().read(cx);
-        (frame.scope().clone(), frame.as_of().clone())
+        (
+            frame.shared().scope().clone(),
+            frame.shared().as_of().clone(),
+        )
     });
     assert_eq!(scope, record.scope, "the restored scope must apply");
     assert_eq!(as_of, record.as_of, "the restored as-of must apply");
 
     let undid = shell.update(&mut cx, |shell, cx| {
-        shell.frame().update(cx, |f, _| f.undo_scope())
+        shell.frame().update(cx, |f, _| f.shared_mut().undo_scope())
     });
     assert!(
         !undid,

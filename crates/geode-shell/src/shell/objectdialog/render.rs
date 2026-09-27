@@ -553,7 +553,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         NameSeed::FromFrame => {
             // Capture current frame scope at confirmation time. Recheck emptiness
             // because frame scope can change while the naming prompt is open.
-            let scope = shell.frame.read(cx).scope().clone();
+            let scope = shell.target_frame().read(cx).scope().clone();
             if scope.is_empty() {
                 set_notice(shell, EMPTY_SCOPE_NOTICE.to_string());
                 cx.notify();
@@ -668,7 +668,7 @@ pub(in crate::shell) fn open_save_scope(
     if !dialog::can_open(shell, dialog::DialogKind::Object) {
         return;
     }
-    if shell.frame.read(cx).scope().is_empty() {
+    if shell.target_frame().read(cx).scope().is_empty() {
         open(shell, Domain::Scopes, window, cx);
         if let Some(state) = shell.object_dialog.as_mut() {
             state.notice = Some(EMPTY_SCOPE_NOTICE.to_string());
@@ -1043,7 +1043,7 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
         return;
     };
     let scope = scopes::draft_scope(draft, config, column);
-    let as_of = shell.frame.read(cx).as_of().clone();
+    let as_of = shell.target_frame().read(cx).as_of().clone();
     shell.next_picker_tag += 1;
     let tag = shell.next_picker_tag;
     let Some(state) = shell.object_dialog.as_mut() else {
@@ -2633,7 +2633,13 @@ fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<Str
                 .collect()
         })
         .unwrap_or_default();
-    let frame = shell.frame.read(cx).scope().named.iter().any(|n| n == name);
+    let frame = shell
+        .target_frame()
+        .read(cx)
+        .scope()
+        .named
+        .iter()
+        .any(|n| n == name);
     super::used_by_sentence(users, frame)
 }
 
@@ -2711,7 +2717,7 @@ fn run_overwrite(shell: &mut ShellView, cx: &mut Context<ShellView>) -> bool {
         cx.notify();
         return false;
     }
-    let scope = shell.frame.read(cx).scope().clone();
+    let scope = shell.target_frame().read(cx).scope().clone();
     let config = shell.services.config.clone();
     let changed = draft_mut(shell).is_some_and(|draft| {
         scopes::overwrite_with(draft, &scope, &config);

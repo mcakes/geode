@@ -695,7 +695,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             };
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
-            let as_of = shell.read(cx).frame().read(cx).as_of().clone();
+            let as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
             match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
@@ -845,12 +845,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
-        let last = Rc::new(Cell::new(frame.read(cx).versions().config));
+        let last = Rc::new(Cell::new(frame.read(cx).config_version()));
         // Seeded with the key the factory was built from; `None` (a factory
         // built from an unknown config) lets the first reload through.
         let last_key = Rc::new(std::cell::RefCell::new(bridge.pricer_key.clone()));
         cx.observe(&frame, move |frame, cx| {
-            let now = frame.read(cx).versions().config;
+            let now = frame.read(cx).config_version();
             if now == last.get() {
                 return;
             }
@@ -1049,7 +1049,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         catalog_refresh.in_flight.set(None);
                         match outcome.snapshot {
                             Ok(snapshot) => {
-                                let current_as_of = shell.read(cx).frame().read(cx).as_of().clone();
+                                let current_as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
                                 diagnostics.update(cx, |d, cx| {
                                     let before = d.version();
                                     // A publication while reading schedules another read, but
@@ -3368,7 +3368,7 @@ role = "key"
         });
         let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
-        let before = frame.read_with(&vcx, |f, _| f.versions().data);
+        let before = frame.read_with(&vcx, |f, _| f.data_version());
 
         tx.try_send(DataEvent::Published {
             dataset: "pricer_sheets".into(),
@@ -3379,7 +3379,7 @@ role = "key"
         .unwrap();
         vcx.run_until_parked();
         assert_eq!(
-            frame.read_with(&vcx, |f, _| f.versions().data),
+            frame.read_with(&vcx, |f, _| f.data_version()),
             before,
             "a local publish is not a data change"
         );
@@ -3397,7 +3397,7 @@ role = "key"
         })
         .unwrap();
         vcx.run_until_parked();
-        assert_eq!(frame.read_with(&vcx, |f, _| f.versions().data), before + 1);
+        assert_eq!(frame.read_with(&vcx, |f, _| f.data_version()), before + 1);
     }
 
     /// A pricing outcome must reach the recording occupant, not merely survive
@@ -4368,7 +4368,8 @@ role = "key"
         let at = chrono::Utc::now();
         for offset in (0..8).rev() {
             frame.update(&mut vcx, |f, cx| {
-                f.set_as_of(AsOf::At(at - chrono::Duration::days(offset)));
+                f.shared_mut()
+                    .set_as_of(AsOf::At(at - chrono::Duration::days(offset)));
                 cx.notify();
             });
             vcx.run_until_parked();
@@ -4420,7 +4421,7 @@ role = "key"
         // Recovery from a stale in-flight result must not mask that contract.
         let later = at + chrono::Duration::days(1);
         frame.update(&mut vcx, |f, cx| {
-            f.set_as_of(AsOf::At(later));
+            f.shared_mut().set_as_of(AsOf::At(later));
             cx.notify();
         });
         vcx.run_until_parked();
@@ -5379,7 +5380,7 @@ role = "key"
         let first = next_catalog(&f);
         let at = chrono::Utc::now();
         frame.update(&mut vcx, |frame, cx| {
-            frame.set_as_of(AsOf::At(at));
+            frame.shared_mut().set_as_of(AsOf::At(at));
             cx.notify();
         });
         vcx.run_until_parked();

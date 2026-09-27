@@ -255,7 +255,7 @@ impl ChoiceDialogState {
 /// dialog state: a pick is a one-off event whose commit drops that state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
-    /// `Frame::set_active_slot`; `None` is the view default.
+    /// `FrameViewMut::set_active_slot`; `None` is the view default.
     Slot(Option<u8>),
     /// `ShellView::add_tile` of this kind.
     Kind(String),
@@ -347,7 +347,7 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
 /// toolbar readout's click.
 pub fn open_grouping(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let state = {
-        let frame = view.frame.read(cx);
+        let frame = view.target_frame().read(cx);
         ChoiceDialogState::grouping(frame.slots(), frame.active_slot())
     };
     open(view, state, window, cx);
@@ -455,7 +455,7 @@ pub(super) const SLOT_GONE: &str = "that grouping slot is no longer configured";
 fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Context<ShellView>) {
     match pick {
         Pick::Slot(slot) => {
-            let (changed, still_there) = shell.frame.update(cx, |f, cx| {
+            let (changed, still_there) = shell.target_frame().update(cx, |f, cx| {
                 let changed = f.set_active_slot(slot);
                 if changed {
                     cx.notify();

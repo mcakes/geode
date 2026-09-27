@@ -61,7 +61,7 @@ fn hovering_the_as_of_badge_names_the_selector_chord(cx: &mut gpui::TestAppConte
         )
         .expect("noon exists in every zone");
     frame.update(&mut vcx, |f, cx| {
-        if f.set_as_of(AsOf::At(at)) {
+        if f.shared_mut().set_as_of(AsOf::At(at)) {
             cx.notify();
         }
     });
@@ -140,7 +140,10 @@ fn typing_eod_and_enter_commits_eod_t_minus_one(cx: &mut gpui::TestAppContext) {
     let crate::shell::asof_rows::Commit::At(t) = expected else {
         panic!()
     };
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        AsOf::At(t)
+    );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("as-of-stripe").is_some());
@@ -158,7 +161,7 @@ fn the_list_takes_nav_keys_and_a_digit_jumps_on_an_empty_field(cx: &mut gpui::Te
     let s = shell.read_with(&vcx, |s, _| s.as_of_dialog.is_none());
     assert!(s, "a digit on an empty field committed and closed");
     assert!(matches!(
-        frame.read_with(&vcx, |f, _| f.as_of().clone()),
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
         AsOf::At(_)
     ));
 }
@@ -198,7 +201,7 @@ fn tab_opens_the_custom_field_up_steps_the_day_and_enter_commits(cx: &mut gpui::
     let clock = shell.read_with(&vcx, |s, cx| s.clock(cx));
     let expected = clock.resolve_local(after.date(), after.time()).unwrap();
     assert_eq!(
-        frame.read_with(&vcx, |f, _| f.as_of().clone()),
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
         AsOf::At(expected)
     );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
@@ -251,7 +254,10 @@ fn a_row_click_commits_it(cx: &mut gpui::TestAppContext) {
     let crate::shell::asof_rows::Commit::At(t) = expected else {
         panic!("row 1 expected to be an At commit")
     };
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        AsOf::At(t)
+    );
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
@@ -261,7 +267,7 @@ fn while_pinned_current_and_live_lead_and_live_returns_to_live(cx: &mut gpui::Te
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     vcx.simulate_keystrokes("enter"); // EOD T-1
     assert!(matches!(
-        frame.read_with(&vcx, |f, _| f.as_of().clone()),
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
         AsOf::At(_)
     ));
     vcx.simulate_keystrokes("alt-t");
@@ -269,7 +275,10 @@ fn while_pinned_current_and_live_lead_and_live_returns_to_live(cx: &mut gpui::Te
     assert_eq!(s.painted()[0].label, "current");
     assert_eq!(s.painted()[1].label, "live");
     vcx.simulate_keystrokes("down enter");
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::Live);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        AsOf::Live
+    );
 }
 
 #[gpui::test]
@@ -309,7 +318,10 @@ fn tab_then_escape_then_down_then_enter_commits_the_highlighted_row(cx: &mut gpu
     let crate::shell::asof_rows::Commit::At(t) = expected else {
         panic!("row {highlighted} expected to be an At commit")
     };
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        AsOf::At(t)
+    );
 }
 
 /// An unrecognized bare key while Custom is open must be claimed without reaching the
@@ -570,7 +582,7 @@ fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     vcx.simulate_keystrokes("enter"); // EOD T-1
-    let pinned = frame.read_with(&vcx, |f, _| f.as_of().clone());
+    let pinned = frame.read_with(&vcx, |f, _| f.shared().as_of().clone());
     assert!(matches!(pinned, AsOf::At(_)));
 
     vcx.update(|window, cx| {
@@ -578,14 +590,20 @@ fn frame_live_and_as_of_undo_still_dispatch(cx: &mut gpui::TestAppContext) {
             shell.dispatch(&ActionId("frame::live".to_string()), None, window, cx);
         });
     });
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::Live);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        AsOf::Live
+    );
 
     vcx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.dispatch(&ActionId("frame::as_of_undo".to_string()), None, window, cx);
         });
     });
-    assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), pinned);
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().as_of().clone()),
+        pinned
+    );
 }
 
 /// Clicking a Custom-field segment selects it, preserves input focus, and allows
@@ -680,7 +698,7 @@ fn the_as_of_chip_leads_the_bar_and_opens_the_selector(cx: &mut gpui::TestAppCon
         )
         .expect("noon exists in every zone");
     frame.update(&mut vcx, |f, cx| {
-        if f.set_as_of(AsOf::At(at)) {
+        if f.shared_mut().set_as_of(AsOf::At(at)) {
             cx.notify();
         }
     });

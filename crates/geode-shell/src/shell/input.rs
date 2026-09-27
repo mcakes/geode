@@ -291,7 +291,7 @@ impl ShellView {
         {
             // Activate a configured grouping slot. Empty slots leave the frame and
             // following tiles unchanged and do not notify.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.set_active_slot(Some(n)) {
                     cx.notify();
                 }
@@ -299,14 +299,14 @@ impl ShellView {
         } else if action.0 == "frame::slot_clear" {
             // ctrl+0: return every following tile to its view's own
             // grouping.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.set_active_slot(None) {
                     cx.notify();
                 }
             });
         } else if action.0 == "frame::scope_undo" {
             // Walk the bounded scope undo stack.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.undo_scope() {
                     cx.notify();
                 }
@@ -314,7 +314,7 @@ impl ShellView {
         } else if action.0 == "frame::scope_redo" {
             // mod+shift+z: walk the redo stack; cleared by the next
             // `set_scope`/`set_scope_in_session`.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.redo_scope() {
                     cx.notify();
                 }
@@ -322,7 +322,7 @@ impl ShellView {
         } else if action.0 == "frame::scope_clear" {
             // Palette-only (no chord — occasional deliberate act, not
             // muscle memory): clear the whole scope, itself undoable.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.clear_scope() {
                     cx.notify();
                 }
@@ -346,9 +346,9 @@ impl ShellView {
             // by the Scopes domain. Seed the naming prompt from the current frame scope.
             objectdialog::render::open_save_scope(self, window, cx);
         } else if let Some(name) = action.0.strip_prefix("scope::") {
-            // Load a saved scope through `Frame::set_scope`, making the change undoable.
+            // Load a saved scope through `FrameViewMut::set_scope`, making the change undoable.
             // These per-scope actions are palette-reachable and bindable by user keymaps.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if let Ok(true) = f.load_scope(name) {
                     cx.notify();
                 }
@@ -365,7 +365,7 @@ impl ShellView {
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.clear_expression() {
                     cx.notify();
                 }
@@ -430,15 +430,15 @@ impl ShellView {
             choicedialog::open_log_level(self, window, cx);
         } else if action.0 == "frame::live" {
             // Return to live and retain the previous as-of for `frame::as_of_undo`.
-            self.frame.update(cx, |f, cx| {
+            self.target_frame().update(cx, |f, cx| {
                 if f.set_as_of(AsOf::Live) {
                     cx.notify();
                 }
             });
         } else if action.0 == "frame::as_of_undo" {
             // Palette-only: swap back to the previous as-of — a toggle,
-            // not a stack (see `Frame::undo_as_of`).
-            self.frame.update(cx, |f, cx| {
+            // not a stack (see `FrameViewMut::undo_as_of`).
+            self.target_frame().update(cx, |f, cx| {
                 if f.undo_as_of() {
                     cx.notify();
                 }
@@ -670,7 +670,14 @@ impl ShellView {
         {
             return;
         }
-        let frame_text = self.frame.read(cx).scope().text.clone().unwrap_or_default();
+        // The scope field is the active workspace's, as its subscription is.
+        let frame_text = self
+            .active_frame()
+            .read(cx)
+            .scope()
+            .text
+            .clone()
+            .unwrap_or_default();
         if self.filter_input.read(cx).value().as_ref() != frame_text.as_str() {
             self.filter_input.update(cx, |i, cx| {
                 i.set_value(frame_text, window, cx);
@@ -832,7 +839,9 @@ impl ShellView {
                     self.filter_input.update(cx, |i, cx| {
                         i.set_value(base.clone(), window, cx);
                     });
-                    self.frame.update(cx, |f, cx| {
+                    // The session opened on the active lane (the field's
+                    // `Focus` subscription); the revert ends it there.
+                    self.active_frame().update(cx, |f, cx| {
                         let mut reverted = f.scope().clone();
                         reverted.text = (!base.trim().is_empty()).then_some(base);
                         let changed = f.set_scope_in_session(reverted);

@@ -274,9 +274,8 @@ impl Editor {
 
 pub struct PricerTile {
     pub(crate) id: TileId,
-    // Retain the frame alongside the tile; the flip-barrier observer in `new`
-    // receives its own handle for updates.
-    #[allow(dead_code)]
+    // The flip-barrier observer in `new` reads the lane through this handle;
+    // the observed entity alone would answer for the shared lane.
     frame: FrameRef,
     pub(crate) data: DataHandle,
     pub(crate) shared: Rc<Shared>,
@@ -4226,11 +4225,12 @@ pub(crate) mod tests {
     fn the_tile_answers_a_flip_barrier_it_has_nothing_coming_for(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         h.frame.update(&mut vcx, |f, cx| {
-            f.set_scope(geode_core::scope::Scope {
+            f.shared_mut().set_scope(geode_core::scope::Scope {
                 text: Some("spx".into()),
                 ..Default::default()
             });
-            f.open_flip([QueryKey(TILE)], std::time::Instant::now());
+            f.shared_mut()
+                .open_flip([QueryKey(TILE)], std::time::Instant::now());
             cx.notify();
         });
         assert!(!h.frame.read_with(&vcx, |f, _| f.barrier_open()));
@@ -6679,14 +6679,14 @@ pub(crate) mod tests {
                 "no sweep line for `:{word}`"
             );
         }
-        let before = h.frame.read_with(&vcx, |f, _| f.versions());
+        let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         for line in lines {
             assert!(
                 crate::core::commands::parse(line).is_ok(),
                 "`{line}` no longer parses"
             );
             let _ = h.command(&mut vcx, line);
-            let after = h.frame.read_with(&vcx, |f, _| f.versions());
+            let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
             assert_eq!(
                 (after.scope, after.grouping, after.as_of),
                 (before.scope, before.grouping, before.as_of),

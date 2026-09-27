@@ -231,8 +231,8 @@ fn open_barrier_on_as_of(
 ) {
     let keys = keys.to_vec();
     h.frame.update(vcx, |f, cx| {
-        f.set_as_of(AsOf::At(at));
-        f.open_flip(keys, std::time::Instant::now());
+        f.shared_mut().set_as_of(AsOf::At(at));
+        f.shared_mut().open_flip(keys, std::time::Instant::now());
         cx.notify();
     });
 }
@@ -1075,11 +1075,11 @@ fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
             "no sweep line for `:{word}`"
         );
     }
-    let before = h.frame.read_with(&vcx, |f, _| f.versions());
+    let before = h.frame.read_with(&vcx, |f, _| f.shared().versions());
     for line in lines {
         assert!(commands::parse(line).is_ok(), "`{line}` no longer parses");
         let _ = vcx.update(|window, cx| h.content.command(line, window, cx));
-        let after = h.frame.read_with(&vcx, |f, _| f.versions());
+        let after = h.frame.read_with(&vcx, |f, _| f.shared().versions());
         assert_eq!(
             (after.scope, after.grouping, after.as_of),
             (before.scope, before.grouping, before.as_of),
@@ -1303,7 +1303,7 @@ fn a_range_change_refetches_a_pair_whose_fetch_has_not_answered(cx: &mut gpui::T
     // An unrelated frame notification before the first fetch returns must not
     // resubmit that span. With no acted query yet, requery can still be needed.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
@@ -1555,11 +1555,12 @@ fn the_tile_follows_as_of_only_and_stages_under_an_open_barrier(cx: &mut gpui::T
     h.deliver_series(&mut vcx, tag, result_with(&[1], 5));
     // A scope bump: nothing, and it must not hold the barrier either.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_scope(geode_core::scope::Scope {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
             text: Some("spx".into()),
             ..Default::default()
         });
-        f.open_flip([QueryKey(TILE)], std::time::Instant::now());
+        f.shared_mut()
+            .open_flip([QueryKey(TILE)], std::time::Instant::now());
         cx.notify();
     });
     assert!(h.series_request().is_none(), "scope is not followed");
@@ -2570,7 +2571,7 @@ fn an_absolute_range_reopens_on_the_dates_it_stores(cx: &mut gpui::TestAppContex
     // An as-of inside the stored span clips queries, but must not rewrite the
     // To date merely because the editor opens and commits.
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2026-01-20T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();
@@ -3665,7 +3666,7 @@ fn an_as_of_change_refreshes_an_open_frequency_menus_cap_reasons(cx: &mut gpui::
         "six years of 5m is over the cap"
     );
     h.frame.update(&mut vcx, |f, cx| {
-        f.set_as_of(AsOf::At(
+        f.shared_mut().set_as_of(AsOf::At(
             "2020-06-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap(),
         ));
         cx.notify();

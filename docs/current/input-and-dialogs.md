@@ -275,7 +275,7 @@ described in [features](features.md#autosized-columns).
 
 ## Scope text and stack selection
 
-The toolbar scope field edits `Frame::scope().text` live. Focus captures the
+The toolbar scope field edits `FrameView::scope().text` live. Focus captures the
 entry text and opens a scope session; text changes coalesce into one undo
 entry. Enter and blur keep the result and end the session. Escape restores
 the entry text while still inside the session, then ends it and returns focus
