@@ -191,6 +191,109 @@ to resolve them against a delivered grid. Attribute serialization has a type
 ambiguity: a text attribute that looks like an ISO date restores as a Date.
 The saved draft therefore does not preserve every attribute value's type.
 
+### Selection
+
+The panel's grid selection follows the [blotter's](#selection): `V`
+(`marketdata::visual_rows`) selects whole rows and `v`
+(`marketdata::visual_block`) a rectangle of cells; the other key switches
+kind at the same anchor and the same key again clears. While a selection is
+live the tile reports `mode == visual` (see [context
+predicates](keymaps.md#context-predicates)); motions extend it and clamp at the
+grid's edges, never wrapping and never entering the header attribute strip.
+The strip and the row-label column are never members. The first `escape`
+clears the selection alone.
+
+The anchor is the row's label and the column's name, so a redelivery, an
+inserted row, or a rebase keeps the same cells selected. An anchor no longer
+painted clears the selection with "selection cleared: anchor row no longer
+shown" (or "anchor column", for a block); no neighbour is guessed. Switching
+underlying clears the selection, because the next document's terms can carry
+the same labels and a selection must never carry over to another document. A
+click on a header attribute leaves the grid and clears it without a notice.
+
+The selection is tinted with the theme's selection color under each cell's
+own edited, sent, or deleted fill, and the cursor keeps its border inside the
+tint. A row selection tints its labels and every column. The footer shows the
+extent alone (`2 rows × 3 cols`), with no totals: a vol or forward ladder does
+not add up.
+
+In visual mode the verbs are single keys; the doubled normal-mode forms
+(`y y`, `y c`, `d d`) are not bound there.
+
+- `y` copies the selection as TSV and ends it. A row selection copies a
+  header line (the row-axis name where labels are shown, then every column)
+  and each row as `y y` would; a block copies its own columns' header and
+  cells, with no label.
+- `d` deletes every row of a row selection as one draft change and ends the
+  selection. Over a block it refuses with `d deletes rows — use V` and keeps
+  the selection, rather than deleting whole rows the block only partly covers.
+- `:bump <delta>` with no axis moves every selected number by `delta` and
+  keeps the selection; `:bump <delta> row|col` keeps its cursor-relative
+  meaning and ignores the selection. It notices `bumped N cells`.
+- `i` or `enter` opens the editor on the cursor cell, and refuses exactly when
+  that cell refuses (a deleted row, a document with nothing to edit); it does
+  not look for another member.
+
+A row selection's edits skip each term's leading slice values (forward, atm,
+skew), which is `:bump row`'s rule: a term's ladder moves without its
+forward. A block is exactly its rectangle. The copy and the tint still cover
+the slice values.
+
+**One typed value.** With a selection live, committing the editor — typed
+text, a date field, or a choice picked from the popup — writes the value to
+every selected cell that accepts it. A number cell parses it by its column's
+declared type, a date cell as a date, a text cell as trimmed text (blank is
+refused where the column is required), and a choice cell only when it names an
+option exactly: a bulk write has no popup to rank a near miss. Deleted rows
+and cells that refuse are skipped and counted, `set 5 cells, skipped 3 (2
+deleted, 1 wrong type)`. Every member is judged before any write, so when
+nothing accepts, the commit is refused with the editor still open and the
+draft untouched. On a text or date cursor cell an untouched `enter` writes
+the seeded value across the selection. The selection stays after a
+commit.
+
+**Live steps.** On a number cursor cell with its text untouched, the editor's
+arrows (`up`/`down`, `shift+` for ten) step every selected number in the
+draft at once, so the grid shows the block as it moves; the header reads
+`stepped N cells +S` with the running total. Each cell moves from its exact
+current value by one unit of its column's displayed places, or by 1 on an
+integer column, and is never rounded to the painted grid: snapping would
+silently rewrite each cell's unpainted decimals. Empty, deleted, and
+non-number cells are skipped and counted. Each press is all-or-nothing: if
+any cell refuses (a fractional step on an integer column, an overflow),
+nothing is written. A step refuses while the draft is Behind or its upload
+echo differs, as every edit does.
+
+- `enter` on the untouched text keeps the steps and the selection.
+- `escape` restores the draft exactly as `i` found it, provided the steps are
+  still its last change and the painted document has not moved; a delivery
+  held Behind meanwhile stays reported. A click elsewhere, a row verb, or a
+  switch of underlying closes the editor the same way. If an automatic rebase
+  moved the painted document, the steps are kept and the header says `steps
+  kept: the document moved`, because the pre-edit draft is keyed to a grid
+  no longer shown. If anything else changed the draft meanwhile (a revert, an
+  automatic replace, `:set`), the editor closes silently and leaves the draft
+  as it is.
+- Typing makes the edit absolute. The typed value replaces the steps; a cell
+  that refuses it returns to its pre-`i` value rather than keeping a
+  half-step. From then on the arrows nudge the editor's text alone.
+
+**Mouse.** A shift+click makes a block from the cursor as it was before the
+press to the clicked cell, or a row selection when it lands on a row label
+(on a panel with hidden labels, the line-number gutter). A drag selects
+continuously from the cell it started on; where the press landed decides the
+kind, and a drag that did not start on a cell, label, or gutter selects
+nothing. With a selection live, shift+click extends it. A plain click anywhere
+on a row, including beside its cells, clears the selection and moves the
+cursor, so a double-click with a selection live opens a single-cell editor. A
+press inside the open editor's own cell belongs to the editor (caret
+placement, text selection, a date segment or separator): it neither cancels
+the edit nor starts a selection; `escape` cancels.
+
+Limitations: a selection is one contiguous row range or rectangle; there is
+no paste; `space` is not bound in visual mode, and the choice step reached
+from the palette acts on the cursor cell alone; the footer shows no totals.
+
 ### Uploads
 
 `:upload [target]` and the action list's `Upload` row send the edited document

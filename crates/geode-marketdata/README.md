@@ -27,10 +27,12 @@ Current behavior and rationale:
 | `core::spec`, `core::matrix` | Panel vocabulary and prepared grids built from a snapshot plus draft. |
 | `core::draft` | Edits restored/rebased by row and column labels, including same-date group sizes that guard dividend rebases. `DocumentBase` (source time and store generation) is the base a delivery is compared against. |
 | `core::upload` | Typed whole-document assembly and row-order-independent echo comparison; minted labels are ignored and floats allow one ULP. |
-| `core::cursor`, `core::menu` | Grid navigation and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
+| `core::cursor`, `core::menu` | Grid navigation (wrapping, and `step_clamped` for a live selection) and available actions. Numeric nudging and date fields are re-exported from `geode-core` and `geode-widgets`. |
+| `core::bulk` | Selection-wide edit rules: whether a typed value lands in a cell of each kind, one arrow step's delta per column, and the `set`/`stepped` notices that count skips by reason. |
 | `commands` | The `:` line: `:rebase`, `:revert`, `:auto`, `:bump`, `:upload` and the rest, parsed to data. |
 | `header` | Prepared identity, attributes, draft/upload feedback, source time, shared date-field rendering, and the menu control. |
 | `tile` | `MarketDataTile`: requests one document by key through `DataHandle`, stages under the barrier, owns the cursor, the editor, the draft and the parked drafts per underlying. |
+| `tile::select` | The `V`/`v` grid selection: its state doors, label-anchored resolution, and every verb that takes it as operand (`y`, `d`, `:bump`, the bulk commit, the live step and its undo). |
 | `delegate` | `MatrixDelegate`, the `TableDelegate` over gpui-component's table. |
 | `popup` | Action menu, underlying picker, and cell-choice state and rendering. Menu/picker anchor at the header; choices anchor beneath their target cell. |
 | `content` | The `TileContent` wrapper and `MarketDataFactory`, one per `PanelSpec`, plus the module's `ACTIONS` and `DEFAULT_KEYMAP` fragment. |
@@ -61,9 +63,13 @@ cargo bench -p geode-marketdata    # matrix model and draft
 - `close_popup_with_window` is the one popup closer; it and `close_editor`
   blur only when their own field is focused, and `close_editor` blurs
   before dropping the `InputState`, in that order and both halves.
-- Grid and attribute selection close the previous editor; double-click opens
-  the selected value. Date-segment clicks are consumed within the field so they
-  select a segment without closing it. Header controls allow propagation for
+- Grid and attribute clicks close the previous editor; double-click opens
+  the selected value. A press inside the open editor's own cell (a value cell
+  or a row label) belongs to the editor: the delegate reports no pointer event
+  for it and the tile ignores the table's `SelectCell` on that cell, so caret
+  placement never cancels an edit or drops a provisional row. Date-segment
+  clicks are consumed within the field so they select a segment without
+  closing it. Header controls allow propagation for
   shell focus handling; popup row presses are consumed above the grid.
 - Cell paint precedence is deleted, sent, inserted, then edited. Deleted rows
   use muted strike-through with no fill; other marked cells retain foreground
@@ -87,12 +93,31 @@ cargo bench -p geode-marketdata    # matrix model and draft
   duplicate) with no underlying opens the underlying picker at once; a
   restored panel does not. Every panel kind accepts an underlying launch
   context.
+- The grid selection is anchored by row label and column name and
+  re-resolved in `sync_cursor` on every cursor or model change; a lost anchor
+  clears it with a notice, never a nearest-row guess. `cursor_to_attr` and
+  `set_key` clear it first. `Resolved` and the footer extent text are
+  prepared at those change points; render only reads them.
+- A `Rows` selection's edits skip the leading `slice_columns`
+  (`selection_cells`); a `Block` is its rectangle. Every selection edit is
+  gated by `held_refusal` then `edit_base`, and judges every member before it
+  writes any: a step is all-or-nothing, and a bulk commit that nothing accepts
+  is refused with the editor open.
+- A selection editor carries a `Bulk` only on a number cursor cell. It holds
+  the draft as `i` found it (`before`), as the last step left it (`after`),
+  and the painted base. Closing the editor restores `before` only while the
+  draft's work still equals `after` and the painted base is unchanged; a
+  moved base keeps the steps with `steps kept: the document moved`, any other
+  draft change closes silently. Every commit that keeps its value takes the
+  `Bulk` out before `close_editor`, which would otherwise undo it.
 
 ## Input and popup contracts
 
-The panel reports `normal`, `menu`, or `insert` in the shared `marketdata`
-context. Editors, underlying and choice inputs, and upload confirmation use
-insert mode. Insert bindings leave shell chords available; confirmation consumes
+The panel reports `normal`, `visual`, `menu`, or `insert` in the shared
+`marketdata` context, with `select == rows|block` added whenever a selection
+is live. An open editor or popup outranks the selection: a selection editor
+is `insert`. Editors, underlying and choice inputs, and upload confirmation
+use insert mode. Insert bindings leave shell chords available; confirmation consumes
 every key, including chords, while armed.
 
 Action-menu keyboard motion counts enabled actions and skips disabled rows,

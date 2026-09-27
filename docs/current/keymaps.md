@@ -98,12 +98,24 @@ blotter && mode == normal
 mode != insert
 ```
 
-A module can push more than one key onto its own frame. The blotter's
-`key_context` pushes `mode == visual` while a grid selection is live (the
-same flag `mode == normal` above tests for its absence) and, only then, a
-second `select == rows` or `select == block` pair naming the selection's
-kind — `blotter && select == rows` reaches only while a `V` row selection is
-live, never a `v` block one.
+A module can push more than one key onto its own frame. The blotter's and the
+market-data panel's `key_context` push `mode == visual` while a grid selection
+is live (the same flag `mode == normal` above tests for its absence) and, only
+then, a second `select == rows` or `select == block` pair naming the
+selection's kind — `blotter && select == rows` reaches only while a `V` row
+selection is live, never a `v` block one.
+
+The market-data panel reports one of `normal`, `visual`, `menu`, or `insert`.
+An open editor, picker, choice field, or upload confirmation is `insert` even
+while a selection is live, so the editor's `enter`, `escape`, and arrows keep
+their insert-mode meaning over a selection; the action menu is `menu`. Its
+`marketdata && mode == visual` block repeats the normal motions and binds the
+selection verbs as single keys — `y` (`marketdata::yank`), `d`
+(`marketdata::delete_row`), `i` and `enter` (`marketdata::edit`), `v`, `V`,
+and `escape` — because a doubled normal-mode form (`y y`, `y c`, `d d`) would
+leave the first press waiting for a second. Normal-mode keys the block does
+not list, such as `space`, `o`, `u`, `n`, and `.`, have no panel binding while
+a selection is live; the palette still reaches their actions.
 
 A flag matches when any stack frame carries it. A comparison uses the innermost
 frame defining its key. Both `==` and `!=` are false when the key is absent;
