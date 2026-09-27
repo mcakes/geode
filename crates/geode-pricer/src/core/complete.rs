@@ -553,10 +553,13 @@ mod tests {
     #[test]
     fn a_range_that_does_not_fit_the_line_writes_nothing() {
         let u = unds(&["SPX"]);
-        let mut c = refreshed("xx S", 4, &u);
-        assert_eq!(c.pick("xx é", 0), None, "the end falls inside é");
-        let mut c = refreshed("xx SP", 5, &u);
-        assert_eq!(c.pick("xx", 0), None, "past the end");
+        // The underlying slot, so row 0 exists and only the fit refuses.
+        let mut c = refreshed("S", 1, &u);
+        assert_eq!(c.candidate_count(), 1);
+        assert_eq!(c.pick("é", 0), None, "the end falls inside é");
+        let mut c = refreshed("SP", 2, &u);
+        assert_eq!(c.candidate_count(), 1);
+        assert_eq!(c.pick("S", 0), None, "past the end");
     }
 
     #[test]
