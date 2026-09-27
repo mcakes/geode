@@ -248,6 +248,9 @@ pub(crate) struct Bulk {
     /// bypassed the counter still shows here, and rolling back over it
     /// would put the steps' inverses on cells something else wrote.
     pub(crate) after: Vec<(LineId, StepMark)>,
+    /// Each stepped line's values before its first step, so a keep of
+    /// steps that net to nothing records no entry.
+    pub(crate) before: Vec<(LineId, StepMark)>,
     /// The step notice last shown, withdrawn by a rollback: the count
     /// would describe steps that are no longer in the sheet.
     pub(crate) notice: Option<SharedString>,
@@ -649,11 +652,11 @@ impl PricerTile {
         .detach();
         // Release flushes a dirty sheet once, cancels pricing, and releases its name
         // for another tile to open.
-        cx.on_release(|this: &mut PricerTile, _cx| {
+        cx.on_release(|this: &mut PricerTile, cx| {
             // Flush edits still waiting on the timer and retry failed or refused
             // saves. Queued, unanswered saves already belong to the writer.
             // `save_now` leaves a blocked fallback unpublished.
-            this.flush_save();
+            this.flush_save(cx);
             this.data.cancel(QueryKey(this.id.0));
             this.shared.open.borrow_mut().remove(&this.sheet.name);
             // A rename not yet confirmed keeps its old document.
@@ -1342,6 +1345,7 @@ impl PricerTile {
                     undo: Undo { inverse: vec![] },
                     seq: self.edit_seq,
                     after: Vec::new(),
+                    before: Vec::new(),
                     notice: None,
                 });
                 let input = cx.new(|cx| InputState::new(window, cx));
@@ -1423,26 +1427,32 @@ impl PricerTile {
             self.commit_date(window, cx);
             return;
         }
-        // A live step's editor: untouched text keeps the steps as one undo
-        // entry; typed text is absolute, so the steps come out first and
-        // the typed value replaces them rather than landing on top.
-        let stepped = match &self.editor {
+        // A live step's editor. Untouched text keeps the steps as one undo
+        // entry and writes nothing more — with no step taken, nothing at
+        // all: the shown value written to every target would be a
+        // plausible wrong block from a no-op gesture. Typed text is
+        // absolute, so any steps come out first and the typed value
+        // replaces them rather than landing on top.
+        let untouched = match &self.editor {
             Some(Editor::Text {
                 input,
                 bulk: Some(b),
                 ..
-            }) if !b.undo.inverse.is_empty() => Some(input.read(cx).value().as_ref() == b.seeded),
+            }) => Some(input.read(cx).value().as_ref() == b.seeded),
             _ => None,
         };
-        if let Some(untouched) = stepped
-            && let Some(bulk) = self.take_bulk()
-        {
-            self.settle_bulk(bulk, untouched, cx);
+        if let Some(untouched) = untouched {
             if untouched {
+                if let Some(bulk) = self.take_bulk() {
+                    self.settle_bulk(bulk, true, cx);
+                }
                 self.close_editor(window, cx);
                 self.rebuild_chrome();
                 cx.notify();
                 return;
+            }
+            if let Some(bulk) = self.take_bulk() {
+                self.settle_bulk(bulk, false, cx);
             }
         }
         // The editor's borrow ends inside this block, before any `self` call.
@@ -1915,17 +1925,25 @@ impl PricerTile {
     ///
     /// An open live step is abandoned first, as `escape` would: a close
     /// or quit has no `escape` after it, and saving then would persist
-    /// steps the trader never kept.
-    pub(crate) fn flush_save(&mut self) {
+    /// steps the trader never kept. Its editor closes with it: the field
+    /// still shows stepped text, and a later `enter` would commit that
+    /// text absolutely. Answers whether it closed an editor, so a caller
+    /// holding a `Context` rebuilds the grid off the rolled-back sheet.
+    pub(crate) fn flush_save(&mut self, cx: &mut App) -> bool {
+        let mut closed = false;
         if let Some(bulk) = self.take_bulk()
-            && self.take_back_steps(bulk)
+            && !bulk.undo.inverse.is_empty()
         {
-            self.dirty = true;
+            if self.take_back_steps(bulk) {
+                self.dirty = true;
+            }
+            closed = self.release_editor(cx);
         }
         self.save_task = None;
         if self.dirty || self.save_failed {
             let _ = self.save_now();
         }
+        closed
     }
 
     /// The whole sheet, once. An empty sheet publishes nothing (the last
@@ -3538,10 +3556,18 @@ impl PricerTile {
         {
             self.undo.record(bulk.undo);
         }
+        if self.release_editor(cx) {
+            self.footer = Some(MOVED.into());
+        }
+    }
+
+    /// Drop the editor where no `Window` is at hand, blurring it later
+    /// through the window it opened in if it still owns focus (a newer
+    /// field is never blurred). Answers whether there was one.
+    fn release_editor(&mut self, cx: &mut App) -> bool {
         let Some(editor) = self.editor.take() else {
-            return;
+            return false;
         };
-        self.footer = Some(MOVED.into());
         let focus = editor.focus_handle(cx);
         drop(editor);
         if let Some(handle) = self.editor_window {
@@ -3553,6 +3579,7 @@ impl PricerTile {
                 });
             });
         }
+        true
     }
 
     pub(crate) fn rebuild_chrome(&mut self) {

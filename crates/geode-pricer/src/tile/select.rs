@@ -622,6 +622,10 @@ impl PricerTile {
                 _ => None,
             })
             .collect();
+        let before: Vec<(LineId, StepMark)> = touched
+            .iter()
+            .map(|&r| (self.sheet.id(r), self.step_mark(r)))
+            .collect();
         let undo = match self.apply_batch(edits) {
             Ok(Some(u)) => u,
             Ok(None) => return Some(()),
@@ -633,11 +637,39 @@ impl PricerTile {
                 return self.refuse_step(e.to_string(), cx);
             }
         };
-        self.after_edit(cx);
-        let marks: Vec<(LineId, StepMark)> = touched
+        let after: Vec<(LineId, StepMark)> = touched
             .into_iter()
             .map(|r| (self.sheet.id(r), self.step_mark(r)))
             .collect();
+        // The step's inverse joins the bulk BEFORE the rebuild: a rebuild
+        // that drops the editor (`follow_editor`) records the bulk's
+        // inverses, and one not yet in it would leave this step in the
+        // sheet with no history.
+        let Some(Editor::Text {
+            bulk: Some(bulk), ..
+        }) = &mut self.editor
+        else {
+            self.undo.record(undo);
+            self.after_edit(cx);
+            return Some(());
+        };
+        let mut inverse = undo.inverse;
+        inverse.append(&mut bulk.undo.inverse);
+        bulk.undo.inverse = inverse;
+        bulk.steps += steps;
+        for (id, mark) in before {
+            if !bulk.before.iter().any(|(m, _)| *m == id) {
+                bulk.before.push((id, mark));
+            }
+        }
+        for (id, mark) in after {
+            match bulk.after.iter_mut().find(|(m, _)| *m == id) {
+                Some(slot) => slot.1 = mark,
+                None => bulk.after.push((id, mark)),
+            }
+        }
+        let total = bulk.steps;
+        self.after_edit(cx);
         // The field follows its own cell: the step moved it too.
         let reseed = self.sheet.index_of(line).and_then(|row| {
             let format = &self.plan.columns.get(self.cursor.col)?.format;
@@ -646,9 +678,6 @@ impl PricerTile {
                 _ => None,
             }
         });
-        if let Some(text) = &reseed {
-            input.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
-        }
         let seq = self.edit_seq;
         let Some(Editor::Text {
             bulk: Some(bulk),
@@ -658,28 +687,21 @@ impl PricerTile {
         else {
             return Some(());
         };
-        let mut inverse = undo.inverse;
-        inverse.append(&mut bulk.undo.inverse);
-        bulk.undo.inverse = inverse;
         bulk.seq = seq;
-        bulk.steps += steps;
-        for (id, mark) in marks {
-            match bulk.after.iter_mut().find(|(m, _)| *m == id) {
-                Some(slot) => slot.1 = mark,
-                None => bulk.after.push((id, mark)),
-            }
-        }
-        if let Some(text) = reseed {
+        if let Some(text) = &reseed {
             // A package cell's commit checks the text it opened on; the
             // step changed that text, not the trader.
             if opened.is_some() {
                 *opened = Some(text.clone());
             }
-            bulk.seeded = text;
+            bulk.seeded = text.clone();
         }
-        let notice: SharedString = step_notice(stepped, bulk.steps, &skips).into();
+        let notice: SharedString = step_notice(stepped, total, &skips).into();
         bulk.notice = Some(notice.clone());
         self.notice = Some(notice);
+        if let Some(text) = reseed {
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
         self.sync_editor(cx);
         Some(())
     }
@@ -709,7 +731,16 @@ impl PricerTile {
     /// the rollback's own save replaces them.
     pub(crate) fn settle_bulk(&mut self, bulk: Bulk, keep: bool, cx: &mut Context<Self>) {
         if keep {
-            if !bulk.undo.inverse.is_empty() {
+            // Steps that net to nothing (up then down) leave every stepped
+            // line as `i` found it: an entry for them would be an undo
+            // that changes nothing.
+            let net_zero = bulk.steps == 0
+                && bulk.before.iter().all(|(id, mark)| {
+                    self.sheet
+                        .index_of(*id)
+                        .is_some_and(|r| self.step_mark(r) == *mark)
+                });
+            if !bulk.undo.inverse.is_empty() && !net_zero {
                 self.undo.record(bulk.undo);
             }
             return;

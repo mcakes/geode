@@ -676,7 +676,9 @@ impl PricerFactory {
     pub fn flush_all(&self, cx: &mut App) {
         for tile in self.live_tiles() {
             tile.update(cx, |t, cx| {
-                t.flush_save();
+                if t.flush_save(cx) {
+                    t.rebuild(cx);
+                }
                 t.rebuild_chrome();
                 cx.notify();
             });

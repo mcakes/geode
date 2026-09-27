@@ -653,7 +653,9 @@ fn an_unchanged_value_over_a_selection_is_no_undo_entry(cx: &mut gpui::TestAppCo
     h.dispatch(&mut vcx, "visual_rows", None);
     h.dispatch(&mut vcx, "down", None);
     h.dispatch(&mut vcx, "edit", None);
-    set_editor(&h, &mut vcx, "1");
+    // Typed, not the untouched `1` the field opened on (which writes
+    // nothing): the same value in another spelling.
+    set_editor(&h, &mut vcx, "01");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.mode(&mut vcx), "visual", "the editor closed");
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
@@ -734,7 +736,8 @@ fn an_unchanged_package_qty_over_a_selection_keeps_its_legs_weighted(
     assert_eq!(opened, "-5");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(leg_qtys(&h, &vcx, 1), [-5, 5], "not -5/-5");
-    assert_eq!(notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+    assert_eq!(notice(&h, &vcx), None, "an untouched enter writes nothing");
+    assert_eq!(editor_text(&h, &vcx), None, "and closes the editor");
     assert!(!can_undo(&h, &vcx), "no edit, no undo entry");
 }
 
@@ -1139,4 +1142,50 @@ fn a_package_qty_stepping_to_zero_refuses_the_whole_press(cx: &mut gpui::TestApp
         "the line's 1 → 2 does not land either"
     );
     assert_eq!(h.footer(&vcx).as_deref(), Some("quantity must not be zero"));
+}
+
+#[gpui::test]
+fn an_untouched_enter_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx); // the cursor on the 4000 P
+    h.prices(); // drains the opening requests
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "not the cursor's 4000");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4000");
+    assert!(!can_undo(&h, &vcx), "no undo entry");
+    assert!(h.prices().is_empty(), "nothing repriced");
+}
+
+#[gpui::test]
+fn steps_that_net_to_nothing_keep_no_undo_entry(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "insert_down", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None);
+    assert!(
+        !can_undo(&h, &vcx),
+        "an undo that changes nothing is no entry"
+    );
+}
+
+#[gpui::test]
+fn a_flush_mid_step_closes_the_editor_on_the_rolled_back_sheet(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx);
+    h.dispatch(&mut vcx, "insert_up", None);
+    vcx.update(|_, cx| h.factory.flush_all(cx));
+    assert_eq!(
+        editor_text(&h, &vcx),
+        None,
+        "no field left holding stepped text for a later enter"
+    );
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000", "the grid is rebuilt");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
+    assert!(!can_undo(&h, &vcx));
 }
