@@ -148,7 +148,11 @@ fn suggestions(slot: Slot, inputs: &Inputs) -> Vec<Suggestion> {
         Slot::Expiry => {
             let mut out = Vec::with_capacity(12);
             let (mut y, mut m) = (inputs.today.year(), inputs.today.month());
-            while out.len() < 8 {
+            // Bounded: a month with no third Friday cannot spin the loop.
+            for _ in 0..24 {
+                if out.len() == 8 {
+                    break;
+                }
                 if let Some(d) = third_friday(y, m).filter(|d| *d >= inputs.today) {
                     let yy = y.rem_euclid(100);
                     out.push(s(
@@ -397,8 +401,10 @@ mod tests {
 
     #[test]
     fn a_caret_inside_a_character_clamps_back() {
-        let line = "SPé";
-        assert_eq!(slot_at(line, 3), (Slot::Underlying, 0..4));
+        // An expiry token, so the caret is sliced at: byte 6 falls inside
+        // `é` (5..7) and clamps to 5, whose `/` part is `Zé` (4..7).
+        let line = "SPX Zé/H";
+        assert_eq!(slot_at(line, 6), (Slot::Expiry, 4..7));
     }
 
     #[test]

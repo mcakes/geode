@@ -19862,6 +19862,18 @@ run_mutation "pricer complete: a stale range is sliced" \
   '        if false {' \
   geode-pricer a_range_that_does_not_fit_the_line_writes_nothing
 
+# A caret inside a character clamps back to a boundary before a slash
+# token is sliced at it; unclamped, the slice panics.
+run_mutation "pricer complete: a caret inside a character is not clamped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    while !line.is_char_boundary(caret) {
+        caret -= 1;
+    }' \
+  '    while false {
+        caret -= 1;
+    }' \
+  geode-pricer a_caret_inside_a_character_clamps_back
+
 run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
