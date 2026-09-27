@@ -721,3 +721,107 @@ fn picking_the_toggle_row_over_a_dialog_does_not_reopen_the_palette(cx: &mut gpu
     assert_eq!(input_text(&shell, &mut vcx), "ab");
     assert!(dialog_filter_is_focused(&shell, &mut vcx));
 }
+
+/// `test_services` with a `datasets` doc naming one column (`book`), for a
+/// reload test that adds a second column while a `ScopeExpr` dialog
+/// referencing it is covered by another dialog.
+fn services_with_one_dataset_column() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// `services_with_one_dataset_column`'s `datasets` doc with `zzcol` added,
+/// for `apply_reload` to pick up.
+fn config_with_a_second_dataset_column() -> Config {
+    Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                 [risk.columns.zzcol]\ntype = \"utf8\"\nrole = \"attribute\"\ngrain = \"position\"\n",
+            )
+            .unwrap(),
+        ],
+        desk: None,
+        user: None,
+    })
+}
+
+/// A hot reload that adds a dataset column must refresh a COVERED
+/// `ScopeExpr` dialog's suggestions too, not only the top dialog's:
+/// `hot_reload`'s `pickable_changed` branch used to rebuild only
+/// `top_kind()`'s completion, so a covered expression field kept its stale
+/// "unknown column" warning until its own next keystroke.
+#[gpui::test]
+fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell_with(
+        cx,
+        services_with_one_dataset_column(),
+        "frame::scope_expression",
+    );
+    vcx.simulate_input("zzcol = 'x'");
+    vcx.run_until_parked();
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_expr_dialog
+            .as_ref()
+            .unwrap()
+            .completion
+            .warning()
+            .is_some()),
+        "zzcol is not yet a known column, so the field should warn"
+    );
+
+    dispatch_action(&shell, "settings::open", &mut vcx);
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::ScopeExpr, DialogKind::Settings]
+    );
+
+    shell.update(&mut vcx, |s, cx| {
+        s.apply_reload(config_with_a_second_dataset_column(), cx)
+    });
+    // Still covered by Settings: the fix rebuilds it at reload time, not at
+    // reveal, so the warning must already be gone here.
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_expr_dialog
+            .as_ref()
+            .unwrap()
+            .completion
+            .warning()
+            .is_none()),
+        "a covered dialog's suggestions must refresh at reload, while still covered"
+    );
+
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::ScopeExpr]);
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .scope_expr_dialog
+            .as_ref()
+            .unwrap()
+            .completion
+            .warning()
+            .is_none()),
+        "the covered dialog's suggestions must refresh from the reload, \
+         not only from its own next keystroke"
+    );
+}
