@@ -134,11 +134,11 @@ In `handle_key_down`'s modal branch (`shell/input.rs`):
    `opens_dialog`. Then stop propagation.
 3. Otherwise, an unclaimed Escape pops one level through `close_modal`.
 
-`ActionDef` gains `opens_dialog: bool`. Every action whose dispatch opens a
-shell dialog sets it where it is registered, in `geode-shell` and in
-`geode-app`. A test enumerates the registry and checks that every action
-dispatching `open_shell_dialog*` is flagged. The check drives each flagged
-and unflagged action against an open dialog and compares the stack depth.
+`dialog::opens_dialog(&ActionId) -> bool` names the actions whose dispatch
+opens a shell dialog. Only `ShellView::dispatch` opens shell dialogs, so the
+list lives beside that dispatch table rather than on `ActionDef`.
+`opens_dialog_matches_what_dispatch_pushes` dispatches every registered action
+over a base modal and requires flagged ⇔ pushed.
 
 Component dialogs (`window.has_active_dialog`) keep their separate handling
 and are out of scope.
@@ -160,6 +160,12 @@ and are out of scope.
   Implementation audits palette-reachable actions for any that call
   `close_modal` or write a per-kind state field, and records the outcome in
   the plan.
+
+Audit result: every `close_modal` call and every per-kind state write sits
+inside a dialog's own handler, a `can_open`-gated opener, or
+`clear_dialog_state`, so no palette-reachable non-dialog action closes or
+replaces dialog state. The tile-kind picker resolves its target tile at
+commit, not at open, so it does not need to read or hold dialog state either.
 
 ## 7. Rendering and guards
 

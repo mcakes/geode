@@ -15,7 +15,7 @@ this order:
 
 | Owner | Routing |
 |---|---|
-| Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal; unclaimed Escape closes it. |
+| Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
 | Occupant holding focus in insert mode | Single-key chords use the whole context stack; bare keys use only contexts carrying `mode == insert`. |
@@ -50,12 +50,36 @@ competing transient state and pending key sequences. A mouse-opened dialog
 uses `prevent_default` so the click's default focus behavior cannot undo the
 focus assigned by the opening path.
 
+Dialogs form a stack (`ShellView::modals`), and only the top entry paints and
+takes keys; every entry beneath it is inert and invisible until revealed.
+Opening a kind already on top does nothing; requesting a kind already open
+lower in the stack does nothing either, and posts "… is already open
+underneath" instead of pushing a duplicate or overwriting that entry's state.
+Closing — Enter commit, Escape, the close button, or a backdrop click — pops
+exactly one level and clears only the popped kind's own state, never a kind
+still lower in the stack.
+
+Revealing the covered entry restores the shared input's text and caret to
+what they were when it was covered, and gives back its focus: mode dialogs
+(Settings, Keybindings, the Object dialog, As-of) resolve focus from their own
+state through `sync_dialog_text`; filter-only dialogs (the picker, `Choice`
+lists, the scope-expression dialog) always focus the input. The scope field's
+return-to-field flag belongs to the base of the stack; a nested push must not
+overwrite it with "the dialog beneath had focus". A covered dialog's async
+deliveries (a distinct-values reply, a config reload) still apply to its own
+state while it is hidden, and show once it is revealed.
+
 Render closures receive a borrowed shell and must not re-enter its entity.
 Keyboard and pointer transitions mutate the dialog model, then reconcile the
 shared input through `sync_dialog_text`. Pointer handlers must run that step
 themselves because they do not pass through the keyboard handler's tail.
 Writing an input value does not emit `InputEvent::Change`; model mutations
 cannot depend on such an event to keep text synchronized.
+
+Known limitation: the stack holds one instance per `DialogKind`, so a second
+request for a live kind cannot open beside the first even from a different
+call site. The three `choicedialog` pickers (grouping, tile kind, log level)
+share one kind and so count as one instance for this purpose.
 
 A multi-screen dialog registers its back step with `dialog::set_back`: a
 predicate over its current state and the transition Escape's final back step
@@ -132,6 +156,22 @@ The standalone `VimListNav` count parser does not share the keymap matcher's
 filters do not use it as their controller.
 
 ## Palette and which-key
+
+The palette opens over an open dialog stack rather than being mutually
+exclusive with one: it lists every action regardless of what is open beneath
+it, paints above the top dialog, and a click outside the palette closes only
+the palette. A dialog-opening row pushes its dialog onto the stack; every
+other row dispatches and runs behind the stack, which stays exactly as it
+was. Closing the palette — Escape, a commit, or an outside click — restores
+focus to the top dialog, whether or not the action it ran moved focus itself.
+
+Known limitation: picking "Tile: Command line" or "Find in tile" while a
+dialog is open does nothing useful — the line opens behind the dialog, loses
+focus to the dialog on the post-dispatch refocus, and cancels itself on the
+next render because it never held focus. "Stack: Pick…" opens its member list
+under the stack the same way; that list stays open and becomes usable once
+the stack closes, since nothing cancels it the way the command and find lines
+cancel themselves.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and
 category, not action id. Category matches receive half weight, rounded up.

@@ -439,9 +439,11 @@ pub struct ShellView {
     /// Other keys must keep propagating so IME/text-input dispatch can deliver
     /// text to this field.
     palette_input: Entity<InputState>,
-    /// The dialogs' shared input. Only one modal can be open, and closing it
-    /// clears every dialog state before another can use this subscription. The
-    /// entity and focus handle persist; each dialog resets its value on open.
+    /// The dialogs' shared input. Only the top of the modal stack owns it;
+    /// popping one level clears only that kind's own state and hands the
+    /// input back to the entry beneath, restoring its saved text and caret
+    /// (see `dialog::refocus_top`). The entity and focus handle persist;
+    /// each dialog resets its value on open.
     ///
     /// Normal mode blurs the input so letters reach dialog commands. Entering
     /// filter mode focuses it; leaving filter mode blurs it again. Keybinding
