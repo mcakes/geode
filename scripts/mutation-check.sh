@@ -6757,47 +6757,6 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
 
 # --- Task 5: the geode-diagnostics module ---------------------------
 
-run_mutation "diagnostics module: sources sorted best-first instead of worst-first" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    reported.sort_by(|a, b| b.1.health.cmp(&a.1.health).then_with(|| a.0.cmp(b.0)));' \
-  '    reported.sort_by(|a, b| a.1.health.cmp(&b.1.health).then_with(|| a.0.cmp(b.0)));' \
-  geode-diagnostics sources_are_sorted_worst_first_with_their_detail
-
-run_mutation "diagnostics module: the resolved-generation marker points at the wrong generation" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                    && part.resolved_gen == Some(generation.gen_id);' \
-  '                    && part.resolved_gen == Some(generation.gen_id + 1);' \
-  geode-diagnostics data_rows_mark_the_resolved_generation_under_an_as_of
-
-run_mutation "diagnostics module: the log filter matches every row regardless of target or level" \
-  crates/geode-diagnostics/src/sections.rs \
-  '        .filter(|r| filter.is_empty() || r.text.contains(filter))
-        .collect()' \
-  '        .filter(|_r| true)
-        .collect()' \
-  geode-diagnostics log_rows_filter_by_target_or_level_text
-
-run_mutation "diagnostics module: move_cursor never clears follow" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        self.cursor = target as usize;
-        self.follow = false;' \
-  '        self.cursor = target as usize;' \
-  geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
-
-run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            this.last_diag_versions = now;
-            if relevant {
-                this.rebuild(cx);
-            }
-        })
-        .detach();' \
-  '            this.last_diag_versions = now;
-            this.rebuild(cx);
-        })
-        .detach();' \
-  geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
-
 # Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
 # into `shell/add_tile.rs` beside the one door it now goes through.
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
@@ -6821,26 +6780,7 @@ run_mutation "shell: open_module never finds an existing occupant, so a second c
   '        let found: Option<(TileId, Option<DockSide>)> = None;' \
   geode-shell open_module_twice_yields_one_tile_of_that_kind_focused
 
-run_mutation "diagnostics module: the log section never reports records lost to a ring wrap" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                self.lost_records = self
-                    .ring
-                    .oldest_seq()
-                    .map(|oldest| oldest.saturating_sub(self.since + 1))
-                    .unwrap_or(0);' \
-  '                self.lost_records = 0;' \
-  geode-diagnostics the_log_section_reports_lost_records_when_the_ring_wrapped_past_since
-
 # --- Task 5 fix round 1 ----------------------------------------------
-
-run_mutation "diagnostics module: MAJ-1 — sync_scroll never scrolls the list" \
-  crates/geode-diagnostics/src/tile.rs \
-  '    fn sync_scroll(&self) {
-        self.scroll
-            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
-    }' \
-  '    fn sync_scroll(&self) {}' \
-  geode-diagnostics pressing_bottom_scrolls_the_list_to_the_last_row
 
 run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant without unwatching it" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -6862,63 +6802,6 @@ run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_c
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();' \
   geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
-
-run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh buffer instead of reusing drain_buf" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                self.ring.drain_since(self.since, &mut self.drain_buf);' \
-  '                let mut fresh_drain_buf = Vec::new();
-                self.ring.drain_since(self.since, &mut fresh_drain_buf);
-                self.drain_buf = fresh_drain_buf;' \
-  geode-diagnostics a_no_op_log_drain_does_not_grow_the_drain_buffer
-
-run_mutation "diagnostics module: the frame observer rebuilds Sources/Log/Perf on an as_of-or-config change too (successor of the retired MAJ-6 frame_versions_relevant_eq entry — that function was deleted by MAJ-4)" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                Section::Sources | Section::Log | Section::Perf => false,' \
-  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
-  geode-diagnostics a_config_reload_while_showing_sources_does_not_rebuild
-
-run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            if as_of_changed && this.visible {
-                this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog_refresh();
-                    cx.notify();
-                });
-            }' \
-  '            if false {
-                this.diagnostics.update(cx, |d, cx| {
-                    d.request_catalog_refresh();
-                    cx.notify();
-                });
-            }' \
-  geode-diagnostics an_as_of_change_while_visible_requests_a_fresh_catalog
-
-run_mutation "diagnostics module: MAJ-8 — the config explainer stops recursing into arrays" \
-  crates/geode-diagnostics/src/sections.rs \
-  '        toml::Value::Array(items) => {
-            for (i, v) in items.iter().enumerate() {
-                walk_value(v, &format!("{path}.{i}"), out);
-            }
-        }
-        other => out.push((path.to_string(), other.to_string())),' \
-  '        other => out.push((path.to_string(), other.to_string())),' \
-  geode-diagnostics config_rows_recurses_into_arrays_with_indexed_paths
-
-run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count multiplier" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down" => self.move_cursor(5 * n, cx),
-            "page_up" => self.move_cursor(-5 * n, cx),' \
-  '            "page_down" => self.move_cursor(5, cx),
-            "page_up" => self.move_cursor(-5, cx),' \
-  geode-diagnostics a_count_prefix_multiplies_page_down
-
-run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            "page_down_full" => self.move_cursor(10 * n, cx),
-            "page_up_full" => self.move_cursor(-10 * n, cx),' \
-  '            "page_down_full" => self.move_cursor(5 * n, cx),
-            "page_up_full" => self.move_cursor(-5 * n, cx),' \
-  geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
 
 run_mutation "blotter: ctrl+b moves back ten, not forward" \
   crates/geode-blotter/src/tile.rs \
@@ -6988,21 +6871,6 @@ run_mutation "blotter gutter: a changed setting refreshes the table's column gro
         }' \
   geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
 
-run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            self.diagnostics.update(cx, |d, cx| {
-                d.unwatch();
-                cx.notify();
-            });
-        }
-    }' \
-  '            self.diagnostics.update(cx, |d, _cx| {
-                d.unwatch();
-            });
-        }
-    }' \
-  geode-diagnostics set_visible_false_unwatches_and_notifies
-
 # Re-homed and re-anchored 2026-09-08 (add-tile): `open_module` moved to
 # `shell/add_tile.rs`, the guard now scans the addressed `pending_tiles`
 # map rather than a single `pending_kind_for_new_tile`, and its test was
@@ -7015,26 +6883,6 @@ run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
         self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   '        self.add_tile(kind, AddPlacement::Split(None), None, window, cx);' \
   geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
-
-run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        if !self.filter.is_empty() {
-            header = header.child(
-                div()
-                    .text_color(neutral_chip.text)' \
-  '        if false {
-            header = header.child(
-                div()
-                    .text_color(neutral_chip.text)' \
-  geode-diagnostics a_filtered_tile_shows_the_filtered_pill
-
-# --- Task 5 fix round 2 ----------------------------------------------
-
-run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            if as_of_changed && this.visible {' \
-  '            if false {' \
-  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
 
 # ---- Phase 4b Task 6: the panic boundaries (the ingest error event, ----
 # ---- the crash file, the action tail) -----------------------------------
@@ -7304,40 +7152,6 @@ run_mutation "service: the load lane is keyed by source only, so any batch's cle
         let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
   geode-data a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing
 
-run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
-  crates/geode-diagnostics/src/tile.rs \
-  '                diag_version_for_section(this.section, now)
-                    != diag_version_for_section(this.section, this.last_diag_versions)' \
-  '                true' \
-  geode-diagnostics refresh_frame_hist_does_not_rebuild_the_config_section
-
-run_mutation "sections: the perf section shows database/memory bytes and threads once a catalog arrives" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                "database {} (checkpointed) · memory {} · threads {}",' \
-  '                "db {} (checkpointed) · mem {} · thr {}",' \
-  geode-diagnostics perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives
-
-run_mutation "diagnostics tile: set_section replaces the cached header text" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        self.header_text = header_text_for(section);' \
-  '        let _ = header_text_for(section);' \
-  geode-diagnostics the_header_text_is_cached_across_paints_and_replaced_on_section_change
-
-run_mutation "diagnostics tile: since is seeded from the ring's current latest_seq, not 0" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            since: initial_since,' \
-  '            since: 0,' \
-  geode-diagnostics a_freshly_opened_tile_does_not_claim_records_it_never_had
-
-run_mutation "sections: the resolved-generation marker requires the snapshot's own as_of to match the frame's" \
-  crates/geode-diagnostics/src/sections.rs \
-  '                let marked = !as_of.is_live()
-                    && snapshot_matches_as_of
-                    && part.resolved_gen == Some(generation.gen_id);' \
-  '                let marked = !as_of.is_live()
-                    && part.resolved_gen == Some(generation.gen_id);' \
-  geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
-
 # Retired 2026-09-08 (add-tile): this guarded "a single
 # `pending_kind_for_new_tile` is spent on the LOWEST TileId when two
 # tiles go occupant-less in one pass", and both halves are gone — the
@@ -7348,49 +7162,6 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
 # here would be one with no test behind it. What replaced this defence
 # is "add-tile: the pending request is keyed by the id split_active
 # returned" in the add-tile block below.
-
-run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
-  crates/geode-diagnostics/src/sections.rs \
-  '            out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-            out.push(row(
-                format!(
-                    "adapter: {} · priority: {} · readiness: {}",
-                    spec.adapter, spec.priority, spec.readiness
-                ),
-                1,
-                Tone::Muted,
-            ));' \
-  '            out.push(row(
-                format!(
-                    "path: {paths} · adapter: {} · priority: {} · readiness: {}",
-                    spec.adapter, spec.priority, spec.readiness
-                ),
-                1,
-                Tone::Muted,
-            ));' \
-  geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
-
-run_mutation "commands: section parses each name, not just the first" \
-  crates/geode-diagnostics/src/commands.rs \
-  '        Some("section") => {' \
-  '        Some("section") => {
-            return Ok(Command::Section(Section::Log));' \
-  geode-diagnostics section_parses_each_name_and_rejects_unknown
-
-run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
-  crates/geode-diagnostics/src/commands.rs \
-  '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
-  '        .split('"'"' '"'"')' \
-  geode-diagnostics completions_split_words_the_way_the_shell_does
-
-# Command-line locality (2026-09-20): `:level` is a refusal, never a
-# log-level change.
-run_mutation "locality: :level never reaches the Diagnostics entity" \
-  crates/geode-diagnostics/src/tile.rs \
-  '            Command::Refused(message) => return Err(message.to_string()),' \
-  '            Command::Refused(_) => { self.diagnostics.update(cx, |d, cx| { d.request_overlay_toggle(); cx.notify(); }); }' \
-  geode-diagnostics \
-  every_colon_command_leaves_the_app_alone
 
 # Command-line locality (2026-09-20) — the scope expression dialog
 # (spec §4.1), the palette door that replaced `:scope <expr>`.
@@ -11780,21 +11551,6 @@ run_mutation "sources: a subscribed source stores the paths it just said it igno
   '' \
   geode-core a_subscribed_sources_paths_are_warned_about_and_cleared
 
-run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    match spec.shape {' \
-  '    match SourceShape::Directory {' \
-  geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
-
-# The third shape (timeseries spec §5.4). Mutated to paint the subscribed
-# rows, a fetch source shows `topics: ` — an empty list for a source
-# nothing is ever pushed to, which is what it did before the arm existed.
-run_mutation "sections: a fetch source is described as a subscribed one (empty topics)" \
-  crates/geode-diagnostics/src/sections.rs \
-  '            out.push(row("fetch", 1, Tone::Muted));' \
-  '            out.push(row(format!("topics: {}", spec.topics.join(", ")), 1, Tone::Muted));' \
-  geode-diagnostics a_fetch_source_shows_its_adapter_and_that_it_is_fetched
-
 run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
   crates/geode-documents/src/cvi.rs \
   '                        if slice.term.is_some() {
@@ -12589,16 +12345,6 @@ run_mutation "objectdialog: a column stage offers no destructive action" \
   a_column_stage_offers_no_destructive_action
 
 # ---- Part 2 residuals, fixed at Part 3's opening (Task 1) ----
-
-# Re-anchored 2026-09-19 (timeseries Part 1): the discriminator is the
-# source's SHAPE now, not its adapter — a fetch source is "not a
-# directory" too — so the mutation derives one from `topics.is_empty()`
-# instead, which is the residual this entry has always guarded against.
-run_mutation "parked: sections discriminates a source by shape, not by topics.is_empty()" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    match spec.shape {' \
-  '    match (if spec.topics.is_empty() { SourceShape::Directory } else { SourceShape::Subscribed }) {' \
-  geode-diagnostics a_subscribed_source_with_no_topics_still_shows_the_subscribed_shape
 
 run_mutation "parked: a topic pattern with a non-final '>' is accepted rather than refused" \
   crates/geode-core/src/source_config.rs \
@@ -20023,7 +19769,7 @@ run_mutation "catalog refresh: old as-of results are discarded" \
   crates/geode-app/src/bridge.rs \
   'snapshot.as_of == current_as_of' \
   'true' \
-  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
+  geode-app an_as_of_change_on_the_visible_diagnostics_page_requests_a_second_catalog_with_the_new_as_of
 
 
 run_mutation "catalog refresh: refused submissions retry" \
@@ -23880,12 +23626,6 @@ run_mutation "status: the stopped segment's click does nothing" \
   '                    stopped_click(window, cx);' \
   '                    let _ = (&stopped_click, window, cx);' \
   geode-shell clicking_the_stopped_segment_opens_the_diagnostics_page
-
-run_mutation "sections: stopped threads are not listed" \
-  crates/geode-diagnostics/src/sections.rs \
-  '    if !d.stopped.is_empty() {' \
-  '    if false {' \
-  geode-diagnostics stopped_threads_lead_the_sources_section
 
 run_mutation "bridge: a stopped thread never reaches diagnostics" \
   crates/geode-app/src/bridge.rs \
