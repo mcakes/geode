@@ -16517,6 +16517,73 @@ run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
   geode-shell \
   stacking_onto_a_fullscreen_tile_exits_fullscreen
 
+# Toggle stack: the split-to-stack direction takes every tile under the
+# focused leaf's parent split and acts on the innermost container only;
+# the stack-to-split direction gives equal ratios. (The new stack's
+# `active` index is also set by `set_focus`, so neither alone is
+# observable and no entry defends it.)
+run_mutation "toggle stack: a nested split and its stacks flatten" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    let mut members = Vec::new();
+                    collect_leaves(node, &mut members);' \
+  '                    let mut members = Vec::new();
+                    for c in children.iter() {
+                        if let Node::Leaf(id) = c {
+                            members.push(*id);
+                        }
+                    }' \
+  geode-shell \
+  toggle_stack_flattens_a_nested_split_and_its_stacks
+
+run_mutation "toggle stack: only the innermost container converts" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    if !matches!(slot, Node::Leaf(_)) {
+                        return toggle_at(slot, focused, orientation);' \
+  '                    if matches!(slot, Node::Stack { .. }) {
+                        return toggle_at(slot, focused, orientation);' \
+  geode-shell \
+  toggle_stack_converts_only_the_innermost_split
+
+run_mutation "toggle stack: exits fullscreen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '            // layout operation trumps a stale fullscreen.
+            self.fullscreen = None;' \
+  '            // layout operation trumps a stale fullscreen.' \
+  geode-shell \
+  toggle_stack_exits_fullscreen
+
+run_mutation "toggle stack: a split stack gets equal ratios" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '                    let share = 1.0 / children.len() as f32;' \
+  '                    let share = 0.5;' \
+  geode-shell \
+  toggle_stack_round_trip_gives_an_equal_flat_split
+
+run_mutation "toggle stack: mod+s is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+s" = "workspace::toggle_stack"
+' \
+  '' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: a conversion dirties the session" \
+  crates/geode-shell/src/shell/input.rs \
+  '                .toggle_stack(orientation)
+            {
+                self.session_dirty = true;' \
+  '                .toggle_stack(orientation)
+            {' \
+  geode-shell \
+  mod_s_splits_the_focused_stack_and_stacks_it_back
+
+run_mutation "toggle stack: a refusal leaves a notice" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NOTHING_TO_STACK);' \
+  '                {}' \
+  geode-shell \
+  mod_s_on_a_lone_tile_leaves_a_notice
+
 # Brief's original pick (drop the `ix < active` branch entirely) turned
 # out unreachable: both `remove_focused` and `pop_out` always target
 # `self.focused`, which the `set_focus`/`activate` invariant guarantees is

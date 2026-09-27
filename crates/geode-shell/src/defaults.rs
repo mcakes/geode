@@ -51,6 +51,7 @@ context = "workspace"
 "shift+up" = "workspace::resize_up"
 "shift+right" = "workspace::resize_right"
 "mod+e" = "workspace::toggle_split_orientation"
+"mod+s" = "workspace::toggle_stack"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+w" = "workspace::close_tile"
 "shift+d" = "workspace::duplicate_horizontal"
@@ -142,6 +143,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Toggle split orientation",
         "Workspace",
     );
+    // Turn the focused tile's split into a stack or its stack into a split;
+    // ShellView dispatches it because the new split's orientation needs geometry.
+    action(reg, "workspace::toggle_stack", "Toggle stack", "Workspace");
     // Duplicate the focused tile with its serialized state: horizontal places
     // it to the right, vertical places it below.
     action(

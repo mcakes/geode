@@ -167,6 +167,54 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
 }
 
 #[gpui::test]
+fn mod_s_splits_the_focused_stack_and_stacks_it_back(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, log, left, right, top) = stacked_shell(cx);
+    let visible = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| {
+            s.services.workspaces.active().tree().visible_tiles()
+        })
+    };
+    cx.simulate_keystrokes("alt-s");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![left, right, top], "every member painted");
+    assert_eq!(stack_events(&log, right).last(), Some(&None));
+    assert_eq!(stack_events(&log, top).last(), Some(&None));
+    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(top)
+    );
+
+    // Focus sits in the split the stack became, so the same chord
+    // restacks that slot and leaves `left` beside it.
+    cx.simulate_keystrokes("alt-s");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![left, top]);
+    assert_eq!(stack_events(&log, right).last(), Some(&Some((1, 2))));
+    assert_eq!(stack_events(&log, top).last(), Some(&Some((2, 2))));
+}
+
+#[gpui::test]
+fn mod_s_on_a_lone_tile_leaves_a_notice(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("alt-s");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.notice),
+        Some("nothing to stack")
+    );
+}
+
+#[gpui::test]
 fn unstack_pops_the_focused_member_out_and_the_survivors_are_re_notified(
     cx: &mut gpui::TestAppContext,
 ) {

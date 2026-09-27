@@ -357,6 +357,13 @@ impl Workspace {
         self.tree_for_mut(region).unstack_focused(orientation)
     }
 
+    /// Convert the focused region's innermost container between split and
+    /// stack; return false for an empty region or a lone tile.
+    pub fn toggle_stack(&mut self, orientation: Orientation) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).toggle_stack(orientation)
+    }
+
     /// Find `id`'s member index and stack length across this workspace's trees.
     pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
         let region = self.region_of(id)?;

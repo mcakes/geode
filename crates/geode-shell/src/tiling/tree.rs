@@ -374,6 +374,69 @@ impl Tree {
         self.pop_out(orientation, true)
     }
 
+    /// Convert the innermost container around focus between split and
+    /// stack. A focused stack member's stack becomes a split of
+    /// `orientation` in the stack's own slot, members in order with equal
+    /// ratios. Otherwise the split directly holding the focused leaf becomes
+    /// one stack of every tile under it, in tree order — nested splits
+    /// flatten and nested stacks contribute all members — with focus
+    /// active. Ratios and nesting are not remembered, so a round trip
+    /// yields an equal flat split. Clears fullscreen on success. Return
+    /// false without mutation for an empty tree or a lone root leaf.
+    pub fn toggle_stack(&mut self, orientation: Orientation) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        fn toggle_at(node: &mut Node, focused: TileId, orientation: Orientation) -> bool {
+            match node {
+                Node::Leaf(_) => false,
+                Node::Stack { children, .. } => {
+                    if !children.contains(&focused) {
+                        return false;
+                    }
+                    let share = 1.0 / children.len() as f32;
+                    *node = Node::Split {
+                        orientation,
+                        ratios: vec![share; children.len()],
+                        children: children.iter().map(|id| Node::Leaf(*id)).collect(),
+                    };
+                    true
+                }
+                Node::Split { children, .. } => {
+                    let Some(slot) = children.iter_mut().find(|c| holds_anywhere(c, focused))
+                    else {
+                        return false;
+                    };
+                    if !matches!(slot, Node::Leaf(_)) {
+                        return toggle_at(slot, focused, orientation);
+                    }
+                    let mut members = Vec::new();
+                    collect_leaves(node, &mut members);
+                    let active = members
+                        .iter()
+                        .position(|id| *id == focused)
+                        .expect("the focused leaf is under its own split");
+                    *node = Node::Stack {
+                        children: members,
+                        active,
+                    };
+                    true
+                }
+            }
+        }
+        let changed = self
+            .root
+            .as_mut()
+            .is_some_and(|root| toggle_at(root, focused, orientation));
+        if changed {
+            // Same rule as `split`/`pop_out`/`stack_after`: an explicit
+            // layout operation trumps a stale fullscreen.
+            self.fullscreen = None;
+            self.set_focus(focused);
+        }
+        changed
+    }
+
     pub fn contains(&self, id: TileId) -> bool {
         self.root
             .as_ref()
@@ -2814,5 +2877,108 @@ mod tests {
             Some((2, 2)),
             "the stack itself is untouched"
         );
+    }
+
+    fn row_of_three() -> Tree {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree
+    }
+
+    #[test]
+    fn toggle_stack_turns_the_focused_split_into_one_stack() {
+        let mut tree = row_of_three();
+        tree.focus(TileId(2));
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(tree.stack_position(TileId(2)), Some((2, 3)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(2)], "focus stays active");
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert_eq!(rect_of(&tree, 2), Rect::UNIT, "the stack fills the split");
+    }
+
+    #[test]
+    fn toggle_stack_flattens_a_nested_split_and_its_stacks() {
+        // [1 | stack(2, 3)] with 1 focused: the root split is 1's parent,
+        // and every tile under it joins, stack members included.
+        let mut tree = two_tiles_then_stack();
+        tree.focus(TileId(1));
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.stack_position(TileId(1)), Some((1, 3)));
+        assert_eq!(tree.stack_position(TileId(3)), Some((3, 3)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(1)]);
+    }
+
+    #[test]
+    fn toggle_stack_converts_only_the_innermost_split() {
+        // [1 | (2 / 3)] with 2 focused: only the right half stacks.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Vertical);
+        tree.focus(TileId(2));
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.stack_position(TileId(1)), None);
+        assert_eq!(tree.stack_position(TileId(2)), Some((1, 2)));
+        assert_eq!(tree.visible_tiles(), vec![TileId(1), TileId(2)]);
+        let r2 = rect_of(&tree, 2);
+        assert!(approx(r2.x, 0.5) && approx(r2.h, 1.0), "the right half");
+    }
+
+    #[test]
+    fn toggle_stack_splits_a_stack_in_its_own_slot() {
+        let mut tree = two_tiles_then_stack(); // [1 | stack(2, 3 active)]
+        assert!(tree.toggle_stack(Orientation::Vertical));
+        assert_eq!(tree.stack_position(TileId(2)), None);
+        assert_eq!(tree.stack_position(TileId(3)), None);
+        assert_eq!(tree.visible_tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        let (r1, r2, r3) = (rect_of(&tree, 1), rect_of(&tree, 2), rect_of(&tree, 3));
+        assert!(approx(r1.w, 0.5), "1 keeps its half");
+        assert!(
+            approx(r2.x, 0.5) && approx(r3.x, 0.5),
+            "members share the stack's slot"
+        );
+        assert!(
+            approx(r2.h, 0.5) && approx(r3.y, 0.5),
+            "equal, in member order"
+        );
+    }
+
+    #[test]
+    fn toggle_stack_refuses_a_lone_tile_and_an_empty_tree() {
+        let mut tree = Tree::default();
+        assert!(!tree.toggle_stack(Orientation::Horizontal));
+        tree.split(TileId(1), Orientation::Horizontal);
+        let before = tree.clone();
+        assert!(!tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree, before);
+    }
+
+    #[test]
+    fn toggle_stack_exits_fullscreen() {
+        let mut tree = row_of_three();
+        assert!(tree.toggle_fullscreen());
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.fullscreen(), None);
+        assert!(tree.toggle_fullscreen());
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.fullscreen(), None);
+    }
+
+    #[test]
+    fn toggle_stack_round_trip_gives_an_equal_flat_split() {
+        let mut tree = row_of_three();
+        tree.focus(TileId(1));
+        assert!(tree.move_divider(Direction::Right, 0.1), "uneven ratios");
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert!(tree.toggle_stack(Orientation::Horizontal));
+        assert_eq!(tree.visible_tiles(), vec![TileId(1), TileId(2), TileId(3)]);
+        assert_eq!(tree.focused(), Some(TileId(1)));
+        for id in 1..=3 {
+            assert!(approx(rect_of(&tree, id).w, 1.0 / 3.0), "tile {id} width");
+        }
     }
 }

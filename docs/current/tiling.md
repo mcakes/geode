@@ -53,6 +53,16 @@ focused dock does nothing; removing its last tile hides it.
 | Edge drop | Insert beside the target's slot, within or across regions |
 | Centre drop | Insert after the target in its stack; a plain target becomes a stack |
 | Dock-background drop | Insert into that dock; dropping into the source dock does nothing |
+| Toggle stack (`mod+s`) | A focused member's stack becomes a split in its own slot; otherwise the focused leaf's parent split becomes one stack |
+
+Toggle stack acts on the innermost container around focus. Stacking a split
+takes every tile beneath it in tree order: nested splits flatten and nested
+stacks contribute all their members, with the focused tile active. Splitting a
+stack keeps member order, gives equal ratios, and takes its orientation from
+the configured add direction resolved against the stack's slot, as
+`stack::unstack` does. Neither ratios nor nesting are remembered, so a round
+trip yields an equal flat split. Both directions clear fullscreen. A lone tile
+or empty region refuses with a notice.
 
 Matching-orientation insertion adds a sibling and equalizes sibling ratios.
 Otherwise it wraps the anchor slot in a half-and-half split. A member used
