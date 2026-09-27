@@ -579,7 +579,7 @@ Normal-mode keys:
 
 | Keys | Effect |
 |---|---|
-| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
+| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |

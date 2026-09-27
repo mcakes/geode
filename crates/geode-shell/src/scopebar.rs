@@ -66,6 +66,7 @@ pub struct NamedChip {
     /// refuses to query, so the chip must read as an error, not routine state.
     pub broken: bool,
     /// The chip body's element id and debug selector (`"scope-named-chip-{name}"`).
+    /// A click on the body opens the Expressions dialog on this name.
     pub selector: SharedString,
     /// The chip body's tooltip selector (`"tip-scope-named-chip-{name}"`).
     pub tip_selector: SharedString,
@@ -79,7 +80,7 @@ pub struct NamedChip {
 
 /// Elide to 40 characters plus `…`, the scope bar's one rule for
 /// expression text.
-fn elide(s: &str) -> String {
+pub(crate) fn elide(s: &str) -> String {
     if s.chars().count() > 40 {
         format!("{}…", s.chars().take(40).collect::<String>())
     } else {

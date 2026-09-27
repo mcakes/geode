@@ -203,6 +203,17 @@ and the object is written to the user layer only on the first Enter that
 parses and is not empty. Escape before that Enter writes nothing. A copy
 starts from its source's text as usual, since it is never empty.
 
+The frame's scope expression dialog is a second way to create a named
+expression: `mod+s` in its Whole or Add mode names the typed text, applying
+the same name checks as creation here (malformed, reserved, or already held)
+and the dialog's own Enter checks on the text, and writes
+`[name] expression = "<text>"` to the user layer of `expressions.toml`
+through this dialog's write path (see
+[input and dialogs](input-and-dialogs.md#frame-expression)). The
+Expressions dialog is also where a scope-bar named chip's click lands: a
+defined name opens in its edit stage, and a missing one opens Browse with
+`'<name>' is not defined`.
+
 Delete removes a user-defined object. Revert requires an inherited object to
 restore and removes the user's definition and associated view presentation
 where present. A presentation-only view override can therefore be reverted
@@ -272,7 +283,10 @@ written afterward — and the query reports it once the scope is used.
 The Scopes domain's `expression` field carries the same suggestion list as
 the frame's expression dialogs — see [input-and-dialogs.md's Frame
 expression](input-and-dialogs.md#frame-expression) for the rows, operators,
-value rules, and keys, all of which apply here while the field is open. It
+value rules, and keys, all of which apply here while the field is open,
+except that neither this field nor the Expressions domain's offers named
+expression rows (a scope ticks its names in its own **Named expressions**
+field). It
 narrows its values request by the edited scope's own dimension selections
 and text filter, with no expression (the field is replacing it), and the
 frame's as-of.

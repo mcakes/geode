@@ -7257,7 +7257,8 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            Ok(frame.set_scope(scope))' \
+  '            scope.expression = parsed;
+            Ok(frame.set_scope(scope))' \
   '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
@@ -7321,20 +7322,16 @@ run_mutation "expr-chips: a term edit replaces only that term" \
 # Appending joins with `and`; replacing loses the existing expression.
 run_mutation "expr-chips: append joins the existing expression with and" \
   crates/geode-shell/src/frame.rs \
-  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
-  '            Some(_) => term,' \
+  '        Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '        Some(_) => term,' \
   geode-shell \
-  append_expression_joins_with_and_or_sets_it
+  and_join_joins_with_and_or_sets_it
 
 # The dialog's add mode appends; committing as whole mode replaces.
 run_mutation "expr-chips: the add dialog appends rather than replaces" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
-  '        Mode::Add => {
-            let mut scope = frame.scope().clone();
-            scope.expression = parsed;
-            Ok(frame.set_scope(scope))
-        }' \
+  '                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));' \
+  '                scope.expression = Some(term);' \
   geode-shell \
   the_plus_menus_expression_row_appends_with_and
 
@@ -20330,10 +20327,25 @@ run_mutation "pricer entry bar: an edit keeps a stale error" \
 # past a line that never went in.
 run_mutation "pricer entry bar: a refusal keeps the advanced place" \
   crates/geode-pricer/src/tile.rs \
-  '                    entry.place = at;
+  '                    entry.place = before;
                     entry.error = Some(e.to_string().into());' \
   '                    entry.error = Some(e.to_string().into());' \
   geode-pricer a_refused_line_puts_the_place_back
+
+# A package typed inside a package lands just after it rather than being
+# refused ("a package cannot hold a package").
+run_mutation "pricer entry: a package inside a package is refused" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) => Place::Root {' \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) if false => Place::Root {' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
+
+# The bar must insert at the landing place, not the raw leg place.
+run_mutation "pricer entry bar: enter ignores the landing place" \
+  crates/geode-pricer/src/tile.rs \
+  '        let at = landing_place(&self.sheet, before, &spec);' \
+  '        let at = before;' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
 
 # The label follows the place after each enter.
 run_mutation "pricer entry bar: the label stays on the first place" \
@@ -21492,24 +21504,30 @@ run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   '            if false {
                 return self.switch_sheet(name, true, cx);' \
   geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
-# A date cell's field paints unframed. Mutated to the strip's frame, a
-# second rounded border sits inside the cursor's and the padding pushes
-# the day off the cell's right edge.
-run_mutation "mdedit: a date cell's field paints without the strip's frame" \
-  crates/geode-marketdata/src/delegate.rs \
-  '                            self.tile_id,
-                            false,' \
-  '                            self.tile_id,
-                            true,' \
-  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
-
-# ...and with flush segments. Mutated to padded ones, the digits spread
-# apart and the field outgrows the plain date, clipping the year.
+# A date field paints flush segments. Mutated to padded ones, the digits
+# spread apart and the field outgrows the plain date, clipping the year.
 run_mutation "mdedit: a date cell's segments paint flush" \
   crates/geode-marketdata/src/header.rs \
-  '        flush: !framed,' \
+  '        flush: true,' \
   '        flush: false,' \
   geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# A header text editor paints no frame of its own. Mutated to the
+# input's appearance, a bordered, rounded control appears inside the
+# attribute's box and grows it to the input's height.
+run_mutation "mdedit: a header text editor paints no frame of its own" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(true).px_0().py_0().h_auto())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
+
+# ...and takes its line's height, not the control's. Mutated to keep the
+# input's own height and padding, the box grows while editing.
+run_mutation "mdedit: a header text editor takes its line's height" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(false).px_0())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
 
 # ---- Market-data line numbers (2026-09-26): `[ui] line_numbers` ----
 
@@ -22417,8 +22435,8 @@ run_mutation "expr suggest: enter refuses an unknown column" \
 # A row click inserts it.
 run_mutation "expr suggest: a row click inserts" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '                    on_click(&label, window, cx);' \
-  '                    let _ = (&label, window, cx);' \
+  '                    on_click(named, &label, window, cx);' \
+  '                    let _ = (named, &label, window, cx);' \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
@@ -22456,6 +22474,125 @@ run_mutation "expr suggest: a double-click inserts once" \
   '                    if event.click_count > 99 {' \
   geode-shell \
   double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# A name stands for a whole term: offered past the column position it
+# would stage mid-comparison.
+run_mutation "expr suggest: named rows only at a column position" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        let mut candidates = if matches!(context.position, Position::Column) {' \
+  '        let mut candidates = if true {' \
+  geode-shell \
+  named_offers_never_appear_past_the_column_position
+
+# A named row stages its name; writing it as text would leave a column
+# reference that does not exist.
+run_mutation "expr suggest: accepting a named row stages it" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            RowKind::Insert => Accept::Write(Write {' \
+  '            _ => Accept::Write(Write {' \
+  geode-shell \
+  accepting_a_named_row_stages_it_and_erases_the_token
+
+# Whole mode's Enter replaces the frame's names with the staged ones; left
+# out, a removed chip would stay in the scope.
+run_mutation "scope expr: whole apply sets the staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            scope.named = staged.to_vec();' \
+  '            let _ = staged;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# Backspace at the field's start removes the last staged chip.
+run_mutation "scope expr: backspace at the start unstages" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return backspace_unstages(shell, cx);' \
+  '        return false;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# A reload re-offers the new definitions under an open dialog.
+run_mutation "scope expr: a reload re-offers named expressions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                super::scope_expr_view::sync_named_offers(self, cx);' \
+  '' \
+  geode-shell \
+  a_reload_offers_a_new_named_expression_under_an_open_dialog
+
+# A staged name is not offered again.
+run_mutation "scope expr: offers exclude staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        .filter(|name| !staged.iter().chain(joined).any(|s| s == name))' \
+  '        .filter(|name| !joined.iter().any(|s| s == name))' \
+  geode-shell \
+  a_staged_name_leaves_the_named_rows
+
+# Add mode joins the frame's names, so it does not offer them.
+run_mutation "scope expr: add mode offers the frame's own names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => frame_named,' \
+  '        Mode::Add => &[],' \
+  geode-shell \
+  add_mode_leaves_out_the_frames_own_names
+
+# A saved name must resolve at once: the write promotes on a timer, and
+# until then the staged name would read as missing.
+run_mutation "scope expr: saving refreshes the frame's definitions at once" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            if f.replace_named_expressions(named) {' \
+  '            if false && f.replace_named_expressions(named) {' \
+  geode-shell \
+  mod_s_saves_the_text_as_a_named_expression_and_stages_it
+
+# Saving under a defined name would overwrite that definition.
+run_mutation "scope expr: saving refuses a taken name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.name_taken(config, &name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_taken_name
+
+# An empty field names nothing; opening the entry for it would ask for a
+# name that can only be refused.
+run_mutation "scope expr: mod+s on an empty field opens the name entry" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '    if text.trim().is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  mod_s_on_an_empty_field_refuses_and_writes_nothing
+
+# A reserved name belongs to a built-in row; saving under it would shadow it.
+run_mutation "scope expr: saving refuses a reserved name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.is_reserved(&name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_reserved_name
+
+# The name entry shares the field; suggestions there would write an
+# expression into a name.
+run_mutation "expr suggest: no suggestions while naming" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        if state.naming.is_some() {' \
+  '        if false {' \
+  geode-shell \
+  naming_offers_no_suggestions
+
+# A named chip's body is the mouse door to its definition.
+run_mutation "named chip: the body opens its expression" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                on_open(&open_name, window, cx)' \
+  '                { let _ = (&on_open, &open_name, &window, &cx); }' \
+  geode-shell \
+  a_named_chips_body_opens_its_expression
+
+# An undefined name must not enter an edit stage: its draft is empty, and
+# an edit there would write an object nobody asked to create.
+run_mutation "named chip: a missing name stays in browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if defined {' \
+  '    if true {' \
+  geode-shell \
+  a_missing_named_chips_body_opens_browse_with_a_notice
 
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.
@@ -22653,8 +22790,8 @@ run_mutation "named expr: a named chip's x removes nothing" \
 # A missing name paints the danger chip.
 run_mutation "named expr: a missing name paints the plain chip" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
-  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if false && named.broken {' \
   geode-shell \
   a_missing_name_paints_the_broken_chip
 
@@ -22666,6 +22803,15 @@ run_mutation "named expr: document distinct drops unresolved names" \
   '    if false {' \
   geode-data \
   distinct_over_a_document_only_dimension_refuses_unresolved_names
+
+# Staging a name changes the values' narrowing, so the cached column is
+# dropped and asked for again under the new scope.
+run_mutation "named expr: staging keeps the old values" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) {' \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) { return;' \
+  geode-shell \
+  staging_a_name_requests_values_again_under_it
 
 # A Scopes item's missing/invalid named note is danger text.
 run_mutation "named expr: a missing named note is muted" \

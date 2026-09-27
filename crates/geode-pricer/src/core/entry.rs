@@ -43,8 +43,9 @@ fn span(spec: &RowSpec) -> usize {
 }
 
 /// The place after `inserted` landed at `place`, so a book of lines
-/// is typed without another `o` (spec §8.4). A package at a leg place is
-/// refused by `apply`, so that pair answers `place` unchanged.
+/// is typed without another `o` (spec §8.4). [`landing_place`] never hands
+/// a package a leg place; `apply` would refuse that pair, so it answers
+/// `place` unchanged.
 pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
     match (place, inserted) {
         (Place::Root { at }, spec) => Place::Root {
@@ -55,6 +56,19 @@ pub fn next_place(place: Place, inserted: &RowSpec) -> Place {
             leg: leg + 1,
         },
         (p @ Place::Leg { .. }, RowSpec::Package { .. }) => p,
+    }
+}
+
+/// Where a typed row lands. A package cannot hold a package, so a package
+/// typed at a leg place (inside a package, or on a package row's first
+/// leg slot) lands as a root just after that package's last leg; every
+/// other row lands at `place`.
+pub fn landing_place(sheet: &Sheet, place: Place, spec: &RowSpec) -> Place {
+    match (place, spec) {
+        (Place::Leg { package, .. }, RowSpec::Package { .. }) => Place::Root {
+            at: sheet.children(package).end.max(package + 1),
+        },
+        _ => place,
     }
 }
 
@@ -125,6 +139,30 @@ mod tests {
         push(&mut s, vec![callspread(1)]);
         push(&mut s, vec![line(spx(4000.0, OptionKind::Put), 1)]);
         s
+    }
+
+    #[test]
+    fn landing_place_moves_a_package_out_of_a_package() {
+        let s = sheet();
+        let cs = parse_builtin("SPX Z26 4800/5200 CS").unwrap();
+        let one = parse_builtin("SPX Z26 5000 C").unwrap();
+        for leg in 0..=2 {
+            assert_eq!(
+                landing_place(&s, Place::Leg { package: 1, leg }, &cs),
+                Place::Root { at: 4 },
+                "leg slot {leg}: after P's last leg, before B"
+            );
+        }
+        assert_eq!(
+            landing_place(&s, Place::Leg { package: 1, leg: 1 }, &one),
+            Place::Leg { package: 1, leg: 1 },
+            "a line still becomes a leg"
+        );
+        assert_eq!(
+            landing_place(&s, Place::Root { at: 1 }, &cs),
+            Place::Root { at: 1 },
+            "a root place is unchanged"
+        );
     }
 
     #[test]

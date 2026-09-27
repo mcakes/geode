@@ -245,7 +245,6 @@ impl MatrixDelegate {
                             &self.tones,
                             &tile,
                             self.tile_id,
-                            false,
                         ))
                         .into_any_element(),
                 )
