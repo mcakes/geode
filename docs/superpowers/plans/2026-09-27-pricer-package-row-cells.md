@@ -34,7 +34,7 @@ takes a list of edits and applies several through the existing one-undo
 - **Edit mapping:**
   - One part goes to every group.
   - A list of exactly `groups.len()` parts maps by position.
-  - Any other count is refused with `"{n} values: {current}"`.
+  - Any other count is refused with `"{n} values: {current}"` (`"1 value: …"` for one).
   - Package qty takes one non-zero integer `q`, and each leg becomes `q × weight` (checked). A list is refused with `"one quantity"`, and overflow with `"quantity out of range"`.
 - **Commit:**
   - Every part is validated (through `edit_for`) before anything is applied.
@@ -482,7 +482,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
         assert_eq!(apply(&mut s, 0, "strike", "7800/7400"), Ok(2));
         assert_eq!(s.shorthand(0), "-5 SPX Z26 7800/7400 CS");
         // A change that breaks the table keeps the name and prints the legs.
-        assert_eq!(apply(&mut s, 0, "type", "P/C"), Err("1 values: C".into()), "one type shown: one value or refused");
+        assert_eq!(apply(&mut s, 0, "type", "P/C"), Err("1 value: C".into()), "one type shown: one value or refused");
         assert_eq!(apply(&mut s, 0, "type", "P"), Ok(2));
         assert!(s.shorthand(0).contains('\n'), "puts no longer fit CS: legs one per line");
         assert_eq!(s.kind(0), crate::core::sheet::RowKind::Package { template: Template::CS }, "keeps its name");
@@ -582,7 +582,8 @@ pub fn commit(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result
     };
     if parts.len() != 1 && parts.len() != gs.len() {
         let current = gs.iter().map(|g| g.display.as_str()).collect::<Vec<_>>().join("/");
-        return Err(format!("{} values: {current}", gs.len()));
+        let n = gs.len();
+        return Err(format!("{n} value{}: {current}", if n == 1 { "" } else { "s" }));
     }
     let mut edits = Vec::new();
     for (i, g) in gs.iter().enumerate() {
