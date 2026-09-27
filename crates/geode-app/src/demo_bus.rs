@@ -1,12 +1,9 @@
-//! The demo bus (market-data-documents plan, Task 10; extended to
-//! several producers by the dividend-schedule plan, Task 11): the
-//! background thread `--demo` mode uses for the market-data path. Each
-//! [`Producer`] wraps one document generator (CVI, dividend schedules)
-//! and publishes onto a `ChannelAdapter`'s feed through exactly the wire
-//! format a subscribed source's own receiver thread parses (spec §9.4)
-//! — so a demo panel exercises the real subscribed-source path with no
-//! broker anywhere. Registered and spawned only in demo mode
-//! (`main.rs`); never built outside it.
+//! Background document publishing for `--demo`.
+//!
+//! Each [`Producer`] generates documents, serializes them through its
+//! registered kind, and publishes to a channel feed. Subscribed sources
+//! receive and parse those bytes through the normal ingestion path.
+//! The application starts this bus only in demo mode.
 
 use geode_core::document::{DocumentKind, DocumentRows};
 use geode_data::adapter::ChannelFeed;
@@ -17,21 +14,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// How often the run loop re-checks `stop` while waiting out a cadence.
-/// Bounds how long [`DemoBus::stop`] can take to return regardless of
-/// how long `cadence` itself is — a real desk's `cadence` is measured in
-/// seconds, and nothing here may block a caller for that long.
+/// Interval for checking shutdown while waiting between publishes.
+/// Generation, serialization, and publication run to completion before the
+/// next check; this interval bounds the sleep slice, not total stop latency.
 const STOP_POLL: Duration = Duration::from_millis(20);
 
-/// One document source the bus feeds: a kind (which also parses the
-/// wire bytes on the subscribed source's receiver thread), the topic
-/// prefix its keys publish under (e.g. `"marketdata/cvi/"`, trailing
-/// slash included so a topic is just `format!("{prefix}{key}")`), the
-/// keys it produces documents for, and the stateful closure that builds
-/// the next document for a given key — a generator's own `next_document`
-/// moved in, since the generator itself is `FnMut`-shaped (it mutates
-/// its held schedules on every call) and the bus must not know which
-/// concrete generator type is behind it (design spec §6.4).
+/// A document generator and its destination topics.
+///
+/// `kind` serializes rows into the wire format consumed by the subscribed
+/// source. Topics concatenate `topic_prefix` and the key, so a prefix such as
+/// `"marketdata/cvi/"` includes its separator. `next` owns mutable generator
+/// state without coupling the bus to a concrete generator type.
 pub struct Producer {
     pub kind: Arc<dyn DocumentKind>,
     pub topic_prefix: &'static str,
@@ -39,11 +32,10 @@ pub struct Producer {
     pub next: Box<dyn FnMut(&str) -> DocumentRows + Send>,
 }
 
-/// A running demo bus thread.
+/// A running demo bus thread, stopped and joined on drop.
 ///
-/// `stop` is also `AtomicBool`-checked between every publish and while
-/// waiting out a cadence, so [`Self::stop`] returns within about
-/// [`STOP_POLL`] rather than at the mercy of `cadence`.
+/// Shutdown is checked between publishes and in [`STOP_POLL`] sleep slices.
+/// A publish already in progress must finish before the thread exits.
 pub struct DemoBus {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -69,20 +61,18 @@ impl Drop for DemoBus {
     }
 }
 
-/// Spawns the demo bus thread (named `geode-demo-bus`) over `producers`.
+/// Spawns the `geode-demo-bus` thread over `producers`.
 ///
-/// On start it publishes every producer's every key once, immediately,
-/// in producer order then key order, so a panel opened at startup has
-/// something to paint on its very first frame (Task 10 brief) whichever
-/// document kind it shows. It then loops forever over one flat,
-/// round-robin schedule built once from every producer's key list (see
-/// [`round_robin_schedule`]) — one publish per `cadence` plus or minus a
-/// seeded `jitter` (`cadence - jitter ..= cadence + jitter`, clamped so
-/// a `jitter` larger than `cadence` still waits a non-negative time) —
-/// so the overall generation rate stays about one per `cadence`
-/// regardless of how many producers are registered (design spec §6.4:
-/// adding a second source must not double the archive growth rate).
-/// `stop` is checked between every publish and while waiting.
+/// Startup attempts one publish per key in producer order then key order,
+/// without waiting for a cadence. Ingestion and delivery remain asynchronous.
+/// Subsequent publishes follow [`round_robin_schedule`], with one wait per
+/// publish across all producers. Jitter is seeded and capped at `cadence`,
+/// giving nonnegative waits from `cadence - jitter` through `cadence + jitter`
+/// at millisecond jitter resolution. Adding producers lengthens the schedule
+/// without multiplying its steady-state publication rate.
+///
+/// Shutdown is checked between publishes and during waits. Thread creation
+/// failure panics.
 pub fn spawn(
     feed: ChannelFeed,
     producers: Vec<Producer>,
@@ -121,16 +111,11 @@ fn sleep_checking_stop(duration: Duration, stop: &AtomicBool) -> bool {
     }
 }
 
-/// One publish: generate the next document for `key` through `next`,
-/// write it via `kind`, and put it on the bus under
-/// `format!("{topic_prefix}{key}")`. Never `unwrap`s — a malformed
-/// document (a write refusal the generator itself should never produce,
-/// but a future generator bug or a `DocumentKind` swap might) must not
-/// take the whole demo bus thread down with it, so a write failure is
-/// logged at `warn` under `geode::ingest` and this publish is skipped
-/// rather than panicking. A refused send (the inbound queue is full) is
-/// counted and logged once, not spun on — the caller carries on to the
-/// next key on its own cadence rather than retrying immediately.
+/// Generates and serializes one document, then publishes it to the topic
+/// formed by concatenating the prefix and key. Serialization errors log a
+/// warning and skip this publish. A full or disconnected inbound queue drops
+/// the message; the feed counts refusals and the bus warns only on the first.
+/// There is no immediate retry. Generator and serializer panics are not caught.
 fn publish_one(
     feed: &ChannelFeed,
     kind: &Arc<dyn DocumentKind>,
@@ -194,9 +179,8 @@ fn run(
 ) {
     let mut warned_full = false;
 
-    // Every producer's every key once, immediately, producer order then
-    // key order: the first thing a freshly opened panel of any kind
-    // sees.
+    // Attempt every key once before the first cadence wait. Parsing and
+    // store publication happen asynchronously after feed admission.
     for producer in producers.iter_mut() {
         let keys = producer.keys.clone();
         for key in &keys {
@@ -318,10 +302,8 @@ mod tests {
         let jitter = Duration::from_millis(50);
         let mut bus = spawn(feed, producers, cadence, jitter, 42);
 
-        // Phase 1: every key of every producer published once,
-        // immediately — well inside one cadence-minus-jitter window, so
-        // this can only pass if the burst really runs before the first
-        // cadence wait.
+        // The startup burst must cover every key within less than one cadence
+        // wait, so cadence-only publication cannot satisfy this deadline.
         let burst_deadline = Instant::now() + Duration::from_millis(200);
         let mut cvi_burst: HashSet<String> = HashSet::new();
         let mut dividend_burst: HashSet<String> = HashSet::new();
@@ -362,10 +344,8 @@ mod tests {
             "every dividend key must publish once immediately at start"
         );
 
-        // Phase 2: the cadence loop round-robins across producers — the
-        // first two publishes after the burst are one of each prefix
-        // (the schedule's first row: `(cvi, SPX)` then `(dividend,
-        // SPX)`).
+        // The first two cadence publishes must cover both producers: the
+        // schedule begins with `(cvi, SPX)` then `(dividend, SPX)`.
         let mut prefixes = HashSet::new();
         for _ in 0..2 {
             let m = rx
@@ -392,11 +372,8 @@ mod tests {
         );
     }
 
-    /// Task 11: the demo generator's own status vocabulary must agree
-    /// with `geode_documents::dividend::STATUSES` — `geode-demo-data`
-    /// cannot depend on `geode-documents` (workspace layering), so it
-    /// keeps its own copy, and this is the one place both are visible at
-    /// once to prove they have not drifted.
+    /// The generator and document parser must use the same dividend statuses.
+    /// They live in independent crates; the composition root can verify both.
     #[test]
     fn the_demo_generators_status_vocabulary_matches_the_dividend_kind() {
         assert_eq!(
@@ -405,11 +382,8 @@ mod tests {
         );
     }
 
-    /// Task 12: the `DIVIDEND` panel spec's own copy — `geode-marketdata`
-    /// cannot depend on `geode-documents` either — must agree with
-    /// `geode_documents::dividend::STATUSES` the same way the generator's
-    /// copy above does; `geode-app` is the one crate where all three are
-    /// visible at once.
+    /// The panel and document parser must use the same dividend statuses.
+    /// The composition root verifies agreement without a feature-to-parser dependency.
     #[test]
     fn the_dividend_panel_specs_status_vocabulary_matches_the_dividend_kind() {
         assert_eq!(
@@ -418,16 +392,10 @@ mod tests {
         );
     }
 
-    /// The egress end-to-end check: a headless upload-then-echo loop
-    /// through the real `DataService` built from the demo config — no
-    /// internal mutator stands in for any hop. The path
-    /// exercised: `service.upload` resolves the `[sophis]` egress target
-    /// and hands written bytes to `ChannelEgress`; that publish lands on
-    /// `marketdata/dividend/XYZ`, which the `[dividend]` source's own
-    /// subscription (topics `marketdata/dividend/>`) receives and parses
-    /// exactly as a real broker source would; the resulting publish is
-    /// read back through an ordinary document request. Every wait is
-    /// bounded so a broken hop fails the test rather than hanging it.
+    /// Upload bytes must reach the subscribed source and return through an
+    /// ordinary document query. The demo `sophis` target routes the upload to
+    /// `marketdata/dividend/XYZ`; the dividend subscription parses and stores it.
+    /// Each event receive has a timeout so a silent pipeline fails the test.
     #[test]
     fn an_uploaded_dividend_document_echoes_through_the_real_data_service() {
         use geode_core::config::{Config, ConfigSources};
@@ -470,13 +438,9 @@ mod tests {
         let (service, rx) = DataService::open_channel(setup.config)
             .expect("the demo schema opens cleanly against a fresh database");
 
-        // Two rows share an ex date (to prove ordinal minting through the
-        // real pipeline, not only `mint_ids` in isolation) and a third
-        // falls on a different date. The axis carries placeholder labels —
-        // exactly what a fresh draft's `Inserted` rows would ("new-<n>",
-        // spec §10 amendment 3) — since `DividendKind::write` never emits
-        // an id: the assembled rows on the wire carry none, and the
-        // ordinal position each id occupies is what `mint_ids` reads back.
+        // Two rows share an ex date to exercise ordinal ID minting through
+        // the full pipeline. Placeholder draft labels are omitted by the
+        // writer; the parser assigns IDs from ex dates and row order.
         let ex1 = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         let ex2 = NaiveDate::from_ymd_opt(2027, 1, 5).unwrap();
         let uploaded = DocumentRows {
@@ -582,12 +546,9 @@ mod tests {
 
         service.shutdown();
     }
-    /// The echo comparison against the REAL store (final review): the
-    /// store hands a document back sorted by its axes, while an upload's
-    /// rows are in painted order. A dividend inserted under the first row
-    /// with the latest ex date is out of order on the wire; its echo,
-    /// read back through the document query and assembled exactly as the
-    /// panel's echo check assembles it, must still confirm.
+    /// The store sorts document rows by their axes while uploads use painted
+    /// order. An inserted dividend with a later ex date can move on readback;
+    /// the panel's echo comparison must still confirm the same contents.
     #[test]
     fn an_out_of_order_insert_echoes_back_as_confirmed_through_the_real_store() {
         use geode_core::config::{Config, ConfigSources};

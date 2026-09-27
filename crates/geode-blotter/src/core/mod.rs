@@ -1,5 +1,6 @@
-//! The blotter's pure core (Phase 3 §6.1): no `gpui`, tested without a
-//! window. Each module lands with the Plan 3c task that needs it.
+//! Pure blotter models and transformations, tested without a GPUI window.
+//! The core resolves columns, tracks expansion and navigation, prepares
+//! visible rows and formatted cells, and builds selection summaries and TSV.
 
 pub mod cache;
 pub mod commands;

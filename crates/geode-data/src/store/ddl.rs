@@ -1,24 +1,16 @@
-//! Table DDL generated from the declared schema (spec §4.2). The measure
-//! family gets one live and one archive table per grain present in the
-//! dataset; the document family gets exactly one such pair for the whole
-//! dataset (market-data spec §4.1). Either way a dataset owns a set of
-//! [`TablePair`]s, which is what publish, retention and history all speak.
+//! Table DDL derived from the declared schema. Measure datasets own a live/archive
+//! pair per declared grain; document datasets own one pair for the whole dataset.
+//! Publication, retention, and history use these [`TablePair`] values. Series
+//! datasets use the separate storage layout in [`super::series`].
 //!
-//! Live carries exactly the current rows for every file partition: no
-//! generation column, no history predicate, size independent of retention.
-//! That is what keeps the requery budget reachable by construction, so the
-//! absence of `gen_id` from live is load-bearing, not an oversight.
+//! Live tables hold one current generation per partition, keeping live query size
+//! independent of retained history. Both live and archive carry `gen_id` and
+//! `source_time`; moving outgoing rows preserves their historical identity.
 //!
-//! A grain's table carries its key columns plus the measures and attributes
-//! declared *at that grain*, plus every dimension it carries (spec §3.3):
-//! a key dimension it always had, and a *carried* dimension — one that
-//! names the grain whose key determines it — as a payload column, stored
-//! at that grain's table and every finer one's. A bare `Dimension` column
-//! outside every grain key is rejected at parse (`schema::validate_dataset`)
-//! rather than silently appearing in no table at all — so anything worth
-//! displaying that is not itself a key (`business_date`, for one) must be
-//! declared as an `attribute` at the grain that owns it, or as a dimension
-//! carried by one.
+//! A grain table contains its key, measures and attributes declared at that grain,
+//! and carried dimensions declared at that or a coarser grain. Schema validation
+//! rejects a bare dimension outside every grain key; such a dimension must name
+//! the grain that carries it. Attributes also declare their owning grain.
 
 use crate::store::StoreError;
 use duckdb::Connection;
@@ -49,15 +41,9 @@ pub fn table_name(dataset: &str, grain: Grain, kind: TableKind) -> String {
     format!("{dataset}_{}{}", grain.short(), kind.suffix())
 }
 
-/// A dataset's live/archive pair. The measure family has one per grain,
-/// the document family exactly one (market-data spec §4.1); everything
-/// that publishes, sweeps or resolves history takes a pair rather than a
-/// `Grain` so the two families go through one door.
-///
-/// The names are built once and carried, not rebuilt at each use: a pair
-/// is never derivable from a grain alone anyway (a document dataset has
-/// no grain), so passing the pair is the only shape that serves both
-/// families without a family test at every call site.
+/// A dataset's live/archive table names. Measure datasets have one pair per
+/// grain; document datasets have one pair without a grain. Carrying the names
+/// lets publication, retention, and history work with either family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TablePair {
     pub live: String,
@@ -91,19 +77,13 @@ impl TablePair {
     }
 }
 
-/// Every live/archive pair a dataset owns: one per grain for the measure
-/// family, exactly one for the document family, and NONE for the series
-/// family — a series dataset's own two tables are named by
-/// `store::series` (timeseries spec §4.4) and answered empty here. The
-/// single place all three families' pair sets are named, so
-/// `apply_schema`, `history_of` and the sweep's reconciliation cannot
-/// drift apart on which pairs exist.
+/// Every live/archive pair a dataset owns: one per declared measure grain or
+/// one per document dataset. Series datasets return no pairs; [`super::series`]
+/// names their payload and coverage tables. History and retention share this
+/// mapping so they cover the same tables as schema creation.
 pub fn table_pairs(ds: &DatasetSpec) -> Vec<TablePair> {
     if ds.is_series() {
-        // A series dataset has no live/archive pair at all (timeseries
-        // spec §4.4): nothing to sweep by generation, nothing to
-        // reconcile, nothing in `history_of`. `store::series` names its
-        // tables.
+        // Series history uses received-at timestamps, not generation-based table pairs.
         return Vec::new();
     }
     if ds.is_document() {
@@ -121,35 +101,21 @@ pub fn enum_type_name(dataset: &str, column: &str) -> String {
     format!("{dataset}_{column}_enum")
 }
 
-/// Columns interned as ENUMs (spec §3.3, §3.6): the schema's `categorical`
-/// flag, which defaults on for dimensions and off for keys, whose
-/// vocabularies would make a useless dictionary.
+/// Columns selected for query-time ENUM encoding by the schema's `categorical`
+/// flag. Dimensions default to categorical; keys default to noncategorical.
 pub fn categorical_columns(ds: &DatasetSpec) -> Vec<&str> {
     ds.categorical_columns()
 }
 
-/// Rebuild a dimension's ENUM type from the values currently live **and**
-/// archived.
+/// Rebuild a categorical column's derived ENUM from non-NULL values in both
+/// live and archive tables. Returns the number of distinct values.
 ///
-/// **Storage stays `VARCHAR`; the ENUM is derived and used only for a
-/// query-time cast.** DuckDB 1.10505 has no `ALTER TYPE ... ADD VALUE`,
-/// so an ENUM *column* could only be widened by dropping and recreating
-/// the type — which means rewriting every table that uses it, the first
-/// time a new book appears. Deriving the type instead keeps the
-/// dictionary encoding §7.2 wants (the cast makes `query_arrow` return
-/// `Dictionary(UInt8, Utf8)`) at the cost of one cheap rebuild per
-/// ingest, and no table ever moves.
-///
-/// The dictionary covers every era because this runs after each publish,
-/// which is also when the outgoing generation moves to the archive
-/// (spec §4.3) — so no row in either table can hold a value the type
-/// lacks at the moment this returns. Retention only ever removes rows,
-/// never adds a value back, so a superset dictionary stays harmless to
-/// the scope compiler's `IN` (spec §3.5): reading both tables here is
-/// what lets the text filter's dictionary rewrite apply under an as-of
-/// era too, not just live.
-///
-/// Returns the number of distinct values the type now carries.
+/// Stored columns retain their declared types. Query-time casts use the ENUM to
+/// produce Arrow dictionaries without rewriting payload tables when new values
+/// arrive. Publication refreshes the type after archiving outgoing rows, so
+/// current and as-of queries can resolve every retained value. Retention only
+/// removes rows, so a dictionary containing evicted values remains safe for
+/// text-filter membership checks.
 pub fn refresh_enum(
     conn: &duckdb::Connection,
     dataset: &str,
@@ -158,8 +124,8 @@ pub fn refresh_enum(
     archive_table: &str,
 ) -> Result<usize, crate::store::StoreError> {
     let name = enum_type_name(dataset, column);
-    // Nothing references the type — columns are VARCHAR — so dropping is
-    // free and never touches stored data.
+    // Payload columns retain their declared types, so dropping the derived
+    // ENUM does not change stored data.
     let sql = format!(
         "drop type if exists {name};
          create type {name} as enum (
@@ -185,10 +151,9 @@ pub fn refresh_enum(
         })
 }
 
-/// Derived ENUM type names currently present for a dataset. Used both by
-/// the view compiler (to intern dimension columns for a live query) and
-/// the scope compiler (to route a text filter's `ILIKE` over the
-/// dictionary rather than every row, spec §3.5).
+/// Derived ENUM type names present for a dataset. View compilation uses them
+/// for categorical projections; scope compilation applies text matching to the
+/// dictionary before filtering payload rows.
 pub fn existing_enum_types(
     conn: &duckdb::Connection,
     dataset: &str,
@@ -233,26 +198,20 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         }
     }
 
-    // Carried dimensions (spec §3.3): payload columns of the declaring
-    // grain's table and every finer grain's.
+    // Carried dimensions are payload columns at their declaring grain and every
+    // finer grain.
     for c in ds.carried_dimensions_at(grain) {
         cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));
     }
 
-    // Partition key completion: `book` is already in the grain key, `batch`
-    // is what replacement matches on, `source_file_id` is provenance only
-    // (spec §4.3 — filenames carry dates, so file id is not partition id).
+    // `book` comes from the grain key. `batch` completes the replacement key;
+    // `source_file_id` records provenance. Dated filenames are not partition IDs.
     cols.push("  \"batch\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
-    // Live and archive carry identical columns, including the generation
-    // that produced the row. Live still holds exactly one generation per
-    // partition, so no query ever filters on `gen_id` — the §4.2 property
-    // that keeps live's size independent of retention is about the absence
-    // of a *history predicate*, not the absence of the column.
-    //
-    // Carrying it is what lets archived rows keep their own identity: the
-    // publish transaction moves rows out of live with their stamps intact,
-    // so as-of to a time when an older generation was live still finds it.
+    // Live and archive share the same column order and generation stamps.
+    // Publication moves outgoing rows with `select *`, preserving the identity
+    // that as-of queries use. Live queries need no history predicate because
+    // replacement leaves one current generation per partition.
     let _ = kind;
     cols.push("  \"gen_id\" BIGINT".to_string());
     cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
@@ -264,43 +223,23 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
     )
 }
 
-/// The document family's one table (market-data spec §4.1):
-/// `DatasetSpec::document_columns` in that order — key, axes, values,
-/// then grainless attributes — followed by the storage columns every
-/// grain table carries, `book` included.
+/// Create a document table with `DatasetSpec::document_columns` in key, axes,
+/// values, then attribute order, followed by storage metadata.
 ///
-/// The storage columns mean exactly what they mean for a grain table:
-/// `batch` is what a republish replaces on, `source_file_id` is
-/// provenance only, and `gen_id`/`source_time` ride on live as well as
-/// archive so archived rows keep the identity they had while live (see
-/// `create_table_sql` for the full argument — live still holds one
-/// generation per partition, so no query filters on `gen_id`). `book` is
-/// the one a grain table gets from its grain key and this one declares
-/// itself: a document's book is *empty*, which is a NULL in a column that
-/// exists rather than a missing column, and every partition-keyed
-/// statement in `store` joins on it.
-///
-/// An attribute repeats down every row of its document rather than
-/// living in a table of its own: a document is published, replaced and
-/// read whole, so there is no second grain to join and nothing a
-/// separate header table would save.
+/// `batch` is the document's replacement key, `book` is NULL, and
+/// `source_file_id` records provenance. Live and archive both carry `gen_id`
+/// and `source_time` so outgoing rows retain their historical identity.
+/// Document-level attributes repeat on each row because documents are published,
+/// replaced, and read as a whole.
 pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
     let mut cols: Vec<String> = ds
         .document_columns()
         .iter()
         .map(|c| format!("  \"{}\" {}", c.name, c.ty.sql()))
         .collect();
-    // Partition key completion, same four columns and the same meanings as
-    // a grain table's (`create_table_sql`) -- plus `book`, which the
-    // document family gets *here* because no grain key supplies it. A
-    // document's book is empty (market-data spec §4.1), and empty means a
-    // NULL value in a column that exists, not an absent column: every
-    // partition-keyed statement in this module joins on `book`
-    // (retention's eviction, `generations_reconcile_sql`,
-    // `rebuild_generations`' union, `publish_file`'s own
-    // `partition_predicate` with its `book is null` term), so a table
-    // without the column could not be published into, swept, reconciled
-    // or summarised at all.
+    // Document tables declare `book` explicitly because there is no grain key.
+    // Its NULL value identifies the bookless partition used by publication,
+    // retention, and generation-summary queries.
     cols.push("  \"batch\" VARCHAR".to_string());
     cols.push("  \"book\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
@@ -313,20 +252,11 @@ pub fn create_document_table_sql(ds: &DatasetSpec, kind: TableKind) -> String {
     )
 }
 
-/// Every table a dataset's history lives in: the archive **and** live of
-/// every pair it owns — each grain's pair for the measure family, the one
-/// document pair for the document family. Generations are resolved (and
-/// rebuilt) across all of them — a partition can be missing from one
-/// grain while present at another (a cash-only book has no underlying
-/// rows), and the generation a partition holds now is in live and nowhere
-/// else (see `query::as_of::resolve_generations`). Shared by `service.rs`
-/// (the freshness fold and the open-time migration) and `query::compile`
-/// (`era_for` and the join path) so the table list is named in one place.
+/// Every live and archive table owned by the dataset. Generation resolution
+/// and rebuilding must include every pair: a partition may occur at only one
+/// grain, and its current generation may exist only in live.
 ///
-/// `dataset` is the caller's own name for the dataset and must be
-/// `ds.name` — kept as a parameter because every caller already has it to
-/// hand, and passing it makes the table names visibly the named
-/// dataset's at the call site.
+/// `dataset` must equal `ds.name`. Series datasets return an empty list.
 pub fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
     debug_assert_eq!(
         dataset, ds.name,
@@ -372,17 +302,13 @@ fn generations_union_sql(tables: &[String]) -> String {
     format!("select distinct batch, book, gen_id, source_time from ({union})")
 }
 
-/// Rebuild the `generations` summary for `dataset` from its data tables
-/// (spec §6.5 as amended): the migration path for a database written
-/// before the table existed (`DataService::open`), and the tests' oracle
-/// -- the summary is defined to equal this, always.
+/// Replace the dataset's `generations` summary with the distinct generation
+/// identities in `tables`. Used during store opening and as a test oracle for
+/// incremental summary maintenance.
 ///
-/// Inside one transaction: delete every row currently recorded for
-/// `dataset`, then reinsert one row per generation found across `tables`
-/// (ordinarily `history_of(dataset, ds)` -- every pair's archive and live
-/// table, so a partition missing from one pair's history is not silently
-/// dropped from the rebuilt summary either). Returns how many rows the
-/// summary now holds for the dataset.
+/// Deletion and reinsertion share one transaction. Pass every live/archive
+/// table from `history_of` so generations present at only one grain survive.
+/// Returns the number of summary rows for this dataset after rebuilding.
 pub fn rebuild_generations(
     conn: &Connection,
     dataset: &str,
@@ -508,8 +434,8 @@ grain = "position"
             .clone()
     }
 
-    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
-    /// grain, and `expiry` an attribute opted into `categorical`.
+    /// A fixture with `currency` carried by the instrument grain and `expiry`
+    /// explicitly marked as a categorical attribute.
     pub(crate) fn carried_dataset() -> DatasetSpec {
         let text = r#"
 [risk.columns.book]
@@ -556,11 +482,9 @@ grain = "underlying"
             .clone()
     }
 
-    /// The market-data spec's own document dataset (§2.1), parsed through
-    /// the real reader rather than hand-built: a document dataset's table
-    /// shape is decided by `family`/`key`/`axes` and the roles the reader
-    /// derives from them, so a hand-built `DatasetSpec` could disagree
-    /// with what a TOML layer can actually produce.
+    /// A CVI document dataset parsed from TOML. Using the schema reader verifies
+    /// that its family, key, axes, and derived column roles match a configuration
+    /// the application can load.
     pub(crate) fn cvi_dataset() -> DatasetSpec {
         let text = r#"
 [cvi_params]
@@ -601,8 +525,7 @@ role = "attribute"
             .clone()
     }
 
-    /// A `local = true` document dataset for the publish tests
-    /// (line-pricer spec §7.2): one key, one axis, one value.
+    /// A local document dataset for publication tests: one key, axis, and value.
     pub(crate) fn local_dataset() -> DatasetSpec {
         let text = r#"
 [sheets]
@@ -642,8 +565,7 @@ role = "value"
         }
     }
 
-    /// The timeseries spec's one series dataset (§4.2), parsed through
-    /// the real reader for the same reason `cvi_dataset` is.
+    /// A series dataset parsed through the schema reader.
     pub(crate) fn series_dataset() -> DatasetSpec {
         let text = "[series]\nfamily = \"series\"\nretention = \"30d\"\nhistory = \"5y\"\n";
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
@@ -677,8 +599,8 @@ role = "value"
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
     }
 
-    /// Two terms x three nodes, term-major — the same shape Task 4's tests
-    /// validate, with the six `param` values the caller chooses.
+    /// Two terms by three nodes, in term-major order, with caller-supplied
+    /// values for the six `param` cells.
     pub(crate) fn cvi_doc(key: &str, params: [f64; 6]) -> DocumentRows {
         DocumentRows {
             key: vec![key.into()],
@@ -707,25 +629,17 @@ role = "value"
         }
     }
 
-    /// A [`DocumentKind`] shaped exactly like the real CVI XML kind —
-    /// the same six columns `cvi_dataset` declares — over a byte format
-    /// small enough to write in a test literal:
+    /// A test [`DocumentKind`] with the same six columns as `cvi_dataset`, using
+    /// a compact byte format:
     ///
     /// ```text
     /// SPX.Z:1,2,3,4,5,6[:elem/path,other/path]
     /// ```
     ///
-    /// the key, then the six `param` values `cvi_doc` takes, then an
-    /// optional comma-separated list of element paths the "parser" did
-    /// not recognise (`ParsedDocument::unknown_paths`).
-    ///
-    /// It lives here rather than beside the receiver's own tests for a
-    /// layering reason (this plan's global constraints): the real CVI
-    /// kind is in `geode-documents`, which `geode-data` must never
-    /// depend on, so every test in this crate that needs a kind at all
-    /// needs a fake — the receiver's (`ingest::subscribe`) and the
-    /// service's (`service`) both, which is what makes this the one
-    /// place to spell it.
+    /// The fields are the key, six `param` values accepted by `cvi_doc`, and an
+    /// optional list of unrecognised element paths (`ParsedDocument::unknown_paths`).
+    /// Receiver and service tests share this fixture because `geode-data` must not
+    /// depend on the production parser in `geode-documents`.
     pub(crate) struct FakeKind {
         columns: Vec<(&'static str, ColumnType)>,
     }
@@ -749,7 +663,7 @@ role = "value"
 
         /// The same kind plus one column no dataset declares — the
         /// kind/dataset mismatch `check_kind_against` refuses at
-        /// source-open time (spec §6.4).
+        /// source-open time.
         pub(crate) fn with_extra_column() -> FakeKind {
             let mut kind = FakeKind::new();
             kind.columns.push(("surface_id", ColumnType::Utf8));
@@ -1006,7 +920,7 @@ mod tests {
     fn live_carries_batch_for_replacement_and_file_id_for_provenance() {
         let sql = create_table_sql(&sample_dataset(), Grain::Underlying, TableKind::Live);
         // `batch` is what the publish transaction matches on: filenames carry
-        // dates, so file identity is not partition identity (spec §4.3).
+        // dates, so file identity is not partition identity.
         assert!(sql.contains("\"batch\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"source_file_id\" BIGINT"), "{sql}");
         // `book` is part of the grain key at every grain, completing the
@@ -1034,14 +948,9 @@ mod tests {
         assert!(sql(Grain::Underlying).contains("\"currency\" VARCHAR"));
     }
 
-    /// The document family's own roles, and a document-level attribute,
-    /// must never be selected into a measure-family grain table — even
-    /// though nothing in the schema reader can produce this mix today
-    /// (`parse_column` only emits `Axis`/`Value` on a document dataset).
-    /// `keep`'s "not this branch" arm covering them is otherwise untested:
-    /// flipping it from `false` to `true` compiles clean and every other
-    /// test stays green, since none of them ever puts one of these roles
-    /// on a measure dataset's columns.
+    /// Measure-grain DDL excludes document axes, values, and grainless
+    /// attributes. A hand-built mixed schema exercises this exclusion even
+    /// though the schema reader does not produce that combination.
     #[test]
     fn create_table_never_selects_a_document_shaped_column() {
         let mut ds = sample_dataset();
@@ -1132,11 +1041,9 @@ mod tests {
         assert!(history_of("series", &ds).is_empty());
     }
 
-    /// `TablePair::for_document`'s safety claim, checked rather than
-    /// asserted in prose: a document pair's name can never be some
-    /// grain's table of the same dataset, so the two families can share a
-    /// database (and a dataset name) with no chance of
-    /// `CREATE TABLE IF NOT EXISTS` handing one family the other's table.
+    /// Document table names cannot collide with grain tables of the same
+    /// dataset. Otherwise `CREATE TABLE IF NOT EXISTS` could reuse a table
+    /// with the wrong family's columns.
     #[test]
     fn document_is_not_a_grain_short_name() {
         for grain in Grain::ALL {
@@ -1175,7 +1082,7 @@ mod tests {
             "\"spot_ref\" DOUBLE",
             "\"batch\" VARCHAR",
             // A document's book is empty, not absent: the column exists
-            // and Task 7 writes NULL into it, because every
+            // and document publication writes NULL into it, because every
             // partition-keyed statement in `store` joins on `book`.
             "\"book\" VARCHAR",
             "\"source_file_id\" BIGINT",

@@ -1,6 +1,5 @@
-//! The footer strip a grid tile shows while a selection is live (grid
-//! selection spec §3.3): the selection's extent, then one group per
-//! selected numeric column — its label and its total.
+//! A grid tile's selection footer: the selection extent and one group per
+//! selected numeric column, with its label and total.
 //!
 //! A group reads as belonging to its column: the label takes the
 //! column's own color the way its header does, and the total is painted

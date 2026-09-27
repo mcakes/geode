@@ -13,19 +13,11 @@ bench = false
 # dev-dependencies turn it on.
 test-support = []
 
-# The pure core (`core`) needs `geode-core` and `chrono`, plus
-# `geode-shell`'s pure `listfilter`/`exprcomplete` and gpui's
-# `SharedString` for the entry-bar completer (`core::complete`). The tile
-# adds `geode-shell` for the module-hosting contract (`TileContent`,
-# `Frame`, the keymap and action vocabulary, `ChoiceList`, the chip, colour,
-# list-row and control doors), `geode-data` for `DataHandle` alone — the one
-# door a module asks for data (pricing) through — `gpui`/`gpui-component`
-# for the tile and its `DataTable`, `toml` for the session record,
-# `tracing` for delivery diagnostics, and `geode-widgets` for
-# the expiry's segmented date field (its pure core and painter). Never
-# `geode-pricing`: a module reaches the pricer only through the data tier's
-# request door (PHILOSOPHY §1, "In-process calculation"); never a sibling
-# module.
+# The core uses shared pricing vocabulary and calendar types; entry completion
+# also uses the shell's pure filtering/completion helpers and GPUI SharedString.
+# The tile uses shell hosting, GPUI components, and the shared date field. Pricing
+# and sheet persistence go through DataHandle, without a pricing implementation
+# or sibling feature dependency.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true
@@ -37,13 +29,9 @@ chrono = "0.4.42"
 toml = "1.1.4"
 tracing.workspace = true
 
-# Dev-dependencies ask for the same geode-* features `--workspace`
-# resolves (test-feature parity, 2026-09-19), or this crate builds a
-# private copy of the stack.
+# Match the support features used by workspace tests to share dependency builds.
 [dev-dependencies]
-# A self dev-dependency (geode-shell's precedent) so `cargo test -p
-# geode-pricer` builds this crate with the same features `--workspace`
-# does.
+# Enable this crate's test accessors for package-local and workspace tests.
 geode-pricer = { path = ".", features = ["test-support"] }
 geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }

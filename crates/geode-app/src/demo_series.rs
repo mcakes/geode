@@ -1,23 +1,17 @@
-//! The demo's fetch adapter (timeseries spec §5.6): a seeded,
-//! deterministic, span-independent generator of one-minute bars on
-//! weekdays 14:30–21:00 UTC (New York's session, without a calendar) for
-//! two dozen identities. Two sources share it under `--demo`: `demo_kdb`
-//! offers a catalogue, `demo_rest` does not, so both picker paths are
-//! exercised.
+//! Deterministic one-minute bars for the demo fetch sources.
 //!
-//! The generated values are a cache: a span the `--demo` database already
-//! covers is never refetched, so a change to `IDENTITIES`, `ANCHOR` or
-//! the walk paints the OLD values beside the new ones with a visible
-//! step. Delete `$TMPDIR/geode-demo/<rows>-<seed>/` after any such change,
-//! the same rule CLAUDE.md gives for a `datasets.toml` column change.
+//! Twenty-four identities share a fixed weekday session, 14:30–21:00 UTC,
+//! with no holiday calendar or daylight-saving adjustment. `demo_kdb`
+//! offers a catalogue; `demo_rest` exercises entry without a catalogue.
 //!
-//! Span-independence is the property that matters: a request for
-//! `[a, b)` returns exactly the bars a wider request would return inside
-//! `[a, b)`, so an overlapping refetch appends nothing (spec §4.4 step 2)
-//! and the service's coverage subtraction is honest. It comes from
-//! seeding per `(seed, identity, day)` and walking each day from a daily
-//! level that is itself walked from a fixed epoch — never from "the last
-//! bar this process generated".
+//! For a fixed seed and identity, `[a, b)` returns the same bars as the
+//! matching slice of a wider request. Each day's intraday walk has its own
+//! seed and starts from a daily level walked from a fixed epoch. Fetch order
+//! and process lifetime do not affect values, so overlapping fetches agree.
+//!
+//! Covered spans are cached in the demo database. Changes to identities,
+//! the anchor, or the walk can mix old and new values in that cache. Delete
+//! `$TMPDIR/geode-demo/<rows>-<seed>/` after changing them or the demo schema.
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc, Weekday};
 use geode_data::adapter::{
@@ -27,10 +21,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::sync::Arc;
 
-/// `(identity, level, drift per day, daily vol)`, where `level` is the
-/// identity's level at the open of [`ANCHOR`] — not at [`EPOCH`]. The
-/// walk still starts at `EPOCH`; [`open_level`] simply starts it low
-/// enough that the drift has compounded back to `level` by `ANCHOR`.
+/// `(identity, level, drift per weekday, daily volatility)`.
+/// `level` is the reference value at [`ANCHOR`], subject to accumulated
+/// random noise. [`open_level`] compensates for drift between [`EPOCH`]
+/// and the anchor without removing that noise.
 pub const IDENTITIES: [(&str, f64, f64, f64); 24] = [
     ("SPX.close", 5600.0, 0.0003, 0.010),
     ("SPX.vol_1m", 14.0, 0.0, 0.060),
@@ -64,10 +58,9 @@ const EPOCH: NaiveDate = match NaiveDate::from_ymd_opt(2020, 1, 6) {
     None => unreachable!(),
 };
 
-/// A Monday, and the day [`IDENTITIES`]' `level` describes. The walk is
-/// anchored here rather than at `EPOCH` because six years of compounding
-/// `drift` between the two would otherwise put `SPX.close` near 10,000 on
-/// a trader's screen today.
+/// Reference date for the levels in [`IDENTITIES`]. Drift compensation
+/// keeps those reference levels centered in log space at this date rather
+/// than allowing all drift since [`EPOCH`] to compound into them.
 const ANCHOR: NaiveDate = match NaiveDate::from_ymd_opt(2026, 1, 5) {
     Some(d) => d,
     None => unreachable!(),
@@ -84,8 +77,8 @@ fn fnv(seed: u64, identity: &str, day: i64) -> u64 {
     h
 }
 
-/// An approximately normal step: Irwin–Hall over twelve uniforms, mean 0,
-/// unit variance. Enough for a demo walk; `rand_distr` is not a dep.
+/// An approximately normal step: twelve independent uniforms summed and
+/// centered to give mean zero and unit variance.
 fn step(rng: &mut StdRng) -> f64 {
     (0..12).map(|_| rng.random::<f64>()).sum::<f64>() - 6.0
 }
@@ -113,16 +106,13 @@ fn weekdays_between(from: NaiveDate, to: NaiveDate) -> i64 {
     count
 }
 
-/// The level at the open of `day`, walked from `EPOCH` one weekday at a
-/// time with a per-(seed, identity) rng, so it depends on nothing but
-/// the calendar day.
+/// The opening level for a fixed seed, identity, parameters, and day.
+/// The daily walk restarts at [`EPOCH`] and advances once per weekday,
+/// so earlier fetches cannot affect the result.
 ///
-/// The walk starts from `level.ln()` less the drift it will accumulate
-/// between `EPOCH` and [`ANCHOR`], so `level` is the identity's level on
-/// the ANCHOR day rather than six years before it. Only the drift term is
-/// subtracted — the random term's expectation is zero — so the ANCHOR-day
-/// open is `level` up to the walk's own noise, which is the point of a
-/// random walk and is not corrected for.
+/// The initial log level subtracts accumulated drift from the epoch to
+/// [`ANCHOR`]. Random daily steps remain, so the anchor's opening level
+/// can differ from the identity's reference level.
 fn open_level(seed: u64, identity: &str, level: f64, drift: f64, vol: f64, day: NaiveDate) -> f64 {
     let mut rng = StdRng::seed_from_u64(fnv(seed, identity, -1));
     let mut x = level.ln() - drift * weekdays_between(EPOCH, ANCHOR) as f64;
@@ -136,6 +126,9 @@ fn open_level(seed: u64, identity: &str, level: f64, drift: f64, vol: f64, day: 
     x.exp()
 }
 
+/// Bars with timestamps in `[from, to)` for a known identity.
+/// Unknown identities return `None`; known identities return an empty result
+/// when the span contains no session bars. Dates before [`EPOCH`] have no bars.
 pub fn bars(
     seed: u64,
     identity: &str,
@@ -170,6 +163,9 @@ pub fn bars(
     Some(rows)
 }
 
+/// Fetch-only adapter with an optional catalogue of [`IDENTITIES`].
+/// Instances with the same seed return identical bars regardless of name or
+/// catalogue availability. Fetching an unknown identity returns an adapter error.
 pub struct DemoSeries {
     name: &'static str,
     seed: u64,
@@ -231,25 +227,13 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    /// A characterisation test: these are whatever the walk produced when
-    /// it was written. A change here means the generator changed and
-    /// every --demo chart looks different — update the values
-    /// deliberately, never to make a refactor pass.
+    /// Pinned values keep the seeded generator stable across refactors.
+    /// Changing them changes demo charts and requires clearing persisted demo
+    /// series to avoid mixing incompatible values.
     ///
-    /// The span pinned here starts on `ANCHOR` itself, the day
-    /// `IDENTITIES`' `level` describes, so the band is now a tight one:
-    /// `open_level` subtracts the drift accumulated since `EPOCH`, and
-    /// the only thing left between `level` (5600.0) and this bar is the
-    /// random walk's own noise — about 1,565 weekday steps of
-    /// `vol = 0.010`, a standard deviation of `sqrt(1565) * 0.010 ≈ 0.40`
-    /// in log space, so 0.5×–2.0× is a couple of sigma either side and
-    /// 3.0× is no longer needed to accommodate the drift. What it still
-    /// catches: a swapped `drift`/`vol` (used as a per-day drift, 0.010
-    /// compounds to `exp(1565 * 0.010) ≈ e^15.65`, many orders of
-    /// magnitude off), a dropped `sqrt(BARS_PER_DAY)` divisor on the
-    /// intraday step, and now also an anchor that drifts away from
-    /// `level` — the defect this replaced, where six years of compounding
-    /// put `SPX.close` near 10,000.
+    /// The anchor-day magnitude check allows accumulated daily noise while
+    /// catching parameter mixups, missing intraday volatility scaling, or
+    /// missing drift compensation between the epoch and anchor.
     #[test]
     fn the_first_bars_of_spx_for_seed_42_are_pinned() {
         let rows = bars(
@@ -284,11 +268,9 @@ mod tests {
         }
     }
 
-    /// `to` at exactly midnight excludes `to`'s own day: every bar of a
-    /// session starts at 14:30, so that day can contribute nothing, and
-    /// visiting it costs a full `open_level` walk. The counts below are
-    /// the contract — the day is skipped, not merely emitted empty — and
-    /// a `to` inside a session still visits its day.
+    /// A midnight end excludes that day's session. Moving the end into the
+    /// next session adds its first bar while preserving the half-open interval.
+    /// The row-count assertions verify emitted bars, not how many daily walks run.
     #[test]
     fn a_midnight_to_does_not_walk_the_excluded_day() {
         let to_midnight = bars(

@@ -9,8 +9,8 @@
 //! hex field.
 //!
 //! Series labels, state text, and swatches are prepared alongside header chips.
-//! Picker labels, completion labels, menu rows, and date segments are also
-//! prepared outside render. Series, picker and completion rows share
+//! Picker labels, completion labels, menu rows, and date segments are retained
+//! for reuse by their painters. Series, picker and completion rows share
 //! row_shell; menu rows add disabled reasons and toggles.
 //!
 //! The lists, add picker, range editor, and expression completion list use
@@ -402,13 +402,12 @@ impl PickerState {
 }
 
 /// Tile-owned expression input painted below the header. Parse and reference
-/// errors keep it open with an inline error. A resolved expression closes the
-/// field before the model write; a model refusal appears in the tile's notice.
+/// errors keep it open with an inline error. After resolution the model write
+/// runs and the field closes; a model refusal appears in the tile's notice.
 pub(crate) struct ExprField {
     pub input: Entity<InputState>,
-    /// The slot being replaced (`e`), or `None` for a fresh one (`x`) —
-    /// what `core::resolve` excludes from the references the text may
-    /// name and checks for a cycle through.
+    /// Stable slot number to replace (`e`), or `None` to add a slot (`x`).
+    /// Resolution permits source-series references only.
     pub editing: Option<u8>,
     pub error: Option<SharedString>,
     /// The loaded-name list under the field, rebuilt on the input's

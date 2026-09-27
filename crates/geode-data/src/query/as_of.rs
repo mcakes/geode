@@ -248,16 +248,10 @@ mod tests {
 
     #[test]
     fn a_row_that_cannot_be_rebuilt_is_an_error_not_a_smaller_answer() {
-        // Swallowing a decode error here silently narrows the resolved
-        // generation set, which silently narrows the *result*: a query
-        // that answers with less data than it has and says nothing. A
-        // loud failure is the only honest outcome.
-        //
-        // Caught at rebuild time now, not at resolve time: the cast fails
-        // inserting into `generations`, before `resolve_generations` ever
-        // runs. `a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer`
-        // below is `resolve_generations`'s own equivalent, once a row is
-        // already in the summary.
+        // An unreadable payload row must fail summary rebuilding instead of
+        // silently narrowing the resolved history. Here the cast fails while
+        // inserting into `generations`; the next test covers unreadable rows
+        // already present in that summary.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -388,10 +382,9 @@ mod tests {
 
     #[test]
     fn the_predicate_names_the_source_time_so_a_reused_gen_id_selects_one_generation() {
-        // `gen_id` is `max + 1` over the catalog, allocated before the
-        // catalog row is written: a publish that then fails to record
-        // leaves rows whose id the next load reuses. Same partition, same
-        // id, different instants — the predicate must pick one.
+        // Legacy history can contain reused generation IDs after failed loads.
+        // For the same partition and ID, source time must distinguish the rows.
+        // Current publications allocate IDs from a sequence.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())

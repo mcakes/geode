@@ -378,7 +378,7 @@ impl Frame {
 
     /// Replace top-level expression term `i` with the named expression
     /// `name`: the term leaves the expression and the name joins the named
-    /// list, in ONE `set_scope` so a single undo puts the term back.
+    /// list, in one `set_scope` so a single undo puts the term back.
     /// `expected` guards the index as in [`Self::replace_expression_term`].
     pub fn name_expression_term(
         &mut self,

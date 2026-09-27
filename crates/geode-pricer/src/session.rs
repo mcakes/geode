@@ -1,8 +1,8 @@
-//! The tile's session record (line-pricer spec §7.4): `{ sheet, view,
-//! refresh, cursor, expanded, column_widths }`. The sheet's rows are the store's; this
-//! names which sheet the tile shows and how it was looking at it. Read
-//! leniently — a key of the wrong type is ignored, never a refusal — so
-//! a hand-edited `session.toml` still opens the tile.
+//! Tile session state: sheet name, view, refresh setting, cursor line ID,
+//! expanded package IDs, and `:autosize` column widths. Sheet contents are
+//! stored separately. Reading ignores wrong-typed fields, invalid refresh
+//! values, and negative IDs; valid members of a mixed expansion list are
+//! retained.
 
 use crate::core::sheet::{LineId, Refresh};
 use crate::core::storage::{encode_refresh, parse_refresh};

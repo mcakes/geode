@@ -1512,9 +1512,9 @@ run_mutation "pool: a worker releases a transaction left behind" \
   crates/geode-data/src/query/pool.rs \
   '        release_transaction(&conn);
 
-        // The stale check' \
+        // Check staleness' \
   '
-        // The stale check' \
+        // Check staleness' \
   geode-data \
   a_transaction_left_aborted_does_not_wedge_the_worker
 
@@ -3680,13 +3680,13 @@ run_mutation "delegate: the cursor is re-derived by column name across a move" \
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   '        if let Some(name) = None::<String>
             && let Some(i) = self.plan.as_ref().and_then(|p| p.position_of(&name))
         {
             self.cursor.col = i;
         }
-        // `TableState::move_column` (gpui-component) calls this directly' \
+        // The component calls this hook without `visible_rows_changed`, so' \
   geode-blotter \
   the_cursor_follows_its_column_across_a_move
 
@@ -3958,12 +3958,12 @@ run_mutation "blotter: filter validates against the dataset" \
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.invalidate_cells();
         self.refresh_selection();
         cx.notify();
     }' \
-  '        // same tree, and the window is only ever tens of rows.
+  '        // column movement leaves their values unchanged because the tree stays fixed.
         self.refresh_selection();
         cx.notify();
     }' \
@@ -15474,11 +15474,9 @@ run_mutation "dialog: the object-dialog frozen-row click is dropped while a conf
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
-# Spec §20.5 at the blotter tile's own derivation (the final review's
-# I2): `Cursor::move_rows` takes `wrap` from the caller, and the tile is
-# what decides it from whether a selection is live (grid selection spec
-# §3, replacing the old `Mode` enum). Mutated to always wrap, a bare `j`
-# with a selection live leaps from the last row to row 0 and inverts it.
+# The tile enables row wrapping only when no selection is active.
+# Forcing wrap on makes a bare j jump from the last row to the first
+# and reverses the selected range across its anchor.
 run_mutation "tile: a bare step wraps in normal mode only (spec §20.5)" \
   crates/geode-blotter/src/tile.rs \
   '                    let wrap = d.selection.is_none();' \
@@ -17087,8 +17085,8 @@ run_mutation "series: dedupe ignores the pair filter" \
 # an empty fetch, the coverage row is never written.
 run_mutation "series: coverage is not recorded for an empty fetch" \
   crates/geode-data/src/store/series.rs \
-  '    // 4. Coverage, always.' \
-  '    // 4. Coverage, always.
+  '    // Record coverage even when deduplication leaves no new rows.' \
+  '    // Record coverage even when deduplication leaves no new rows.
     if req.rows.is_empty() {
         return Ok(SeriesAppended { appended, swept: 0 });
     }' \
@@ -20376,18 +20374,18 @@ run_mutation "pricer tile: a sheet edit lands on the fallback while loading" \
 
 run_mutation "pricer tile: a load keeps undo recorded against the fallback" \
   crates/geode-pricer/src/tile.rs \
-  '                    // over it. Nothing to undo into is the safe state.
+  '                    // them could overwrite loaded values, so discard their history.
                     self.undo.clear();' \
-  '                    // over it. Nothing to undo into is the safe state.' \
+  '                    // them could overwrite loaded values, so discard their history.' \
   geode-pricer shift_spot_group_ungroup_refuse_while_loading_and_loaded_clears_any_undo
 
 run_mutation "pricer tile: put onto a collapsed package's leg slot hides the line" \
   crates/geode-pricer/src/tile.rs \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
             self.expansion.set(self.sheet.id(package), true);
         }' \
-  '        // to wherever it was (review finding).
+  '        // cursor reconciliation can select it.
         let _ = &place;' \
   geode-pricer put_below_onto_a_collapsed_packages_leg_slot_opens_it
 
@@ -22123,7 +22121,7 @@ run_mutation "action rename: register refuses a retired id" \
   '        if let Some(new) = None::<&ActionId> {' \
   geode-shell a_retired_id_cannot_be_registered
 
-# ---- grid selection (grid selection spec) ---------------------------------
+# ---- grid selection ------------------------------------------------------
 
 run_mutation "grid selection: an ancestor in the selection hides the row" \
   crates/geode-core/src/grid/selection.rs \
@@ -22160,7 +22158,7 @@ run_mutation "grid selection: a lost anchor column is named as the column" \
   geode-core \
   resolution_goes_through_identity_and_names_the_lost_anchor
 
-# ---- blotter selection (grid selection spec) -------------------------------
+# ---- blotter selection ---------------------------------------------------
 
 run_mutation "blotter selection: escape clears the selection before find" \
   crates/geode-blotter/src/tile.rs \

@@ -1,11 +1,10 @@
-//! The table's prepared rows (line-pricer spec §8.2): every visible row's
-//! cells as `SharedString`s with the core's `CellState`, built on every
-//! edit, delivery, expansion, view and clock change — never per
-//! frame (`cell_text` allocates a `String` per cell). The paint is NOT
-//! here: `Paints` resolves a state to a colour at render from a per-theme
-//! memo (planning decision 14), so a theme switch rebuilds nothing.
-//! Column 0 carries structure only: the row's tag; the shorthand is kept
-//! as a search key.
+//! Prepared rows for the pricer table. The tile rebuilds this model when sheet data,
+//! expansion, columns, or the display clock changes. Each visible row stores formatted
+//! `SharedString` cells and their `CellState`, so painting does not format cell values.
+//!
+//! Colours live separately in `Paints`: a theme change replaces the palette without
+//! rebuilding these rows. The delegate supplies the tree column from each row's depth,
+//! package state, and tag. Shorthand is retained as a search key, not a painted column.
 
 use crate::core::columns::{CellState, ColumnKind, cell_text};
 use crate::core::sheet::{LineId, RowKind, Sheet};
@@ -49,11 +48,11 @@ pub struct GridRow {
     pub row: Option<usize>,
     pub id: Option<LineId>,
     pub depth: usize,
-    /// Column 0's painted tag: a package's template token (`CS`,
-    /// `CUSTOM`), empty on a line or leg (entry-bar spec §2).
+    /// Tree-column tag: a package's template token (`CS`, `CUSTOM`), empty on a
+    /// line or leg.
     pub tag: SharedString,
-    /// What find matches: the row's shorthand, never painted, so `/`
-    /// finds a row by text no visible column shows (entry-bar spec §3).
+    /// Find key derived from shorthand. It can match text that does not appear in
+    /// the current view's columns.
     pub search: SharedString,
     pub cells: Vec<GridCell>,
 }

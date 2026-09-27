@@ -38,7 +38,8 @@ In Normal mode, Escape clears a remaining query, then returns to the parent
 stage, then closes. The title row's Back button, painted in every stage but
 Browse, returns to the parent stage in one click: it first cancels an open
 value field, reverts filtering, and clears the query, and it does nothing
-while a confirmation is pending. Open value fields and Naming handle their keys separately:
+while a confirmation is pending. Open value fields and Naming handle their
+keys separately:
 Enter applies or chooses a field value, or validates and creates a name;
 Escape cancels that entry. They do not use the filter snapshot even though
 they focus the same input. Cancelling typed text or reverting a filter does
@@ -281,23 +282,22 @@ written afterward — and the query reports it once the scope is used.
 
 ## Scope expression field
 
-The Scopes domain's `expression` field carries the same suggestion list as
-the frame's expression dialogs — see [input-and-dialogs.md's Frame
-expression](input-and-dialogs.md#frame-expression) for the rows, operators,
-value rules, and keys, all of which apply here while the field is open,
-except that neither this field nor the Expressions domain's offers named
-expression rows (a scope ticks its names in its own **Named expressions**
-field). It
-narrows its values request by the edited scope's own dimension selections
-and text filter, with no expression (the field is replacing it), and the
-frame's as-of.
+The Scopes domain's `expression` field shares suggestion rows, operators,
+value rules, and insertion keys with the [frame expression editor](input-and-dialogs.md#frame-expression).
+Its distinct-values request uses the draft's dimension selections and text
+filter with the frame's as-of. The expression being replaced is removed before
+parsing that scope, so an unreadable saved expression does not discard the
+remaining narrowing.
 
-Enter commits the field, as any other text field does, and refuses an
-unknown column or a bad operator on a derived dimension with an `expression:`
-notice, keeping the field open; escape reverts the field's text instead of
-committing it. Both keep the object dialog's own text-entry contract; only
-tab, the arrows, and ctrl+p/ctrl+n additionally serve the suggestion list
-while this field is open.
+The Scopes and Expressions object fields exclude named-expression suggestions.
+Scopes select those references through their separate Named expressions field.
+
+Enter validates and commits the field. Syntax errors, unknown columns, and
+forbidden operators on derived dimensions produce an `expression:` notice
+and keep the field open. Escape cancels the field edit. Tab inserts a suggestion;
+Shift+Tab, Up/Down, and Ctrl+P/Ctrl+N move the suggestion highlight. Insertion
+uses the input's undoable range replacement and then updates the draft, so
+text synchronization preserves the inserted value.
 
 The Expressions domain's own `expression` field — the one field a named
 expression has — carries the same suggestion list and the same Enter/Escape

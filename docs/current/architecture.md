@@ -114,7 +114,10 @@ per-request errors. Read and pricing workers contain panics in their request
 paths. Egress workers contain transport panics and continue serving their
 queues, but service-thread document serialization has no such boundary.
 Containment does not interrupt blocked calls. The application panic hook logs
-contained panics; uncontained panics also produce a crash report.
+panics marked by those containment boundaries without writing a report. Other
+panics trigger a best-effort report under the user config directory before the
+previous hook runs. An absent marker does not establish whether the process
+will exit; another caller may catch the unwind.
 
 Health and freshness describe what the system knows rather than concealing
 degradation. A source can remain queryable while degraded; the UI must retain

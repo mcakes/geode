@@ -12,7 +12,7 @@
 //! - **Add** (`frame::add_expression`, the toolbar's add-a-filter menu):
 //!   empty; Enter joins the typed expression to the current one with
 //!   `and` (or sets it when there is none), and an empty field closes
-//!   without a change.
+//!   without a change when no named expressions are staged.
 //!
 //! Whole and Add also stage named expressions: a named row's accept
 //! stages its name as a `≡ name` chip above the field, and Enter applies
@@ -35,15 +35,15 @@
 //! nothing to stage: the name replaces the term in one `set_scope` and the
 //! dialog closes.
 //!
-//! Every commit goes through `Frame`'s undoable `set_scope` path. A parse
+//! Every scope change goes through `Frame`'s undoable `set_scope` path. A parse
 //! error stays inline in every mode, and editing clears the error. Escape
-//! closes without applying. Each open seeds a fresh draft from the current
-//! frame.
+//! from expression entry closes without applying the draft; definitions already
+//! queued by save-as-named remain. Each open seeds a draft from the current frame.
 //!
 //! While typing, `expr_suggest` lists what fits at the caret and warns
 //! about schema problems. Enter refuses a syntax error or an unknown
 //! column (`geode_core::scope::complete::check`). An operator that means
-//! nothing on its column fails at query time, as before.
+//! nothing on its column fails at query time.
 
 use std::rc::Rc;
 
@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     /// An empty field with names staged applies the names alone, in both
-    /// modes; Whole also clears the expression, as an empty field always did.
+    /// modes; Whole also clears the expression.
     #[test]
     fn empty_text_with_staged_names_applies_the_names() {
         let mut f = frame_with(None);
@@ -1266,7 +1266,7 @@ mod tests {
         let offered: Vec<&str> = offers.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(offered, vec!["bad", "liq"]);
         assert!(offers[0].broken);
-        // A broken offer previews WHY it is broken, not its text.
+        // Broken offers show the validation reason in their preview.
         let Some(NamedExpr::Invalid { reason, .. }) = defined.get("bad") else {
             panic!("bad is invalid");
         };

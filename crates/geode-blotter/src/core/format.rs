@@ -1,13 +1,6 @@
-//! Number formatting moved to `geode_core::format` (market-data Part 3
-//! Task 5): the market-data panel paints cells from a `ColumnFormat`
-//! too, and two modules never depend on each other, so the one formatter
-//! lives in core and both re-export or call it there.
-//!
-//! This file is the blotter's door to it — `crate::core::format::{Sign,
-//! format_number}` still resolves for `delegate.rs` and `core/cache.rs`
-//! — plus the tests that have always covered the rule, kept here so the
-//! behaviour a blotter cell depends on is asserted by the blotter's own
-//! suite.
+//! Shared number formatting from `geode_core::format`. Feature crates use
+//! this common implementation without depending on sibling features. The
+//! blotter tests pin its precision, scaling, sign, and non-finite display rules.
 
 pub use geode_core::format::{Formatted, Sign, format_number};
 

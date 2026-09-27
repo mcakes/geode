@@ -1,8 +1,6 @@
-//! The document request (market-data spec §7): one document by key, live
-//! or as-of, as a plain select in axis order. Deliberately not a view:
-//! there is no grouping, no aggregation and no scope — the key IS the
-//! predicate — so the tree compiler has nothing to add and everything to
-//! get wrong.
+//! Read one document by key, live or at a historical instant, in axis order.
+//! The key supplies the predicate; document reads have no scope, aggregation,
+//! or rollup tree.
 
 use crate::query::as_of::resolve_generations;
 use crate::query::compile::{CompiledColumn, CompiledQuery};
@@ -20,32 +18,16 @@ fn invalid(msg: String) -> StoreError {
     StoreError::Document(msg)
 }
 
-/// Compile a document request into one `select` against the dataset's
-/// document pair (`store::ddl::TablePair::for_document`).
+/// Compile a document request against its dataset's document tables.
 ///
-/// Live reads the live table with no generation predicate at all, the
-/// same rule every other live read follows (`ddl`'s own doc comment: no
-/// `gen_id` column is even consulted). As-of resolves against the
-/// `generations` summary the same way a view query does
-/// (`query::as_of::resolve_generations`) — but only for *this request's
-/// own document*, not the whole dataset's.
+/// Live reads select by key from the live table. Historical reads resolve the
+/// generation summary, select the partition named by [`join_key`], and pin
+/// its generation with `gen_id = N` across the live/archive union. An instant
+/// before that document's first retained generation produces an empty result.
 ///
-/// That narrowing is deliberate, not an optimisation of the general
-/// multi-partition machinery `generation_predicate` builds for a view
-/// spanning every book: a document dataset can hold many unrelated
-/// documents (one partition per distinct key), and a request for one of
-/// them must never be affected by, or report freshness for, another. So
-/// this resolves every partition `resolve_generations` can see as of
-/// `t` (a summary-table read, cheap regardless of how many documents
-/// exist) and then picks out the one whose `batch` is this request's own
-/// key — the exact same `join_key` call `publish_document` made to name
-/// the partition on the way in, recomputed here on the way out, so the
-/// two can never name it differently.
-/// The result is a plain `gen_id = N` equality, not an `IN`-list: with
-/// exactly one partition in scope there is exactly one generation to
-/// pin, and a bare equality is both the cheapest predicate DuckDB can
-/// push down and the most honest reading of "this one document, as it
-/// stood at T".
+/// For historical reads, the selected source time and generation ID travel
+/// with the compiled query for provenance. Other documents in the dataset do
+/// not affect either value.
 pub fn compile_document(
     conn: &Connection,
     schema: &SchemaSpec,
@@ -102,13 +84,9 @@ pub fn compile_document(
             let batch = join_key(&params.document_key);
             let gens = resolve_generations(conn, &ds.name, *t)?;
             let resolved = gens.into_iter().find(|g| g.batch == batch);
-            // Read from the union of both tables regardless of which side
-            // the resolved generation lives on: as-of's newest generation
-            // may still be live (`publish_file` only ever moves the
-            // *outgoing* generation to the archive), so a query aimed at
-            // the archive alone would silently answer "no such document"
-            // for the common case of asking about the current state a
-            // moment in the past.
+            // The selected generation may still be live: publication archives only
+            // the outgoing generation. Read both tables so historical requests can
+            // select the latest retained document too.
             let relation = format!(
                 "(select * from {} union all select * from {})",
                 tables.live, tables.archive
@@ -117,14 +95,9 @@ pub fn compile_document(
                 Some(g) => {
                     resolved_as_of.insert(ds.name.clone(), g.source_time);
                     resolved_generation = Some(g.gen_id);
-                    // `generation_predicate`'s own doc comment warns that
-                    // `gen_id` alone can collide on a database loaded by
-                    // a build that predates the id sequence. That does
-                    // not apply here: the document family's tables are
-                    // new on this branch, so every `gen_id` a document
-                    // dataset ever holds was reserved from the sequence,
-                    // and one publish writes exactly one batch — so a
-                    // `gen_id` can never name two different partitions.
+                    // Document publication allocates each generation from the
+                    // store sequence and writes one key per publish. Together
+                    // with the key predicate, this pins the selected document.
                     (relation, format!(" and gen_id = {}", g.gen_id))
                 }
                 // No generation of this document existed by `t`: a
@@ -162,8 +135,7 @@ pub fn compile_document(
     Ok(CompiledQuery {
         sql,
         params: sql_params,
-        // No grouping: a document has no tree, spec §7 — the snapshot is
-        // depth 0 only.
+        // Document snapshots have no rollup tree and contain only depth 0.
         grouping: Vec::new(),
         columns: compiled_columns,
         stalest_input: vec![ds.name.clone()],
@@ -189,17 +161,9 @@ mod tests {
         spx_first_gen: i64,
     }
 
-    /// SPX.Z published twice (14:00, then republished at 14:05) with a
-    /// second key, NDX.Z, published once in between (14:03).
-    ///
-    /// The second key exists so the as-of arm's per-document resolution
-    /// has more than one partition to choose from at once. With only one
-    /// document ever published, `resolve_generations`'s result always
-    /// has exactly one entry, so `.find(|g| g.batch == batch)` and a bug
-    /// that took whichever generation the resolve happened to list first
-    /// (`.next()`, `min_by_key`, …) read identically — the gap the Task
-    /// 8 review's Important #1 named. Two documents at different
-    /// source times makes the two implementations diverge.
+    /// SPX.Z has generations at 14:00 and 14:05; NDX.Z has one at 14:03.
+    /// Different keys and times expose resolution that selects another
+    /// document's generation or reports dataset-wide freshness.
     fn fixture_with_two_generations() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
@@ -359,15 +323,8 @@ mod tests {
         );
     }
 
-    /// Task 8 review, Important #1(a): two documents exist by 14:04, at
-    /// different source times, so a bug that resolved the wrong batch —
-    /// or simply took the first generation `resolve_generations` handed
-    /// back regardless of which document it belonged to — reads
-    /// differently from the correct per-document resolution. SPX.Z's
-    /// 14:05 republish has not happened yet at 14:04, so it must still
-    /// resolve to its *first* generation even though NDX.Z's only
-    /// generation (14:03) is newer and sorts later in `resolve_generations`'
-    /// result.
+    /// At 14:04, each document resolves to its own generation. SPX.Z still
+    /// selects 14:00 even though NDX.Z has a newer generation at 14:03.
     #[test]
     fn an_as_of_document_query_resolves_each_key_to_its_own_generation() {
         let f = fixture_with_two_generations();
@@ -417,12 +374,8 @@ mod tests {
         );
     }
 
-    /// Task 8 review, Important #1(b): before SPX.Z's first publish, the
-    /// request must compile and return nothing (the `and false` branch)
-    /// rather than error or somehow resolve NDX.Z's generation instead —
-    /// and the very same key at a later instant must resolve normally,
-    /// so the empty result is honestly "nothing existed yet", not a
-    /// compiler stuck on the first instant it was ever asked about.
+    /// A request before the first publish returns no rows; the same key at
+    /// a later instant resolves normally.
     #[test]
     fn an_as_of_before_the_first_publish_compiles_and_returns_no_rows() {
         let f = fixture_with_two_generations();

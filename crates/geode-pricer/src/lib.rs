@@ -15,10 +15,9 @@ pub mod session;
 pub mod store;
 pub mod tile;
 
-/// Rebind `DataTable`'s own navigation keys to `NoAction` inside the
-/// table's context, so the tile's fragment owns them (the blotter's and
-/// the market-data panel's reason, copied: a module may not depend on a
-/// sibling). Called once at startup, beside the other modules' inits.
+/// Suppress component navigation so the tile's keymap owns grid movement.
+/// Call once after component initialization. These bindings remain active
+/// when a pointer press temporarily moves focus into the table.
 pub fn init(cx: &mut gpui::App) {
     const CONTEXT: Option<&str> = Some("DataTable");
     cx.bind_keys(
@@ -40,7 +39,7 @@ pub fn init(cx: &mut gpui::App) {
     );
     // The entry bar's completion owns tab/shift-tab: gpui-component's Root
     // binds both to focus cycling, and a matched action runs before the
-    // bar's key listener (the timeseries expression field's reason).
+    // bar's key listener. Suppressing them lets the entry listener cycle suggestions.
     cx.bind_keys(
         ["tab", "shift-tab"]
             .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),

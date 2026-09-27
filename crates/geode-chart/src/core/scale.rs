@@ -1,4 +1,4 @@
-//! Value ↔ pixel on a y axis, with 1-2-5 nice ticks (spec §8.1).
+//! Value-to-pixel mapping on a y axis, with 1-2-5 nice ticks.
 
 /// `lo` maps to `bottom`, `hi` to `top` (pixel y grows downward).
 #[derive(Clone, Copy, Debug, PartialEq)]

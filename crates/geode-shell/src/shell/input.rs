@@ -128,14 +128,9 @@ impl ShellView {
         self.stack_list = None;
         self.add_filter_menu = None;
 
-        // The palette reaches every action, including these three, even while a
-        // dialog is open (ruling 5). Each would open real transient chrome behind
-        // the stack that the user cannot see and, being blocked from the keyboard
-        // by the modal branch, can barely reach: an unfocusable command line that
-        // cancels itself on the next render, a find prompt with the same fate, or
-        // a stack list that only becomes usable once the stack closes. Refuse
-        // instead of running them behind the stack, unlike an ordinary palette
-        // action (see `commit_selected`), which is allowed to run there.
+        // The palette reaches every action while a dialog is open. Refuse
+        // transient tile controls here: the modal would hide them and block
+        // their keyboard route. Other palette actions may run behind the stack.
         if self.modal_open()
             && matches!(
                 action.0.as_str(),

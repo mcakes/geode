@@ -91,15 +91,18 @@ view's own grouping, selected-column references, a `measure` column's role in th
 primary dataset, a `dimension` column's reachability through the grouping, a
 join, or a declared grain carrying it alongside the whole grouping (the
 unanimity rule; `ViewSpec::ungrouped_dimensions` lists those columns for both
-validation and the compiler), and grouping references. Derived dimensions must resolve to a source column
-in the primary dataset. It does not validate derived SQL or sort keys; query
-compilation performs those.
+validation and the compiler), and grouping references. Derived dimensions
+must resolve to a source column in the primary dataset. It does not validate
+derived SQL or sort keys. The compiler emits them into SQL; DuckDB binding
+and execution can reject them.
 
-`validate` is the gate, not advice. An error means the view cannot be honoured,
-and the data service refuses it by name when queried. A column's `kind` defaults
-to `measure`; a join and a column take `required`, defaulting to true, and
-`required = false` turns that declaration's error into a warning naming what was
-dropped, leaving the view open.
+The data service refuses a view by name when validation reports an error.
+A column's `kind` defaults to `measure`; joins and columns default to
+`required = true`. Setting `required = false` downgrades unusable joins,
+measure-role mismatches, and unreachable dimension columns to warnings and
+allows those declarations to be omitted. Unknown columns and invalid source
+columns for derived dimensions remain errors. The flag does not affect
+validation of derived SQL during compilation.
 
 A top-level string `default = "name"` marks that view when present. A table
 named `default` is an ordinary view. Without a string default, parsed views

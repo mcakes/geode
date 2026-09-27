@@ -1,9 +1,7 @@
-//! The sheet's pure core (line-pricer spec §6): the row model, the one
-//! edit door with its inverses, the shorthand grammar both ways, the
-//! package templates, the column vocabulary, the views doc and the
-//! storage row shape, and the entry bar's completer. No gpui type appears
-//! here except `SharedString`, which `complete` prepares so the entry
-//! bar's list paints without formatting.
+//! The sheet's pure model: row identity and structure, edits and inverses, shorthand
+//! parsing and rendering, package templates, column formatting, views, document
+//! conversion, and entry completion. It performs no I/O and owns no entities or
+//! windows; completion prepares GPUI `SharedString` values for the entry list.
 
 pub mod cell;
 pub mod clip;

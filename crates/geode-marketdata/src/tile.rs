@@ -232,16 +232,10 @@ enum Echo {
     /// `sent HH:MM, confirmed HH:MM` — the draft has cleared; dropped by
     /// [`MarketDataTile::rebuild_chrome`] at the next edit.
     Confirmed(SharedString),
-    /// The generation that was compared and found different (`newer`) and
-    /// the line naming how many rows differ. The panel keeps painting the
-    /// base while this stands, and a redelivery of `newer` is not compared
-    /// again. Keyed by the whole generation, not its source time alone, so
-    /// a corrected republish cannot reuse the previous republish's
-    /// comparison — exact equality rather than
-    /// [`DocumentBase::differs_from`], because re-running a comparison costs
-    /// one build while reusing a stale verdict reports an echo nothing
-    /// checked. Dropped the moment the draft leaves `Sent` (`:rebase`,
-    /// `:revert`, a further edit).
+    /// The compared delivery's full base and the difference notice. Keep the
+    /// Sent draft over its base and reuse this verdict only for an exactly equal
+    /// `DocumentBase`. A changed generation, including known versus unknown,
+    /// requires another comparison. Clear the verdict when the draft leaves Sent.
     Differs {
         newer: DocumentBase,
         text: SharedString,
@@ -1416,10 +1410,8 @@ impl MarketDataTile {
         // committing either. An unbuildable generation changes only the notice, keeping
         // the last usable snapshot, draft state, and model together.
         let mut draft = self.draft.clone();
-        // The generation the edits were made against, taken before anything
-        // below is allowed to move the draft onto another one: an automatic
-        // rebase overwrites `draft.base` with the delivered pair, and a base
-        // read after that would be compared with itself.
+        // Capture the original base before policy handling: automatic rebase
+        // replaces it with the delivered pair, which would compare equal to itself.
         let held = draft.base.clone();
         let mut moved = base.as_ref().is_some_and(|b| draft.on_delivered(b));
         // Evaluate the upload echo on the same draft copy before committing state.
@@ -1490,19 +1482,10 @@ impl MarketDataTile {
                 }
             }
         }
-        // A republish at the SAME source time moves nothing a trader can
-        // see: the `update HH:MM` badge and the header's source-time chip
-        // both carry that time already, and under an automatic rebase even
-        // the badge returns to the plain dirty dot. The document changed
-        // underneath the draft, so say so however the delivery was handled —
-        // silence here is the whole defect this identity exists to remove.
-        //
-        // `held` differing from the delivered pair at an equal source time is
-        // exactly the republish case: a redelivery of the same generation, or
-        // the base generation coming back, does not differ and says nothing.
-        // Only when no policy notice already speaks for this delivery: a
-        // `Replace` disclosure of lost work, or a dropped-edit report,
-        // outranks this one.
+        // Disclose a same-time republish when it changes draft state. The timestamp
+        // cannot show the change, and automatic rebase leaves no Behind badge.
+        // A replacement or dropped-edit notice takes precedence. Redelivery and
+        // returning to the base do not produce a republish notice.
         if moved
             && notice.is_none()
             && let Some(delivered) = &base
@@ -1521,17 +1504,10 @@ impl MarketDataTile {
                 format!("republished at {when} — your edits moved onto it").into()
             });
         }
-        // Retain the outgoing snapshot only when it is the draft's actual base and the
-        // new state still needs it. Restored drafts may have no delivered base; never
-        // pin their newest-snapshot fallback as if it were that base.
-        //
-        // Whole-pair equality here, deliberately, not `DocumentBase::differs_from`:
-        // that method is permissive because it decides whether to DISTURB unsent
-        // work, and an unknown generation must not disturb it. This decides
-        // whether to TRUST a snapshot AS the base, where the permissive answer
-        // is the dangerous one — it would pin a snapshot whose generation the
-        // draft's base cannot vouch for, and the edits would then paint over
-        // another document's grid.
+        // Retain an outgoing snapshot only when its full base equals the draft's
+        // and the new state still needs it. `differs_from` permits unknown-generation
+        // fallbacks; using it here could pin another grid beneath position-keyed
+        // edits. A restored draft's latest painted fallback is not proof of its base.
         let retained = if draft.is_behind() || matches!(echo, EchoStep::Held(_)) {
             match &self.base_snapshot {
                 Some(base) => Some(Arc::clone(base)),
@@ -1760,11 +1736,9 @@ impl MarketDataTile {
         let Some(base) = self.painted_snapshot() else {
             return;
         };
-        // Whole-pair inequality, not `DocumentBase::differs_from`: the
-        // permissive answer would let a generation this base cannot vouch for
-        // overwrite a restored draft's stored group sizes with another
-        // document's, and rebase's same-day guard would then compare counts
-        // taken from a document the edits were never made against.
+        // Capture group sizes only from an exactly matching base. The source-time
+        // fallback in `differs_from` cannot establish that a snapshot belongs to
+        // the draft and must not replace restored group guards.
         if base_of(&base) != draft.base {
             return;
         }
@@ -7430,9 +7404,8 @@ edits = [["2026-11-20", "-1", 9.5]]
         assert_eq!(cells.get("n"), Some(&Value::I64(2)), "n is untouched");
     }
 
-    /// An integer cell commits the exact integer that was typed. Through the
-    /// old `parse_cell` → f64 → `as i64` path the value below silently became
-    /// 9007199254740992, while the same text in an ATTRIBUTE was exact.
+    /// An integer cell preserves the typed `i64` through commit, whole-number
+    /// bump, and upload assembly, including values above exact `f64` precision.
     #[gpui::test]
     fn a_typed_integer_above_2_pow_53_reaches_the_draft_exactly(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_spec(cx, &test_fixtures::MIXED, None);
@@ -8875,10 +8848,9 @@ deleted = true
         );
     }
 
-    /// A corrected republish keeps its source time and takes a new store
-    /// generation. Before the base was a pair, `on_delivered` saw no change,
-    /// `apply_snapshot` installed the new grid anyway, and this edit — keyed
-    /// by grid position — landed on whatever node now held that column.
+    /// A same-time republish with a changed generation puts an edited draft
+    /// Behind and retains its base grid. Removing a term in the new document
+    /// must not move a position-keyed edit to the term now at that index.
     #[gpui::test]
     fn a_republish_at_the_same_source_time_holds_the_draft_instead_of_repointing_it(
         cx: &mut gpui::TestAppContext,
@@ -8935,12 +8907,9 @@ deleted = true
         );
     }
 
-    /// The same defect in the shape that names it: a corrected republish at
-    /// the SAME source time whose node ladder GREW. An axis panel's column
-    /// order is the document's own node order and `Draft::edits` is keyed by
-    /// model column, so painting the republished grid under a position-keyed
-    /// edit would move that edit one column along — onto the node the
-    /// republish inserted, at a value the trader never typed there.
+    /// A same-time republish that inserts a node before the existing ladder
+    /// must not shift a held edit onto the inserted node. Axis columns follow
+    /// document order, while the edit retains its original grid position.
     #[gpui::test]
     fn a_republish_that_reorders_the_nodes_keeps_the_edit_on_its_own_node(
         cx: &mut gpui::TestAppContext,
@@ -9008,11 +8977,9 @@ deleted = true
         assert_eq!(cells[SLICE].text.to_string(), "0.9000", "its own value");
     }
 
-    /// Under `:auto rebase` a corrected republish is resolved without the
-    /// trader touching a key — and nothing on screen moves, because the
-    /// source time did not: no `update HH:MM` badge, the same time chip. The
-    /// notice is the only disclosure that the document changed under the
-    /// draft, so it fires here too, naming no key since nothing is pending.
+    /// Automatic rebase onto a same-time republish reports that the edits moved.
+    /// The source-time chip is unchanged and no Behind badge remains, so the
+    /// notice supplies the update feedback without offering a pending action.
     #[gpui::test]
     fn auto_rebase_still_discloses_a_same_time_republish(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -13747,14 +13714,10 @@ cells = {{ ex = {{ type = "date", value = "2027-01-15" }}, status = {{ type = "t
         );
     }
 
-    /// A routine same-generation requery (any publish anywhere bumps the
-    /// frame, and the demo bus redelivers every few seconds) must not be
-    /// read as the echo: `echo_of`'s own guard compares the delivered
-    /// source time with `draft.base`, not with `sent`, before it ever
-    /// looks at `self.sent`. Content that plainly differs from what was
-    /// sent proves the short-circuit rather than a coincidental match —
-    /// mutated away, this delivery would build and compare against
-    /// `sent` and read as a difference within seconds of every upload.
+    /// Redelivery of the draft's base while Sent does not trigger echo comparison.
+    /// The base check uses source time and known generation IDs before inspecting
+    /// submitted rows. Deliberately different contents prove the short-circuit:
+    /// if compared, this fixture would report a differing echo.
     #[gpui::test]
     fn a_redelivery_of_the_base_while_sent_is_not_read_as_the_echo(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_upload(cx);

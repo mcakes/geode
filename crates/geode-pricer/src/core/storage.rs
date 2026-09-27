@@ -1,12 +1,10 @@
-//! The storage row shape (line-pricer spec §7.2): a sheet as one document
-//! of the `pricer_sheets` dataset — one row per line or package row, the
-//! sheet-wide settings as document attributes. Only definitions are
-//! stored (spec §1.2): a reopened sheet reprices.
+//! Pure conversion between a sheet and one document in the `pricer_sheets` dataset.
+//! Each line or package occupies a row; document attributes hold sheet-wide settings.
+//! Results are omitted, so reopened sheets reprice.
 //!
-//! Values have no NULL, so every optional is a flag plus a value or a
-//! kind plus a value. `geode-app` declares the dataset in its builtin
-//! layer and the tile's `DuckSheetStore` reads and writes it over
-//! `DataHandle`; this module is the pure conversion both ways.
+//! Document values are non-NULL: optional values use flags or kind tags. `geode-app`
+//! installs the dataset declaration, and `DuckSheetStore` performs I/O through
+//! `DataHandle`.
 
 use crate::core::sheet::{LineId, LineState, OwnShifts, Refresh, RowKind, RowRecord, Sheet};
 use crate::core::template::Template;
@@ -25,7 +23,7 @@ pub const PRICER_SHEETS_DATASET: &str = "pricer_sheets";
 pub const SHEET_KEY: &str = "sheet";
 pub const LINE_AXIS: &str = "line";
 
-/// The datasets-doc declaration (spec §7.2), one `[pricer_sheets.columns.<name>]`
+/// The datasets-doc declaration, one `[pricer_sheets.columns.<name>]`
 /// table per column. `geode-app` pushes it into the builtin config layer.
 ///
 /// **Frozen.** The store creates the tables with `CREATE TABLE IF NOT
@@ -129,9 +127,8 @@ type = "utf8"
 role = "attribute"
 "#;
 
-/// `NDX=20000.5;SPX=5100` in `BTreeMap` order; `""` when empty
-/// (planning decision 6). Plain data, no arithmetic. Keys are
-/// upper-case, as `Edit::SetSpotOverride` stores them.
+/// Encode overrides as `NDX=20000.5;SPX=5100` in `BTreeMap` order, or an empty string.
+/// `Edit::SetSpotOverride` stores uppercase keys.
 pub fn encode_overrides(overrides: &MarketOverrides) -> String {
     overrides
         .spot
@@ -165,7 +162,7 @@ pub fn parse_overrides(text: &str) -> Result<MarketOverrides, String> {
 }
 
 /// `""` | `off` | `<secs>s`, or `<millis>ms` where the interval has a
-/// sub-second remainder (spec §7.2): `{}s` alone would spell every
+/// sub-second remainder: `{}s` alone would spell every
 /// sub-second refresh `0s`, and `parse_duration` reads both units.
 pub fn encode_refresh(refresh: Refresh) -> String {
     match refresh {
@@ -211,7 +208,7 @@ fn own_pair(v: Option<f64>) -> (i64, f64) {
 
 /// The document for a sheet, or `None` when it has no rows: a zero-row
 /// document is refused by the store, and the last non-empty generation
-/// stays as history (spec §7.2).
+/// stays as history.
 pub fn to_rows(sheet: &Sheet) -> Option<DocumentRows> {
     if sheet.is_empty() {
         return None;
@@ -391,13 +388,9 @@ fn own(flag: i64, value: f64) -> Option<f64> {
     (flag != 0).then_some(value)
 }
 
-/// A sheet from its document. Rows are taken in `order`; a leg's parent
-/// is resolved by id, must be a package earlier in that order, and the
-/// legs of one package must follow it CONTIGUOUSLY (the sheet's own
-/// invariant — `children` is a scan of the following rows). Every line
-/// comes back `Stale`
-/// at revision 1 with no result (results are not stored, spec §1.2), and
-/// `next_id` continues past the highest stored id.
+/// Decode a sheet in stored `order`. Parent IDs must identify earlier packages, and
+/// each package's legs must follow it contiguously. Loaded lines are stale at revision
+/// 1 with no result; fresh ID allocation continues above the highest stored ID.
 pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
     let ids = match rows.axes.iter().find(|(n, _)| n == LINE_AXIS) {
         Some((_, Column::I64(v))) => v,
@@ -479,11 +472,9 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
                     id.0, pid.0
                 ));
             }
-            // The sheet's invariant is that a package's legs are the
-            // CONTIGUOUS run after it (`Sheet::children` is a scan, not
-            // an index): a leg whose predecessor is neither its package
-            // nor another of its legs would land in neither `roots()`
-            // nor `children(package)` once `reindex_parents` ran.
+            // Legs must immediately follow their package or another of its legs.
+            // Reindexing derives parents from row order, so accepting a separated
+            // leg could hide it from its package or attach it to a different one.
             let follows = records
                 .last()
                 .is_some_and(|prev| prev.id == pid || prev.parent == Some(pid));
@@ -502,9 +493,9 @@ pub fn from_rows(name: &str, rows: &DocumentRows) -> Result<Sheet, String> {
                 if name.is_empty() {
                     return Err(format!("line {}: a package has no template", id.0));
                 }
-                // An unknown or since-removed name still loads: the legs
-                // are stored, so the package keeps its prices, and it
-                // prints its legs until a table of that name fits them.
+                // An unresolved template name still loads because its legs are
+                // stored independently. Repricing uses those instruments; shorthand
+                // prints each leg until a table of that name matches them.
                 RowKind::Package {
                     template: Template::named(name),
                 }
@@ -930,7 +921,7 @@ pub(crate) mod tests {
         assert_eq!(back.overrides(), s.overrides());
         assert_eq!(back.refresh, Refresh::Every(Duration::from_secs(45)));
         assert_eq!(definition(&back), definition(&s));
-        // Results are not persisted (spec §1.2): every line is stale, rev 1, unpriced.
+        // Results are not persisted: every line is stale, rev 1, unpriced.
         for r in 0..back.len() {
             assert_eq!(back.revision(r), 1);
             assert_eq!(back.result(r), None);

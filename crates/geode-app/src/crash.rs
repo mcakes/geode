@@ -1,12 +1,10 @@
-//! Crash and log-file housekeeping (Phase 4b). Task 2 added
-//! [`trim_log_files`], the pure startup trim for the daily rolling log
-//! directory (`main.rs::install_logging`). Task 6 adds the panic hook
-//! itself: [`install_panic_hook`] replaces the default hook with one
-//! that writes a crash file — the log ring's contents plus the last 32
-//! actions dispatched, both otherwise lost the moment the process exits
-//! — beside the daily logs, then defers to whatever hook was installed
-//! before it (so a debug build's default "note: run with `RUST_BACKTRACE`"
-//! output, or any hook a future feature adds, still runs).
+//! Panic reports and log-file retention.
+//!
+//! [`install_panic_hook`] logs panics marked by Geode's containment boundaries
+//! and writes reports for unmarked panics. Reports snapshot the in-memory log
+//! ring and recent dispatched actions before invoking the previous panic hook.
+//! The app stores reports in the user config directory and daily logs in its
+//! `logs` subdirectory. [`trim_log_files`] bounds the daily log files at startup.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,40 +13,26 @@ use std::time::SystemTime;
 use geode_core::log::{Record, Ring};
 use geode_shell::diagnostics::ActionTail;
 
-/// Replaces the process panic hook (spec §4.7). Installed once, after
-/// the `tracing` subscriber (`main.rs::install_logging`), with
-/// everything the crash file needs already captured as `'static`
-/// handles: `ring` (the log tail), `tail` (the last 32 dispatched
-/// actions, as hashes — see `ActionTail`'s own doc comment), and
-/// `names`, which resolves those hashes back to action ids through
-/// `ActionRegistry::hash_names`'s shared snapshot.
+/// Installs panic reporting after logging and the action registry are ready.
+/// `ring` supplies retained log records, `tail` supplies the last 32 dispatched
+/// action hashes, and `names` resolves hashes through the registry's shared map.
 ///
-/// **This hook runs for every panic on any thread, contained or not**
-/// (fix round 1, MAJ-1) — a process panic hook fires before
-/// `catch_unwind` ever gets a chance to catch anything, so the four
-/// deliberate containment boundaries this codebase has (the ingest
-/// load, its pop-time catalog recheck, a discovery poll, a query pool
-/// worker — each wrapped in `geode_core::panic::contained`) do not
-/// suppress it. `geode_core::panic::is_contained()` is how this hook
-/// tells the two apart: a *contained* panic is one of those boundaries
-/// doing exactly what it exists for — the app keeps running — so it
-/// gets an `error` log line and no file; only an *uncontained* panic,
-/// one nothing caught, is an actual crash and gets a
-/// `write_crash_file` call. Without this, forty contained panics in a
-/// row (the `file_generations`-row scenario `runner.rs`'s pop-time
-/// recheck documents) would produce forty "Geode crash report" files
-/// for an application that never crashed.
+/// A process panic hook runs before unwinding, even when `catch_unwind` will
+/// catch the panic. [`geode_core::panic::is_contained`] identifies calls marked
+/// by Geode's containment helper: these emit an error log without a report.
+/// Unmarked panics attempt a report. The marker does not determine whether the
+/// process will exit; an unmarked panic can still be caught or end only its
+/// thread.
 ///
-/// `dir` is the directory crash files are written into — `None` (no
-/// writable user config dir) means the hook only logs; a missing home
-/// directory must never be the reason a panic itself panics.
+/// `dir` selects the report directory; `None` logs without writing a report.
+/// The action tail uses a nonblocking lock and degrades to a placeholder if it
+/// is locked or poisoned. The `names` callback must also avoid blocking on locks
+/// that the panicking thread might hold.
 ///
-/// The previous hook (`std::panic::take_hook`) always runs, last: this
-/// hook adds a crash file, it does not replace whatever handling was
-/// already installed (the default hook's stderr backtrace, or a future
-/// feature's own hook). The crash file is written — and, for a
-/// contained panic, the `error!` line is emitted — *before* that final
-/// call, so the artifact lands even if `previous` never returns.
+/// The previous hook is invoked after reporting on either path, preserving its
+/// stderr output or other handling. Report writing precedes the result log so
+/// subscriber failures cannot prevent an already completed file write. Reporting
+/// is best-effort: it still allocates and performs I/O on the panicking thread.
 pub fn install_panic_hook(
     dir: Option<PathBuf>,
     ring: Arc<Ring>,
@@ -61,12 +45,9 @@ pub fn install_panic_hook(
         let location = info.location().map(|l| l.to_string());
         let at = SystemTime::now();
 
-        // MAJ-1: a contained panic (one of this codebase's own
-        // `catch_unwind` boundaries doing its job) is not a crash — log
-        // it and stop. `geode_core::panic::is_contained` reads a
-        // thread-local set for the duration of the `contained` call the
-        // panic is unwinding out of; the hook always runs on the
-        // panicking thread, so this reads the right thread's marker.
+        // The hook runs on the panicking thread before unwinding clears the
+        // thread-local containment marker. Marked panics log without a report;
+        // the previous hook still runs.
         if geode_core::panic::is_contained() {
             tracing::error!(
                 target: "geode::shell",
@@ -80,26 +61,14 @@ pub fn install_panic_hook(
             return;
         }
 
-        // From here down: nothing caught this — an uncontained panic is
-        // the process actually going down.
-        //
-        // Allocation is fine on this path (spec: "nothing may stall the
-        // render thread" governs the *hot* path, not the one time the
-        // process is already going down) — `Ring::drain_since`'s own doc
-        // comment already allocates one clone per matching record.
+        // An unmarked panic gets a snapshot of the retained ring records.
+        // This path allocates to preserve diagnostic context before unwinding.
         let mut records = Vec::with_capacity(ring.capacity());
         ring.drain_since(0, &mut records);
 
-        // MIN-2: `try_lock`, not `lock().unwrap_or_else(into_inner)` —
-        // poison recovery is the wrong defense here. A hook runs
-        // *before* unwinding, so a mutex the panicking thread already
-        // holds is *held*, not poisoned; blocking `lock()` on it from
-        // the same thread would deadlock the hook rather than recover
-        // from anything. Unreachable today (`dispatch`'s guard is a
-        // statement temporary, and `ActionTail::record`/`fnv1a` panic on
-        // nothing), but the crash file is the artifact that must
-        // survive — a missing tail is a smaller loss than no file at
-        // all.
+        // The hook runs before unwinding releases locks. A blocking lock
+        // could deadlock on a guard held by this same thread; a placeholder
+        // preserves the rest of the report when the tail is unavailable.
         let actions: Vec<String> = match tail.try_lock() {
             Ok(guard) => guard
                 .recent()
@@ -112,32 +81,10 @@ pub fn install_panic_hook(
             Some(dir) => {
                 match write_crash_file(dir, at, &message, location.as_deref(), &records, &actions) {
                     Ok(path) => {
-                        // MIN-3: this — and the `error!` calls in every
-                        // other arm of this hook — re-enters the
-                        // `tracing` subscriber the hook is itself
-                        // reporting on. That's why the file is written
-                        // first: if a panic inside the subscriber (e.g.
-                        // the rolling appender's writer lock already
-                        // held by this same thread) deadlocks here, the
-                        // artifact is already on disk. This crash file
-                        // itself does not depend on the daily log file's
-                        // own state either way — `write_crash_file`
-                        // reads the ring's in-memory tail directly, never
-                        // the file layer.
-                        //
-                        // MIN-8 (final review), superseding the earlier
-                        // note here: `install_logging` now uses
-                        // `tracing_appender::non_blocking`, not a plain
-                        // `RollingFileAppender` — writes to the daily log
-                        // file go through a bounded channel to a
-                        // background thread, so an EARLIER log line is no
-                        // longer guaranteed to already be on disk by the
-                        // time a panic reaches this hook (a buffered
-                        // batch can still be in flight). Accepted: the
-                        // file layer is UI-thread `warn`+ only (the
-                        // Global Constraint), so the window is small, and
-                        // the crash file — the artifact this hook exists
-                        // to guarantee — is unaffected either way.
+                        // Write the report before re-entering the tracing subscriber,
+                        // which may itself be involved in the panic. The report uses
+                        // in-memory records directly; daily log writes are buffered on
+                        // a background thread and may still be in flight.
                         tracing::error!(
                             target: "geode::shell",
                             "crash file written to {}",
@@ -158,12 +105,8 @@ pub fn install_panic_hook(
     }));
 }
 
-/// A panic payload as text: `panic!`/`unwrap`/`expect` payloads are
-/// always `&'static str` or `String`; anything else (a custom
-/// `panic_any` payload) falls back to a named placeholder rather than
-/// losing the crash file entirely. Same shape as
-/// `geode_data::ingest::runner`'s own copy — different crates, no
-/// shared dependency to hang a single one off.
+/// Extracts string panic payloads, with a placeholder for custom payload types.
+/// This keeps non-string `panic_any` values representable in a report.
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
@@ -174,37 +117,25 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// How many `crash-*.log` files `write_crash_file` keeps, applied after
-/// every write (fix round 1, MAJ-1) — the same shape as the daily logs'
-/// own cap (`trim_log_files`, `keep = 7`), just pruned continuously
-/// instead of once at startup, since crash files aren't rotated by
-/// anything else the way `tracing_appender` rotates the daily logs.
+/// Maximum matching report files targeted by best-effort pruning after each
+/// successful write. Reports have no separate rotation task.
 const CRASH_FILES_KEPT: usize = 10;
 
-/// Writes `crash-<YYYYMMDD-HHMMSS-mmm>.log` under `dir`: the panic
-/// message and location, the log ring's contents (oldest first, as
-/// already ordered by `Ring::drain_since`, each line carrying its own
-/// timestamp and sequence number so it can be aligned against
-/// `logs/geode.YYYY-MM-DD.log`), and the last actions dispatched
-/// (oldest first, per `ActionTail::recent`). The timestamp is UTC, not
-/// local — the same clock `tracing-appender`'s daily log files use
-/// (`main.rs::install_logging`'s own MIN-7 note), so a crash file's name
-/// sorts and reads consistently against the log file it landed beside,
-/// even though every *displayed* time elsewhere in this app is the
-/// trader's configured clock (Phase 4a's ruling; as-of dialog Part 2).
+/// Writes `crash-<YYYYMMDD-HHMMSS-mmm>-<suffix>.log` under `dir`.
+/// The report contains the panic message and location, log records, and action
+/// names in their supplied order. The hook supplies records and actions oldest
+/// first. Each record includes its UTC timestamp and ring sequence number for
+/// correlation with daily logs.
 ///
-/// Millisecond resolution, opened with `create_new` rather than
-/// `std::fs::write` (fix round 1, MAJ-1): two panics inside one second
-/// — the exact shape of a run of *contained* panics before this fix
-/// round, and still possible for two genuinely uncontained ones close
-/// together — used to collide on a second-resolution name and the
-/// second write silently truncated the first file. `create_new` turns
-/// that into a detected collision instead: on `AlreadyExists`, retry
-/// with a `-1`, `-2`, … suffix until a name is free, so a near-
-/// simultaneous second crash gets its own file rather than erasing the
-/// first one's. Every write also prunes `dir` to the newest
-/// [`CRASH_FILES_KEPT`] `crash-*.log` files, since nothing else ever
-/// rotates them.
+/// File timestamps use UTC, matching the daily logs regardless of the configured
+/// display clock. The collision suffix starts at `00`; `create_new` reserves a
+/// name without truncating an existing report and retries with the next suffix
+/// on `AlreadyExists`.
+///
+/// Directory creation, file creation, and write failures propagate to the caller;
+/// a failed write can leave a partial file. After a successful write, pruning
+/// keeps the last [`CRASH_FILES_KEPT`] matching names in lexicographic order.
+/// Pruning failures are ignored.
 pub fn write_crash_file(
     dir: &Path,
     at: SystemTime,
@@ -238,11 +169,9 @@ pub fn write_crash_file(
 
     let mut suffix = 0u32;
     let path = loop {
-        // Always suffixed, zero-padded: `-00` for the first file at this
-        // millisecond, `-01` for a collision, so a plain name sort is a
-        // true age order (`-` sorts before `.`, so an unsuffixed name
-        // would sort *after* its own later collision — re-review of Task
-        // 6's fix round).
+        // Every name has a suffix, including the first (`-00`), so an
+        // unsuffixed file cannot sort after its later collision. Padding
+        // keeps suffixes below 100 in numeric order for filename pruning.
         let name = format!("crash-{stamp}-{suffix:02}.log");
         let candidate = dir.join(name);
         match std::fs::OpenOptions::new()
@@ -265,11 +194,8 @@ pub fn write_crash_file(
     Ok(path)
 }
 
-/// One log-tail line: level, target, message, plus (fix round 1, MIN-4)
-/// the record's own UTC timestamp and ring sequence number — without
-/// them, a crash file's tail cannot be lined up against
-/// `logs/geode-YYYY-MM-DD.log`, which is the first thing anyone reading
-/// one will try to do.
+/// Formats a retained record with its UTC timestamp, ring sequence, level,
+/// target, and message so the report can be correlated with daily logs.
 fn format_record(r: &Record) -> String {
     let dt: chrono::DateTime<chrono::Utc> = r.at.into();
     format!(
@@ -287,15 +213,13 @@ fn crash_timestamp(at: SystemTime) -> String {
     dt.format("%Y%m%d-%H%M%S-%3f").to_string()
 }
 
-/// Deletes the oldest files matching `<prefix>*<suffix>` in `dir` beyond
-/// `keep`. Oldest-first by file name: shared by [`trim_log_files`]
-/// (`geode.YYYY-MM-DD.log`, sorts lexicographically by date) and
-/// [`write_crash_file`]'s own pruning (`crash-YYYYMMDD-HHMMSS-mmm.log`,
-/// sorts lexicographically the same way) — both name formats are
-/// deliberately built so a plain sort is a correct age order with no
-/// filesystem metadata read. A pure function of a directory listing:
-/// never called with a `dir` that doesn't exist, but a missing or
-/// unreadable directory is simply a no-op, not a panic.
+/// Best-effort deletion of matching `<prefix>*<suffix>` paths beyond `keep`.
+/// The retained paths are the last `keep` names in lexicographic order; embedded
+/// UTC timestamps put later dates after earlier ones without metadata reads.
+///
+/// Used for daily logs and crash reports. Missing or unreadable directories are
+/// ignored, as are unreadable entries and individual deletion failures. Names
+/// are matched by prefix and suffix only; their timestamp fields are not parsed.
 fn prune_files(dir: &Path, prefix: &str, suffix: &str, keep: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -319,13 +243,10 @@ fn prune_files(dir: &Path, prefix: &str, suffix: &str, keep: usize) {
     }
 }
 
-/// Deletes the oldest `geode.*.log` files in `dir` beyond `keep`, applied
-/// once at startup (`tracing_appender::rolling::daily` itself never
-/// prunes past files it didn't create this run). A pure function of a
-/// directory listing: never called with a `dir` that doesn't exist, but
-/// a missing or unreadable directory is simply a no-op, not a panic
-/// (this runs ahead of the subscriber being fully up). See
-/// [`prune_files`] for the shared oldest-first mechanics.
+/// Prunes `geode.*.log` files to the last `keep` matching names at startup.
+/// Daily rotation creates new files but this startup cap is not reapplied during
+/// the run. Missing directories and deletion failures are ignored; see
+/// [`prune_files`] for matching and ordering.
 pub fn trim_log_files(dir: &Path, keep: usize) {
     prune_files(dir, "geode.", ".log", keep);
 }
@@ -402,11 +323,8 @@ mod tests {
         );
     }
 
-    // Fix round 1, MIN-5: the exact name, not just a prefix/suffix check —
-    // an implementation that ignored `at` (used `SystemTime::now()`
-    // instead) or changed the format would still pass the looser
-    // assertions above. This pins the format, the UTC choice, the
-    // millisecond field, and the `at` parameter itself in one line.
+    // The exact name verifies UTC formatting, millisecond resolution, and use
+    // of the supplied timestamp rather than the wall clock.
     #[test]
     fn write_crash_file_names_the_file_from_at_at_millisecond_resolution() {
         let dir = tempfile::tempdir().unwrap();
@@ -418,10 +336,8 @@ mod tests {
         );
     }
 
-    // Fix round 1, MAJ-1: two panics in the same millisecond must not
-    // silently overwrite each other — `create_new` turns the collision
-    // into a detected error the write retries past with a `-1` suffix,
-    // rather than `std::fs::write`'s truncate-on-collision.
+    // Two reports at the same millisecond must keep both contents.
+    // `create_new` detects the collision and retries with the next suffix.
     #[test]
     fn a_second_write_at_the_same_instant_gets_a_suffixed_name_not_a_truncation() {
         let dir = tempfile::tempdir().unwrap();
@@ -459,10 +375,8 @@ mod tests {
         assert!(second_text.contains("second panic"));
     }
 
-    // Fix round 1, MAJ-1: nothing else ever rotates crash files, so
-    // `write_crash_file` prunes on every call — without this, a run of
-    // contained-panics-turned-uncontained (or just an old checkout) would
-    // accumulate `crash-*.log` files forever.
+    // Each successful write prunes report files; there is no separate
+    // rotation task to enforce retention.
     #[test]
     fn write_crash_file_prunes_to_the_newest_ten() {
         let dir = tempfile::tempdir().unwrap();

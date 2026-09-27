@@ -7,21 +7,17 @@ publish.workspace = true
 [lib]
 bench = false
 
-# `geode-core` for the colour floor (`colour::readable_on`) alone; `gpui`
-# and `gpui-component` for the element (`Plot`, `PathCaches`, the tooltip
-# plumbing); `chrono` for the time axis's unit boundaries and labels. The
-# crate knows nothing of series, sources, the data tier or the shell
-# (spec §8): the rem scale arrives as a parameter.
+# Runtime dependencies provide colour contrast, chart painting and calendar
+# boundaries. Source identities, data access and shell state stay with the
+# caller; the rem scale arrives as a parameter.
 [dependencies]
 geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 chrono = "0.4.42"
 
-# `geode-shell` (test-support) is here for ONE test — the palette sweep
-# over every bundled theme (`theme::load_bundled`) — the same way
-# `geode-marketdata` reaches the theme list. `gpui_platform` is the
-# example window's entry point.
+# Shell test support supplies bundled themes for the palette contrast sweep.
+# `gpui_platform` provides the example window's entry point.
 [dev-dependencies]
 geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }
@@ -34,8 +30,7 @@ proptest = "1"
 name = "decimate"
 harness = false
 
-# Workspace invariant (CLAUDE.md): every target opts out of the built-in
-# libtest harness so `cargo bench` runs criterion cleanly.
+# Exclude the example from the built-in benchmark harness.
 [[example]]
 name = "chart"
 bench = false

@@ -1,10 +1,10 @@
-//! The `:` vocabulary (Phase 3 spec §4.3) as data: a line parses into a
-//! `Command` the tile applies, and the vocabulary for the word under the
-//! cursor is what the shell ranks (§3.4).
+//! Tile-local `:` commands and completion candidates. Parsing produces a
+//! `Command` for the tile to apply; the shell ranks the candidates for the
+//! word at the cursor. Frame-wide commands return actionable refusals.
 
 use crate::core::flatten::SortOrder;
 
-/// A `:asof` argument (command-line locality spec §3.2).
+/// A tile-local `:asof` override, or a return to the frame's as-of state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsOfArg {
     /// Pin the tile to this instant; parsed by `parse_as_of` at apply time.
@@ -36,23 +36,21 @@ pub enum Command {
     Autosize {
         reset: bool,
     },
-    /// A word this line no longer runs because it was frame-wide
-    /// (command-line locality spec §5): the message names the door it
-    /// moved to. The tile shows it inline like any parse error. Never a
-    /// completion — a refusal is not a suggestion.
+    /// A command reserved for a frame-wide or configuration action. The tile
+    /// shows its message inline, naming the supported route. Refused commands
+    /// are excluded from completion candidates.
     Refused(&'static str),
 }
 
-/// The words `completions` offers at the start of a line — every word
-/// `parse` accepts EXCEPT the refusals. The tile's sweep test
-/// (`every_colon_command_leaves_the_frame_alone`) reads this list so a
-/// word added here is swept the day it lands.
+/// Top-level command completion vocabulary, excluding refused commands.
+/// The tile's `every_colon_command_leaves_the_frame_alone` test checks each
+/// entry for frame-state isolation.
 pub const COMMANDS: [&str; 8] = [
     "asof", "autosize", "filter", "group", "sort", "unpin", "unscoped", "view",
 ];
 
-/// The refusal messages (spec §5). Frame-wide verbs left the `:` line on
-/// 2026-09-20; each message names the door that replaced it.
+/// Refusal messages direct frame-wide and configuration commands to their
+/// scope-bar, palette, or dialog routes.
 pub const REFUSED_SCOPE: &str = ":scope is frame-wide — the scope bar (mod+/), Set scope expression…, or the palette's Scope: entries";
 pub const REFUSED_ASOF_UNDO: &str =
     "frame as-of undo is in the palette (Swap to the previous as of)";
@@ -66,8 +64,9 @@ fn slot(arg: Option<&str>, what: &str) -> Result<u8, String> {
         .ok_or_else(|| format!("{what} needs a slot number 1–9"))
 }
 
-/// Parse a `:` line (without the leading colon) into a `Command`. `Err`
-/// carries a message a user can act on — never a panic (spec §4.3).
+/// Parse a command line without the leading colon. Syntax errors carry an
+/// actionable message. Column names, expressions, and timestamps are validated
+/// when the tile applies the command.
 pub fn parse(line: &str) -> Result<Command, String> {
     let line = line.trim();
     if line.is_empty() {
@@ -168,17 +167,14 @@ pub fn parse(line: &str) -> Result<Command, String> {
 
 #[derive(Debug, Clone, Default)]
 pub struct Vocabulary {
-    /// What `sort` can rank: the view's own column plan (the tree column
-    /// plus its declared measures) — what is actually displayed, not the
-    /// dataset's full dimension set.
+    /// Named columns available to `sort`: displayed measure and dimension
+    /// columns, excluding the tree column. Before a plan is available, the tile
+    /// uses the view's declared columns.
     pub columns: Vec<String>,
-    /// Every column the tile's dataset carries as a dimension at any
-    /// grain it has, plus every derived dimension (Phase 4a §3.2, §6.8)
-    /// — distinct from `columns` since a dimension the view does not
-    /// display (e.g. `book`, `currency`) is still a legal `group` or
-    /// `filter` target. `group` completes from this alone; `filter`
-    /// completes from this union `columns` (an expression can also name
-    /// a measure).
+    /// Groupable columns from all grains in the dataset, plus derived
+    /// dimensions, including those absent from the view. `group` completes
+    /// from this list; `filter` also includes `columns` so expressions can
+    /// refer to measures.
     pub dimensions: Vec<String>,
     pub views: Vec<String>,
 }
@@ -241,9 +237,8 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
     out
 }
 
-// `parse_as_of` lives in `geode_core::query` now (both the shell and the
-// data layer need it, and this crate depended only on `chrono`, which
-// `geode-core` already has).
+// Use the shared timestamp parser so tile and frame commands interpret
+// the same timestamp forms.
 pub use geode_core::query::parse_as_of;
 
 #[cfg(test)]
@@ -428,16 +423,9 @@ mod tests {
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
     }
 
-    /// Regression: before this fix, `group`/`filter` all completed from
-    /// `Vocabulary::columns` alone — the view's own column plan (what's
-    /// *displayed*), so a dimension the view does not show (`book`,
-    /// `currency`) never appeared after `:group ` or `:filter `. `sort`
-    /// is unaffected: it still ranks only what's actually a column in
-    /// the view.
-    ///
-    /// `group`'s expected vector includes `slot` — its own existing
-    /// keyword completion, untouched by this fix (only the column
-    /// source changed from `columns` to `dimensions`).
+    /// Grouping and filtering offer dimensions absent from the displayed
+    /// columns. Sorting offers only the column vocabulary. `group` also
+    /// offers its `slot` subcommand.
     #[test]
     fn group_and_drop_complete_dimensions_not_measures() {
         let vocab = Vocabulary {
@@ -459,8 +447,8 @@ mod tests {
         );
     }
 
-    /// Command-line locality (2026-09-20): the frame-wide words are
-    /// refusals whose message names the door, and none is a completion.
+    /// Frame-wide commands return route-specific refusals and are never
+    /// completion candidates.
     #[test]
     fn frame_wide_words_are_refusals_that_name_their_door() {
         assert_eq!(

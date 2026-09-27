@@ -1,6 +1,8 @@
-//! One blotter tile (Phase 3 spec §6.5, §6.7, §6.8): observes the frame,
-//! submits keyed queries through `DataHandle`, applies outcomes, records
-//! timing, and paints the header strip, the table, and the footer.
+//! A blotter tile owns its local query overrides, table, and find state.
+//! It observes frame changes, submits keyed queries through `DataHandle`,
+//! rejects superseded outcomes, and coordinates snapshot display with the
+//! frame's flip barrier. Header and footer rendering report query state,
+//! freshness, selection summaries, and errors.
 
 use crate::core::commands::{AsOfArg, Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::find::FindState;
@@ -45,8 +47,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// After this long without a result the header shows an in-flight glyph
-/// (foundation §7.1's 50–200 ms affordance).
+/// After this long without a result the header shows an in-flight glyph.
 const IN_FLIGHT_AFTER: Duration = Duration::from_millis(50);
 /// Header and footer strip heights, in pixels at the design rem
 /// (`geode_shell::shell::scale`): the strips follow the font size with
@@ -54,9 +55,8 @@ const IN_FLIGHT_AFTER: Duration = Duration::from_millis(50);
 const HEADER_HEIGHT: f32 = 22.0;
 const FOOTER_HEIGHT: f32 = 20.0;
 
-/// Spec §6.5's default for `[app] blotter.stale_after`, until Task 8
-/// reads the real config value. Exposed so `BlotterFactory::new`'s
-/// caller (`geode-app`) has a sensible value to pass before then.
+/// Default for `[app] blotter.stale_after`. The app supplies the configured
+/// value through the factory's shared cell so open tiles follow reloads.
 pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 
 pub const ACTIONS: &[(&str, &str)] = &[
@@ -97,10 +97,9 @@ pub enum Pin {
     Slot(u8),
 }
 
-/// The tile's as-of (command-line locality spec §3): the third override
-/// beside [`Pin`] (grouping) and `tile_scope`/`unscoped` (scope). A
-/// pinned tile queries at its own instant and does not follow the
-/// frame's `as_of` counter; `:asof clear` returns it to `Follow`.
+/// The tile's as-of override, independent of grouping and scope overrides.
+/// A pinned tile queries at its own instant and ignores the frame's `as_of`
+/// counter; `:asof clear` returns it to [`TileAsOf::Follow`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TileAsOf {
     /// Query at the frame's as-of; requery when it changes.
@@ -114,22 +113,17 @@ pub struct BlotterTile {
     frame: Entity<Frame>,
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
-    /// The named colours a `Colour::Named` column paints in (Part 2c
-    /// §6.2) — shared with every other tile exactly as `views` is, and
-    /// refreshed on `ConfigReloaded` by the same `BlotterFactory` door.
-    /// Handed to the delegate in `apply`, the one place a plan is built
-    /// or rebuilt, so the delegate's own `Arc` is never older than the
-    /// snapshot it is painting.
+    /// Named colour definitions shared through the factory and refreshed on
+    /// `ConfigReloaded`. `apply` passes the current definitions to the delegate
+    /// alongside its column plan so both reflect the same configuration.
     colours: Rc<RefCell<Arc<NamedColours>>>,
-    /// The schema and derived dimensions `:filter` validates a tile's
-    /// scope against (Phase 4a §3.7) — shared with every other tile the
-    /// same way `views` is, refreshed on `ConfigReloaded`.
+    /// Schema and derived dimensions used to validate tile-local filters.
+    /// The factory shares and refreshes these on `ConfigReloaded`.
     schema: Rc<RefCell<SchemaSpec>>,
     dims: Rc<RefCell<DerivedDimensions>>,
     pub find_style: Rc<Cell<FindStyle>>,
-    /// `[app] blotter.stale_after` (spec §6.5; 15m default, read by the
-    /// app in Task 8) — carried in exactly like `find_style` so a config
-    /// reload can update every open tile without recreating it.
+    /// Configured freshness threshold, shared through the factory so reloads
+    /// update open tiles without recreating them.
     pub stale_after: Rc<Cell<Duration>>,
     table: Entity<TableState<BlotterDelegate>>,
     view_name: String,
@@ -139,32 +133,20 @@ pub struct BlotterTile {
     /// unscoped-{id}"`), built once here since it depends only on the
     /// tile id, never per render.
     unscoped_tip_selector: SharedString,
-    /// The as-of override (spec §3.1); `Follow` on a fresh tile. Tests
-    /// read it directly, the way they read `pin`.
+    /// The as-of override; fresh tiles follow the frame.
     pub(crate) tile_as_of: TileAsOf,
-    /// The pinned chip's text and tooltip title, cached when
-    /// `tile_as_of` changes (`set_tile_as_of`) so `render` clones two
-    /// `SharedString`s rather than formatting — the `filter_tip` rule.
-    /// Both empty while `Follow`.
+    /// Pinned chip text and tooltip title. `set_tile_as_of` refreshes both;
+    /// render also refreshes them when the clock or its date changes.
+    /// Both are empty while following the frame.
     asof_chip: SharedString,
     asof_tip: SharedString,
-    /// The date, ON THE CLOCK BELOW, `asof_chip`/`asof_tip` were built
-    /// for (review round 1, Important: the date-elided `AS OF HH:MM`
-    /// form must not outlive its day). `render` compares this against
-    /// today before painting and rebuilds through `refresh_asof_chip` on
-    /// a mismatch, so a session pinned across midnight does not keep
-    /// claiming "today" for an instant that no longer is. Meaningless
-    /// while `Follow` (never read then — the chip strings are empty and
-    /// nothing paints).
+    /// Date on `asof_chip_clock` when the chip text was built. Render checks
+    /// this while pinned to an instant: a date-elided `AS OF HH:MM` label must
+    /// regain its date after midnight. Unused while following the frame.
     pub(crate) asof_chip_date: chrono::NaiveDate,
-    /// The clock `asof_chip_date` was computed on (final review,
-    /// Important): `today` alone cannot tell a `[time] zone` reload from
-    /// a no-op, since `Clock::today` returns the SAME date in most zone
-    /// pairs — a reload that only changes the zone (never the date)
-    /// would leave the wall-clock text stuck on the old zone until an
-    /// unrelated midnight rollover or the next `:asof` edit. `render`'s
-    /// guard checks this alongside the date, so either changing is a
-    /// rebuild.
+    /// Clock used to build the chip text. A zone change can leave `today`
+    /// unchanged while changing the displayed time, so render checks both
+    /// this clock and `asof_chip_date` before reusing the cache.
     pub(crate) asof_chip_clock: geode_core::clock::Clock,
     /// `"tip-blotter-asof-{id}"`, built once.
     asof_tip_selector: SharedString,
@@ -190,43 +172,26 @@ pub struct BlotterTile {
     /// `view_name` change always runs through `requery` immediately
     /// after, so that one site covers both).
     title: SharedString,
-    /// This tile's place in its stack (tile-stacks spec §5.1), painted in
-    /// the header (Task 9); `None` while not a stack member.
+    /// This tile's stack membership, shown in the header; `None` outside a stack.
     stack: Option<StackHandle>,
     in_flight: Option<Instant>,
     delivered_at: Option<Instant>,
     visible: bool,
-    /// A notice painted in the header, paired with the tone it paints in
-    /// — a dropped sort is a state change the trader caused, not a
-    /// failure, so it carries [`Tone::WarningText`] rather than the
-    /// [`Tone::DangerText`] every other writer here uses. The renderer
-    /// reads the tone from here rather than assuming one.
+    /// Header notice with its semantic tone. Dropped sorts and selections use
+    /// `WarningText`; query/configuration failures use `DangerText`.
     pub error: Option<(String, Tone)>,
     find: Option<FindState>,
-    /// An outcome that arrived while the frame's flip barrier (Phase 4
-    /// §3.10) still wants this tile's key — held here, not applied, until
-    /// `promote` (driven by `flip` bumping in `on_frame_changed`, or by
-    /// this tile's own `deliver` when its arrival happened to be the one
-    /// that emptied the barrier) puts it through `apply` exactly like an
-    /// un-barriered outcome would have been. `None` once promoted, and
-    /// also `None` the whole time for an outcome that never had to wait
-    /// (no barrier open, or the barrier's versions don't match).
+    /// Successful outcome waiting for the frame's flip barrier, with the
+    /// query's grouping and frame versions. `deliver` promotes it if its
+    /// arrival releases the barrier; otherwise `on_frame_changed` promotes it
+    /// when `flip` advances.
     ///
-    /// Stamped with the `acted` versions it was delivered for (fix round
-    /// 1, Finding 1): a second scope/grouping/as-of mutation within the
-    /// same 250ms window replaces the barrier before this tile's own
-    /// fresh requery (for the newer versions) lands, so a `flip` bump
-    /// from the *newer* barrier releasing must not promote a snapshot
-    /// staged for the *older* one — `promote` checks the stamp against
-    /// the frame's current versions and drops a stale entry rather than
-    /// painting it. `requery` also clears this at its own top: a fresh
-    /// query always supersedes whatever was staged before it, whether or
-    /// not this particular check would have caught it.
+    /// Promotion checks only counters this tile follows, including watched
+    /// data and configuration. `requery` also clears this state because a
+    /// tile-local change can supersede a query without changing any counter.
     staged: Option<(Arc<Snapshot>, Vec<String>, FrameVersions)>,
-    /// `versions().flip` as of the last promotion (Phase 4 §3.10) — this
-    /// tile's own half of the bump, the same shape as `acted` above but
-    /// for "have I applied what this flip released" rather than "what did
-    /// I last query for".
+    /// Last observed `versions().flip`. A new value attempts promotion of a
+    /// staged snapshot independently of whether a requery is needed.
     last_flip: u64,
 }
 
@@ -250,12 +215,9 @@ impl BlotterTile {
             .and_then(|t| t.get("view").and_then(|v| v.as_str()).map(str::to_string))
             .filter(|n| views.borrow().iter().any(|v| &v.name == n))
             .or_else(|| {
-                // Phase 4b M6: the view flagged `default` (a top-level
-                // `default = "<name>"` key in the views doc) wins over
-                // "just take the first one" — `ViewSpec::from_doc` only
-                // sorts by name when no view carries the flag, so this
-                // is deterministic either way, but an explicit default
-                // must win when the author bothered to name one.
+                // Without a valid restored view, use the explicit default, then the
+                // first configured view. `ViewSpec::from_doc` orders that fallback
+                // by name when no default is set.
                 let views = views.borrow();
                 views
                     .iter()
@@ -286,11 +248,9 @@ impl BlotterTile {
         let unscoped = restored
             .and_then(|t| t.get("unscoped").and_then(|v| v.as_bool()))
             .unwrap_or(false);
-        // `filter.expr`/`filter.text` (Phase 4a §3.7): a restored
-        // expression that no longer parses (e.g. hand-edited, or a
-        // column since removed) drops the whole filter rather than
-        // half-applying it — logged (`geode::shell`, warn) since a fresh
-        // tile has nowhere inline to report it.
+        // A syntax error in restored `filter.expr` drops the entire tile filter,
+        // including its text, and logs a warning. Restoration only parses the
+        // expression here; it does not validate column names against the schema.
         let tile_scope = restored
             .and_then(|t| t.get("filter"))
             .and_then(|v| v.as_table())
@@ -316,10 +276,8 @@ impl BlotterTile {
                 Some(scope)
             })
             .unwrap_or_default();
-        // `as_of` (command-line locality spec §3.5): `"live"`, an RFC 3339
-        // instant, or absent (following). A value that is neither follows
-        // the frame, logged like a restored `filter.expr` that no longer
-        // parses.
+        // Restore `as_of` from "live" or an RFC 3339 instant. An absent or
+        // malformed value follows the frame; malformed strings are logged.
         let tile_as_of = match restored
             .and_then(|t| t.get("as_of"))
             .and_then(|v| v.as_str())
@@ -338,8 +296,8 @@ impl BlotterTile {
                 }
             },
         };
-        // `try_global`, not the bare `cx.global` (Task 5 ruling): a
-        // module test fixture may never have installed `AppClock`.
+        // Independently hosted tiles may have no `AppClock`; use the machine
+        // clock as a fallback.
         let clock = cx
             .try_global::<geode_shell::clock::AppClock>()
             .map(|c| c.0)
@@ -423,13 +381,8 @@ impl BlotterTile {
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
-        // `AppClock` (as-of dialog spec §6.1): the per-dataset freshness
-        // readouts read the global fresh at paint time (see `render`) —
-        // a bare notify is all THEY need. The pinned `AS OF` chip does
-        // NOT (`asof_chip`/`asof_chip_date`/`asof_chip_clock`, review
-        // round 1 and the final review): `render`'s own guard, not this
-        // observer, is what notices the clock changed and rebuilds the
-        // cache — this handler only has to get `render` to run again.
+        // Clock changes repaint freshness readouts and the pinned as-of chip.
+        // Render reads the clock and invalidates the chip cache when needed.
         cx.observe_global::<geode_shell::clock::AppClock>(|_this, cx| cx.notify())
             .detach();
 
@@ -499,22 +452,15 @@ impl BlotterTile {
             .cloned()
     }
 
-    /// `:filter` narrows the tile's own scope layer, so it must be valid
-    /// against this tile's dataset (spec §10.1) the same way a frame
-    /// expression is checked against the schema when it is entered in the
-    /// shell's expression dialogs (`shell::scope_expr_view`, the `Set
-    /// scope expression…` dialog, and the Scopes object dialog's
-    /// `expression` field) — an unknown column or a bad operator on a
-    /// derived dimension is a user error reported at the caret/column, not
-    /// a silent no-op or a compiler error surfaced far downstream. That
-    /// dialog check runs only when the field is entered; a frame restored
-    /// from a saved session is not re-checked here (a saved scope is
-    /// checked separately, by `Scope::validate`, wherever it is loaded).
-    /// A tile's `:scope` word never reaches this check: `:` lines are
-    /// tile-local, so the parser refuses it rather than change the frame.
-    /// `Ok(())` when the view or its dataset isn't resolvable
-    /// (nothing to validate against yet — `requery`'s own "view is not
-    /// configured" error already covers that case).
+    /// Validate a tile-local `:filter` against its dataset and derived dimensions.
+    /// Unknown columns and unsupported operators are reported before the scope
+    /// changes. The shell's expression dialogs perform the corresponding check
+    /// for frame expressions; this method does not revalidate restored frames.
+    /// Saved scopes are checked separately by `Scope::validate` when loaded.
+    ///
+    /// The parser refuses `:scope` because tile commands cannot change the frame.
+    /// An unresolved view or dataset returns `Ok(())` here; query setup reports
+    /// the missing configuration.
     fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
         let Some(view) = self.view() else {
             return Ok(());
@@ -530,20 +476,14 @@ impl BlotterTile {
         }
     }
 
-    /// The one place `tile_scope` is assigned (final review, spec §5.1):
-    /// `filter_tip` is the tile's own filter, spelled out in full for a
-    /// hover (`filter_summary`), and it must never drift from
-    /// `tile_scope` itself — three separate assignment pairs (`:filter`,
-    /// `:filter text`, `:filter clear`) each had their own chance to
-    /// update one and forget the other. Building `filter_tip` from
-    /// `scope` before moving it into `self.tile_scope` costs nothing
-    /// extra: `filter_summary` already borrows its argument.
+    /// Update the tile filter and its tooltip together. Every filter command
+    /// uses this method so the hover summary always describes the active scope.
     fn set_tile_scope(&mut self, scope: Scope) {
         self.filter_tip = filter_summary(&scope).into();
         self.tile_scope = scope;
     }
 
-    /// The chip text and tooltip title for `as_of` (spec §3.4).
+    /// Chip text and tooltip title for the tile's as-of override.
     fn asof_chip_strings(
         as_of: &TileAsOf,
         clock: geode_core::clock::Clock,
@@ -562,17 +502,9 @@ impl BlotterTile {
         }
     }
 
-    /// Rebuilds `asof_chip`/`asof_tip`/`asof_chip_date`/`asof_chip_clock`
-    /// from `tile_as_of` — the one door: called whenever `tile_as_of`
-    /// changes (`set_tile_as_of`) and lazily by `render` when the
-    /// trader's date OR clock has moved since the cache was last built
-    /// (review round 1, Important: the date-elided `AS OF HH:MM` form
-    /// must not outlive its day; final review, Important: a `[time]`
-    /// zone reload that lands on the SAME date as before — the common
-    /// case — must not leave the wall-clock text painted in the old
-    /// zone until an unrelated midnight or the next `:asof` edit, which
-    /// is why the clock is part of the cache key too, not just the
-    /// date).
+    /// Refresh the chip text, tooltip, date, and clock as one cache entry.
+    /// Called on as-of edits and from render after a date or zone change;
+    /// checking the clock also catches zone changes within the same date.
     fn refresh_asof_chip(&mut self, clock: geode_core::clock::Clock) {
         let (chip, tip) = Self::asof_chip_strings(&self.tile_as_of, clock);
         self.asof_chip = chip;
@@ -581,8 +513,8 @@ impl BlotterTile {
         self.asof_chip_clock = clock;
     }
 
-    /// Change the as-of override; `true` when it changed. The one door,
-    /// so Task 3's chip cache cannot go stale.
+    /// Change the as-of override and refresh its chip cache.
+    /// Returns whether the override changed and needs a requery.
     fn set_tile_as_of(&mut self, next: TileAsOf, clock: geode_core::clock::Clock) -> bool {
         if self.tile_as_of == next {
             return false;
@@ -632,11 +564,8 @@ impl BlotterTile {
         });
     }
 
-    /// Which counters this tile follows (§4.1). Deliberately does not
-    /// compare `now.flip`/`acted.flip` (Phase 4 §3.10): `flip` never means
-    /// "requery" — it means "a staged snapshot this tile already has may
-    /// now be promoted", which `on_frame_changed` checks on its own before
-    /// ever reaching this method.
+    /// Whether a followed frame counter requires a new query. `flip` only
+    /// releases staged display work and is handled by `on_frame_changed`.
     fn follows_changed(&self, now: FrameVersions) -> bool {
         let Some(acted) = self.acted else {
             return true;
@@ -644,14 +573,10 @@ impl BlotterTile {
         self.differs_on_followed(acted, now)
     }
 
-    /// Whether `versions` and `now` disagree on any counter THIS tile
-    /// follows — `scope` unless it is unscoped, `grouping` unless it is
-    /// pinned, `as_of` unless the tile's own as-of is pinned (spec
-    /// §3.3), and always watched `data`/`config`. The one comparison
-    /// [`Self::follows_changed`] and [`Self::promote`]'s gate both go
-    /// through (I-1, final whole-branch review), so "what this tile
-    /// requeries for" and "what invalidates something it has already
-    /// staged" can never drift apart.
+    /// Compare the counters this tile follows: scope unless unscoped,
+    /// grouping unless pinned, as-of unless pinned, and always watched data
+    /// and configuration. Requery and staged-snapshot promotion share this
+    /// comparison so they agree about which changes invalidate an answer.
     fn differs_on_followed(&self, versions: FrameVersions, now: FrameVersions) -> bool {
         (!self.unscoped && versions.scope != now.scope)
             || (self.pin == Pin::None && versions.grouping != now.grouping)
@@ -661,10 +586,8 @@ impl BlotterTile {
     }
 
     fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
-        // Phase 4 §3.10: a flip released (or this tile never had to wait
-        // and `staged` is empty, a no-op) — promote whatever is staged
-        // regardless of visibility, so a tile hidden between staging and
-        // the flip is never left showing stale data once it comes back.
+        // Attempt promotion on every flip, including while hidden, so hiding
+        // between staging and release does not leave a valid answer waiting.
         let flip = self.frame.read(cx).versions().flip;
         if flip != self.last_flip {
             self.last_flip = flip;
@@ -677,12 +600,9 @@ impl BlotterTile {
         if self.follows_changed(now) {
             self.requery(cx);
         } else {
-            // A pinned tile under a grouping change, or an unscoped tile
-            // under a scope change, does not requery — but it still sits
-            // in an open barrier's key set (§3.10, `ShellView::
-            // visible_tile_keys` does not know which tiles will follow).
-            // Left unanswered, it would hold every other tile open until
-            // `FLIP_DEADLINE`, for no reason: it has nothing new coming.
+            // A tile can belong to the barrier without following its change.
+            // Unless it still awaits a query with that flip identity, mark it
+            // arrived: no new result is needed to release its siblings.
             let key = QueryKey(self.tile.0);
             let awaiting = self.in_flight.is_some()
                 && self
@@ -698,32 +618,13 @@ impl BlotterTile {
         }
     }
 
-    /// Apply a staged snapshot, if any (Phase 4 §3.10) — `deliver` when
-    /// its own arrival didn't empty the barrier, or `on_frame_changed`
-    /// once `flip` shows it did. A no-op when nothing is staged, so
-    /// calling it on every `flip` bump costs nothing for a tile that
-    /// never had to wait.
+    /// Apply a staged snapshot if its followed counters are still current.
+    /// A replaced barrier can release an answer to an outdated query; drop
+    /// that answer while retaining the displayed snapshot.
     ///
-    /// Fix round 1, Finding 1: a staged snapshot is only ever valid while
-    /// it still answers this tile's latest question. A second mutation
-    /// within the same barrier window replaces the barrier before this
-    /// tile's own fresh requery lands — when that happens, the `flip`
-    /// bump that eventually releases the newer barrier must not promote a
-    /// snapshot staged for a question that has since moved. Dropping it
-    /// here keeps whatever is already on screen (last-good); the tile's
-    /// own `requery` (already in flight by the time this runs —
-    /// `follows_changed` fires in the same `on_frame_changed` pass) will
-    /// paint the real answer when it lands.
-    ///
-    /// I-1 (final whole-branch review): the gate asks whether anything
-    /// this tile FOLLOWS has moved, not whether the barrier's flip
-    /// identity is unchanged. An `unscoped` tile under a scope change and
-    /// a pinned tile under a grouping change never requery, so for them
-    /// the replaced barrier came with no fresh answer at all and the
-    /// identity check threw away the only one they would ever get —
-    /// leaving the pre-mutation rows painted with `acted` claiming the
-    /// tile was current. `requery` clears `staged`, so a staged snapshot is by construction the answer to
-    /// the latest question asked.
+    /// Unfollowed scope, grouping, or as-of changes do not invalidate a stage.
+    /// Tile-local changes are handled by `requery` clearing `staged`, since
+    /// those changes need not advance any frame counter.
     fn promote(&mut self, cx: &mut Context<Self>) {
         let Some((snapshot, grouping, versions)) = self.staged.take() else {
             return;
@@ -734,12 +635,10 @@ impl BlotterTile {
         }
     }
 
-    /// Put a snapshot through the table exactly as an un-barriered
-    /// `deliver` always has: `apply_snapshot`, refresh, re-clamp the
-    /// cursor to the (possibly reshaped) row set, and record when this
-    /// landed. Never reorders or re-reads `snapshot` — it applies exactly
-    /// what the query pool handed back, at the grouping it was queried
-    /// under.
+    /// Apply a query snapshot with the grouping it was requested under.
+    /// The delegate rebuilds its display state; refreshing the table updates
+    /// columns and selected row, and delivery time starts the paint timer.
+    /// The immutable snapshot is shared directly with the delegate.
     fn apply(&mut self, snapshot: Arc<Snapshot>, grouping: Vec<String>, cx: &mut Context<Self>) {
         if let Some(view) = self.view() {
             // The plan is (re)built from `view` here, so the definitions
@@ -775,10 +674,8 @@ impl BlotterTile {
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
-        // Fix round 1, Finding 1: a fresh query always supersedes
-        // whatever was staged before it, whether or not it was already
-        // stale for the barrier `promote`'s own version check would
-        // otherwise have caught it against.
+        // A new query supersedes staged work even when frame versions are
+        // unchanged, as with tile-local filters and grouping overrides.
         self.staged = None;
         let Some(view) = self.view() else {
             self.error = Some((
@@ -864,16 +761,10 @@ impl BlotterTile {
                 Tone::DangerText,
             ));
             self.in_flight = None;
-            // A refused submit means nothing is ever coming for these
-            // versions (market-data Part 3 Task 6 review, MIN-3, fixed at
-            // both sites under the mechanism rule): arrive, or an open
-            // barrier (§3.10) holds every other following tile to
-            // `FLIP_DEADLINE` waiting for an outcome that will never
-            // exist. Then clear `acted`, so the next frame change is a
-            // real retry rather than `follows_changed` deciding this tile
-            // is already up to date — without it, one refusal (a full
-            // queue during a burst) left the tile on last-good until
-            // something else happened to move the frame.
+            // A refused submit has no future outcome. Arrive at the barrier so
+            // other tiles can proceed, then clear `acted` so the next frame
+            // notification or visibility change retries. Keep the last snapshot
+            // and show the refusal.
             let key = QueryKey(self.tile.0);
             self.frame.update(cx, |f, cx| {
                 if f.arrived(key, versions) {
@@ -910,10 +801,8 @@ impl BlotterTile {
         match outcome.snapshot {
             Ok(snapshot) => {
                 self.error = None;
-                // Phase 4 §3.10: if a flip barrier is open and still
-                // wants this key, stage rather than apply — this tile
-                // must not paint the new scope/grouping/as-of before
-                // every other following tile is ready to as well.
+                // Stage while the matching barrier wants this key. Its release
+                // coordinates display across the participating tiles.
                 let wants = self.frame.read(cx).barrier_wants(key, acted);
                 if wants {
                     self.staged = Some((snapshot, self.last_grouping.clone(), acted));
@@ -937,9 +826,8 @@ impl BlotterTile {
             }
             Err(e) => {
                 self.error = Some((e, Tone::DangerText));
-                // A failed outcome still counts as arrival (§3.10): one
-                // broken tile must never hold every other tile open until
-                // the deadline.
+                // A failed outcome still arrives at the barrier, allowing other
+                // tiles to promote while this tile keeps its last good snapshot.
                 self.frame.update(cx, |f, cx| {
                     if f.arrived(key, acted) {
                         cx.notify();
@@ -1029,10 +917,9 @@ impl BlotterTile {
         self.with_delegate(cx, |d| d.refresh_selection());
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
-            // Unconditional, as before this door existed: it also clears
-            // `right_clicked_row`, and `TableEvent::SelectRow`'s own
-            // handler is what keeps its unconditional re-emit from
-            // recursing (its early return on an unchanged row).
+            // Always clear `right_clicked_row` as well as setting the cursor row.
+            // The `SelectRow` handler returns early for an unchanged row, preventing
+            // this call's unconditional event from recursing.
             t.set_selected_row(row, cx);
             t.scroll_to_row(row, cx);
             t.scroll_to_col(col, cx);
@@ -1041,14 +928,10 @@ impl BlotterTile {
         cx.notify();
     }
 
-    /// Every mouse selection gesture (grid selection spec §5) lands here
-    /// and goes through the same `start_selection`/`clear_selection`
-    /// doors the keys use, so a shift+click or a drag can never put the
-    /// delegate in a state the keyboard vocabulary could not also reach.
-    /// A plain press clears; a shift press or a drag starts a selection
-    /// only when none is live yet (repeating either while one is live
-    /// just moves the cursor, exactly as holding `V`/`v` down and moving
-    /// does).
+    /// Handle mouse selection through the delegate state used by keyboard actions.
+    /// A plain press clears the selection. A shift press or drag starts one
+    /// at the current cursor if none is active, then moves the cursor to the
+    /// pointer target. Extending a live selection preserves its kind and anchor.
     fn pointer(&mut self, event: CellPointer, cx: &mut Context<Self>) {
         let kind_for = |gutter: bool| {
             if gutter {
@@ -1152,7 +1035,7 @@ impl BlotterTile {
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
-                    // Spec §20.5: a bare j/k wraps outside a selection only —
+                    // A bare j/k wraps outside a selection only —
                     // wrapping past the anchor would silently invert it.
                     let wrap = d.selection.is_none();
                     d.cursor.move_rows(len, cmd, count, wrap);
@@ -1368,9 +1251,8 @@ impl BlotterTile {
             }
             Command::Refused(message) => return Err(message.to_string()),
             Command::AsOf(arg) => {
-                // `try_global`, not the bare `cx.global` (Task 5 ruling,
-                // `geode_shell::clock`'s own module doc): a module test
-                // fixture may never have installed `AppClock`.
+                // Independently hosted tiles may have no `AppClock`; use the
+                // machine clock as a fallback.
                 let clock = cx
                     .try_global::<geode_shell::clock::AppClock>()
                     .map(|c| c.0)
@@ -1467,9 +1349,8 @@ impl BlotterTile {
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
-        // Before the first snapshot lands, `plan` is `None` — fall back to
-        // the view's own declared columns so `:sort`/`:group` completion
-        // works from the moment a tile opens, not only after a delivery.
+        // Sort completion uses displayed columns. Before the first snapshot,
+        // fall back to the view's declarations so completion works immediately.
         let columns = self
             .table
             .read(cx)
@@ -1488,13 +1369,9 @@ impl BlotterTile {
                     .map(|v| v.columns.iter().map(|c| c.name().to_string()).collect())
             })
             .unwrap_or_default();
-        // Every column the tile's dataset carries as a dimension at any
-        // grain it has (Phase 4a: a dimension can now name the grain
-        // that carries it, so this can no longer be read off the column
-        // plan/view above, which only ever lists what's *displayed*),
-        // plus every derived dimension — `columns` is what `sort` can
-        // rank; `dimensions` is what `group`/`filter` complete from
-        // (`core::commands::completions`).
+        // Grouping and filter completions use every groupable dataset column,
+        // including dimensions absent from the view, plus derived dimensions.
+        // Sort completion uses the displayed `columns` assembled above.
         let mut dimensions: Vec<String> = match self.view() {
             Some(v) => {
                 let schema = self.schema.borrow();
@@ -1538,17 +1415,10 @@ impl BlotterTile {
                     self.find = Some(FindState::begin(self.find_style.get(), origin));
                 }
                 let style = self.find_style.get();
-                // Fzf narrows progressively: every keystroke must match
-                // against the full `visible` list (`set_narrowed`'s own
-                // domain), never against the previous keystroke's already-
-                // narrowed `shown` — otherwise the second keystroke's
-                // match positions land in the wrong domain and a
-                // shortened query can never widen the result back out
-                // (review round 1, Finding 1). Vim never narrows, so
-                // `shown` and `visible` agree for it either way; keep it
-                // on `shown_texts()` to match its own cursor-jump domain
-                // exactly (`cursor.to_row` elsewhere in this file always
-                // takes a position into `shown`).
+                // Fzf matches against the full `visible` row list on every change.
+                // Reusing `shown` would misinterpret positions after narrowing and
+                // prevent a shortened query from restoring excluded matches. Vim
+                // uses `shown_texts` because its hits are cursor positions.
                 let texts = if style == FindStyle::Fzf {
                     self.table.read(cx).delegate().visible_texts()
                 } else {
@@ -1625,8 +1495,8 @@ impl BlotterTile {
         t
     }
 
-    /// The session record's `as_of` value (spec §3.5): `None` while
-    /// following, `"live"`, or the pinned instant in RFC 3339 (UTC).
+    /// Session `as_of`: omitted while following, `"live"` for a live pin,
+    /// or the pinned instant in RFC 3339 (UTC).
     fn as_of_record(&self) -> Option<toml::Value> {
         match &self.tile_as_of {
             TileAsOf::Follow => None,
@@ -1637,9 +1507,9 @@ impl BlotterTile {
         }
     }
 
-    /// Whether a per-dataset freshness reading (§6.5) is old enough to
-    /// warrant the header's stale marker, per this tile's configured
-    /// `stale_after` (review round 1, Finding 2: was a hardcoded 15m).
+    /// Whether a parseable freshness timestamp is older than `stale_after`.
+    /// Missing or malformed timestamps are not marked stale; future timestamps
+    /// have zero age.
     pub(crate) fn is_stale(&self, as_of: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
         as_of
             .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
@@ -1651,19 +1521,14 @@ impl BlotterTile {
             })
     }
 
-    /// The tile's current notice or error text, as the footer shows it.
+    /// The tile's current notice or error text, as the header shows it.
     #[cfg(test)]
     pub fn error_text(&self) -> Option<String> {
         self.error.as_ref().map(|(e, _)| e.clone())
     }
 
-    /// The per-dataset freshness readout exactly as `render` builds it —
-    /// the `"{dataset} {short_time}"` strings, in the same `f.as_of`
-    /// order, read through the SAME `try_global` door `render` uses —
-    /// so a test asserts on what a trader reads rather than reaching
-    /// for the global itself (review finding, Task 7: no test installed
-    /// `AppClock` before this, so a tile that ignored it would have
-    /// passed everything else).
+    /// Freshness readouts using render's clock lookup, formatting, and
+    /// `as_of` ordering. Tests can inspect the text without a pixel reader.
     #[cfg(test)]
     pub(crate) fn freshness_texts(&self, cx: &App) -> Vec<String> {
         let clock = cx
@@ -1686,11 +1551,8 @@ impl BlotterTile {
     }
 }
 
-/// The `HH:MM` of an RFC 3339 `as_of` on the trader's clock, for the
-/// header's per-dataset freshness readout; a string that is not an
-/// instant is echoed whole rather than sliced (a `&t[11..16]` panicked
-/// on short input once — a malformed freshness timestamp must never be
-/// able to take the render thread down with it).
+/// Format an RFC 3339 freshness timestamp as `HH:MM` on the trader's clock.
+/// Echo malformed values intact so unexpected input cannot panic by slicing.
 fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
     match chrono::DateTime::parse_from_rfc3339(t) {
         Ok(at) => clock.hm(at.to_utc()),
@@ -1698,12 +1560,8 @@ fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
     }
 }
 
-/// The pinned chip's text (spec §3.4): `AS OF HH:MM` when `at` falls on
-/// today's date on the trader's clock, `AS OF YYYY-MM-DD HH:MM`
-/// otherwise — the same rule the toolbar's readout uses. On the
-/// CONFIGURED clock (`[time] zone`), not the machine's local zone,
-/// because every displayed time is the trader's configured clock
-/// (Phase 4a ruling, as-of dialog Part 2).
+/// Pinned chip text on the trader's configured clock: `AS OF HH:MM` for
+/// today, or `AS OF YYYY-MM-DD HH:MM` for another date.
 pub(crate) fn pinned_chip_text(
     at: chrono::DateTime<chrono::Utc>,
     now: chrono::DateTime<chrono::Utc>,
@@ -1717,12 +1575,9 @@ pub(crate) fn pinned_chip_text(
     }
 }
 
-/// One line for the `filtered` pill's tooltip: the tile's own filter
-/// layer (`:filter`, spec §3.7), spelled the way the scope bar spells
-/// the frame's — dimensions, then text, then expression, joined by
-/// ` · `; empty for an empty scope. Computed once wherever `tile_scope`
-/// changes (`BlotterTile::new`, and the `:filter`/`:filter clear`
-/// handlers), never per render — see `filter_tip` on `BlotterTile`.
+/// Tooltip summary of the tile's filter: dimensions, text, then expression,
+/// joined by ` · `; empty for an empty scope. Cached on construction and in
+/// `set_tile_scope` so render only clones the prepared text.
 pub(crate) fn filter_summary(scope: &Scope) -> String {
     let mut parts: Vec<String> = scope
         .dimensions
@@ -1740,30 +1595,21 @@ pub(crate) fn filter_summary(scope: &Scope) -> String {
 
 impl gpui::Render for BlotterTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The paint half of §7.1 (§6.8): the first render after a delivery.
+        // Record the first render after a snapshot is applied.
         if let Some(at) = self.delivered_at.take() {
             let micros = at.elapsed().as_micros() as u64;
             self.frame
                 .update(cx, |f, _| f.requery.record_snapshot_to_paint(micros));
         }
-        // `try_global`, not the bare `cx.global` (Task 5 ruling): a
-        // module test fixture may never have installed `AppClock`.
+        // Independently hosted tiles may have no `AppClock`; use the machine
+        // clock as a fallback.
         let clock = cx
             .try_global::<geode_shell::clock::AppClock>()
             .map(|c| c.0)
             .unwrap_or_else(|| geode_core::clock::Clock::machine().0);
-        // Midnight rollover (review round 1, Important) AND a `[time]`
-        // zone reload landing on the same date (final review, Important:
-        // `Clock::today` returns the same `NaiveDate` for most zone
-        // pairs, so the date alone cannot tell a reload from a no-op) —
-        // either one leaves `asof_chip`/`asof_tip` stale: a pinned
-        // today-instant that stays open past the trader's own midnight
-        // must not keep painting the date-elided `AS OF HH:MM` form as
-        // if it were still today, and a zone change must not keep
-        // painting the OLD zone's wall clock until one of those two
-        // things eventually happens to shake it loose. One date read and
-        // one `Clock` comparison per render, a rebuild only when either
-        // moved.
+        // A pinned instant's cached text depends on both the local date and
+        // clock. Rebuild after midnight or a zone change, even if the zone
+        // change leaves the date unchanged.
         if matches!(self.tile_as_of, TileAsOf::Pinned(AsOf::At(_)))
             && (clock.today(chrono::Utc::now()) != self.asof_chip_date
                 || clock != self.asof_chip_clock)
@@ -1778,15 +1624,11 @@ impl gpui::Render for BlotterTile {
         let theme = cx.theme();
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
-        // One door for every semantic chip and warning run in this header
-        // (`geode_shell::shell::chip`): `warning_foreground` over a tint
-        // of `warning` — the pairing this used to paint — is the
-        // background family on a barely-tinted background, under 3:1 on
-        // 30 of 44 bundled themes.
+        // Resolve chip and warning text through the shell's semantic paint
+        // helper so theme foreground and fill remain a readable pair.
         let warn_chip = chip::chip_paint(theme, Tone::Warning);
-        // `pinned` and `filtered` are the trader's own choices, not hazards:
-        // neutral, so `unscoped` and `AS OF` — the two that really warn —
-        // are the only warning-toned things in the strip.
+        // Grouping pins, filters, and tile-local as-of pins use neutral chips.
+        // Ignoring shared scope and following a historical frame use warning chips.
         let neutral_chip = chip::chip_paint(theme, Tone::Neutral);
         let warn_text = chip::chip_paint(theme, Tone::WarningText).text;
 
@@ -1803,9 +1645,8 @@ impl gpui::Render for BlotterTile {
             .border_b_1()
             .border_color(theme.border)
             .debug_selector(|| format!("blotter-header-{}", self.tile.0));
-        // The stack marker paints first, through the one builder every
-        // module uses (`StackHandle::marker`, spec §5.1) — `None` while
-        // the tile is not a member of a stack of two or more.
+        // The shared stack marker appears first when the tile belongs to a
+        // stack of at least two members.
         header = header
             .children(self.stack.as_ref().and_then(|s| s.marker(theme, self.tile)))
             .child(
@@ -1868,10 +1709,8 @@ impl gpui::Render for BlotterTile {
                     )),
             );
         }
-        // The as-of override's chip (spec §3.4): neutral, like `pinned`
-        // and `filtered` — a state the trader chose. Painted from the
-        // tile's own state, so it is right from the keystroke, not from
-        // the next delivery.
+        // A pinned as-of is a neutral state chosen by the trader. Read it from
+        // tile state so the chip updates immediately, before the query returns.
         if let TileAsOf::Pinned(_) = &self.tile_as_of {
             header = header.child(
                 div()
@@ -1906,9 +1745,8 @@ impl gpui::Render for BlotterTile {
                 let stale = self.is_stale(f.as_of.as_deref(), now);
                 header = header.child(div().when(stale, |el| el.text_color(warn_text)).child(text));
             }
-            // The frame's historical warning (inherited danger) — only
-            // while FOLLOWING; a pinned tile's request always carries its
-            // pin and the neutral chip above already says so.
+            // Historical request provenance warns only while following the
+            // frame; a pinned tile already shows its own neutral as-of chip.
             if matches!(self.tile_as_of, TileAsOf::Follow)
                 && let Some(req) = &p.as_of_request
             {
@@ -2043,11 +1881,8 @@ mod tests {
         ViewSpec::from_doc(&doc).0
     }
 
-    /// [`views`], plus a top-level `default = "<name>"` header (Phase 4b
-    /// Task 1 fix round 1, MIN-4) — for pinning `BlotterTile::new`'s own
-    /// half of M6 (`.find(|v| v.is_default)`), which had no test of its
-    /// own: the two M6 tests in `geode-core::view` both pin `ViewSpec::
-    /// from_doc`'s sort/flag, not the half a fresh tile actually feels.
+    /// Views with an explicit default, used to check that fresh tiles honor
+    /// the flag independently of alphabetical view order.
     fn views_with_explicit_default(default: &str) -> Vec<ViewSpec> {
         let text = format!(
             "default = \"{default}\"\n[tree]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n[[tree.columns]]\nname = \"delta01\"\n[[tree.columns]]\nname = \"daily_trading_pnl\"\n[wide]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[wide.columns]]\nname = \"delta01\"\n"
@@ -2155,12 +1990,9 @@ mod tests {
         Arc::new(Snapshot::for_tests(snapshot_columns(), 2))
     }
 
-    /// Same shape as `snapshot`, but with a provenance carrying an
-    /// `as_of_request` — the archive-read marker the frame's historical
-    /// warning chip reads (`blotter-asof-frame-…`). `snapshot`'s default
-    /// provenance never sets this, so a test asserting that chip stays
-    /// hidden while pinned needs this fixture to be a real check rather
-    /// than one where the guard's `&&` right-hand side is already false.
+    /// A snapshot with historical request provenance. This drives the frame's
+    /// historical warning chip even if the selected data came from live tables;
+    /// `as_of_request` does not identify which storage table served the query.
     fn snapshot_with_as_of_request(req: &str) -> Arc<Snapshot> {
         Arc::new(Snapshot::for_tests_with_provenance(
             snapshot_columns(),
@@ -2225,11 +2057,9 @@ mod tests {
         ))
     }
 
-    /// A third distinct payload (fix round 1, Finding 1's regression
-    /// test): the stale-staged-snapshot race needs three tellable-apart
-    /// generations — the pre-V1 baseline (`snapshot()`), the stale V1
-    /// payload that must never paint (`snapshot2()`), and the real V2
-    /// payload that must (this one).
+    /// A third distinct payload for staged-snapshot races: `snapshot` is the
+    /// baseline, `snapshot2` is the superseded answer, and this is the current
+    /// answer. Distinct labels show which payload actually reaches the table.
     fn snapshot3() -> Arc<Snapshot> {
         let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
             name: n.into(),
@@ -2293,10 +2123,8 @@ mod tests {
         open_with(cx, None)
     }
 
-    /// Same as [`open`], but a `restored` record (§3.7's `filter.expr`/
-    /// `filter.text` round trip) is threaded straight into `BlotterTile::
-    /// new`, exactly as `BlotterFactory::create` does for a session
-    /// restore.
+    /// Open with a session record passed to `BlotterTile::new`, matching the
+    /// factory's restoration path.
     fn open_with(
         cx: &mut gpui::TestAppContext,
         restored: Option<&toml::Table>,
@@ -2360,10 +2188,7 @@ mod tests {
         )
     }
 
-    /// Same as [`open_with`], but the views doc is the caller's own
-    /// rather than the fixed [`views`] fixture — for
-    /// [`views_with_explicit_default`] (Phase 4b Task 1 fix round 1,
-    /// MIN-4).
+    /// Open with caller-supplied views to exercise default-view selection.
     fn open_with_views(
         cx: &mut gpui::TestAppContext,
         restored: Option<&toml::Table>,
@@ -2372,9 +2197,8 @@ mod tests {
         open_with_views_and_colours(cx, restored, views, NamedColours::default())
     }
 
-    /// [`open_with_views`] with the tile's shared `colours` cell filled
-    /// too — the factory's own pairing (Part 2c §6.2), so a test can see
-    /// what a tile actually hands its delegate.
+    /// Open with shared colour definitions as supplied by the factory, so
+    /// tests can inspect the definitions handed to the delegate.
     fn open_with_views_and_colours(
         cx: &mut gpui::TestAppContext,
         restored: Option<&toml::Table>,
@@ -2429,12 +2253,8 @@ mod tests {
         )
     }
 
-    /// Phase 4b Task 1 fix round 1, MIN-4: a fresh tile (nothing
-    /// restored) must open on the view flagged `default`, not the one
-    /// that happens to sort first by name — "wide" is flagged here,
-    /// while "tree" < "wide" alphabetically, so a regression that drops
-    /// `BlotterTile::new`'s `.find(|v| v.is_default)` would silently
-    /// open on "tree" instead.
+    /// A fresh tile honors the explicit default view. Choosing "wide", which
+    /// sorts after "tree", distinguishes the flag from alphabetical fallback.
     #[gpui::test]
     fn a_fresh_tile_opens_on_the_explicit_default_view_not_the_alphabetical_first(
         cx: &mut gpui::TestAppContext,
@@ -2590,14 +2410,9 @@ mod tests {
         tile.read_with(cx, |t, cx| t.table().read(cx).delegate().shown_texts())
     }
 
-    /// Review finding (Task 7): no test installed `AppClock`, so a tile
-    /// that hard-coded `Clock::machine()` — or whose `observe_global`
-    /// handler were deleted — would have passed everything else. The
-    /// freshness readout is built fresh every `render` (never cached),
-    /// so `freshness_texts` mirrors that same path rather than exposing
-    /// a stored field. `2026-09-12T14:00:00Z` is `23:00` in Tokyo
-    /// (UTC+9) and `14:00` in UTC — both spelled by hand, not derived
-    /// through `Clock` (the thing under test).
+    /// Freshness text uses the installed `AppClock` and reflects a later zone
+    /// change. The helper mirrors render's uncached formatting; assertions use
+    /// known Tokyo/UTC times independently of `Clock` formatting.
     #[gpui::test]
     fn the_freshness_readout_reads_the_installed_app_clock_and_follows_a_later_change(
         cx: &mut gpui::TestAppContext,
@@ -2651,31 +2466,11 @@ mod tests {
         );
     }
 
-    /// Final review, Important 1: the freshness readout above reads the
-    /// global fresh on every call and could never tell "observer
-    /// present" from "observer deleted" — but the PINNED `AS OF` chip
-    /// IS cached (`asof_chip`/`asof_chip_date`/`asof_chip_clock`), so
-    /// this is a real pin on both the `AppClock` observer and the
-    /// cache's clock key, the shape the market-data and diagnostics
-    /// tests already have. Pinned with an explicit DATE, not a bare
-    /// `HH:MM` (`parse_as_of` would otherwise resolve "today" on
-    /// whichever clock is installed at pin time — deterministic per
-    /// run, but on a different date than the assertion strings below
-    /// expect whenever the real machine's date differs from the one
-    /// this comment was written against); `2030-06-15 13:00` Tokyo is
-    /// `2030-06-15 04:00` UTC (Tokyo is UTC+9, same calendar day either
-    /// way) — both hand-spelled, not derived through `Clock` (the thing
-    /// under test). The cache's DATE is force-set to what UTC's
-    /// `today(now)` will read a moment later, BEFORE the global switch
-    /// (the same poke-the-field trick `the_pinned_chip_is_rebuilt_when_
-    /// the_local_date_rolls_over` uses to simulate staleness): without
-    /// it, `render`'s date half of the guard would ALSO fire whenever
-    /// Tokyo's real "today" happens to run ahead of UTC's (true for up
-    /// to nine hours of every real day) and mask whether the clock half
-    /// — `asof_chip_clock`, this finding's whole fix — is doing
-    /// anything at all. Deleting the observer, or dropping
-    /// `asof_chip_clock` back out of `render`'s guard, fails this test
-    /// (checked by hand, each once, reverted).
+    /// Changing `AppClock` repaints the cached pinned chip in the new zone.
+    /// An explicit date avoids depending on the machine's current date. Set
+    /// the cache's date to UTC's current date before switching so a date
+    /// mismatch cannot mask a missing clock-key check. The text changes only
+    /// when the observer schedules render and render refreshes the cache.
     #[gpui::test]
     fn the_pinned_chip_reads_the_installed_app_clock_and_follows_a_later_change(
         cx: &mut gpui::TestAppContext,
@@ -2775,13 +2570,9 @@ mod tests {
         );
     }
 
-    /// Market-data Part 3 Task 6 review, MIN-3, fixed at both sites under
-    /// the mechanism rule: a REFUSED submit (a full request queue, or a
-    /// gone service) means no outcome will ever arrive for those versions.
-    /// Left unanswered it holds an open flip barrier (§3.10) to
-    /// `FLIP_DEADLINE`, and left with `acted` set it is never retried
-    /// either — the tile sits on last-good until something else happens to
-    /// move the frame.
+    /// A refused request immediately arrives at the barrier and clears
+    /// `acted`, allowing a later notification to retry. This fixture shuts
+    /// down the handle to force refusal without a future outcome.
     #[gpui::test]
     fn a_refused_query_arrives_at_the_barrier_and_retries_on_the_next_change(
         cx: &mut gpui::TestAppContext,
@@ -2960,11 +2751,9 @@ mod tests {
         (h, cx)
     }
 
-    /// The centre of a painted, `debug_selector`-tagged element — every
-    /// mouse-selection test's way of turning a cell's logical `(row,
-    /// col)` into the point a real press would land on. `debug_bounds`
-    /// wants a `'static str`: every call site here passes a literal, so
-    /// this takes one too rather than the brief's plain `&str`.
+    /// Find the centre of a painted element by its `debug_selector` id so
+    /// mouse tests exercise the rendered cell. `debug_bounds` requires a
+    /// `'static str`; all callers supply literal selectors.
     fn centre(cx: &mut gpui::VisualTestContext, sel: &'static str) -> gpui::Point<gpui::Pixels> {
         cx.run_until_parked();
         cx.debug_bounds(sel)
@@ -3003,12 +2792,10 @@ mod tests {
         assert_eq!(r.rows, 0..2);
     }
 
-    /// A plain press on a row's area outside every cell — the trailing
-    /// filler column past the last one — is still a plain click (spec §5):
-    /// it clears a live selection and moves the cursor to that row, on
-    /// the cursor's own row as much as on another. Only `render_td` cells
-    /// used to report a press, so the table's own `SelectRow` moved the
-    /// cursor under a selection that stayed live.
+    /// A press on the row's trailing filler clears a live selection and
+    /// moves the cursor to that row, including when it is already the cursor
+    /// row. The row's press listener must report this gesture because no
+    /// cell listener handles the filler.
     #[gpui::test]
     fn a_plain_click_beside_the_cells_clears_the_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = delivered(cx);
@@ -3524,11 +3311,9 @@ mod tests {
         assert!(!act(&mut cx, "workspace::focus_left", None), "not ours");
     }
 
-    /// Spec §20.5: a bare `j` past the last row wraps to row 0 in normal
-    /// mode only. In visual mode the same keystroke clamps, so a
-    /// selection being extended downward cannot leap back to the top
-    /// and silently invert itself — and the anchor is untouched either
-    /// way.
+    /// A bare `j` past the last row wraps to row 0 in normal mode. In visual
+    /// mode it clamps so extending a selection cannot wrap past its anchor.
+    /// Neither movement changes the anchor.
     #[gpui::test]
     fn a_bare_j_wraps_in_normal_mode_and_clamps_in_visual(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -3598,10 +3383,8 @@ mod tests {
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
             vec![1, 2]
         );
-        // Progressive narrowing (review round 1, Finding 1): the second
-        // keystroke must match against the un-narrowed `visible` list,
-        // not against the previous keystroke's already-narrowed `shown`
-        // — otherwise "l2"'s match position lands in the wrong domain.
+        // Each Fzf keystroke matches the full visible row list, rather than
+        // the previous keystroke's narrowed positions.
         h.tile
             .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l2".into()), cx));
         assert_eq!(
@@ -3769,13 +3552,9 @@ mod tests {
         assert_eq!(sort(&mut cx), None);
     }
 
-    /// A view edit that drops the sorted column reorders the rows to
-    /// default order regardless (the re-resolving filter in
-    /// `apply_snapshot`); the only question is whether the trader is told
-    /// why. `note_config_reloaded` plus a redelivery is the real route a
-    /// Views-dialog edit reaches a tile through — the same one
-    /// `publication_bursts_query_only_base_and_join_consumers` uses to
-    /// force a plan rebuild.
+    /// Hiding the sorted column restores default row order and reports the
+    /// dropped column. A configuration notification followed by redelivery
+    /// exercises the same rebuild route as a Views-dialog edit.
     #[gpui::test]
     fn hiding_the_sorted_column_drops_the_sort_and_says_which(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -3829,14 +3608,9 @@ mod tests {
         );
     }
 
-    /// A view edit is not the only reorder path a rebuild takes: it also
-    /// shortens `ColumnPlan::columns` when a column is hidden, and a
-    /// cursor sitting past the hidden column's old slot then keeps an
-    /// in-range index that now names a different column — the same
-    /// failure `move_column`'s own fix prevents for a column drag. Hiding
-    /// a column to the RIGHT of the cursor never moves its index, so only
-    /// a column hidden to its LEFT can tell a real fix from a clamp that
-    /// merely keeps the index in bounds.
+    /// Hiding a column to the cursor's left must preserve its column identity.
+    /// Its previous numeric index can remain in bounds while naming a different
+    /// column; hiding a column to the right would not expose that mistake.
     #[gpui::test]
     fn hiding_a_column_left_of_the_cursor_carries_it_by_name(cx: &mut gpui::TestAppContext) {
         let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
@@ -3920,15 +3694,11 @@ mod tests {
         );
     }
 
-    /// A header click reaches every order a measure can show, desc first
-    /// (user ruling 2026-09-12), whatever three-state value gpui-component
-    /// proposes; the header label follows; the tree column paints no sort
-    /// icon and its hook is a no-op; and the component's row highlight
-    /// follows the cursor's row across the resort. Drives the delegate
-    /// hook the component's click handler calls, with a deliberately
-    /// wrong proposal each time. Not observable here: the component's
-    /// cached arrow after the deferred refresh (`col_groups` is private),
-    /// so its direction on the 3rd/4th click is on the display-check list.
+    /// Header clicks cycle every supported order, descending first, regardless
+    /// of the component's proposed three-state order. Labels and the selected
+    /// row follow the result; the tree column has no sort icon or sorting action.
+    /// The test calls the delegate hook with deliberately wrong proposals.
+    /// The component's private cached arrow still needs a real-window check.
     #[gpui::test]
     fn a_header_click_cycles_through_the_absolute_orders_too(cx: &mut gpui::TestAppContext) {
         use gpui_component::table::{ColumnSort, TableDelegate as _};
@@ -4144,11 +3914,8 @@ mod tests {
         );
     }
 
-    /// `Command::FilterText` recomputes `filter_tip` exactly as
-    /// `Command::FilterExpr` does (`set_tile_scope`, final review, spec
-    /// §5.1) — a `:filter text` line must show up in the pill's hover
-    /// exactly as a `:filter <expr>` one does above, not the stale
-    /// pre-filter tip a missed recompute would leave painted.
+    /// `:filter text` updates the pill's cached hover summary, just as an
+    /// expression filter does. It must describe the current tile scope.
     #[gpui::test]
     fn hovering_the_filtered_pill_after_filter_text_shows_the_text(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_two(cx);
@@ -4226,23 +3993,17 @@ mod tests {
         );
     }
 
-    /// Command-line locality spec §3: `:asof <time>` pins THIS tile, the
-    /// frame's own as-of untouched; `:asof live` pins it to live under a
-    /// historical frame; `:asof clear` follows again. Spec §7's own
-    /// case opens the test: pinning the frame's OWN current (live)
-    /// value still stops following it — a real transition, so it
-    /// requeries once, but the frame moving on afterward requeries
-    /// nothing out of the now-pinned tile.
+    /// `:asof <time>` pins only this tile, `:asof live` pins it to live even
+    /// under a historical frame, and `:asof clear` resumes following. Pinning
+    /// the frame's current value still changes ownership and requeries once;
+    /// later frame changes do not requery the pinned tile.
     #[gpui::test]
     fn asof_pins_the_tile_and_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let _ = next_query(&h.requests);
 
-        // Spec §7: pinning the frame's own value still stops following.
-        // The frame is live and the tile follows; `:asof live` pins the
-        // tile to that same (live) value — a real transition
-        // (Follow → Pinned(Live)) — so it requeries once.
+        // Pinning the frame's current value still stops following.
         h.tile.update_in(&mut cx, |t, window, cx| {
             t.command("asof live", window, cx).unwrap()
         });
@@ -4329,10 +4090,8 @@ mod tests {
         );
     }
 
-    /// A pinned tile does not follow the frame's as-of (spec §3.3): a
-    /// frame change neither requeries it nor holds the barrier for it —
-    /// the tile self-arrives through `Frame::arrived`, as a pinned-
-    /// grouping tile does.
+    /// An as-of pin ignores the frame's as-of changes without holding its
+    /// barrier open: `on_frame_changed` records arrival without a new query.
     #[gpui::test]
     fn a_pinned_tile_ignores_the_frames_as_of_and_answers_the_barrier(
         cx: &mut gpui::TestAppContext,
@@ -4361,8 +4120,8 @@ mod tests {
         );
     }
 
-    /// The pinned chip reads `AS OF HH:MM` for today on the trader's
-    /// configured clock and carries the date otherwise (spec §3.4).
+    /// The pinned chip omits the date for today on the configured clock and
+    /// includes it for other dates.
     #[test]
     fn pinned_chip_text_elides_todays_date() {
         let now = chrono::Utc::now();
@@ -4433,9 +4192,8 @@ mod tests {
         );
     }
 
-    /// Session (spec §3.5): `as_of` is written only while pinned, as
-    /// `"live"` or RFC 3339, restored to the same pin, and a malformed
-    /// value restores to `Follow`.
+    /// Sessions store `as_of` only while pinned, as "live" or RFC 3339.
+    /// Restoration preserves either pin and falls back to following when malformed.
     #[gpui::test]
     fn as_of_round_trips_through_the_session_record(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -4490,11 +4248,9 @@ mod tests {
         );
     }
 
-    /// The pinned chip is a per-render date guard, not just a per-
-    /// mutation cache (review round 1, Important): a stale
-    /// `asof_chip_date` (as if the cache was last built yesterday) is
-    /// corrected on the very next draw, so the elided `AS OF HH:MM` form
-    /// cannot survive into a day it no longer describes.
+    /// Render checks the pinned chip's date as well as edits to the pin.
+    /// A stale cache date forces a refresh on the next draw, preventing a
+    /// date-elided label from outliving the day it describes.
     #[gpui::test]
     fn the_pinned_chip_is_rebuilt_when_the_local_date_rolls_over(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -4525,9 +4281,8 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        // No `AppClock` global is installed in this harness, so `render`
-        // falls back to `Clock::machine()` (Task 5's `try_global`
-        // fallback) — the same zone this comparison must read.
+        // The fixture has no `AppClock`, so compare the rebuilt date and
+        // text using the same machine-clock fallback as the tile.
         let clock = geode_core::clock::Clock::machine().0;
         let today = clock.today(chrono::Utc::now());
         h.tile.read_with(&cx, |t, _| {
@@ -4540,8 +4295,7 @@ mod tests {
         });
     }
 
-    /// The refusals (spec §5) reach the trader as the parser's message,
-    /// and touch nothing.
+    /// Refused commands return the parser's message without changing tile state.
     #[gpui::test]
     fn refused_words_error_inline_with_the_doors_name(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -4565,8 +4319,8 @@ mod tests {
         );
     }
 
-    /// A bad `:filter` expression is a user error at the point of entry
-    /// (spec §10.1), reported inline, never applied.
+    /// A bad `:filter` expression is reported inline at entry and leaves the
+    /// active filter unchanged.
     #[gpui::test]
     fn filter_validates_against_the_tiles_dataset(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -4605,10 +4359,9 @@ mod tests {
         );
     }
 
-    /// The stack marker (tile-stacks spec §5.1) paints only while the
-    /// tile is a stack member with more than one member, first in the
-    /// header strip, and `title()` reads from the same cache the header
-    /// text itself paints.
+    /// The stack marker appears first in the header only for stacks with
+    /// multiple members. `title()` describes the same view and grouping shown
+    /// in the header.
     #[gpui::test]
     fn the_stack_marker_paints_only_while_a_member(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -4814,11 +4567,8 @@ mod tests {
         );
     }
 
-    /// The cell's own press listener (grid selection spec §5) fires for
-    /// every left press, a double-click's first press included; a plain
-    /// press always clears any live selection, so it leaves none behind
-    /// here either — there was none to clear, but the toggle itself must
-    /// not have started one.
+    /// A plain cell press clears a live selection, including the presses in
+    /// a double-click. Toggling the row's expansion must not start a selection.
     #[gpui::test]
     fn a_double_click_that_toggles_a_row_leaves_no_selection(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -4922,9 +4672,8 @@ mod tests {
         ))
     }
 
-    /// A flat, single-level shape (root plus `n` leaves) for the C1
-    /// regression test below: `n` large enough that the test window's
-    /// viewport shows only a fraction of it.
+    /// A flat root-plus-leaves snapshot large enough for the virtualized
+    /// viewport to show only a fraction of its rows.
     fn flat_snapshot(n: usize, delta_base: f64) -> Arc<Snapshot> {
         let meta = |name: &str| ColumnMeta {
             name: name.into(),
@@ -4951,14 +4700,9 @@ mod tests {
         ))
     }
 
-    /// I4, test 1: a `NonAttributable` cell (a NULL the compiler said was
-    /// never a number here, §6.5) paints no text. gpui's test harness has
-    /// no pixel/text reader, so "no text" is checked the way every other
-    /// test in this module checks what painted — through the delegate's
-    /// `FormatCache`, which is the sole input `render_td`'s `match
-    /// cell.attribution` branches on (see that match: `NonAttributable`
-    /// is the only arm that never calls `.child(text)`) — backed by
-    /// `debug_bounds` proving the cell's own element painted at all.
+    /// A `NonAttributable` cell has no value text. Without a pixel/text reader,
+    /// the test checks the attribution in `FormatCache`, which selects the
+    /// no-text render arm, and verifies that the cell element has painted bounds.
     #[gpui::test]
     fn a_non_attributable_cells_element_has_no_text(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -5022,11 +4766,8 @@ mod tests {
         );
     }
 
-    /// I4, test 2: a `DeterminedNonAdditive` cell carries the dagger — in
-    /// practice, the delegate's cached attribution `render_td` paints the
-    /// dagger from, plus the footer's `any_determined` flag it drives
-    /// (see `render_td`'s `DeterminedNonAdditive` arm, which appends
-    /// `DETERMINED_MARK` after the text).
+    /// A `DeterminedNonAdditive` cell supplies the cached attribution that
+    /// renders the dagger and sets the footer's `any_determined` legend flag.
     #[gpui::test]
     fn a_determined_non_additive_cells_element_carries_the_dagger(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
@@ -5070,12 +4811,9 @@ mod tests {
         assert!(cx.debug_bounds(selector).is_some(), "the cell painted");
     }
 
-    /// The tree column is pinned left (user ruling 2026-09-12): in a
-    /// window too narrow for the fixture's three columns, `$` scrolls
-    /// the table right so the last column ends flush with the viewport's
-    /// right edge (its x moves left, and column 1 is culled), while the
-    /// tree cell's painted x does not move — it is rendered in the
-    /// table's fixed region, outside the scrolled one.
+    /// The tree column stays fixed during horizontal scrolling. In a narrow
+    /// window, `$` reveals the last column at the viewport's right edge and
+    /// culls column 1 while the tree cell keeps its painted x coordinate.
     #[gpui::test]
     fn the_tree_column_stays_put_when_the_table_scrolls_right(cx: &mut gpui::TestAppContext) {
         use gpui::{Bounds, WindowBounds, point, size};
@@ -5130,12 +4868,9 @@ mod tests {
         );
     }
 
-    /// `[ui] line_numbers` reaches a live tile through the shell's
-    /// `UiSettings` global (user ruling 2026-09-11): with the setting
-    /// off no gutter element paints; publishing `rel` paints one per row
-    /// on the next draw without any requery, numbered from the cursor
-    /// with the cursor row showing its absolute number; and a cursor
-    /// move re-derives the offsets.
+    /// Publishing `[ui] line_numbers` through `UiSettings` updates a live tile
+    /// without requerying. Off hides the gutter; relative mode shows cursor
+    /// offsets with an absolute number at the cursor and updates after movement.
     #[gpui::test]
     fn the_line_numbers_global_paints_a_gutter_on_the_next_draw(cx: &mut gpui::TestAppContext) {
         use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -5232,14 +4967,10 @@ mod tests {
         );
     }
 
-    /// I4, test 3 — the C1 regression. With more rows than the test
-    /// viewport shows, the visible row *range* `TableState` computes is
-    /// the same after a second snapshot delivery as after the first
-    /// (there's nothing new to scroll to), so `visible_rows_changed` —
-    /// the only other refill path besides `invalidate_cells` — never
-    /// fires again for it. Before the C1 fix this left every cell in
-    /// that unchanged range painting blank forever, the first time this
-    /// happened onward.
+    /// A new snapshot must refill formatted cells even when the virtualized
+    /// visible row range stays unchanged. In that case `visible_rows_changed`
+    /// does not fire again, so `invalidate_cells` must repopulate the cached
+    /// range to avoid blank cells.
     #[gpui::test]
     fn a_cell_still_has_text_after_a_second_snapshot_with_an_unchanged_visible_range(
         cx: &mut gpui::TestAppContext,
@@ -5305,18 +5036,11 @@ mod tests {
         );
     }
 
-    /// Phase 4 §3.10, end to end at the tile level (shell-less: the
-    /// barrier is opened by hand here exactly the way `ShellView::
-    /// on_frame_changed` opens it in production — see `geode-shell`'s own
-    /// `shell/tests/flip.rs` for that half). Two tiles share one frame:
-    /// a scope change makes both requery, and while the barrier is open
-    /// tile A's own outcome is staged rather than painted — only once
-    /// tile B's outcome arrives too (emptying the barrier and bumping
-    /// `flip`) do both tiles show the new snapshot, in the same notify
-    /// pass. Repeated with B *failing* the second time: a failed outcome
-    /// still counts as arrival, so A promotes on schedule and B keeps its
-    /// last-good snapshot plus the error — one broken tile never holds
-    /// the rest open.
+    /// Two tiles stage outcomes until their shared frame barrier releases,
+    /// then promote in the same notification pass. A failed outcome also
+    /// arrives, allowing its sibling to promote while retaining its own last
+    /// good snapshot and error. This fixture opens the barrier explicitly;
+    /// shell tests cover opening it from frame changes.
     #[gpui::test]
     fn two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier(
         cx: &mut gpui::TestAppContext,
@@ -5419,16 +5143,10 @@ mod tests {
         );
     }
 
-    /// A pinned tile ignores a grouping-only change (§4.1: `follows_
-    /// changed` is false for it) — but it still sits in the barrier's key
-    /// set, and it must "arrive" on its own from `on_frame_changed`,
-    /// never from `deliver` (it submits no new query at all), or it would
-    /// hold its unpinned sibling's flip open until `FLIP_DEADLINE` for no
-    /// reason (§3.10). The grouping mutation and `open_flip` are set up
-    /// together, before the one `cx.notify()` that fans out to both
-    /// tiles — the real order `ShellView::on_frame_changed` guarantees in
-    /// production, since its own frame observer is registered (in
-    /// `ShellView::new`) before any tile occupant's.
+    /// A grouping-pinned tile ignores grouping-only changes but still belongs
+    /// to the barrier's participant set. `on_frame_changed` must arrive for it
+    /// without submitting a query. Mutation and barrier creation precede the
+    /// notification, matching the shell observer's ordering.
     #[gpui::test]
     fn a_pinned_tile_arrives_from_on_frame_changed_without_requerying(
         cx: &mut gpui::TestAppContext,
@@ -5480,41 +5198,14 @@ mod tests {
         );
     }
 
-    /// Fix round 1, Finding 1: `staged` carried no version identity and
-    /// survived `requery`. Trace reproduced here — tile B stages a
-    /// snapshot for V1 while the barrier still awaits A; a second
-    /// mutation lands within the 250ms window before A ever answers V1;
-    /// `open_flip` replaces the barrier for V2; B's `on_frame_changed`
-    /// sees `follows_changed(V2)` and requeries (bumping `tag`, setting
-    /// `acted = V2`) while the stale V1 snapshot was still sitting in
-    /// `staged`; the V2 barrier releases on the deadline before B's own
-    /// V2 query lands; `flip` bumps and B's `on_frame_changed` must NOT
-    /// promote the stale V1 payload under that bump.
+    /// Staged answers remain valid only for the tile's current query.
+    /// A second scope change supersedes the staged answer; a grouping-only
+    /// change leaves a grouping-pinned tile's stage valid; and a watched data
+    /// publication invalidates it even while the original barrier remains open.
     ///
-    /// Three independent scenarios, because the fix's two halves are not
-    /// redundant with each other and no single race tells them apart on
-    /// its own (checked by hand, mutating each half separately against
-    /// only the others — see the fix-round report for both console
-    /// outputs): Part 1 (both tiles unpinned, a second *scope* change)
-    /// is caught by either half alone — `requery`'s clear runs before
-    /// the flip bumps, and `promote`'s gate would also reject the scope
-    /// mismatch if it didn't. Part 2 pins B to a fixed grouping, so a
-    /// *grouping-only* second mutation never makes B requery at all
-    /// (`requery`'s clear never runs) — and, since I-1 (final
-    /// whole-branch review) narrowed the gate from the barrier's flip
-    /// identity to the counters the tile itself FOLLOWS, the V1 payload
-    /// there is no longer stale at all: it is the only answer a pinned B
-    /// will ever get for that scope, and it now promotes. What the gate
-    /// still refuses is a stage whose own followed counters moved, which
-    /// `a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved`
-    /// pins. Part 3 is the reverse: a `data`-only bump (which never
-    /// opens or replaces a barrier, but `follows_changed` always
-    /// compares `data`) forces B to requery while the *original* V1
-    /// barrier — whose scope/grouping/as_of the data bump never
-    /// touches — is still what releases on the deadline; `promote`'s
-    /// version check alone would not catch this (it deliberately
-    /// ignores `data`/`config`, same as `Frame::matches`), so only
-    /// `requery`'s clear does.
+    /// `requery` clears stages and `promote` checks followed counters, including
+    /// data and configuration. The separate tile-local requery test covers a
+    /// change that the counter check alone cannot detect.
     #[gpui::test]
     fn a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot(
         cx: &mut gpui::TestAppContext,
@@ -5595,10 +5286,9 @@ mod tests {
             "the real V2 payload paints once it actually arrives"
         );
 
-        // Part 2: B pinned to a fixed grouping — a grouping-only second
-        // mutation never makes it requery, so only `promote`'s own
-        // version check (not `requery`'s clear) can stop the stale V1
-        // payload from painting.
+        // B is pinned to a grouping, so a grouping-only second change neither
+        // requeries nor invalidates its stage. The staged scope result remains
+        // the answer to B's latest query and must promote on release.
         let (h2, mut vcx2) = open_two(cx);
         h2.a.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
         h2.b.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
@@ -5671,12 +5361,10 @@ mod tests {
              the pre-V1 rows painted with `acted` claiming B was current"
         );
 
-        // Part 3: a data-only bump forces B to requery while V1 is
-        // staged (`follows_changed` always compares `data`), but the
-        // *original* V1 barrier — whose scope/grouping/as_of the data
-        // bump never touches — is what eventually releases on the
-        // deadline. Only `requery`'s own clear stops the stale
-        // (pre-data-bump) V1 snapshot from painting here.
+        // A watched data publication requeries B while its earlier answer is
+        // staged. It leaves the original barrier open, but the earlier answer
+        // must not promote on release: requery clears it, and promotion also
+        // checks the followed data counter.
         let (h3, mut vcx3) = open_two(cx);
         h3.a.update(&mut vcx3, |t, cx| t.set_visible(true, cx));
         h3.b.update(&mut vcx3, |t, cx| t.set_visible(true, cx));
@@ -5745,12 +5433,9 @@ mod tests {
         );
     }
 
-    /// I-1 (final whole-branch review), the other half of the same gate:
-    /// a stage whose own followed counters have MOVED must still be
-    /// dropped. Reachable while hidden — `set_visible(false)` leaves a
-    /// stage in place and a hidden tile never requeries, so nothing else
-    /// supersedes it; `promote`'s gate is the only thing between it and
-    /// the screen.
+    /// A hidden tile does not requery when followed counters change, so an
+    /// existing stage can survive until release. Promotion must reject that
+    /// stage based on its own version stamp.
     #[gpui::test]
     fn a_stage_is_dropped_when_a_counter_the_tile_follows_has_moved(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_two(cx);
@@ -5799,22 +5484,10 @@ mod tests {
         );
     }
 
-    /// The half of Fix round 1, Finding 1 that `promote`'s gate cannot
-    /// reach, and the one `requery`'s clear is now alone in defending.
-    ///
-    /// Every scenario in
-    /// `a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot`
-    /// moves a counter the tile FOLLOWS, and since I-1 (final
-    /// whole-branch review) narrowed `promote`'s gate onto
-    /// `differs_on_followed` — `data` and `config` included — the gate
-    /// now catches all three on its own, Part 3's data-only bump
-    /// included: the clear is masked there. A TILE-LOCAL requery is the
-    /// case it is not. `:filter`, `:group`, `:unpin` and `:unscoped` all
-    /// requery against frame versions that never move, so a stage made
-    /// before one still agrees with `now` on every followed counter and
-    /// the gate waves it through — only the clear stops a snapshot
-    /// answering the pre-filter question from painting over the filtered
-    /// query already in flight.
+    /// A tile-local requery must clear the staged answer even when no frame
+    /// counter changes. Commands such as `:filter`, `:group`, `:unpin`, and
+    /// `:unscoped` change the question while leaving the counter gate satisfied;
+    /// only the requery clear prevents the prior answer from painting.
     #[gpui::test]
     fn a_tile_local_requery_clears_the_stage_a_barrier_left_behind(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_two(cx);
@@ -5889,13 +5562,9 @@ mod tests {
         );
     }
 
-    /// Regression: `BlotterTile::completions` used to build its
-    /// `Vocabulary` from the column plan/view alone (what's
-    /// *displayed*), so `:group `/`:filter ` never offered a dimension
-    /// the current view does not show — `model_code` here (`schema()`'s
-    /// carried dimension, `grain = "instrument"`) is exactly that shape.
-    /// `delta01`/`daily_trading_pnl` are measures and must never appear
-    /// for `group`.
+    /// Grouping and filter completions include dimensions absent from the
+    /// current view. Here `model_code` is carried at instrument grain but is
+    /// not displayed. Measures must never appear as grouping completions.
     #[gpui::test]
     fn completions_offer_dataset_dimensions_not_just_displayed_columns(
         cx: &mut gpui::TestAppContext,
@@ -5915,11 +5584,9 @@ mod tests {
         );
     }
 
-    /// 2c §6.2: the definitions travel from the factory's shared cell to
-    /// the delegate, and they travel on the plan — the tile hands them
-    /// over in `apply`, where the plan is built, so the delegate can
-    /// never be painting a plan against colours older than it. Asserted
-    /// through `cell_colour`, the same door `render_td`/`render_th` use.
+    /// Applying a snapshot hands the factory's shared colour definitions to
+    /// the delegate alongside the rebuilt plan. `cell_colour`, also used by
+    /// cell and header rendering, must resolve against the current definitions.
     #[gpui::test]
     fn a_delivered_snapshot_hands_the_delegate_the_tiles_colours(cx: &mut gpui::TestAppContext) {
         let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
@@ -5978,12 +5645,9 @@ mod tests {
         );
     }
 
-    /// The rule (command-line locality spec §2): a `:` line changes only
-    /// this tile. Every word the parser accepts — with a valid argument
-    /// where one is needed — plus every refusal, runs against a tile
-    /// while the frame's scope/grouping/as-of counters, its slot set and
-    /// its pending slot persist are watched. `COMMANDS` is read so a word
-    /// added there without a line here fails.
+    /// Every accepted or refused `:` command leaves the frame's scope,
+    /// grouping, as-of, slots, and pending slot persistence unchanged. Reading
+    /// `COMMANDS` makes a newly added command require an explicit test case.
     #[gpui::test]
     fn every_colon_command_leaves_the_frame_alone(cx: &mut gpui::TestAppContext) {
         let (h, mut cx) = open(cx);
