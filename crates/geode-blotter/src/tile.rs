@@ -25,7 +25,7 @@ use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::fonts;
-use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
+use geode_shell::frame::{FrameRef, FrameVersions, FrameView, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
@@ -110,7 +110,7 @@ pub enum TileAsOf {
 
 pub struct BlotterTile {
     tile: TileId,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
     /// Named colour definitions shared through the factory and refreshed on
@@ -199,7 +199,7 @@ impl BlotterTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tile: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
         colours: Rc<RefCell<Arc<NamedColours>>>,
@@ -377,7 +377,7 @@ impl BlotterTile {
             this.pointer(*event, cx)
         })
         .detach();
-        cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
+        cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
         cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
@@ -524,7 +524,7 @@ impl BlotterTile {
         true
     }
 
-    fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
+    fn grouping(&self, frame: &FrameView<'_>, view: &ViewSpec) -> Vec<String> {
         match &self.pin {
             Pin::Grouping(g) => g.clone(),
             Pin::Slot(n) => frame
@@ -688,7 +688,7 @@ impl BlotterTile {
         self.watch_view(&view, cx);
         let (grouping, scope, as_of, versions) = {
             let frame = self.frame.read(cx);
-            let grouping = self.grouping(frame, &view);
+            let grouping = self.grouping(&frame, &view);
             // A tile scope comes from `:filter` and never names an
             // expression, so the unscoped branch needs no resolution; the
             // compiler refuses one that somehow does.
@@ -1864,9 +1864,10 @@ mod tests {
     use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, FrameRef, Publish};
     use geode_shell::module::FindEvent;
     use geode_shell::tiling::TileId;
+    use geode_shell::tiling::WorkspaceIx;
     use geode_shell::vimfind::FindStyle;
     use gpui::px;
     use gpui::{Modifiers, MouseButton};
@@ -2150,7 +2151,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
                                 Rc::new(RefCell::new(Arc::new(NamedColours::default()))),
@@ -2215,7 +2216,7 @@ mod tests {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 Rc::new(RefCell::new(views)),
                                 Rc::new(RefCell::new(Arc::new(colours))),
@@ -2302,7 +2303,7 @@ mod tests {
                         let a = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(7),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -2318,7 +2319,7 @@ mod tests {
                         let b = cx.new(|cx| {
                             BlotterTile::new(
                                 TileId(8),
-                                frame.clone(),
+                                FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                                 data.clone(),
                                 views.clone(),
                                 colours.clone(),
@@ -5092,7 +5093,7 @@ mod tests {
         assert_eq!(shown_texts(&h.a, &vcx), old_texts);
         assert_eq!(shown_texts(&h.b, &vcx), old_texts);
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // A scope change: this test drives the two steps directly, in
         // whichever order reaches "both queries in flight, no barrier
@@ -5197,7 +5198,7 @@ mod tests {
         let pa_pin = next_query(&h.requests);
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa_pin.tag, Ok(snapshot()));
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         frame.update(&mut vcx, |f, cx| {
             f.set_active_slot(Some(1));
             f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());
@@ -5250,7 +5251,7 @@ mod tests {
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
 
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys.
         frame.update(&mut vcx, |f, cx| {
@@ -5335,7 +5336,7 @@ mod tests {
         let qb_pin = next_query(&h2.requests);
         deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb_pin.tag, Ok(snapshot()));
 
-        let frame2 = h2.a.read_with(&vcx2, |t, _| t.frame.clone());
+        let frame2 = h2.a.read_with(&vcx2, |t, _| t.frame.entity().clone());
 
         // V1: a scope change — pinned-to-grouping B still follows scope,
         // so it requeries and, once the barrier opens over it, stages.
@@ -5405,7 +5406,7 @@ mod tests {
         deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb0.tag, Ok(snapshot()));
         let baseline3 = shown_texts(&h3.b, &vcx3);
 
-        let frame3 = h3.a.read_with(&vcx3, |t, _| t.frame.clone());
+        let frame3 = h3.a.read_with(&vcx3, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys.
         frame3.update(&mut vcx3, |f, cx| {
@@ -5477,7 +5478,7 @@ mod tests {
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change over both keys; B stages, A never answers.
         frame.update(&mut vcx, |f, cx| {
@@ -5529,7 +5530,7 @@ mod tests {
         deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
         let baseline = shown_texts(&h.b, &vcx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
 
         // V1: a scope change opens a barrier over both keys; A's query is
         // left outstanding, so only the deadline will release it.
@@ -5962,7 +5963,7 @@ mod tests {
     #[gpui::test]
     fn publication_bursts_query_only_base_and_join_consumers(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_two(cx);
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         h.a.update(&mut vcx, |t, _| {
             let mut views = t.views.borrow_mut();
             views
@@ -6060,7 +6061,7 @@ mod tests {
         let b = next_query(&h.requests);
         deliver_to(&h.a, QueryKey(7), &mut vcx, a.tag, Ok(snapshot()));
         deliver_to(&h.b, QueryKey(8), &mut vcx, b.tag, Ok(snapshot()));
-        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.entity().clone());
         frame.update(&mut vcx, |f, cx| {
             f.set_text(Some("new scope".into()));
             f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());

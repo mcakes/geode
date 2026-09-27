@@ -37,7 +37,7 @@ use geode_data::{DataHandle, Refusal};
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
 use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
-use geode_shell::frame::Frame;
+use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle};
@@ -277,7 +277,7 @@ pub struct PricerTile {
     // Retain the frame alongside the tile; the flip-barrier observer in `new`
     // receives its own handle for updates.
     #[allow(dead_code)]
-    frame: Entity<Frame>,
+    frame: FrameRef,
     pub(crate) data: DataHandle,
     pub(crate) shared: Rc<Shared>,
     pub(crate) sheet: Sheet,
@@ -453,7 +453,7 @@ impl PricerTile {
     /// the shell reaches a tile only through `PricerFactory::create`.
     pub(crate) fn new(
         id: TileId,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         data: DataHandle,
         shared: Rc<Shared>,
         restored: Option<&toml::Table>,
@@ -563,7 +563,10 @@ impl PricerTile {
         .detach();
         // Pricing does not follow frame queries, so there is no result to wait for.
         // Arrive immediately to avoid holding other tiles behind the flip barrier.
-        cx.observe(&frame, |this, frame, cx| {
+        cx.observe(frame.entity(), |this, _, cx| {
+            // Read through the tile's own handle: the observed entity alone
+            // would answer for the shared lane, not this workspace's.
+            let frame = this.frame.clone();
             let key = QueryKey(this.id.0);
             let now = frame.read(cx).versions();
             if frame.read(cx).barrier_wants(key, now) {
@@ -3617,9 +3620,10 @@ pub(crate) mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
-    use geode_shell::frame::Frame;
+    use geode_shell::frame::{Frame, FrameRef};
     use geode_shell::module::{Delivery, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
+    use geode_shell::tiling::WorkspaceIx;
     use geode_widgets::datefield::Segment;
     use gpui::{Entity, VisualTestContext};
     use std::cell::RefCell;
@@ -3758,7 +3762,7 @@ pub(crate) mod tests {
                     let occupant = factory.create(
                         TileId(TILE),
                         restored.as_ref(),
-                        frame.clone(),
+                        FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                         diagnostics.clone(),
                         window,
                         cx,
@@ -4014,7 +4018,7 @@ pub(crate) mod tests {
             h.factory.create(
                 TileId(TILE + 1),
                 None,
-                h.frame.clone(),
+                FrameRef::new(h.frame.clone(), WorkspaceIx::FIRST),
                 h.diagnostics.clone(),
                 window,
                 cx,
@@ -4248,7 +4252,7 @@ pub(crate) mod tests {
                 let o = factory.create(
                     TileId(TILE + 2),
                     None,
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -7049,7 +7053,7 @@ pub(crate) mod tests {
                 let o = factory.create(
                     TileId(TILE + 3),
                     Some(&record),
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -8331,7 +8335,7 @@ pub(crate) mod tests {
                 .create(
                     TileId(id),
                     None,
-                    h.frame.clone(),
+                    FrameRef::new(h.frame.clone(), WorkspaceIx::FIRST),
                     h.diagnostics.clone(),
                     window,
                     cx,
@@ -8448,7 +8452,7 @@ pub(crate) mod tests {
                 let first = factory.create(
                     TileId(1),
                     None,
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -8467,7 +8471,7 @@ pub(crate) mod tests {
                 let _ = factory.create(
                     TileId(2),
                     None,
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,
@@ -8507,7 +8511,7 @@ pub(crate) mod tests {
                     let o = factory.create(
                         TileId(id),
                         None,
-                        frame.clone(),
+                        FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                         diagnostics.clone(),
                         window,
                         cx,
@@ -9058,7 +9062,7 @@ pub(crate) mod tests {
                     let o = h.factory.create(
                         TileId(id),
                         Some(&record),
-                        h.frame.clone(),
+                        FrameRef::new(h.frame.clone(), WorkspaceIx::FIRST),
                         h.diagnostics.clone(),
                         window,
                         cx,
@@ -9099,7 +9103,7 @@ pub(crate) mod tests {
             let o = h.factory.create(
                 TileId(id),
                 None,
-                h.frame.clone(),
+                FrameRef::new(h.frame.clone(), WorkspaceIx::FIRST),
                 h.diagnostics.clone(),
                 window,
                 cx,

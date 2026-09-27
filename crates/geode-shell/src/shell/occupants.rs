@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, FocusHandle, Focusable as _, Window};
 
+use crate::frame::FrameRef;
 use crate::module::Delivery;
 use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
@@ -243,11 +244,19 @@ impl ShellView {
             // Only an `add_tile` request (no matching restored record) may be
             // told it was launched: a restore must never take focus.
             let from_add = matched.is_none() && pending_factory.is_some();
+            // The tile's own workspace, not the active one: an occupant
+            // restored into a hidden workspace reads that workspace's lane.
+            let ws = self
+                .services
+                .workspaces
+                .workspace_of(*id)
+                .unwrap_or_else(|| self.services.workspaces.active_ix());
+            let frame = FrameRef::new(self.frame.clone(), ws);
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,
                     state,
-                    self.frame.clone(),
+                    frame.clone(),
                     self.diagnostics.clone(),
                     window,
                     cx,
@@ -255,7 +264,7 @@ impl ShellView {
                 None => crate::module::placeholder::PlaceholderFactory.create(
                     *id,
                     None,
-                    self.frame.clone(),
+                    frame.clone(),
                     self.diagnostics.clone(),
                     window,
                     cx,

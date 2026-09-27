@@ -14,11 +14,11 @@ use geode_core::series::{BucketRule, Frequency, SlotKind, SlotProvenance, SlotRe
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::Frame;
+use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent, TileOccupant};
 use geode_shell::series::{FetchSource, SeriesSettings};
-use geode_shell::tiling::TileId;
+use geode_shell::tiling::{TileId, WorkspaceIx};
 use geode_widgets::datefield::Segment;
 use gpui::{Entity, SharedString, Window};
 use gpui_component::color_picker::ColorPickerState;
@@ -169,7 +169,7 @@ impl ModuleFactory for Handle {
         &self,
         tile: TileId,
         restored: Option<&toml::Table>,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut gpui::App,
@@ -339,7 +339,7 @@ fn open_full(
                 let occupant = factory.create(
                     TileId(TILE),
                     restored.as_ref(),
-                    frame.clone(),
+                    FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                     diagnostics.clone(),
                     window,
                     cx,

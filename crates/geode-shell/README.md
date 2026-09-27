@@ -6,9 +6,11 @@ as-of), theming, the modal dialogs, and the contract a module implements
 to live in a tile. Built on gpui and gpui-component.
 
 This crate never depends on `geode-data` or on any module crate. A module
-gets shell-side handles only (a `TileId`, the frame entity, the action
+gets shell-side handles only (a `TileId`, a `FrameRef`, the action
 registry); anything it needs from data it asks `geode-data` for itself,
-and the two meet only in `geode-app`.
+and the two meet only in `geode-app`. A tile's `FrameRef` is bound to its
+workspace for life; reads resolve to that workspace's lane (see
+[the shared frame](../../docs/current/shell.md#the-shared-frame)).
 
 Current behavior and rationale: [`docs/current/shell.md`](../../docs/current/shell.md).
 Keyboard ownership, palette, completion, choices, and frame-picker contracts:

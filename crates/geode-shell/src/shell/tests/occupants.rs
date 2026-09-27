@@ -102,7 +102,7 @@ mod watching {
             &self,
             tile: TileId,
             _restored: Option<&toml::Table>,
-            _frame: Entity<Frame>,
+            _frame: crate::frame::FrameRef,
             diagnostics: Entity<Diagnostics>,
             _window: &mut Window,
             cx: &mut App,
@@ -1710,4 +1710,76 @@ fn palette_is_focused(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContex
             .focus_handle(cx)
             .is_focused(window)
     })
+}
+
+/// Each occupant is handed its own workspace's frame: a tile added in
+/// workspace 2 reads workspace 2's lane, never the active one at some
+/// later moment.
+#[gpui::test]
+fn an_occupant_is_created_with_its_own_workspaces_frame(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    dispatch_and_draw(&shell, &mut cx, "workspace::switch_2");
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let framed: Vec<u8> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Framed(_, ws) => Some(ws.get()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(framed, vec![1, 2]);
+}
+
+/// A tile restored into a hidden workspace is framed by that workspace,
+/// not by the one active when its occupant is created on the first render.
+#[gpui::test]
+fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAppContext) {
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::palette_usage::PaletteUsage::new(),
+    );
+    let ws2: toml::Table = r#"
+        focused = 1
+        [node]
+        kind = "leaf"
+        id = 1
+        [tiles.1]
+        module = "rec"
+    "#
+    .parse()
+    .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("2".to_string(), toml::Value::Table(ws2));
+    }
+    let restored = session::from_toml(&table).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    assert_eq!(
+        restored.workspaces.active_index(),
+        1,
+        "sanity: workspace 1, not 2, is active"
+    );
+
+    let (mut services, log) = services_with_recorder();
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    let (_window, mut cx) = open_shell(cx, services);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let framed: Vec<(TileId, u8)> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Framed(t, ws) => Some((*t, ws.get())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(framed, vec![(TileId(1), 2)]);
 }

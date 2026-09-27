@@ -16,6 +16,7 @@
 //! unscoped tile ignores `scope`. Publication watches narrow `data` to the
 //! datasets/documents a consumer reads; other counters retain their contracts.
 
+pub use crate::frame_ref::FrameRef;
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use crate::tiling::WorkspaceIx;

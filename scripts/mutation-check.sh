@@ -16729,6 +16729,13 @@ run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
   geode-shell \
   a_pull_from_insert_mode_leaves_the_typing_tile_its_input
 
+run_mutation "occupants: a tile is framed by its own workspace" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            let frame = FrameRef::new(self.frame.clone(), ws);' \
+  '            let frame = FrameRef::new(self.frame.clone(), self.services.workspaces.active_ix());' \
+  geode-shell \
+  a_tile_restored_into_a_hidden_workspace_is_framed_by_it
+
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
   '                self.notice = Some(NO_TILE_THAT_WAY);' \

@@ -46,7 +46,7 @@ use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
+use geode_shell::frame::{FrameRef, FrameVersions, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{FindEvent, StackHandle, UploadDelivery};
@@ -415,7 +415,7 @@ enum Yank {
 pub struct MarketDataTile {
     id: TileId,
     spec: &'static PanelSpec,
-    frame: Entity<Frame>,
+    frame: FrameRef,
     diagnostics: Entity<Diagnostics>,
     data: DataHandle,
     /// The document key, in the dataset's declared `key` order. The
@@ -570,7 +570,7 @@ impl MarketDataTile {
     pub fn new(
         id: TileId,
         spec: &'static PanelSpec,
-        frame: Entity<Frame>,
+        frame: FrameRef,
         diagnostics: Entity<Diagnostics>,
         data: DataHandle,
         stale_after: Rc<StdCell<Duration>>,
@@ -704,7 +704,7 @@ impl MarketDataTile {
             }
         })
         .detach();
-        cx.observe(&frame, |this, _frame, cx| {
+        cx.observe(frame.entity(), |this, _frame, cx| {
             // Promote staged results on flip even if the tile became hidden after
             // staging. Flip releases prepared results; it never triggers a document
             // query.
@@ -4629,9 +4629,10 @@ mod tests {
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
     use geode_shell::diagnostics::Diagnostics;
-    use geode_shell::frame::{Frame, Publish};
+    use geode_shell::frame::{Frame, FrameRef, Publish};
     use geode_shell::module::{Delivery, FindEvent, ModuleFactory, TileContent};
     use geode_shell::tiling::TileId;
+    use geode_shell::tiling::WorkspaceIx;
     use gpui::{Entity, Window};
 
     /// Header tones derived by this tile must meet 3:1 contrast on every bundled
@@ -4969,7 +4970,7 @@ mod tests {
                     let occupant = factory.create(
                         TileId(TILE),
                         restored.as_ref(),
-                        frame.clone(),
+                        FrameRef::new(frame.clone(), WorkspaceIx::FIRST),
                         diagnostics.clone(),
                         window,
                         cx,
@@ -5055,7 +5056,14 @@ mod tests {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                 let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
-                let occupant = factory.create(TileId(TILE), None, frame, diagnostics, window, cx);
+                let occupant = factory.create(
+                    TileId(TILE),
+                    None,
+                    FrameRef::new(frame, WorkspaceIx::FIRST),
+                    diagnostics,
+                    window,
+                    cx,
+                );
                 let tile = occupant.view.clone().downcast::<MarketDataTile>().unwrap();
                 *out.borrow_mut() = Some(tile.clone());
                 let host = cx.new(|_| Host {
@@ -14104,7 +14112,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &self,
             tile: TileId,
             restored: Option<&toml::Table>,
-            frame: Entity<Frame>,
+            frame: FrameRef,
             diagnostics: Entity<Diagnostics>,
             window: &mut Window,
             cx: &mut gpui::App,

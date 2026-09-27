@@ -18,6 +18,7 @@ pub mod fonts;
 pub mod fontsize;
 pub mod footer;
 pub mod frame;
+mod frame_ref;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod linenumbers;
