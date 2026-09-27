@@ -17408,10 +17408,9 @@ run_mutation "pricer storage: an answer for another sheet installs under this na
 
 run_mutation "pricer store: a refused submission answers Refused, not Pending" \
   crates/geode-pricer/src/store.rs \
-  '        if queued {
-            Loaded::Pending
-        } else {
-            Loaded::Refused
+  '        match queued {
+            Ok(()) => Loaded::Pending,
+            Err(refusal) => Loaded::Refused(refusal),
         }' \
   '        let _ = queued;
         Loaded::Pending' \
@@ -17762,7 +17761,7 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '        } else if self.shared.store.forget(&pending.sheet) {
+  '        } else if self.shared.store.forget(&pending.sheet).is_ok() {
             // Reserved until the forget is answered.' \
   '        } else if false {
             // Reserved until the forget is answered.' \
@@ -22771,6 +22770,61 @@ run_mutation "pricer entry bar: a history step leaves the list stale" \
   $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
   '' \
   geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
+# ---- containment and liveness
+
+# A body that unwinds must be declared: otherwise a dead data thread is
+# invisible and every tile waits on it forever.
+run_mutation "supervise: an unwinding body is not declared" \
+  crates/geode-data/src/supervise.rs \
+  '            let _ = sink(DataEvent::ThreadStopped { thread, reason });' \
+  '            let _ = (&sink, thread, reason);' \
+  geode-data a_panicking_supervised_body_emits_one_thread_stopped
+
+# Marked contained, the crash hook would log the death and write no crash
+# file: the one bug report an uncontained death leaves.
+run_mutation "supervise: the body runs contained" \
+  crates/geode-data/src/supervise.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));' \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| geode_core::panic::contained(body)));' \
+  geode-data the_supervised_body_is_not_marked_contained
+
+run_mutation "handle: a full queue is refused Stopped" \
+  crates/geode-data/src/handle.rs \
+  '                Err(TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    Err(Refusal::Busy)' \
+  '                Err(TrySendError::Full(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    Err(Refusal::Stopped)' \
+  geode-data a_full_channel_refuses_and_counts_rather_than_blocking
+
+run_mutation "handle: a disconnected queue is refused Busy" \
+  crates/geode-data/src/handle.rs \
+  '                Err(TrySendError::Disconnected(_)) => Err(Refusal::Stopped),' \
+  '                Err(TrySendError::Disconnected(_)) => Err(Refusal::Busy),' \
+  geode-data a_gone_service_thread_refuses_every_request
+
+run_mutation "handle: a shut-down handle is refused Busy" \
+  crates/geode-data/src/handle.rs \
+  '            None => Err(Refusal::Stopped),' \
+  '            None => Err(Refusal::Busy),' \
+  geode-data the_real_service_answers_through_the_sink_and_reports_open_failures
+
+run_mutation "serve: an open failure is not declared" \
+  crates/geode-data/src/handle.rs \
+  '            let _ = sink(DataEvent::ThreadStopped {
+                thread: REQUEST_LOOP.to_string(),
+                reason,
+            });' \
+  '            let _ = reason;' \
+  geode-data an_unopenable_database_is_a_diagnostic_and_a_stopped_request_loop
+
+run_mutation "events: two threads stopping coalesce into one" \
+  crates/geode-app/src/events.rs \
+  '        DataEvent::ThreadStopped { thread, .. } => Key::Stopped(thread.clone()),' \
+  '        DataEvent::ThreadStopped { .. } => Key::Stopped(String::new()),' \
+  geode-app two_threads_stopping_between_drains_are_both_delivered
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
