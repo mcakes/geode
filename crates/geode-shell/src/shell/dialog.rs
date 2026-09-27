@@ -144,6 +144,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
             | "frame::as_of"
             | "frame::scope_expression"
             | "frame::add_expression"
+            | "frame::add_named_expression"
             | "frame::grouping"
             | "tile::add"
             | "tile::open_with"

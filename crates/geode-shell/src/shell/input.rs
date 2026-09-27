@@ -321,6 +321,10 @@ impl ShellView {
             // Open the expression editor in add mode: the typed expression is
             // joined to the current one with `and` (the `+` menu's Expression row).
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
+        } else if action.0 == "frame::add_named_expression" {
+            // The `+` menu's Named expression… row: the same add dialog, whose
+            // empty field lists the named rows first.
+            scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.
             self.frame.update(cx, |f, cx| {

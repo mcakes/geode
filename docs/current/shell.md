@@ -250,18 +250,26 @@ A named chip's tooltip is the expression text. A name the frame's
 `≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
 `Scope::resolve` gives; every tile that scope reaches refuses to query until
 the name is defined again or removed. The `×` inside a named chip removes that
-name (`Frame::drop_named`, undoable through `set_scope`). Named chips are
-keyed by name, so their element ids survive a neighbour's removal. The chip
-body has no click and no hover fill yet; the Expressions dialog is the
-keyboard route to the definitions. Known limitation: no key removes one name
-from the frame scope. The keyboard reaches that only through
-`frame::scope_clear` (the whole scope), `frame::scope_undo`, or loading a
-saved scope. A scope whose only content is a name is not empty: the chips
-row and the save glyph paint for it.
+name (`Frame::drop_named`, undoable through `set_scope`) and does nothing
+else. Named chips are keyed by name, so their element ids survive a
+neighbour's removal. The chip body has the chips' hover and pressed fills,
+and a click on it opens the Expressions dialog on that name
+(`objectdialog::render::open_object`): a defined name opens in its edit
+stage, an invalid one included, since editing it is how it gets fixed; a
+missing name opens the Browse list with the notice `'<name>' is not
+defined`. The keyboard route to one name's removal is the scope expression
+dialog: `frame::scope_expression` opens it in Whole mode with the frame's
+names staged as chips, backspace at the field's start removes the last one,
+and Enter applies the rest (see
+[input and dialogs](input-and-dialogs.md#frame-expression)). A scope whose
+only content is a name is not empty: the chips row and the save glyph paint
+for it.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
-and each row shows its action's live binding, if any. The `+` holds its
+"Named expression…" dispatches `frame::add_named_expression` (the same Add
+dialog, whose empty field lists the named expressions first), and each row
+shows its action's live binding, if any. The `+` holds its
 pressed fill while the menu is open. The menu is shell-owned transient state
 (`shell/addfilter.rs`), not gpui-component's `PopupMenu`, because its rows
 dispatch the shell's string actions and label them from the shell keymap.
