@@ -2850,6 +2850,36 @@ run_mutation "dialog stack: a palette over the stack records the return-to-field
   geode-shell \
   the_last_pop_returns_to_the_field_after_a_palette_mid_stack
 
+run_mutation "object stack: the same domain lower in the stack is pushed again" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '            .any(|parked| parked.state.domain == domain);' \
+  '            .any(|_| false);' \
+  geode-shell \
+  three_object_dialogs_pop_in_order
+
+run_mutation "object stack: a popped cover does not bring back the dialog it covered" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                dialog::unpark_object_dialog(self);' \
+  '                {}' \
+  geode-shell \
+  colors_pushes_over_a_views_column_stage_and_escape_returns_to_it
+
+run_mutation "object stack: the covered state parks with the stack top, not its owner" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        .rev()
+        .find(|m| m.kind == DialogKind::Object);' \
+  '        .rev()
+        .next();' \
+  geode-shell \
+  a_choice_list_between_two_object_dialogs_keeps_the_lower_one
+
+run_mutation "object stack: save-current names the covered dialog instead of Scopes" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if !dialog::can_open_object(shell, Domain::Scopes) {' \
+  '    if !dialog::can_open(shell, dialog::DialogKind::Object) {' \
+  geode-shell \
+  scope_save_current_stacks_over_views_without_touching_it
+
 run_mutation "dialog stack: every chord reaches through a dialog" \
   crates/geode-shell/src/shell/input.rs \
   '                        && dialog::opens_dialog(&action)' \
@@ -5456,8 +5486,9 @@ run_mutation "objectdialog: the browse list ignores the query it displays" \
 # records for `settings`.
 run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
   crates/geode-shell/src/shell/mod.rs \
-  '            DialogKind::Object => self.object_dialog = None,' \
-  '            DialogKind::Object => {}' \
+  '                self.object_dialog = None;
+                // The next object dialog down' \
+  '                // The next object dialog down' \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 

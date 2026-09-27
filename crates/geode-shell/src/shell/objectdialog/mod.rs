@@ -170,6 +170,31 @@ impl Domain {
         }
     }
 
+    /// Every domain, for recognising [`Domain::already_open_notice`] strings.
+    pub const ALL: [Domain; 7] = [
+        Domain::Views,
+        Domain::Groupings,
+        Domain::Scopes,
+        Domain::Schema,
+        Domain::Sources,
+        Domain::Colors,
+        Domain::Expressions,
+    ];
+
+    /// The status notice for a request refused because this domain's dialog is
+    /// already open lower in the stack.
+    pub fn already_open_notice(self) -> &'static str {
+        match self {
+            Domain::Views => "views is already open underneath",
+            Domain::Groupings => "groupings is already open underneath",
+            Domain::Scopes => "scopes is already open underneath",
+            Domain::Schema => "schema is already open underneath",
+            Domain::Sources => "sources is already open underneath",
+            Domain::Colors => "colors is already open underneath",
+            Domain::Expressions => "expressions is already open underneath",
+        }
+    }
+
     /// The dialog's title, and the word the footer uses for one object.
     pub fn title(self) -> &'static str {
         match self {

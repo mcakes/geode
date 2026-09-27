@@ -1289,8 +1289,9 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Drop the state field `kind` owns. A field left behind would swallow the
-    /// next same-kind dialog's queries.
+    /// Drop the state field `kind` owns, and for an object dialog bring back the
+    /// one it covered. A field left behind would swallow the next same-kind
+    /// dialog's queries.
     fn clear_dialog_state(&mut self, kind: dialog::DialogKind) {
         use dialog::DialogKind;
         match kind {
@@ -1300,7 +1301,11 @@ impl ShellView {
             DialogKind::AsOf => self.as_of_dialog = None,
             DialogKind::ScopeExpr => self.scope_expr_dialog = None,
             DialogKind::Choice => self.choice_dialog = None,
-            DialogKind::Object => self.object_dialog = None,
+            DialogKind::Object => {
+                self.object_dialog = None;
+                // The next object dialog down, if any, becomes live again.
+                dialog::unpark_object_dialog(self);
+            }
             DialogKind::Plain => {}
         }
     }

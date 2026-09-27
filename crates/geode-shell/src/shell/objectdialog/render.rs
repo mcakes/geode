@@ -70,17 +70,21 @@ const VISIBLE_ROWS: usize = 10;
 const WIDTH: f32 = 640.0;
 
 /// Open the object dialog on `domain` (`config::views`, palette-only —
-/// see `defaults::register_builtin_actions`). A no-op when this kind is
-/// already open (see `dialog::can_open`).
+/// see `defaults::register_builtin_actions`). A no-op when this domain is
+/// already open (see `dialog::can_open_object`); over an object dialog of
+/// another domain it stacks.
 pub fn open(
     view: &mut ShellView,
     domain: Domain,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if !dialog::can_open(view, dialog::DialogKind::Object) {
+    if !dialog::can_open_object(view, domain) {
         return;
     }
+    // A covered object dialog of another domain keeps its whole state in its own
+    // stack entry until this one closes.
+    dialog::park_object_dialog(view);
     // Fresh state every open — nothing survives a close/reopen, the same
     // contract `palette` and both list dialogs hold.
     view.object_dialog = Some(ObjectDialogState::new(domain));
@@ -657,15 +661,11 @@ pub(in crate::shell) fn open_save_scope(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // `open`'s own guard (below) refuses to open a SECOND modal, but it returns
-    // silently — this door kept going past that refusal and mutated whatever
-    // `object_dialog` was already there instead (a Views dialog's
-    // `begin_naming`/`naming_seed`, say), because a second `open(..)` call two lines
-    // down is a no-op while the first branch's `state.notice = ..` and this function's
-    // own `begin_naming` read `shell.object_dialog` regardless of whose it is. Guarding
-    // here, before either branch touches it, is what makes "no modal is already open"
-    // the one precondition both branches share with `open` itself.
-    if !dialog::can_open(shell, dialog::DialogKind::Object) {
+    // Guard before either branch touches `object_dialog`: `open` refuses a second
+    // Scopes dialog silently, and without this check the notice or `begin_naming`
+    // below would land on whichever object dialog is live. Another domain's dialog
+    // (Views, say) is parked by `open` and comes back when Scopes closes.
+    if !dialog::can_open_object(shell, Domain::Scopes) {
         return;
     }
     if shell.frame.read(cx).scope().is_empty() {
@@ -701,9 +701,10 @@ pub(in crate::shell) fn open_object(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // `open` refuses a second object dialog silently; without this guard the edit
-    // below would land on whatever object dialog is already up (see `open_save_scope`).
-    if !dialog::can_open(shell, dialog::DialogKind::Object) {
+    // `open` refuses this domain silently when it is already open; without this
+    // guard the edit below would land on whatever object dialog is live (see
+    // `open_save_scope`).
+    if !dialog::can_open_object(shell, domain) {
         return;
     }
     let defined = {
