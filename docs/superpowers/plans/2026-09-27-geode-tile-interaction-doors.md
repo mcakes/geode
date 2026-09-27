@@ -45,6 +45,12 @@
 7. **One renderer unifies small presentation differences** (display checks owed): the lane is `text_sm` everywhere (timeseries used `text_xs`); a lit row's lane uses the lit text color everywhere (the pricer used muted-on-accent); text is floored to the readable ratio on the popover and accent grounds everywhere (only the pricer did); enabled non-lit rows take `control` hover/pressed (timeseries used `listrow` hover; the others had none); section headings ellipsize everywhere. The pricer's lane and section debug selectors (`pricer-menu-lane-{i}`, `pricer-menu-section-{i}`) go; no test reads them.
 8. **`row_shell` moves but only timeseries uses it.** The pricer and market-data picker/choice rows have no hover fill today; adopting `row_shell` would add one, a change the spec does not list. They use `popover::surface`, `anchor_popup` and `empty_row`.
 
+## Owner rulings (Matthew, 2026-09-27)
+
+- Deviation 3 accepted: a confirm's focus "restore" is blur-to-tile via the shell's existing restoration path, not a refocus of the arm-time handle.
+- Deviation 4 accepted: the confirm prompt stays in the foreground color.
+- Execution: subagent-driven.
+
 ## File Structure
 
 New crate `crates/geode-tile/`:
