@@ -327,6 +327,18 @@ impl Frame {
         self.set_scope(s)
     }
 
+    /// Remove named expression `name` from the scope through the undoable
+    /// `set_scope` path. Return false when the scope does not name it.
+    pub fn drop_named(&mut self, name: &str) -> bool {
+        let mut s = self.scope.clone();
+        let before = s.named.len();
+        s.named.retain(|n| n != name);
+        if s.named.len() == before {
+            return false;
+        }
+        self.set_scope(s)
+    }
+
     /// Remove top-level expression term `i` (`Expr::conjuncts` order)
     /// through the undoable `set_scope` path; the remaining terms are
     /// rebuilt as a left-folded `and` chain, and removing the last one

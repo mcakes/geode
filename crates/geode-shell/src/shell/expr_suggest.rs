@@ -40,23 +40,22 @@ fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     if let Some(state) = view.scope_expr_dialog.as_ref() {
         return Some(scope_expr_view::request_scope(&state.mode, current));
     }
-    // A named expression has no enclosing scope: it is ANDed into whichever
-    // scope ticks it, so its values are the whole dataset's.
-    if let Some(state) = view.object_dialog.as_ref()
-        && super::objectdialog::expression_entry_open(state)
-        && state.domain == super::objectdialog::Domain::Expressions
-    {
-        return Some(Scope::default());
+    let state = view
+        .object_dialog
+        .as_ref()
+        .filter(|state| super::objectdialog::expression_entry_open(state))?;
+    match state.domain {
+        // A named expression has no enclosing scope: it is ANDed into
+        // whichever scope ticks it, so its values are the whole dataset's.
+        super::objectdialog::Domain::Expressions => Some(Scope::default()),
+        super::objectdialog::Domain::Scopes => {
+            let draft = state.draft.as_ref()?;
+            let pending = super::objectdialog::apply::config_with_pending(view);
+            let config = pending.as_ref().unwrap_or(&view.services.config);
+            Some(super::objectdialog::scopes::expression_scope(draft, config))
+        }
+        _ => None,
     }
-    if let Some(state) = view.object_dialog.as_ref()
-        && super::objectdialog::expression_entry_open(state)
-        && let Some(draft) = state.draft.as_ref()
-    {
-        let pending = super::objectdialog::apply::config_with_pending(view);
-        let config = pending.as_ref().unwrap_or(&view.services.config);
-        return Some(super::objectdialog::scopes::expression_scope(draft, config));
-    }
-    None
 }
 
 /// Re-read the field's text and caret. Runs from the input observer, on

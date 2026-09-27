@@ -37,6 +37,14 @@ pub(crate) fn compile_distinct_with_cache(
     params: &DistinctParams,
     cache: &mut DictionaryCache,
 ) -> Result<CompiledQuery, StoreError> {
+    // Refused here, before any arm: the document arm compiles its scope
+    // without `compile_scope_cached`, so that function's own refusal would
+    // not reach it and the names' filter would be silently dropped.
+    if !params.scope.named.is_empty() {
+        return Err(StoreError::Scope(
+            "scope carries unresolved named expressions".into(),
+        ));
+    }
     let base = dims.base_column(&params.column);
     let mut selects: Vec<String> = Vec::new();
     let mut all_params: Vec<Value> = Vec::new();
@@ -1007,6 +1015,27 @@ role = "attribute"
             rows,
             vec![("EQ1".to_string(), 12)],
             "both documents' rows, and no error from the measure dataset that lacks the column"
+        );
+    }
+
+    /// A column only a document dataset carries takes the document arm,
+    /// which compiles its scope by its own route: unresolved names must
+    /// still be refused there, not dropped into unnarrowed values.
+    #[test]
+    fn distinct_over_a_document_only_dimension_refuses_unresolved_names() {
+        let f = document_fixture();
+        let params = DistinctParams {
+            column: "curve_id".into(),
+            scope: Scope {
+                named: vec!["liq".into()],
+                ..Scope::default()
+            },
+            ..base_params()
+        };
+        let e = compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "scope: scope carries unresolved named expressions"
         );
     }
 

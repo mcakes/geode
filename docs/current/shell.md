@@ -205,7 +205,8 @@ removes the no-op undo entry. Changes made through another surface during the
 session remain distinct.
 
 The toolbar's scope segment paints the dimension chips, then one chip per
-top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
+named-expression reference (`≡ name`, in `Scope.named` order), then one chip
+per top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
 flatten on both sides; an `or`, a `not`, or a single comparison is one term),
 then the contradiction chip. The frame still holds one `Expr`; the terms are
 a view of it, and an edit rebuilds a left-folded `and` chain from the
@@ -217,6 +218,20 @@ Term chips are addressed by index, which is stable within one scope version;
 the term dialog also carries the term it was seeded with and refuses inline
 unless that term is still at its index at commit time. Every term
 edit, append, and clear goes through undoable `set_scope`.
+
+A named chip's tooltip is the expression text. A name the frame's
+`NamedExpressions` cannot resolve paints as a danger-toned chip,
+`≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
+`Scope::resolve` gives; every tile that scope reaches refuses to query until
+the name is defined again or removed. The `×` inside a named chip removes that
+name (`Frame::drop_named`, undoable through `set_scope`). Named chips are
+keyed by name, so their element ids survive a neighbour's removal. The chip
+body has no click and no hover fill yet; the Expressions dialog is the
+keyboard route to the definitions. Known limitation: no key removes one name
+from the frame scope. The keyboard reaches that only through
+`frame::scope_clear` (the whole scope), `frame::scope_undo`, or loading a
+saved scope. A scope whose only content is a name is not empty: the chips
+row and the save glyph paint for it.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,

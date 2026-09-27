@@ -3717,13 +3717,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         })
                         .filter(|s| !s.is_empty())
                     });
+                    // A scope's reference to a missing or invalid named
+                    // expression refuses every query it reaches, so its note
+                    // reads as an error rather than routine detail.
+                    let broken_reference = own
+                        && domain == Domain::Scopes
+                        && draft.values().is_none()
+                        && draft.fields[field].key == "named"
+                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));
                     if let Some(note) = note {
-                        name_row = name_row.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(note),
-                        );
+                        let note_row = div().text_xs().child(note);
+                        name_row = name_row.child(if broken_reference {
+                            let selector = format!("objectdialog-note-danger-{}", entry.name);
+                            note_row
+                                .text_color(
+                                    super::super::chip::chip_paint(
+                                        theme,
+                                        super::super::chip::Tone::DangerText,
+                                    )
+                                    .text,
+                                )
+                                .debug_selector(move || selector)
+                        } else {
+                            note_row.text_color(theme.muted_foreground)
+                        });
                     }
                     let name = name_row.into_any_element();
                     (

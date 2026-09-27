@@ -261,9 +261,9 @@ no references at all rather than a state the reader must distinguish. The
 list has no reorder route, the way Dimensions has none.
 
 A ticked name the `expressions` document cannot supply is not dropped or
-hidden: its row carries a `missing` or `invalid` note (the same two reasons
-[`Scope::resolve`](shell.md#the-shared-frame) reports) and can still be
-unticked. Saving a scope with such a name warns at that row rather than
+hidden: its row carries a `missing` or `invalid` note in danger text (the
+same two reasons [`Scope::resolve`](shell.md#the-shared-frame) reports) and
+can still be unticked. Saving a scope with such a name warns at that row rather than
 blocking the commit — the reference may be legitimate and the definition
 written afterward — and the query reports it once the scope is used.
 

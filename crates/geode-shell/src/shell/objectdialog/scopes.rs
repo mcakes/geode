@@ -2,8 +2,9 @@
 //!
 //! A scope draft owns ordered dimension selections, ticked named-expression
 //! references, and optional text and expression filters. The values stage
-//! edits one dimension's selected values. Expressions are parsed before persistence, so invalid text is refused with
-//! its parser diagnostic instead of being written and dropped on reload.
+//! edits one dimension's selected values. Expressions are parsed before
+//! persistence, so invalid text is refused with its parser diagnostic
+//! instead of being written and dropped on reload.
 //! Folding always updates the draft's source table before validation or write.
 
 use geode_core::config::{

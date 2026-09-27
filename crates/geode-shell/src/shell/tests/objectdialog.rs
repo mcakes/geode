@@ -2437,6 +2437,31 @@ fn a_missing_named_expression_warns_on_its_row_and_still_commits(cx: &mut gpui::
     );
 }
 
+/// A named reference the expressions doc cannot supply has its `missing`
+/// note painted in danger text; a dimension's values note beside it
+/// stays muted.
+#[gpui::test]
+fn a_missing_named_expressions_note_paints_in_danger_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("gone"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-note-danger-gone").is_some(),
+        "gone's missing note is danger text"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-item-book").is_some()
+            && cx.debug_bounds("objectdialog-note-danger-book").is_none(),
+        "a dimension's values note is not"
+    );
+}
+
 /// Walk the Scopes edit cursor to the Expression row with `j` and open it
 /// with `i`. Production keys only.
 fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {

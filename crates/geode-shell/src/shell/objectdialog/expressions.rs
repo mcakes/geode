@@ -115,7 +115,7 @@ pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
 pub fn help(key: &str) -> &'static str {
     match key {
         "expression" => {
-            "The expression this name stands for; scopes that tick it AND it in. tab completes columns."
+            "The expression this name stands for; scopes that tick it AND it in. Tab completes columns."
         }
         _ => "",
     }

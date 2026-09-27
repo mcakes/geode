@@ -21854,6 +21854,48 @@ run_mutation "named expr: the expressions field has no suggestions" \
   geode-shell \
   the_expressions_field_suggests_columns
 
+# The scope bar shows every name on the frame's scope, or it narrows
+# totals with nothing on screen saying so.
+run_mutation "named expr: the scope bar omits named chips" \
+  crates/geode-shell/src/scopebar.rs \
+  '        .map(|name| named_chip(name, frame.named_expressions()))' \
+  '        .filter(|_| false).map(|name| named_chip(name, frame.named_expressions()))' \
+  geode-shell \
+  a_loaded_scope_paints_a_chip_for_its_named_expression
+
+# A named chip's × removes that name through set_scope.
+run_mutation "named expr: a named chip's x removes nothing" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_named(name) {' \
+  '                    if false && f.drop_named(name) {' \
+  geode-shell \
+  a_named_chips_close_glyph_drops_the_name_undoably
+
+# A missing name paints the danger chip.
+run_mutation "named expr: a missing name paints the plain chip" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  geode-shell \
+  a_missing_name_paints_the_broken_chip
+
+# The document distinct arm compiles its scope by its own route, so the
+# names are refused before any arm.
+run_mutation "named expr: document distinct drops unresolved names" \
+  crates/geode-data/src/query/distinct.rs \
+  '    if !params.scope.named.is_empty() {' \
+  '    if false {' \
+  geode-data \
+  distinct_over_a_document_only_dimension_refuses_unresolved_names
+
+# A Scopes item's missing/invalid named note is danger text.
+run_mutation "named expr: a missing named note is muted" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));' \
+  '                        && matches!(entry.note.as_deref(), Some("never"));' \
+  geode-shell \
+  a_missing_named_expressions_note_paints_in_danger_text
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
