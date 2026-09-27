@@ -1041,3 +1041,19 @@ fn a_click_elsewhere_undoes_the_steps(cx: &mut gpui::TestAppContext) {
     assert!(h.editor_value(&vcx).is_none());
     assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }
+
+/// The rebuild a step makes keeps the open editor painted in its own
+/// cell, where gpui routes typed characters to it.
+#[gpui::test]
+fn the_editor_stays_painted_in_its_cell_across_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(2));
+    draw(&mut vcx);
+    // Table column = model column + the row-label column.
+    assert!(vcx.debug_bounds("marketdata-editor-1-5").is_some());
+    type_keys(&mut vcx, "9");
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.50029"));
+}
