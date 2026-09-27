@@ -23116,7 +23116,7 @@ run_mutation "pricer package: text cells paint blank" \
   crates/geode-pricer/src/core/columns.rs \
   '    if sheet.is_package(row) && crate::core::package::aggregates(def.kind) {' \
   '    if false && crate::core::package::aggregates(def.kind) {' \
-  geode-pricer a_call_spread_shows_one_underlying_one_expiry_and_both_strikes
+  geode-pricer instrument_cells_render_the_grammar_and_a_package_aggregates_them
 
 # Repeated values collapse: a fly's body is one strike, not two.
 run_mutation "pricer package: repeats are not collapsed" \
