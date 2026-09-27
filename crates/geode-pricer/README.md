@@ -22,6 +22,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
 | `entry` | Where `o` lands, the entry bar's label, and the entry history. |
+| `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary: parse and completions. |
@@ -36,7 +37,7 @@ The tile:
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
-| `popup` | The typeahead and the `.` action menu. |
+| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
 | `session` | The tile's session record. |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
@@ -59,6 +60,12 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Rules this crate pins
 
+- Completion never runs in render; the tile refreshes it on every text change,
+  history step, commit and reload, and a Tab at a moved caret re-ranks first.
+  A completion write is one range replace (one undo step) whose own `Change`
+  is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
+  `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
+  focus cycling.
 - Every edit passes through `Sheet::apply`, which returns the undo operation.
   New tile edits use `PricerTile::apply_edit`/`apply_edits`; undo and redo
   apply through the LIFO history. Loading replaces the sheet. Deliveries,

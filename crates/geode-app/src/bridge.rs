@@ -372,10 +372,11 @@ pub fn pricer_templates_from_config(
 
 /// Exactly what the pricer reads out of a config: the merged
 /// `pricer_views` and `pricer_templates` docs, the raw `[pricing] refresh`
-/// and `[pricing] underlyings` values and the resolved stale threshold. Two equal keys resolve to the
-/// same views and settings, so the reload observer skips a reload whose
-/// key is unchanged — a theme or keymap edit must not restart every tile's
-/// refresh timer or repeat a bad value's warning.
+/// and `[pricing] underlyings` values and the resolved stale threshold.
+/// Two equal keys resolve to the same views and settings, so the reload
+/// observer skips a reload whose key is unchanged — a theme or keymap edit
+/// must not restart every tile's refresh timer or repeat a bad value's
+/// warning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricerConfigKey {
     views: Option<toml::Table>,
@@ -1595,8 +1596,8 @@ role = "key"
         assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// The reload gate's key moves with exactly the four things the
-    /// pricer reads and with nothing else.
+    /// The reload gate's key moves with each thing the pricer reads and
+    /// with nothing else.
     #[test]
     fn the_pricer_config_key_changes_only_with_what_the_pricer_reads() {
         let config = |app: &str, views: &str, templates: &str| {

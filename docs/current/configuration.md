@@ -425,10 +425,12 @@ open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
 
 `underlyings` lists the underlyings the pricer's entry bar suggests, in the
-order it offers them: an array of strings, upper-cased, with repeats
-dropped. A non-array value or a non-string element warns at
+order it offers them: an array of strings, upper-cased, with blank entries
+and repeats dropped. A non-array value or a non-string element warns at
 `app.pricing.underlyings` and is skipped. A reload applies it to open tiles
-without a restart. Without it the bar says no underlyings are configured.
+without a restart. An edit to `underlyings` alone still runs the pricer's
+full reload, which restarts every open tile's refresh timer. Without it the
+bar says no underlyings are configured.
 
 `pricer_views` holds the pricer's named column views. The builtin layer
 carries the two bundled views; like other named objects, a desk or user entry

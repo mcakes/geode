@@ -22286,6 +22286,35 @@ run_mutation "pricer underlyings: an unchanged set bumps the revision" \
   '        if false {' \
   geode-pricer an_underlying_list_normalises_and_bumps_only_on_change
 
+# The echo of the tile's own write must not reset the cycle, or a second
+# Tab writes the first suggestion again.
+run_mutation "pricer entry bar: the write's echo resets the cycle" \
+  crates/geode-pricer/src/tile.rs \
+  '            if entry.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if entry.echo.take().is_some_and(|_| false) {' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# A Tab at a caret moved without typing must re-rank there first.
+run_mutation "pricer entry bar: a Tab at a moved caret uses the old range" \
+  crates/geode-pricer/src/tile.rs \
+  '        if entry.completion.stale_at(entry.input.read(cx).cursor()) {' \
+  '        if false {' \
+  geode-pricer a_tab_after_the_caret_moved_ranks_at_the_live_caret
+
+# A provider change must reach an open bar on the next keystroke.
+run_mutation "pricer entry bar: the provider is read once" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.underlyings_rev != Some(rev) {' \
+  '        if self.underlyings_rev.is_none() {' \
+  geode-pricer a_revision_bump_reaches_an_open_bar
+
+# A history step sets the text without a Change; it must re-rank itself.
+run_mutation "pricer entry bar: a history step leaves the list stale" \
+  crates/geode-pricer/src/tile.rs \
+  $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
+  '' \
+  geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

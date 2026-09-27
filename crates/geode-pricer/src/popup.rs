@@ -1,6 +1,7 @@
 //! Cell choice typeahead and the tile's action menu. Prepared rows are refreshed when
 //! list state changes; rendering consumes those rows.
 
+use crate::core::complete::Completion;
 use crate::paint::Paints;
 use crate::tile::PricerTile;
 use geode_shell::choice::ChoiceList;
@@ -117,6 +118,83 @@ pub(crate) fn render_choice(
             .child(list),
     )
     .with_priority(1)
+}
+
+/// The entry bar's list when the underlying slot has nothing to offer
+/// because nothing is configured, not because nothing matches.
+pub(crate) const NO_UNDERLYINGS: &str = "no underlyings configured ([pricing] underlyings)";
+
+/// The entry bar's suggestions for the slot at the caret, hung from the
+/// bar's bottom-left over the table: at most `complete::MAX_ROWS` rows,
+/// the window following the lit row as Tab cycles. Labels and details
+/// were prepared by `Completion::refresh`. A row press writes it, exactly
+/// as Tab would, and keeps focus in the field (`stop_propagation`, and
+/// `occlude` so the table under the list gets no press). `None` when the
+/// slot offers nothing.
+pub(crate) fn render_entry_list(
+    c: &Completion,
+    tile: &Entity<PricerTile>,
+    cx: &App,
+) -> Option<impl IntoElement + use<>> {
+    if !c.no_underlyings() && c.candidate_count() == 0 {
+        return None;
+    }
+    let theme = cx.theme();
+    let mut list = popover_surface(cx)
+        .debug_selector(|| "pricer-entry-list".into())
+        .occlude();
+    if c.no_underlyings() {
+        list = list.child(
+            div()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .flex()
+                .items_center()
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "pricer-entry-none".into())
+                .child(NO_UNDERLYINGS),
+        );
+    }
+    let lit = c.highlighted();
+    for (i, s) in c.painted() {
+        let (fg, muted) = if i == lit {
+            (theme.accent_foreground, theme.accent_foreground)
+        } else {
+            (theme.popover_foreground, theme.muted_foreground)
+        };
+        list = list.child(
+            h_flex()
+                .h(scale::design(ROW_HEIGHT))
+                .px(scale::design(ROW_INSET))
+                .gap_2()
+                .rounded(theme.radius)
+                .items_center()
+                .text_color(fg)
+                .when(i == lit, |d| d.bg(theme.accent))
+                .debug_selector(move || format!("pricer-entry-row-{i}"))
+                .on_mouse_down(MouseButton::Left, {
+                    let tile = tile.clone();
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        tile.update(cx, |t, cx| t.entry_pick(i, window, cx))
+                    }
+                })
+                .child(s.label.clone())
+                .when(!s.detail.is_empty(), |d| {
+                    d.child(div().text_xs().text_color(muted).child(s.detail.clone()))
+                }),
+        );
+    }
+    Some(
+        deferred(
+            anchored()
+                .anchor(Anchor::TopLeft)
+                .position_mode(AnchoredPositionMode::Local)
+                .snap_to_window_with_margin(px(SNAP_MARGIN))
+                .child(list),
+        )
+        .with_priority(1),
+    )
 }
 
 /// Prepared action-menu row. Action and View rows accept the highlight; separators and
