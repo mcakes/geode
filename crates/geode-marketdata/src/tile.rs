@@ -4676,6 +4676,7 @@ mod tests {
             attribution_by_depth: vec![attribution],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
 
@@ -10039,6 +10040,46 @@ edits = [["2099-01-01", "-1", 1.0]]
         h.command(&mut vcx, "rebase").unwrap();
         assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().attrs.len()), 1);
         assert!(h.tile.read_with(&vcx, |t, _| t.model().header[1].edited));
+    }
+
+    /// Opening an attribute's editor leaves its value box where it was:
+    /// the box is the only frame, so neither the text input's own
+    /// border, padding and control height nor a second date frame paints
+    /// inside it. The date editor is also as wide as the resting date.
+    #[gpui::test]
+    fn opening_an_attribute_editor_keeps_its_value_box(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.with_document(&mut vcx);
+        for (i, keeps_width) in [(0, true), (1, false)] {
+            let selector: &'static str =
+                Box::leak(format!("marketdata-attr-{TILE}-{i}").into_boxed_str());
+            draw(&mut vcx);
+            let rest = vcx
+                .debug_bounds(selector)
+                .expect("the attribute is painted");
+            let at = centre_of(&mut vcx, selector);
+            click_at(&mut vcx, at, 1);
+            click_at(&mut vcx, at, 2);
+            assert_eq!(h.mode(&vcx), "insert", "attribute {i} opened its editor");
+            draw(&mut vcx);
+            let editing = vcx
+                .debug_bounds(selector)
+                .expect("the attribute is painted");
+            assert_eq!(
+                (editing.top(), editing.size.height),
+                (rest.top(), rest.size.height),
+                "attribute {i}'s box keeps its top and height while editing"
+            );
+            if keeps_width {
+                assert!(
+                    (editing.size.width - rest.size.width).abs() <= gpui::px(1.),
+                    "attribute {i}'s box keeps its width ({:?}), not {:?}",
+                    rest.size.width,
+                    editing.size.width
+                );
+            }
+            h.dispatch(&mut vcx, "escape", None);
+        }
     }
 
     /// `y`/`yy` in the strip yank the attribute's own value, and its

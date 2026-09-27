@@ -36,11 +36,11 @@ const ROW_HEIGHT: f32 = 28.0;
 const VISIBLE_ROWS: usize = crate::choice::DEFAULT_CAP;
 
 /// Open the dialog (`frame::as_of`, `mod+t`, the toolbar chip). A no-op
-/// if a modal is already open, like every other `open` here. The state is
+/// when this kind is already open (see `dialog::can_open`). The state is
 /// built fresh from the frame, the clock and `now` — nothing survives a
 /// close/reopen.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::AsOf) {
         return;
     }
     let clock = view.clock(cx);
@@ -61,6 +61,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         view,
         window,
         cx,
+        dialog::DialogKind::AsOf,
         "As of",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),

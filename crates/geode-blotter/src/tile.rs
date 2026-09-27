@@ -1883,6 +1883,7 @@ mod tests {
             scope_semantics: ScopeSemantics::Direct,
             // The fixture's measures are plain sum measures.
             summable: matches!(n, "delta01" | "daily_trading_pnl"),
+            mixed_flag: None,
         };
         vec![
             (
@@ -1951,6 +1952,7 @@ mod tests {
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
             summable: matches!(n, "delta01" | "daily_trading_pnl"),
+            mixed_flag: None,
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -2000,6 +2002,7 @@ mod tests {
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
             summable: matches!(n, "delta01" | "daily_trading_pnl"),
+            mixed_flag: None,
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -2363,6 +2366,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let provenance = Provenance {
             datasets: vec![Freshness {
@@ -2638,6 +2642,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let stale_snapshot = Arc::new(Snapshot::for_tests(
             vec![(meta1, TestColumn::Dict(vec![Some("X".into())]))],
@@ -3099,6 +3104,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Arc::new(Snapshot::for_tests(
             vec![
@@ -3545,6 +3551,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Arc::new(Snapshot::for_tests(
             vec![
@@ -4525,6 +4532,7 @@ mod tests {
             attribution_by_depth: by_depth,
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         Arc::new(Snapshot::for_tests(
             vec![
@@ -4580,6 +4588,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let mut lhu: Vec<Option<String>> = vec![None];
         let mut depth: Vec<i32> = vec![0];

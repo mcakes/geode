@@ -196,6 +196,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 3],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Snapshot::for_tests(
             vec![
@@ -248,6 +249,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 3],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Snapshot::for_tests(
             vec![
@@ -299,6 +301,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 3],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let mut lhu: Vec<Option<String>> = vec![None]; // root
         let mut und: Vec<Option<String>> = vec![None];

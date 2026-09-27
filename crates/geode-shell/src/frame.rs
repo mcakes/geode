@@ -345,7 +345,8 @@ impl Frame {
     /// leaves no expression. Out of range (including no expression)
     /// returns false and changes nothing.
     pub fn drop_expression_term(&mut self, i: usize) -> bool {
-        self.edit_expression_term(i, None, None).unwrap_or(false)
+        self.edit_expression_term(i, None, None, None)
+            .unwrap_or(false)
     }
 
     /// Replace top-level expression term `i` with `term`, or remove it
@@ -361,7 +362,31 @@ impl Frame {
         expected: &Expr,
         term: Option<Expr>,
     ) -> Result<bool, TermGone> {
-        self.edit_expression_term(i, Some(expected), term)
+        self.edit_expression_term(i, Some(expected), term, None)
+    }
+
+    /// Whether top-level expression term `i` still equals `expected`: the
+    /// check [`Self::replace_expression_term`] makes, for a caller that must
+    /// refuse before doing anything else (writing a definition).
+    pub fn expression_term_is(&self, i: usize, expected: &Expr) -> bool {
+        self.scope
+            .expression
+            .as_ref()
+            .and_then(|e| e.conjuncts().get(i).copied())
+            .is_some_and(|t| t == expected)
+    }
+
+    /// Replace top-level expression term `i` with the named expression
+    /// `name`: the term leaves the expression and the name joins the named
+    /// list, in one `set_scope` so a single undo puts the term back.
+    /// `expected` guards the index as in [`Self::replace_expression_term`].
+    pub fn name_expression_term(
+        &mut self,
+        i: usize,
+        expected: &Expr,
+        name: &str,
+    ) -> Result<bool, TermGone> {
+        self.edit_expression_term(i, Some(expected), None, Some(name))
     }
 
     fn edit_expression_term(
@@ -369,6 +394,7 @@ impl Frame {
         i: usize,
         expected: Option<&Expr>,
         term: Option<Expr>,
+        name: Option<&str>,
     ) -> Result<bool, TermGone> {
         let mut terms: Vec<Expr> = self
             .scope
@@ -390,19 +416,12 @@ impl Frame {
         }
         let mut s = self.scope.clone();
         s.expression = Expr::from_conjuncts(terms);
+        if let Some(name) = name
+            && !s.named.iter().any(|n| n == name)
+        {
+            s.named.push(name.to_string());
+        }
         Ok(self.set_scope(s))
-    }
-
-    /// Join `term` to the expression with `and` (`existing and term`), or
-    /// make it the expression when there is none — an undoable edit
-    /// through `set_scope`.
-    pub fn append_expression(&mut self, term: Expr) -> bool {
-        let mut s = self.scope.clone();
-        s.expression = Some(match s.expression.take() {
-            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),
-            None => term,
-        });
-        self.set_scope(s)
     }
 
     /// Remove the whole expression layer through the undoable `set_scope`
@@ -789,6 +808,16 @@ impl Frame {
     fn release(&mut self) {
         self.barrier = None;
         self.versions.flip += 1;
+    }
+}
+
+/// `term` joined to `existing` with `and` (`existing and term`), or `term`
+/// alone when there is no expression. Appending never replaces: the
+/// existing expression keeps narrowing.
+pub fn and_join(existing: Option<Expr>, term: Expr) -> Expr {
+    match existing {
+        Some(existing) => Expr::And(Box::new(existing), Box::new(term)),
+        None => term,
     }
 }
 
@@ -1211,10 +1240,6 @@ mod tests {
         }
     }
 
-    fn expr_text(f: &Frame) -> Option<String> {
-        f.scope().expression.as_ref().map(ToString::to_string)
-    }
-
     fn term_texts(f: &Frame) -> Vec<String> {
         f.scope()
             .expression
@@ -1281,20 +1306,46 @@ mod tests {
     }
 
     #[test]
-    fn append_expression_joins_with_and_or_sets_it() {
+    fn name_expression_term_swaps_the_term_for_the_name_in_one_undo_step() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(expr_scope("a = 1 and b = 2 and c = 3"));
+        let p = |t: &str| geode_core::scope::parse_expr(t).unwrap();
+        assert!(f.expression_term_is(1, &p("b = 2")));
+        assert!(!f.expression_term_is(1, &p("a = 1")));
+        assert!(!f.expression_term_is(3, &p("b = 2")), "out of range");
+        assert_eq!(
+            f.name_expression_term(1, &p("a = 1"), "bee"),
+            Err(TermGone),
+            "index 1 holds a different term: refuse rather than name it"
+        );
+        assert_eq!(f.scope().named, Vec::<String>::new());
+        assert_eq!(f.name_expression_term(1, &p("b = 2"), "bee"), Ok(true));
+        assert_eq!(term_texts(&f), vec!["a = 1", "c = 3"]);
+        assert_eq!(f.scope().named, vec!["bee".to_string()]);
+        assert!(f.undo_scope(), "one step");
+        assert_eq!(term_texts(&f), vec!["a = 1", "b = 2", "c = 3"]);
+        assert_eq!(f.scope().named, Vec::<String>::new());
+
+        // A scope may already list the name (a reference whose definition
+        // is missing); naming a term after it lists it once.
+        let mut s = f.scope().clone();
+        s.named = vec!["gone".to_string()];
+        f.set_scope(s);
+        assert_eq!(f.name_expression_term(0, &p("a = 1"), "gone"), Ok(true));
+        assert_eq!(f.scope().named, vec!["gone".to_string()]);
+    }
+
+    #[test]
+    fn and_join_joins_with_and_or_sets_it() {
         let a = geode_core::scope::parse_expr("a = 1").unwrap();
         let b = geode_core::scope::parse_expr("b = 2 or c = 3").unwrap();
-        assert!(f.append_expression(a));
-        assert_eq!(expr_text(&f).as_deref(), Some("a = 1"), "none: it is set");
-        assert!(f.append_expression(b));
+        let joined = and_join(None, a);
+        assert_eq!(joined.to_string(), "a = 1", "none: it is set");
         assert_eq!(
-            expr_text(&f).as_deref(),
-            Some("(a = 1) and ((b = 2) or (c = 3))"),
+            and_join(Some(joined), b).to_string(),
+            "(a = 1) and ((b = 2) or (c = 3))",
             "existing and (new)"
         );
-        assert!(f.undo_scope());
-        assert_eq!(expr_text(&f).as_deref(), Some("a = 1"));
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! The sheet's pure model: row identity and structure, edits and inverses, shorthand
-//! parsing and rendering, package templates, column formatting, views, and document
-//! conversion. This module has no GPUI types or I/O.
+//! parsing and rendering, package templates, column formatting, views, document
+//! conversion, and entry completion. It performs no I/O and owns no entities or
+//! windows; completion prepares GPUI `SharedString` values for the entry list.
 
 pub mod cell;
 pub mod clip;
 pub mod columns;
 pub mod commands;
+pub mod complete;
 pub mod edit;
 pub mod entry;
 pub mod sheet;
@@ -20,6 +22,7 @@ pub use cell::{CellEditor, READ_ONLY};
 pub use columns::{
     Applies, COLUMNS, CellState, CellText, ColumnDef, ColumnKind, cell_text, column,
 };
+pub use complete::{Completion, Inputs, MAX_ROWS, Slot, Suggestion, slot_at};
 pub use edit::{Edit, EditError, Undo};
 pub use sheet::{
     Delivered, LineId, LineSpec, LineState, OwnShifts, Place, Refresh, RowKind, RowRecord, RowSpec,

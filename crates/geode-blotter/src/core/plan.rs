@@ -219,6 +219,7 @@ name = "missing_in_snapshot"
             attribution_by_depth: by_depth,
             scope_semantics: semantics,
             summable: false,
+            mixed_flag: None,
         }
     }
 

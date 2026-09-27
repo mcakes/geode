@@ -31,6 +31,12 @@ cargo bench -p geode-blotter   # the pure core
   `NoAction` after component initialization. Row clicks can briefly focus
   the table; these overrides keep its component actions inactive while
   the shell owns blotter key routing.
+- An ungrouped dimension displays its common value when every contributing
+  row agrees. Disagreement, including NULL alongside a value, displays muted
+  `mixed`; all-NULL or absent rows display blank. `Snapshot::is_mixed_at`
+  distinguishes mixed cells from other NULL cells. Sorting puts values, mixed,
+  then blanks in both directions; yank preserves the marker. Numeric dimensions
+  sort numerically and display without measure scaling or rounding.
 - A `NonAttributable` cell is NULL. Read numeric columns only through
   `f64_at`/`f64_value`; the format cache is the one place a cell becomes
   text.

@@ -21,7 +21,8 @@ The pure core (`core`, no element, entity, window, or data service):
 | `template` | Template names, the `pricer_templates` reader and `TemplateSet`. |
 | `columns`, `views` | Column vocabulary, prepared column plans, and cell text. |
 | `cell` | Cell commit validation, the typeahead vocabularies, the expiry date commit, and nudging. |
-| `entry` | Where `o` lands, the entry bar's label, and the entry history. |
+| `entry` | Where `o` lands, lifting a typed package out of a leg position, the entry bar's label, and entry history. |
+| `complete` | Entry-bar completion: the slot at the caret, suggestions, hint, and the Tab cycle. |
 | `clip` | The yank register and where `p`/`shift+p` land. |
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary: parse and completions. |
@@ -36,9 +37,9 @@ The tile:
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
-| `popup` | The typeahead and the `.` action menu. |
+| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
 | `session` | The tile's session record. |
-| `content` | The factory, keymap fragment, actions, and settings. |
+| `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
@@ -59,6 +60,26 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 
 ## Invariants
 
+- Completion never runs in render; the tile refreshes it on every text change,
+  history step, commit and reload, and a Tab at a moved caret re-ranks first.
+  A completion write is one range replace (one undo step) whose own `Change`
+  is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
+  `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
+  focus cycling.
+- Entry completion suggests configured underlyings, upcoming monthly expiries,
+  tenors, option types, templates, and barrier kinds. It replaces the token at
+  the caret (one slash-separated part for expiries or strikes); quantities,
+  strikes, and barrier levels have hints but no suggestions. Tab/Shift-Tab
+  cycle candidates, a pointer press accepts a row, and Enter parses the typed
+  line without implicitly accepting the highlight.
+- The app supplies `[pricing] underlyings` through `UnderlyingList`, which trims
+  and uppercases names, drops blanks and duplicates, and preserves first occurrence
+  order. Tiles cache names by provider revision. An absent setting clears the list;
+  a non-array value warns and keeps the previous list on reload, while non-string
+  array elements warn and are skipped. Suggestions do not restrict typed names.
+- A package typed at a leg position becomes a root after the containing package;
+  a single line still becomes a leg. After insertion the bar advances from the
+  actual landing place, so further rows follow the new root.
 - Every edit passes through `Sheet::apply`, which returns the undo operation.
   New tile edits use `PricerTile::apply_edit`/`apply_edits`; undo and redo
   apply through the LIFO history. Loading replaces the sheet. Deliveries,

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
-use crate::schema::{ColumnRole, Grain, SchemaSpec};
+use crate::schema::{ColumnRole, DatasetSpec, Grain, SchemaSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinSpec {
@@ -356,7 +356,93 @@ pub struct ViewSpec {
     pub is_default: bool,
 }
 
+/// The declared grain of `ds` an ungrouped dimension column is computed
+/// from: the coarsest one that carries `column` and every column of
+/// `grouping` (derived grouping names resolved to their source column).
+///
+/// Coarsest, because a carried value repeats identically across the finer
+/// rows beneath it, so the coarsest carrying table gives the same answer
+/// over the fewest rows. Every column of the grouping, not a query's bounded
+/// prefix of it: the same grain then serves every depth, and a view that
+/// validates compiles at every `max_depth`. `None` when no declared grain
+/// carries them all — such a column has no table to be read from.
+pub fn unanimity_grain(
+    ds: &DatasetSpec,
+    grouping: &[String],
+    column: &str,
+    dims: &DerivedDimensions,
+) -> Option<Grain> {
+    ds.grains().into_iter().find(|g| {
+        let carries_column = ds.carries(*g, column);
+        let carries_grouping = grouping.iter().all(|c| ds.carries(*g, dims.base_column(c)));
+        carries_column && carries_grouping
+    })
+}
+
+/// A `dimension` column the view shows but neither groups by nor takes off
+/// a join, so the compiler supplies it by the unanimity rule: the value
+/// where every row under the tree row agrees, a mixed marker where they
+/// disagree, blank where none has a value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UngroupedDimension<'a> {
+    pub name: &'a str,
+    pub required: bool,
+    /// [`unanimity_grain`]; `None` when no declared grain can supply it,
+    /// which validation reports and the compiler refuses (required) or
+    /// drops (optional).
+    pub grain: Option<Grain>,
+}
+
 impl ViewSpec {
+    /// Whether one of this view's joins names a dataset that has `name`.
+    /// Such a column comes off the join, never from the unanimity rule.
+    fn joined_column(&self, schema: &SchemaSpec, name: &str) -> bool {
+        self.joins.iter().any(|j| {
+            schema
+                .dataset(&j.dataset)
+                .is_some_and(|d| d.column(name).is_some())
+        })
+    }
+
+    /// The view's ungrouped dimension columns, in view order: `dimension`
+    /// columns of a measure-family primary dataset, declared there with the
+    /// dimension role, that are not in the grouping, not a derived
+    /// dimension, and not supplied by a join. Validation and the compiler
+    /// both read this list, so they cannot disagree about which columns
+    /// take the unanimity path.
+    pub fn ungrouped_dimensions<'a>(
+        &'a self,
+        schema: &SchemaSpec,
+        dims: &DerivedDimensions,
+    ) -> Vec<UngroupedDimension<'a>> {
+        let Some(ds) = schema.dataset(&self.dataset) else {
+            return Vec::new();
+        };
+        if ds.is_document() || ds.is_series() {
+            return Vec::new();
+        }
+        self.columns
+            .iter()
+            .filter_map(|c| match c {
+                ViewColumn::Dimension { name, required } => Some((name.as_str(), *required)),
+                _ => None,
+            })
+            .filter(|(name, _)| {
+                !self.grouping.iter().any(|g| g == name)
+                    && dims.get(name).is_none()
+                    && !self.joined_column(schema, name)
+                    && ds
+                        .column(name)
+                        .is_some_and(|c| matches!(c.role, ColumnRole::Dimension { .. }))
+            })
+            .map(|(name, required)| UngroupedDimension {
+                name,
+                required,
+                grain: unanimity_grain(ds, &self.grouping, name, dims),
+            })
+            .collect()
+    }
+
     /// Distinct grains of the measures this view selects, coarse first.
     /// The compiler emits one aggregate subquery per grain.
     pub fn measure_grains(&self, schema: &SchemaSpec) -> Vec<Grain> {
@@ -556,24 +642,30 @@ impl ViewSpec {
                             ),
                         ));
                     }
-                    // A dimension reaches the row only by being grouped or by
-                    // coming off a join; the spine selects nothing else. Judged
+                    // A dimension reaches the row by being grouped, by coming
+                    // off a join, or — for a column the primary dataset
+                    // declares a dimension — by the unanimity rule, read from
+                    // a grain that carries it alongside the grouping. Judged
                     // against the view's own grouping, not a query's bounded
                     // depth: a grouping column below `max_depth` is legitimately
-                    // absent at that depth and is not a configuration error.
+                    // absent at that depth and is not a configuration error,
+                    // and the grain chosen for the whole grouping serves every
+                    // shallower depth too.
                     if let ViewColumn::Dimension { required, .. } = other
                         && !self.grouping.iter().any(|g| g == name)
-                        && !self.joins.iter().any(|j| {
-                            schema
-                                .dataset(&j.dataset)
-                                .is_some_and(|d| d.column(name).is_some())
-                        })
+                        && !self.joined_column(schema, name)
+                        && !self
+                            .ungrouped_dimensions(schema, dims)
+                            .iter()
+                            .any(|u| u.name == name && u.grain.is_some())
                     {
                         diags.push(report(
                             *required,
                             format!(
-                                "column '{name}' is declared a dimension, but it is neither \
-                                 in the grouping nor carried by a join, so no row supplies it"
+                                "column '{name}' is declared a dimension, but it is not in the \
+                                 grouping, no join carries it, and no declared grain of dataset \
+                                 '{}' carries it alongside the grouping {:?}, so no row supplies it",
+                                self.dataset, self.grouping
                             ),
                         ));
                     }
@@ -1676,8 +1768,10 @@ kind = "measure"
         );
     }
 
-    /// Selected nowhere: the spine carries only grouping columns, aggregates,
-    /// joins and derived expressions, so this column is absent, not NULL.
+    /// Selected nowhere: not grouped, not joined, and not a dimension of the
+    /// primary dataset (an attribute declared `kind = "dimension"`), so no
+    /// grain can supply it by the unanimity rule and the column would be
+    /// absent, not NULL.
     #[test]
     fn a_dimension_column_neither_grouped_nor_joined_refuses_the_view() {
         let text = r#"
@@ -1686,7 +1780,7 @@ dataset = "risk_snapshot"
 grouping = ["book"]
 
 [[v.columns]]
-name = "counterparty"
+name = "desk_name"
 kind = "dimension"
 "#;
         let (views, _) = ViewSpec::from_doc(&doc(text));
@@ -1697,7 +1791,7 @@ kind = "dimension"
             .collect();
         assert_eq!(errors.len(), 1, "{diags:?}");
         assert!(
-            errors[0].message.contains("counterparty"),
+            errors[0].message.contains("desk_name"),
             "the diagnostic must name the column: {}",
             errors[0].message
         );
@@ -1712,7 +1806,7 @@ dataset = "risk_snapshot"
 grouping = ["book"]
 
 [[v.columns]]
-name = "counterparty"
+name = "desk_name"
 kind = "dimension"
 required = false
 "#;
@@ -1724,10 +1818,174 @@ required = false
         );
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(
-            diags[0].message.contains("counterparty") && diags[0].message.contains("dropped"),
+            diags[0].message.contains("desk_name") && diags[0].message.contains("dropped"),
             "the diagnostic must name the column and say it was dropped: {}",
             diags[0].message
         );
+    }
+
+    /// `strike` carried at instrument grain; a position-grain measure, and an
+    /// underlying-grain one when `underlying` is set. Without it no declared
+    /// grain is fine enough to carry an instrument dimension.
+    fn carried_schema(underlying: bool) -> SchemaSpec {
+        let mut text = String::from(
+            r#"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+"#,
+        );
+        if underlying {
+            text.push_str(
+                "[risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n",
+            );
+        }
+        let d = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
+        SchemaSpec::from_doc(&d).0
+    }
+
+    fn strike_view(grouping: &str, required: bool) -> ViewSpec {
+        let text = format!(
+            "[v]\ndataset = \"risk\"\ngrouping = {grouping}\n\
+             [[v.columns]]\nname = \"npv\"\n\
+             [[v.columns]]\nname = \"strike\"\nkind = \"dimension\"\nrequired = {required}\n"
+        );
+        ViewSpec::from_doc(&doc(&text)).0.remove(0)
+    }
+
+    /// The unanimity rule supplies an ungrouped dimension from a grain that
+    /// carries it alongside the whole grouping: `strike` beside a position
+    /// tree is read from the underlying table, which carries both.
+    #[test]
+    fn an_ungrouped_dimension_a_grain_carries_alongside_the_grouping_is_accepted() {
+        let schema = carried_schema(true);
+        let view = strike_view(r#"["lhu", "underlying_ref", "position_ref"]"#, true);
+        let diags = view.validate(&schema, &dimensions(""));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            view.ungrouped_dimensions(&schema, &dimensions("")),
+            vec![UngroupedDimension {
+                name: "strike",
+                required: true,
+                grain: Some(Grain::Underlying),
+            }]
+        );
+    }
+
+    /// With only a position table, nothing stores `strike` at all: no grain
+    /// can supply it, so the view is refused with a message saying what would
+    /// have — the grouping, a join, or a grain carrying it.
+    #[test]
+    fn an_ungrouped_dimension_no_grain_carries_refuses_the_view() {
+        let schema = carried_schema(false);
+        let view = strike_view(r#"["lhu", "position_ref"]"#, true);
+        let diags = view.validate(&schema, &dimensions(""));
+        let errors: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1, "{diags:?}");
+        let m = &errors[0].message;
+        assert!(
+            m.contains("'strike'") && m.contains("grouping") && m.contains("join"),
+            "the message names the column and what would have supplied it: {m}"
+        );
+        assert!(
+            m.contains("grain") && m.contains("'risk'"),
+            "the message names the missing grain of the dataset: {m}"
+        );
+        // And `required = false` keeps its meaning: dropped, said so.
+        let optional = strike_view(r#"["lhu", "position_ref"]"#, false);
+        let diags = optional.validate(&schema, &dimensions(""));
+        assert!(
+            diags.iter().all(|d| d.severity != Severity::Error)
+                && diags.iter().any(|d| d.message.contains("dropped")),
+            "{diags:?}"
+        );
+    }
+
+    /// The coarsest grain carrying the column and every grouping column is
+    /// the one read, judged against the whole grouping: a position-level
+    /// grouping is served by the coarsest table that stores the column, not
+    /// the position table that stores the grouping alone, and a grouping
+    /// column no grain carries leaves nothing to read.
+    #[test]
+    fn the_unanimity_grain_is_the_coarsest_carrying_the_column_and_the_whole_grouping() {
+        let schema = carried_schema(true);
+        let ds = schema.dataset("risk").unwrap();
+        let none = dimensions("");
+        let g = |grouping: &[&str]| {
+            let grouping: Vec<String> = grouping.iter().map(|s| s.to_string()).collect();
+            unanimity_grain(ds, &grouping, "strike", &none)
+        };
+        assert_eq!(
+            g(&[]),
+            Some(Grain::Underlying),
+            "position declares no strike"
+        );
+        assert_eq!(g(&["book", "lhu", "position_ref"]), Some(Grain::Underlying));
+        assert_eq!(g(&["lhu", "underlying_ref"]), Some(Grain::Underlying));
+        assert_eq!(
+            g(&["lhu", "nosuch"]),
+            None,
+            "a grouping column nothing carries"
+        );
+    }
+
+    /// Only a column the primary dataset declares a dimension takes the
+    /// unanimity path: a joined column keeps its join, a grouped one the
+    /// spine, and a derived dimension its own path.
+    #[test]
+    fn only_an_ungrouped_unjoined_primary_dimension_takes_the_unanimity_path() {
+        let schema = carried_schema(true);
+        let text = r#"
+[v]
+dataset = "risk"
+grouping = ["lhu"]
+[[v.columns]]
+name = "lhu"
+kind = "dimension"
+[[v.columns]]
+name = "counterparty"
+kind = "dimension"
+[[v.columns]]
+name = "desk"
+kind = "dimension"
+[[v.columns]]
+name = "npv"
+"#;
+        let view = ViewSpec::from_doc(&doc(text)).0.remove(0);
+        let dims = dimensions("[desk]\nfrom = \"book\"\n[desk.values]\nEU = [\"BK0\"]\n");
+        let names: Vec<&str> = view
+            .ungrouped_dimensions(&schema, &dims)
+            .iter()
+            .map(|u| u.name)
+            .collect();
+        assert_eq!(names, vec!["counterparty"]);
+        assert!(view.validate(&schema, &dims).is_empty());
     }
 
     /// A join keyed outside the grouping cannot be performed at any depth, and

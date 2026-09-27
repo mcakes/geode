@@ -1,10 +1,10 @@
 //! Shared shell modal lifecycle, focus synchronization, and rendering helpers.
 //!
-//! `ShellView` owns one [`ShellModal`] and renders its chrome without animation. Open
-//! through [`open_shell_dialog`] or [`open_shell_dialog_with_key`] so pending key
-//! sequences, competing overlays, the retained input, and focus are reconciled. Dialog
-//! state must be installed before opening; `sync_dialog_text` reads that state to
-//! choose the shared input's text and focus.
+//! `ShellView` owns a stack of [`ShellModal`]s and renders the top one's chrome without
+//! animation. Open through [`open_shell_dialog`] or [`open_shell_dialog_with_key`] so
+//! pending key sequences, competing overlays, the retained input, and focus are
+//! reconciled. Dialog state must be installed before opening; `sync_dialog_text` reads
+//! that state to choose the shared input's text and focus.
 //!
 //! Content and key handlers receive the shell's existing borrow. They must not
 //! synchronously read or update its entity again. Pointer callbacks may capture the
@@ -41,17 +41,129 @@ type ModalBuilder = Rc<dyn Fn(&ShellView, &mut Window, &mut App) -> AnyElement>;
 
 /// A modal's optional handler for normalized shell keystrokes. Runs before the shell's
 /// Escape-close fallback; `true` consumes the key, including Escape. `false` permits
-/// the modal fallback and text-input handling, but never resumes shell chord matching
-/// while the modal is open.
+/// the modal fallback and text-input handling. Declined chords may open another
+/// dialog or the palette; other shell actions remain blocked on this key route.
 ///
 /// The caller already holds `&mut ShellView`. Use that borrow: synchronously updating
 /// its entity here would be reentrant access.
 pub type ModalKeyHandler =
     Rc<dyn Fn(&mut ShellView, &Keystroke, &mut Window, &mut Context<ShellView>) -> bool>;
 
+/// Which dialog a stack entry is. Each kind but `Plain` owns one `ShellView`
+/// state field, so a kind appears at most once in the stack (see [`can_open`]);
+/// a second instance would overwrite the live one's state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogKind {
+    Settings,
+    Keybindings,
+    /// The dimension picker (`picker.rs`).
+    Picker,
+    AsOf,
+    ScopeExpr,
+    /// Every `choicedialog` target (tile kinds, grouping, log level): they share
+    /// the one `choice_dialog` field.
+    Choice,
+    /// Every object-dialog domain: they share the one `object_dialog` field.
+    Object,
+    /// A modal with no state field of its own.
+    Plain,
+}
+
+impl DialogKind {
+    /// The status notice for a request refused because this kind is already
+    /// open lower in the stack.
+    pub(crate) fn already_open_notice(self) -> &'static str {
+        match self {
+            DialogKind::Settings => "settings is already open underneath",
+            DialogKind::Keybindings => "keybindings is already open underneath",
+            DialogKind::Picker => "the picker is already open underneath",
+            DialogKind::AsOf => "as-of is already open underneath",
+            DialogKind::ScopeExpr => "the expression dialog is already open underneath",
+            DialogKind::Choice => "a choice list is already open underneath",
+            DialogKind::Object => "a configuration dialog is already open underneath",
+            DialogKind::Plain => "a dialog is already open underneath",
+        }
+    }
+
+    /// Every kind, for [`is_already_open_notice`].
+    const ALL: [DialogKind; 8] = [
+        DialogKind::Settings,
+        DialogKind::Keybindings,
+        DialogKind::Picker,
+        DialogKind::AsOf,
+        DialogKind::ScopeExpr,
+        DialogKind::Choice,
+        DialogKind::Object,
+        DialogKind::Plain,
+    ];
+}
+
+/// Whether `notice` is one of [`DialogKind::already_open_notice`]'s strings.
+/// `close_modal` uses this to drop a refusal notice once the stack it named
+/// is empty: the kind it referred to no longer exists, so the notice would
+/// otherwise sit in the status bar describing a dialog nothing points to.
+pub(crate) fn is_already_open_notice(notice: &str) -> bool {
+    DialogKind::ALL
+        .iter()
+        .any(|kind| kind.already_open_notice() == notice)
+}
+
+/// Whether a dialog of `kind` may be pushed now. Openers call this before
+/// installing their state, because a second instance of a kind would overwrite
+/// the live one's state field. A request for the kind already on top does
+/// nothing; one for a kind lower in the stack says so in the status bar.
+pub(crate) fn can_open(view: &mut ShellView, kind: DialogKind) -> bool {
+    let Some(at) = view.modals.iter().position(|m| m.kind == kind) else {
+        return true;
+    };
+    if at + 1 < view.modals.len() {
+        view.notice = Some(kind.already_open_notice());
+    }
+    false
+}
+
+/// Whether dispatching `action` opens a shell dialog. With a dialog open, an
+/// unclaimed chord reaches the shell only for these actions and the palette
+/// toggle, so a stray chord cannot change tiles hidden behind the modal. Mirrors
+/// the dialog-opening arms of `ShellView::dispatch`;
+/// `opens_dialog_matches_what_dispatch_pushes` holds the two together.
+pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
+    matches!(
+        action.0.as_str(),
+        "settings::open"
+            | "keybindings::open"
+            | "config::views"
+            | "config::groupings"
+            | "config::scopes"
+            | "config::schema"
+            | "config::sources"
+            | "config::colors"
+            | "config::expressions"
+            | "frame::pick"
+            | "scope::save_current"
+            | "frame::as_of"
+            | "frame::scope_expression"
+            | "frame::add_expression"
+            | "frame::grouping"
+            | "tile::add"
+            | "tile::open_with"
+            | "log::level"
+    ) || action.0.starts_with("frame::pick_")
+}
+
+/// The shared input's text and caret as the entry beneath a push left them.
+/// The input is one entity reused at every depth, and some dialogs (the
+/// expression dialog) keep their value only in it.
+pub struct SavedInput {
+    pub text: String,
+    pub cursor: usize,
+}
+
 /// One open modal, owned and rendered by `ShellView`. Its `Rc` closures can be cloned
-/// out of `self.modal` before invocation, releasing that field's borrow.
+/// out of `self.modals` before invocation, releasing that field's borrow.
 pub struct ShellModal {
+    /// Which state field this entry owns; see [`DialogKind`].
+    pub kind: DialogKind,
     pub title: SharedString,
     /// Build fresh content during [`ShellView::render`] using its existing borrow.
     /// Synchronous entity reads or updates would reenter the shell while it is being
@@ -66,6 +178,8 @@ pub struct ShellModal {
     /// Optional pointer route for the dialog's one-screen back step. See
     /// [`set_back`].
     pub back: Option<ModalBack>,
+    /// Set while another entry covers this one; restored by [`refocus_top`].
+    pub saved_input: Option<SavedInput>,
 }
 
 /// A multi-screen dialog's back step for the title row's Back button. `available`
@@ -93,7 +207,7 @@ pub fn set_title_extra(
     view: &mut ShellView,
     build: impl Fn(&ShellView, &mut App) -> AnyElement + 'static,
 ) {
-    if let Some(modal) = view.modal.as_mut() {
+    if let Some(modal) = view.modals.last_mut() {
         modal.title_extra = Some(Rc::new(build));
     }
 }
@@ -105,7 +219,7 @@ pub fn set_back(
     available: impl Fn(&ShellView) -> bool + 'static,
     step: impl Fn(&mut ShellView, &mut Window, &mut Context<ShellView>) + 'static,
 ) {
-    if let Some(modal) = view.modal.as_mut() {
+    if let Some(modal) = view.modals.last_mut() {
         modal.back = Some(ModalBack {
             available: Rc::new(available),
             step: Rc::new(step),
@@ -116,8 +230,8 @@ pub fn set_back(
 /// Whether the open modal currently offers a back step. Read during rendering to decide
 /// whether the title row paints its Back button.
 pub(crate) fn back_available(view: &ShellView) -> bool {
-    view.modal
-        .as_ref()
+    view.modals
+        .last()
         .and_then(|modal| modal.back.as_ref())
         .is_some_and(|back| (back.available)(view))
 }
@@ -126,8 +240,8 @@ pub(crate) fn back_available(view: &ShellView) -> bool {
 /// then synchronize the shared input's text and focus from the resulting state, as
 /// every pointer transition must.
 pub(crate) fn step_back(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    // Clone out of `view.modal` so the step can take the whole view.
-    let Some(back) = view.modal.as_ref().and_then(|modal| modal.back.clone()) else {
+    // Clone out of `view.modals` so the step can take the whole view.
+    let Some(back) = view.modals.last().and_then(|modal| modal.back.clone()) else {
         return;
     };
     if !(back.available)(view) {
@@ -192,12 +306,13 @@ pub fn open_shell_dialog<F>(
     view: &mut ShellView,
     window: &mut Window,
     cx: &mut Context<ShellView>,
+    kind: DialogKind,
     title: impl Into<SharedString>,
     build: F,
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
-    open_shell_dialog_with_key(view, window, cx, title, build, None, false);
+    open_shell_dialog_with_key(view, window, cx, kind, title, build, None, false);
 }
 
 /// Install a modal after cancelling pending key sequences and competing overlays. The
@@ -207,10 +322,13 @@ pub fn open_shell_dialog<F>(
 /// state install it before calling this function and pass `false`, allowing
 /// `sync_dialog_text` to choose focus from their state. Callers guard against
 /// replacing an already-open modal.
+#[allow(clippy::too_many_arguments)]
+// One door for every dialog; bundling these into a struct would only rename them.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
     cx: &mut Context<ShellView>,
+    kind: DialogKind,
     title: impl Into<SharedString>,
     build: F,
     on_key: Option<ModalKeyHandler>,
@@ -218,6 +336,12 @@ pub fn open_shell_dialog_with_key<F>(
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
+    // Backstop for an opener that skipped its own `can_open` check. By then that
+    // opener may already have overwritten the live state, which is why each
+    // opener checks first.
+    if !can_open(view, kind) {
+        return;
+    }
     // Do not let a pending shell key sequence survive into or across the modal.
     view.matcher.cancel();
     // Closing the palette releases its exclusive key route and restores focus before
@@ -232,15 +356,30 @@ pub fn open_shell_dialog_with_key<F>(
 
     // Recorded after the palette close above (which may itself have just
     // returned focus to the field) and before the dialog takes focus, for
-    // `close_modal` (see `ShellView::overlay_return_to_filter`).
-    view.overlay_return_to_filter = view.filter_field_focused(window, cx);
+    // `close_modal` (see `ShellView::overlay_return_to_filter`). Only the
+    // stack's base records it: a nested push must not overwrite it with "the
+    // dialog beneath had focus".
+    if view.modals.is_empty() {
+        view.overlay_return_to_filter = view.filter_field_focused(window, cx);
+    }
+    // The covered entry keeps the shared input's text and caret; the push below
+    // clears the input for the new dialog.
+    let (text, cursor) = {
+        let input = view.dialog_input.read(cx);
+        (input.value().to_string(), input.cursor())
+    };
+    if let Some(covered) = view.modals.last_mut() {
+        covered.saved_input = Some(SavedInput { text, cursor });
+    }
 
-    view.modal = Some(ShellModal {
+    view.modals.push(ShellModal {
+        kind,
         title: title.into(),
         title_extra: None,
         build: Rc::new(build),
         on_key,
         back: None,
+        saved_input: None,
     });
 
     // Reuse the retained input, clearing text left by the previous dialog even if this
@@ -264,8 +403,8 @@ pub fn open_shell_dialog_with_key<F>(
 /// Mirror the active dialog's effective query and focus into the shared Input. The
 /// as-of dialog always owns the input. Settings, keybindings, and object dialogs use
 /// [`crate::dialogmode::focus_target`], with capture taking priority over list mode.
-/// These dialog states are mutually exclusive: closing clears all of them. A
-/// filter-only picker retains its own open-time focus path.
+/// Several states can be `Some` while stacked; the top kind decides. Filter-only
+/// dialogs keep their own focus path (see [`refocus_top`]).
 ///
 /// Call after opening and at the end of keyboard or pointer transitions that change
 /// dialog state. Pointer handlers must call it themselves because they do not pass
@@ -280,25 +419,43 @@ pub(crate) fn sync_dialog_text(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    // The as-of dialog has no list mode or capture state: its query always owns the
-    // focused shared input.
-    if let Some(state) = shell.as_of_dialog.as_ref() {
-        let query = state.query();
-        let input = shell.dialog_input.clone();
-        if input.read(cx).text() != query {
-            input.update(cx, |i, cx| i.set_value(query, window, cx));
+    // The live dialog owns the shared input. Several kinds' states can be `Some`
+    // at once while stacked, so the owner is the top kind, never the first
+    // non-empty field.
+    let (mode, listening, query) = match shell.top_kind() {
+        Some(DialogKind::AsOf) => {
+            // No list mode or capture state: its query always owns the focused input.
+            let Some(state) = shell.as_of_dialog.as_ref() else {
+                return;
+            };
+            let query = state.query();
+            let input = shell.dialog_input.clone();
+            if input.read(cx).text() != query {
+                input.update(cx, |i, cx| i.set_value(query, window, cx));
+            }
+            input.read(cx).focus_handle(cx).focus(window, cx);
+            return;
         }
-        input.read(cx).focus_handle(cx).focus(window, cx);
-        return;
-    }
-    let (mode, listening, query) = if let Some(state) = shell.keybindings.as_ref() {
-        (state.mode, state.listening.is_some(), state.query.as_str())
-    } else if let Some(state) = shell.object_dialog.as_ref() {
-        (state.mode, false, state.effective_query())
-    } else if let Some(state) = shell.settings.as_ref() {
-        (state.mode, false, state.effective_query())
-    } else {
-        return;
+        Some(DialogKind::Keybindings) => {
+            let Some(state) = shell.keybindings.as_ref() else {
+                return;
+            };
+            (state.mode, state.listening.is_some(), state.query.as_str())
+        }
+        Some(DialogKind::Object) => {
+            let Some(state) = shell.object_dialog.as_ref() else {
+                return;
+            };
+            (state.mode, false, state.effective_query())
+        }
+        Some(DialogKind::Settings) => {
+            let Some(state) = shell.settings.as_ref() else {
+                return;
+            };
+            (state.mode, false, state.effective_query())
+        }
+        // Filter-only dialogs keep their own focus path (see `refocus_top`).
+        _ => return,
     };
     let input = shell.dialog_input.clone();
     if input.read(cx).text() != query {
@@ -307,6 +464,37 @@ pub(crate) fn sync_dialog_text(
     match dialogmode::focus_target(mode, listening) {
         FocusTarget::Input => input.read(cx).focus_handle(cx).focus(window, cx),
         FocusTarget::Shell => shell.focus_handle.focus(window, cx),
+    }
+}
+
+/// Give the top dialog back the shared input and focus once whatever covered
+/// it (a popped dialog, the palette) is gone. Restores the text and caret the
+/// entry had when it was covered, then chooses focus: mode dialogs through
+/// [`sync_dialog_text`], filter-only dialogs by focusing the input they always
+/// type into. `set_value` emits no `Change`, and the restored text is what the
+/// entry's state already holds.
+pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(top) = view.modals.last_mut() else {
+        return;
+    };
+    let kind = top.kind;
+    if let Some(saved) = top.saved_input.take() {
+        let input = view.dialog_input.clone();
+        input.update(cx, |i, cx| {
+            i.set_value(saved.text, window, cx);
+            i.set_selected_range(saved.cursor..saved.cursor, cx);
+        });
+        super::expr_suggest::revealed(view, cx);
+    }
+    match kind {
+        DialogKind::Picker | DialogKind::Choice | DialogKind::ScopeExpr => {
+            let handle = view.dialog_input.read(cx).focus_handle(cx);
+            handle.focus(window, cx);
+        }
+        DialogKind::Plain => {}
+        DialogKind::Settings | DialogKind::Keybindings | DialogKind::Object | DialogKind::AsOf => {
+            sync_dialog_text(view, window, cx);
+        }
     }
 }
 
@@ -342,22 +530,36 @@ pub struct FrozenFilter<'a> {
 /// shell root while the dialog displays filter mode. An armed confirmation blocks
 /// this transition until answered.
 pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
-    if let Some(state) = shell.keybindings.as_mut() {
-        // Keep the confirmation's exclusive input route until it is answered.
-        if state.confirm.is_some() {
-            return;
+    match shell.top_kind() {
+        Some(DialogKind::Keybindings) => {
+            let Some(state) = shell.keybindings.as_mut() else {
+                return;
+            };
+            // Keep the confirmation's exclusive input route until it is answered.
+            if state.confirm.is_some() {
+                return;
+            }
+            state.listening = None;
+            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
         }
-        state.listening = None;
-        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
-    } else if let Some(state) = shell.object_dialog.as_mut() {
-        // `build_edit` still paints the frozen row during confirmation, so guard
-        // the transition here as well as in keyboard routing.
-        if state.confirm.is_some() {
-            return;
+        Some(DialogKind::Object) => {
+            let Some(state) = shell.object_dialog.as_mut() else {
+                return;
+            };
+            // `build_edit` still paints the frozen row during confirmation, so guard
+            // the transition here as well as in keyboard routing.
+            if state.confirm.is_some() {
+                return;
+            }
+            state.enter_filter();
         }
-        state.enter_filter();
-    } else if let Some(state) = shell.settings.as_mut() {
-        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
+        Some(DialogKind::Settings) => {
+            let Some(state) = shell.settings.as_mut() else {
+                return;
+            };
+            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
+        }
+        _ => {}
     }
 }
 
@@ -710,6 +912,10 @@ pub(crate) fn render_modal(
         .pt(px(viewport_height * MODAL_TOP_RATIO))
         .bg(overlay)
         .debug_selector(|| "shell-modal-backdrop".to_string())
+        // gpui fires `on_mouse_down` for every hovered hitbox, not only the
+        // topmost; without `occlude()` a click outside the panel pops the dialog
+        // and also reaches the chrome beneath (a scope chip's `×`, a tile press).
+        .occlude()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {

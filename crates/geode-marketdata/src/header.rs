@@ -17,7 +17,7 @@ use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
-use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div};
+use gpui::{ElementId, Entity, FocusHandle, Hsla, SharedString, div, rems};
 use gpui_component::input::Input;
 use gpui_component::{Theme, h_flex};
 
@@ -92,10 +92,10 @@ pub(crate) fn date_segment_paint(
     }
 }
 
-/// Shared segmented-date painter for header attributes and grid cells.
-/// `framed` adds padding and a rounded border for a header attribute; grid
-/// editors omit that frame and segment padding because the cursor border
-/// already surrounds the cell.
+/// Shared segmented-date painter for header attributes and grid cells. It
+/// paints no frame and flush segments: the attribute's value box or the
+/// cell's cursor border already surrounds it, and a second frame would jump
+/// in when the editor opens.
 ///
 /// The container tracks the editor's focus handle and routes handled keys before
 /// the shell listener. Segment clicks are consumed to avoid the parent cell or
@@ -108,18 +108,11 @@ pub(crate) fn render_date_field(
     tones: &FlooredTones,
     tile: &Entity<MarketDataTile>,
     tile_id: u64,
-    framed: bool,
 ) -> impl IntoElement {
     let separator: Hsla = theme.muted_foreground;
     let field = h_flex()
         .track_focus(focus)
         .items_center()
-        .when(framed, |el| {
-            el.px_1()
-                .rounded(theme.radius_tokens().sm)
-                .border_1()
-                .border_color(theme.table_active_border)
-        })
         .font_family(fonts::MONO)
         .debug_selector(move || format!("marketdata-date-{tile_id}"))
         .on_key_down({
@@ -149,7 +142,7 @@ pub(crate) fn render_date_field(
         separator,
         suffix: separator,
         radius: theme.radius_tokens().sm,
-        flush: !framed,
+        flush: true,
     };
     let tile = tile.clone();
     field.child(geode_widgets::datefield::paint(
@@ -405,9 +398,13 @@ pub(crate) fn render(
         let CellPaint { fill, text, .. } =
             cell_paint(theme, false, attr.edited, RowState::Document);
         let at_cursor = cursor_attr == Some(i);
+        // The value box is the attribute's only frame: resting text, the text
+        // editor and the date editor all paint inside it on one pinned line
+        // box (the input's own 1.25rem), so opening an editor moves nothing.
         let mut value = div()
             .px_1()
             .rounded(theme.radius_tokens().sm)
+            .line_height(rems(1.25))
             .font_family(fonts::MONO)
             .text_color(text)
             .when_some(fill, |d, f| d.bg(f))
@@ -428,12 +425,14 @@ pub(crate) fn render(
                 }
             });
         value = match &editor {
-            Some((e, EditorPaint::Text(state))) if *e == i => {
-                value.child(div().min_w(scale::design(80.)).child(Input::new(state)))
-            }
-            Some((e, EditorPaint::Date { paint, focus })) if *e == i => value.child(
-                render_date_field(paint, focus, theme, tones, tile, tile_id, true),
+            Some((e, EditorPaint::Text(state))) if *e == i => value.child(
+                div()
+                    .min_w(scale::design(80.))
+                    .child(Input::new(state).appearance(false).px_0().py_0().h_auto()),
             ),
+            Some((e, EditorPaint::Date { paint, focus })) if *e == i => {
+                value.child(render_date_field(paint, focus, theme, tones, tile, tile_id))
+            }
             _ => value.child(attr.text.clone()),
         };
         row = row.child(

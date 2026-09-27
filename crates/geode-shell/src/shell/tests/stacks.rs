@@ -167,6 +167,98 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
 }
 
 #[gpui::test]
+fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, log, left, right, top) = stacked_shell(cx);
+    let visible = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |s, _| {
+            s.services.workspaces.active().tree().visible_tiles()
+        })
+    };
+    // The fixture's own adds dirtied the session; only the chord may now.
+    // A fixed add direction makes the orientation independent of the
+    // test window's shape.
+    shell.update(&mut cx, |shell, _| {
+        shell.session_dirty = false;
+        shell.add_direction = crate::tileadd::AddDirection::Vertical;
+    });
+    cx.simulate_keystrokes("alt-s");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![left, right, top], "every member painted");
+    let rect = |id: TileId| {
+        shell.read_with(&cx, |s, _| {
+            s.services
+                .workspaces
+                .active()
+                .tree()
+                .layout(crate::tiling::Rect::UNIT)
+                .into_iter()
+                .find(|(t, _)| *t == id)
+                .map(|(_, r)| r)
+                .expect("painted")
+        })
+    };
+    assert!(
+        rect(top).y > rect(right).y,
+        "the add direction was honoured"
+    );
+    assert_eq!(stack_events(&log, right).last(), Some(&None));
+    assert_eq!(stack_events(&log, top).last(), Some(&None));
+    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(top)
+    );
+
+    // `top` sits below `right`: pulling up puts `right` first in top's
+    // slot, and pulling left then puts `left` first again.
+    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    cx.simulate_keystrokes("alt-shift-k");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![left, top]);
+    assert_eq!(stack_events(&log, right).last(), Some(&Some((1, 2))));
+    assert_eq!(stack_events(&log, top).last(), Some(&Some((2, 2))));
+    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    cx.simulate_keystrokes("alt-shift-h");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(visible(&cx), vec![top], "one slot, focus still showing");
+    assert_eq!(stack_events(&log, left).last(), Some(&Some((1, 3))));
+    assert_eq!(stack_events(&log, top).last(), Some(&Some((3, 3))));
+}
+
+#[gpui::test]
+fn a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("alt-s");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.notice),
+        Some("not in a stack")
+    );
+    for chord in ["alt-shift-h", "alt-shift-j", "alt-shift-k", "alt-shift-l"] {
+        cx.simulate_keystrokes(chord);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.notice),
+            Some("no tile that way"),
+            "{chord}"
+        );
+    }
+}
+
+#[gpui::test]
 fn unstack_pops_the_focused_member_out_and_the_survivors_are_re_notified(
     cx: &mut gpui::TestAppContext,
 ) {

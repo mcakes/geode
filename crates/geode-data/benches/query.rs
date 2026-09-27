@@ -101,6 +101,34 @@ source_name = "ModelCode"
     SchemaSpec::from_doc(&doc).0
 }
 
+/// `schema()` plus the demo's instrument-carried `strike` and `expiry`,
+/// which the `tree_carried` view shows ungrouped under the unanimity rule.
+fn schema_with_carried() -> SchemaSpec {
+    let mut s = schema();
+    let text = r#"
+[risk_snapshot.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[risk_snapshot.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+"#;
+    let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+    let extra = SchemaSpec::from_doc(&doc).0;
+    let columns = extra.datasets.into_iter().next().unwrap().columns;
+    s.datasets
+        .first_mut()
+        .expect("risk_snapshot declared")
+        .columns
+        .extend(columns);
+    s
+}
+
 /// Mark plain-string key columns as textual as well. Unlike categorical
 /// ENUMs, these columns require row scans for text filtering, exposing the
 /// cost that dictionary lookup cannot remove.
@@ -139,6 +167,33 @@ kind = "measure"
 [[tree.columns]]
 name = "daily_trading_pnl"
 kind = "measure"
+
+# `tree` plus two ungrouped dimensions, read under the unanimity rule.
+# Only served by `schema_with_carried`; under `schema()` it is refused.
+[tree_carried]
+dataset = "risk_snapshot"
+grouping = ["lhu", "underlying_ref", "position_ref"]
+[[tree_carried.columns]]
+name = "delta01"
+kind = "measure"
+[[tree_carried.columns]]
+name = "gamma01"
+kind = "measure"
+[[tree_carried.columns]]
+name = "vega01"
+kind = "measure"
+[[tree_carried.columns]]
+name = "npv"
+kind = "measure"
+[[tree_carried.columns]]
+name = "daily_trading_pnl"
+kind = "measure"
+[[tree_carried.columns]]
+name = "strike"
+kind = "dimension"
+[[tree_carried.columns]]
+name = "expiry"
+kind = "dimension"
 
 [regrouped]
 dataset = "risk_snapshot"
@@ -180,9 +235,22 @@ fn service(
     std::sync::mpsc::Receiver<geode_data::DataEvent>,
     usize,
 ) {
+    service_with(rows, schema())
+}
+
+/// [`service`] under a caller-chosen schema.
+fn service_with(
+    rows: usize,
+    schema: SchemaSpec,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    DataService,
+    std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    usize,
+) {
     let db = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
-    let schema = schema();
     let ds = schema.dataset("risk_snapshot").unwrap().clone();
 
     let store = Store::open(db.path().join("geode.duckdb")).unwrap();
@@ -633,5 +701,40 @@ fn bench_resolve(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_requery, bench_resolve);
+/// Ungrouped dimensions under the unanimity rule: the `tree` view against
+/// the same view plus `strike` and `expiry`, over one million ingested rows
+/// with both columns stored. The difference is what the two columns cost:
+/// their aggregates ride the underlying-grain measure scan, and the result
+/// gains a numeric strike, a text expiry, and their two flags.
+fn bench_carried(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_carried");
+    group.sample_size(20);
+    let rows = 1_000_000usize;
+    let (_db, _src, svc, rx, loaded) = service_with(rows, schema_with_carried());
+    assert!(loaded > 0, "fixture ingested nothing");
+    eprintln!(
+        "\n[{rows} rows ingested {loaded}] result rows — tree_carried/scoped {} · \
+         tree_carried/scoped/d2 {} · tree_carried/unscoped {}",
+        requery(&svc, &rx, "tree_carried", &book_scope(), usize::MAX),
+        requery(&svc, &rx, "tree_carried", &book_scope(), 2),
+        requery(&svc, &rx, "tree_carried", &Scope::default(), usize::MAX),
+    );
+    for view in ["tree", "tree_carried"] {
+        group.bench_function(format!("{rows}_rows_{view}_scoped"), |b| {
+            b.iter(|| black_box(requery(&svc, &rx, view, &book_scope(), usize::MAX)))
+        });
+        group.bench_function(format!("{rows}_rows_{view}_scoped_depth_2"), |b| {
+            b.iter(|| black_box(requery(&svc, &rx, view, &book_scope(), 2)))
+        });
+        group.bench_function(format!("{rows}_rows_{view}_unscoped_depth_2"), |b| {
+            b.iter(|| black_box(requery(&svc, &rx, view, &Scope::default(), 2)))
+        });
+        group.bench_function(format!("{rows}_rows_{view}_unscoped"), |b| {
+            b.iter(|| black_box(requery(&svc, &rx, view, &Scope::default(), usize::MAX)))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_requery, bench_resolve, bench_carried);
 criterion_main!(benches);

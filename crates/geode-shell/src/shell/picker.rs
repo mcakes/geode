@@ -199,7 +199,7 @@ const WIDTH: f32 = 480.0;
 
 /// Open the picker (`frame::pick` with `column: None`, `frame::
 /// pick_<column>` or a chip body click with `column: Some(..)`). A no-op
-/// if a modal is already open, mirroring every other `open` here.
+/// when this kind is already open (see `dialog::can_open`).
 /// `column` names an unrecognised column (stale palette state from before
 /// a reload dropped it, say) falls back to the `Columns` stage rather than
 /// opening on a column that no longer exists.
@@ -209,7 +209,7 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Picker) {
         return;
     }
     let stage = match column {
@@ -236,6 +236,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Picker,
         "Pick",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -796,7 +797,21 @@ pub(crate) fn hint_row(
     fg: Hsla,
     border: Hsla,
 ) -> AnyElement {
-    let children: Vec<AnyElement> = hints
+    hint_row_with(hints, Vec::new(), selector, width, fg, border)
+}
+
+/// [`hint_row`] with `extra` pieces after the static hints: a key that
+/// needs modifiers (a `mod` chord, resolved through the user's alias)
+/// cannot be a [`Hint::Key`], which parses with none.
+pub(crate) fn hint_row_with(
+    hints: &[Hint],
+    extra: Vec<AnyElement>,
+    selector: &'static str,
+    width: f32,
+    fg: Hsla,
+    border: Hsla,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = hints
         .iter()
         .map(|hint| match hint {
             Hint::Key(spec) => {
@@ -807,6 +822,7 @@ pub(crate) fn hint_row(
             Hint::Text(text) => div().child(*text).into_any_element(),
         })
         .collect();
+    children.extend(extra);
     div()
         .id(selector)
         .w(scale::design(width))

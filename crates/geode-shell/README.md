@@ -29,7 +29,7 @@ GPUI globals or provide rendering helpers.
 | `actions` | The shared action registry; the keymap maps keys to action ids and the palette lists them. |
 | `frame` | The shared frame: scope with undo/redo, the active grouping slot, as-of, recent publishes, saved scopes, named expressions (`expressions.toml`, rebuilt on reload), and the data and config generations, as one value every tile observes. `effective_scope` composes the frame and tile scope layers and resolves named references, returning the first missing or invalid one as an error instead of a scope. |
 | `scopebar`, `commandline`, `palette_usage`, `listfilter`, `choice`, `vimnav`, `vimfind`, `footer` | The models behind the scope bar, the per-tile `:` line, palette ranking (frecency), filtered lists, choice-with-typeahead, vim-style list motion and `/` find, and dialog footer hints. |
-| `exprcomplete` | Pure scope-expression completion: derives context from text and caret, retains up to 50 ranked rows, and caches categorical values per column. Loading tags reject stale replies; superseded loading entries are discarded so revisiting a column can request again. |
+| `exprcomplete` | Pure scope-expression completion: derives context from text and caret, retains up to 50 ranked rows, and caches categorical values per column. Loading tags reject stale replies; superseded loading entries are discarded so revisiting a column can request again. Scope changes clear the cache. Whole/Add frame dialogs also offer named expressions, whose acceptance stages a name and erases the typed prefix. |
 | `dialogmode` | Shared Normal/Filter transitions. Keyboard and frozen-row clicks snapshot the query; Escape restores it and bare Enter keeps it, with neither exit acting on a row. See [dialog filtering](../../docs/current/shell.md#dialog-filtering) for focus and stage-specific exceptions. |
 | `theme`, `fonts`, `fontsize`, `linenumbers`, `tileadd`, `tips` | Settings and their pure resolution rules: the bundled gpui-component themes, the bundled Inter and JetBrains Mono faces, the rem scale knob, `[ui] line_numbers`, the add-tile direction, tooltip text from the live keymap. |
 | `config_write`, `keymap_edit`, `log_persist`, `reload` | Ordered user-layer writes, comment-preserving keyed edits, log-level persistence, and reload detection/rejection. See the [configuration contract](../../docs/current/configuration.md#runtime-edits) for write guarantees and the limits of keep-last-good. |
@@ -42,10 +42,12 @@ GPUI globals or provide rendering helpers.
 
 | Module | Holds |
 |---|---|
-| `shell` | `ShellView`, the one view that owns the window: key dispatch (`input.rs`), tile occupants and focus restore (`occupants.rs`), rendering, drag and drop, the toolbar, sidebar and status bar, the palette, the settings, keybindings and object dialogs (`objectdialog/`), the dimension picker, the as-of dialog, the scope expression dialog and its whole/term/add modes (`scope_expr_view`), the toolbar's add-a-filter menu (`addfilter`), the choice dialog (including `tile::open_with`'s context-filtered kind list), the stack member list, which-key, hot reload, session I/O, a grid tile's selection footer strip (`aggregates`: the extent and each column's label and total, laid out from prepared text and per-column colors the tile memoizes, never formatted or resolved at paint time), the color doors (`chip`, `listrow`, `control`, `colours`, `scale`), and `kbd`, the one door every on-screen key paints through (gpui-component's `Kbd`). Its tests live in `shell/tests/`. |
-| `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab inserts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named-expression fields request unscoped values; unresolved scope references report an error before requesting. |
+| `shell` | `ShellView`, the window owner: tile occupants and focus, input dispatch, rendering, drag and drop, chrome, dialogs and palette, hot reload, and session I/O. `aggregates` renders selection extents and totals prepared by grid tiles. Shared color helpers and `kbd` keep chrome presentation consistent. Tests live in `shell/tests/`. |
+| `shell/dialog` | Modal stack ownership, opening, shared-input synchronization, and focus restoration. Only the top dialog renders and receives keys. A kind cannot open twice; pop restores the covered dialog's text and caret. See [modal lifetime](../../docs/current/input-and-dialogs.md#modal-lifetime-and-focus). |
+| `shell/scope_expr_view` | Frame expression editing in Whole, Term, and Add modes. Whole/Add stage named-expression chips; `mod+s` saves typed text as a named definition. Term mode can replace one guarded term with a named reference. |
+| `shell/expr_suggest` | Shared expression-completion controller and renderer for frame, Scopes, and Expressions fields. Observes text and caret changes, requests values under reserved `EXPR_KEY`, and accepts rows through undoable range replacement. Tab accepts; Shift-Tab, Up/Down, and Ctrl-P/Ctrl-N move the highlight. Named rows stage references only in frame Whole/Add mode. Named-definition fields request unscoped values; unresolved scope references report an error before requesting. |
 | `module` | The module-hosting contract: `TileContent` (including `launch_context` and `launched`), `ModuleFactory` (including `accepts` and `launch_state`), `ModuleRoster`, `Delivery`, `StackHandle`. `module::recording` is the test double a downstream crate hosts a neighbour with. |
-| `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
+| `shell/objectdialog` | Domain drafts, staged editing, validation, overrides, and debounced persistence. `render::open_object` opens a named object's edit stage or reports that it is undefined. `apply::queue_object` queues a whole user-layer definition with pending edits. The Expressions adapter validates named definitions and identifies referring scopes before deletion. See [configuration dialogs](../../docs/current/configuration-dialogs.md) for ownership and failure boundaries. |
 
 ## Globals
 
@@ -85,7 +87,10 @@ change most often hits:
   render thread. Per-frame heap churn is a defect.
 - Dialogs open through `shell::dialog::open_shell_dialog`, never
   `window.open_dialog`. A mouse-opened dialog relies on the
-  `prevent_default` inside that door.
+  `prevent_default` inside that door. Openers check `dialog::can_open` before
+  installing state: a duplicate kind would overwrite the covered dialog's draft.
+  Unclaimed dialog-opening chords and the palette can open above a dialog;
+  tile command lines, find prompts, and stack lists are refused while it is open.
 - The pure state of a dialog is the truth; `dialog::sync_dialog_text`
   reconciles the shared input's text and focus after state transitions.
   Expression completion replaces the selected range directly to preserve input

@@ -101,6 +101,13 @@ checked during compilation and is unaffected by this flag. See
 [view validation](typed-documents.md#views-and-presentation) and
 [query refusals](data-path.md#queries-and-time-travel) for the boundaries.
 
+An ungrouped `dimension` column can still be displayed when a declared grain
+of the primary dataset carries it alongside the whole grouping. Each tree row
+shows its value when all contributing rows agree, `mixed` when they disagree,
+and blank when all values are NULL. If no grouping, join, or carrying grain
+can supply it, a required column refuses the view. See
+[ungrouped dimension columns](data-path.md#ungrouped-dimension-columns).
+
 ## Validation boundaries
 
 Typed readers in `geode-core` interpret supplied documents without I/O and
@@ -421,6 +428,17 @@ parser. Zero, invalid strings, and non-string values warn at
 `app.pricing.refresh` and use 30 seconds. A reload applies `refresh` to every
 open pricer tile without a restart; a sheet's own `:refresh` still overrides
 it.
+
+`underlyings` lists the underlyings the pricer's entry bar suggests, in the
+order it offers them: an array of strings, trimmed and upper-cased, with
+blank entries dropped and duplicates keeping their first position. A non-string element warns at
+`app.pricing.underlyings` and is skipped. A value that is not an array warns
+and is ignored: on a reload the bar keeps the list it had. A reload applies a
+valid list to open tiles without a restart. An edit to `underlyings` alone
+still runs the pricer's full reload, which restarts every open tile's refresh
+timer. An absent `underlyings` clears the list, including on reload; a
+non-array value at startup leaves it empty. With an empty list the bar says
+no underlyings are configured.
 
 `pricer_views` holds the pricer's named column views. The builtin layer
 carries the two bundled views; like other named objects, a desk or user entry

@@ -88,10 +88,13 @@ selected columns, grouping, sort, and per-column display properties. Parsing
 and schema validation are separate. `validate` checks the primary dataset, join
 datasets, each join's keys against both the joined dataset's grains and the
 view's own grouping, selected-column references, a `measure` column's role in the
-primary dataset, a `dimension` column's reachability through the grouping or a
-join, and grouping references. Derived dimensions must resolve to a source column
-in the primary dataset. It does not validate derived SQL or sort keys. The
-compiler emits them into SQL; DuckDB binding and execution can reject them.
+primary dataset, a `dimension` column's reachability through the grouping, a
+join, or a declared grain carrying it alongside the whole grouping (the
+unanimity rule; `ViewSpec::ungrouped_dimensions` lists those columns for both
+validation and the compiler), and grouping references. Derived dimensions
+must resolve to a source column in the primary dataset. It does not validate
+derived SQL or sort keys. The compiler emits them into SQL; DuckDB binding
+and execution can reject them.
 
 The data service refuses a view by name when validation reports an error.
 A column's `kind` defaults to `measure`; joins and columns default to

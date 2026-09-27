@@ -4,20 +4,23 @@
 # detect the broken behavior. A surviving mutation identifies a behavior the
 # selected package's tests did not distinguish from the original code.
 #
-# Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
+# Usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]
 #
 # --anchors-only runs no Cargo commands and changes no source files. It checks
 # every selected anchor for exactly one match, reports ANCHOR or AMBIG, and
 # exits nonzero for either finding or an empty selection. Run the unfiltered
 # anchor check before merging and after editing an anchored source block.
-# Nonempty test filters are checked against test-attributed function names under
+# Test filters are checked against test-attributed function names under
 # the selected package's src directory. FILTER means no match; FILTERx means
 # several matches without an exact function name and is also an error. FILTER?
 # means an exact name plus other substring matches and is a warning. This is a
 # source scan, not Cargo test discovery: it does not evaluate cfg attributes,
 # expand macros, or distinguish identical function names in different modules.
-# DUP and SHADOW report shared or overlapping anchors as warnings. They do not
-# by themselves establish that the mutations test the same behavior.
+# REDUNDANT (an entry repeating another's anchor, replacement, package and
+# filter), NOFILTER (an empty test filter) and NOOP (a replacement equal to
+# its anchor) are errors. ALSO is information: a second test detecting the same mutation.
+# A shared anchor with a different replacement, or an anchor nested in a
+# longer one, is a different mutation and is not reported.
 #
 # --changed defaults to main. It selects files changed versus REF, changed in
 # the working tree, or untracked. The set is captured before mutation so the
@@ -37,10 +40,24 @@
 # means the declared filter matched no tests. Correct either mismatch before
 # relying on the entry as evidence for its named test.
 #
-# A failed Cargo command is reported as caught; this script does not distinguish
-# compilation failure from a failing assertion. Inspect the failure when
-# validating an entry. Repeating a deterministic fixture does not add coverage;
-# the fixture must exercise the behavior the mutation changes.
+# A mutation that does not compile is reported as BUILD, not caught: cargo
+# failed before any test ran, so the entry defends nothing. BUILD is an error
+# and makes the run exit 1, as does a stale entry (ANCHOR: file missing or
+# anchor unmatched) in a mutation run or build check. --build-check applies each selected mutation and
+# compiles it with `cargo check --profile test` on the target a mutation run
+# tests (the lib, or geode-app's bins, with their unit tests; not integration
+# tests) without running tests. It audits for replacements left stale by
+# signature changes, which --anchors-only cannot see because it never
+# compiles anything. A mutation run or build check that selects no entry
+# prints "ran 0 entries (nothing selected)" and exits 1, so a mistyped
+# substring does not read as a pass; --changed skipping every candidate
+# because no anchored file changed exits 0. Repeating a deterministic fixture
+# does not add coverage; the fixture must exercise the behavior the mutation
+# changes.
+#
+# The exit status reports harness errors only (a BUILD, a stale entry, an
+# empty selection, bad arguments); SURVIVED, caught* and FILTER are verdicts
+# read from the output lines and do not change the exit status.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -55,8 +72,8 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
-# --anchors-only collects (name, file, anchor, package, filter) NUL-separated
-# here and checks them all in one pass at the end.
+# --anchors-only collects (name, file, anchor, replacement, package, filter)
+# NUL-separated here and checks them all in one pass at the end.
 anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
@@ -96,6 +113,10 @@ trap 'cleanup; exit 143' TERM
 #                                           a test other than '$test_filter'"
 #     (the "caught for the wrong reason" case the header above warns
 #     about, now visible — fix it by naming the right test)
+#   - any failing cargo run whose log
+#     says "could not compile"          -> "BUILD     $name  <-- mutation does
+#                                           not compile; no test ran" in place
+#                                           of caught or caught*; an error
 #   - the filtered run passes and the
 #     full suite also passes            -> "SURVIVED  $name  <-- no test
 #                                           sees this"
@@ -106,8 +127,12 @@ trap 'cleanup; exit 143' TERM
 #                                           plain caught/SURVIVED verdict
 # Omitting `test_filter` runs the full crate suite.
 anchors_only=0
+build_only=0
 if [[ "${1:-}" == --anchors-only ]]; then
   anchors_only=1
+  shift
+elif [[ "${1:-}" == --build-check ]]; then
+  build_only=1
   shift
 fi
 changed_ref=""
@@ -118,16 +143,33 @@ elif [[ "${1:-}" == --changed=* ]]; then
   changed_ref="${1#--changed=}"
   shift
 fi
+usage="usage: zsh scripts/mutation-check.sh [--anchors-only | --build-check] [--changed[=REF]] [substring]"
 only="${1:-}"
 if [[ "$only" == --* ]]; then
-  # Flags are positional: --anchors-only first, then --changed, then the
+  # Flags are positional: a mode flag first, then --changed, then the
   # substring. A flag in the wrong slot used to become the substring, match
   # no entry, and exit 0 having checked nothing.
-  echo "usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]" >&2
+  echo "$usage" >&2
   echo "unexpected argument in the substring slot: $only" >&2
   exit 2
 fi
+if (( $# > 1 )); then
+  # An argument after the substring used to be ignored, so a trailing
+  # `--anchors-only` started a real mutation run that edits source.
+  echo "$usage" >&2
+  echo "unexpected extra argument: $2" >&2
+  exit 2
+fi
 skipped=0
+# Entries past the substring and --changed filters, whatever their verdict.
+selected=0
+build_failures=0
+# Stale entries in a mutation run or build check: a missing file, an
+# unreadable one, or an anchor that no longer matches. Each defends nothing,
+# so any of them fails the run; otherwise a substring selecting only stale
+# entries would read as a pass.
+anchor_failures=0
+built=0
 changed_files=""
 
 if [[ -n "$changed_ref" ]]; then
@@ -141,6 +183,27 @@ if [[ -n "$changed_ref" ]]; then
   )
 fi
 
+# A mutation that does not compile fails cargo before any test runs.
+# Reading that exit as a catch reports success for an entry that defends
+# nothing, forever: the anchor still matches, so no static gate sees it.
+# Keyed on cargo's compile-failure line, not the exit status: a failing
+# assertion also exits nonzero and is a genuine catch.
+compile_failed() {
+  grep -q "could not compile" "$log"
+}
+
+# Prints the verdict for a failed cargo run: BUILD if it never compiled,
+# otherwise the catch line given.
+report_failure() {
+  local name="$1" caught_line="$2"
+  if compile_failed; then
+    echo "BUILD     $name  <-- mutation does not compile; no test ran"
+    build_failures=$((build_failures + 1))
+  else
+    echo "$caught_line"
+  fi
+}
+
 run_mutation() {
   local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}" filter="${6:-}"
   if [[ -n "$only" && "$name" != *"$only"* ]]; then
@@ -150,6 +213,7 @@ run_mutation() {
     skipped=$((skipped + 1))
     return 0
   fi
+  selected=$((selected + 1))
   # geode-app is bin-only (no [lib] target — see its Cargo.toml), so
   # `--lib` fails outright with "no library targets found"; `--bins`
   # is the equivalent for it. Every other package here is lib-only, so
@@ -159,15 +223,17 @@ run_mutation() {
     target_flag="--bins"
   fi
   if (( anchors_only )); then
-    # Retain the package and test filter alongside the source anchor so the
-    # final source scan can validate both locations and intended tests.
-    printf '%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$pkg" "$filter" >> "$anchors"
+    # Retain the replacement, package and test filter alongside the source
+    # anchor so the final scan can validate locations and intended tests, and
+    # can recognise entries that repeat another's anchor and replacement.
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$name" "$file" "$from" "$to" "$pkg" "$filter" >> "$anchors"
     return 0
   fi
   # A moved or deleted file is a stale entry, reported by name, not a
   # traceback that ends the run (`set -e` would otherwise stop here).
   if [[ ! -f "$file" ]]; then
     echo "ANCHOR    $name  <-- file missing: $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   # How many times the anchor occurs, checked before anything is written.
@@ -183,6 +249,7 @@ PY
   ) || hits=-1
   if (( hits < 0 )); then
     echo "ANCHOR    $name  <-- could not read $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits == 0 )); then
@@ -190,6 +257,7 @@ PY
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits > 1 )); then
@@ -202,6 +270,20 @@ import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
+  if (( build_only )); then
+    # The same target a mutation run tests ($target_flag) under the test
+    # profile, i.e. with cfg(test) and its unit tests, and nothing more.
+    # Integration tests are excluded because a mutation run never builds
+    # them: a replacement that broke only one would read BUILD here but
+    # compile and be tested in a real run.
+    built=$((built + 1))
+    if ! cargo check -p "$pkg" $target_flag --profile test >"$log" 2>&1; then
+      echo "BUILD     $name  <-- mutation does not compile; no test ran"
+      build_failures=$((build_failures + 1))
+    fi
+    restore
+    return 0
+  fi
   if [[ -n "$filter" ]]; then
     if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
@@ -209,7 +291,7 @@ PY
         filter=""
       fi
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
       restore
       return 0
     fi
@@ -220,13 +302,13 @@ PY
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught*   $name  <-- caught by a test other than '$filter'"
+      report_failure "$name" "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
     if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
-      echo "caught    $name"
+      report_failure "$name" "caught    $name"
     fi
   fi
   restore
@@ -779,11 +861,11 @@ run_mutation "views: a join keyed outside the grouping is refused" \
 # repeats across every row of its grain — so the total on screen looks like a
 # number and is not one. `kind` defaults to "measure", so this is the mistake
 # the shorthand form makes.
-# A dimension reaches the row only by being grouped or by coming off a join;
-# the spine selects nothing else. Mutated so the grouping test never holds, a
-# dimension column the view declares but nothing supplies goes unreported, and
-# the blotter paints that column empty on every row forever with no diagnostic
-# anywhere the trader would look.
+# A dimension reaches the row only by being grouped, by coming off a join, or
+# by the unanimity rule from a grain carrying it alongside the grouping.
+# Mutated so the check never holds, a dimension column the view declares but
+# nothing supplies goes unreported, and the blotter paints that column empty on
+# every row forever with no diagnostic anywhere the trader would look.
 run_mutation "views: a dimension column must be reachable" \
   crates/geode-core/src/view.rs \
   '                    if let ViewColumn::Dimension { required, .. } = other
@@ -792,6 +874,136 @@ run_mutation "views: a dimension column must be reachable" \
                         && false' \
   geode-core \
   a_dimension_column_neither_grouped_nor_joined_refuses_the_view
+
+# Validation must accept an ungrouped dimension a grain can supply, or a view
+# the Views dialog offers (every dimension-role column) refuses on save.
+run_mutation "unanimity: validate accepts a carried ungrouped dimension" \
+  crates/geode-core/src/view.rs \
+  '                            .any(|u| u.name == name && u.grain.is_some())' \
+  '                            .any(|_u| false)' \
+  geode-core \
+  an_ungrouped_dimension_a_grain_carries_alongside_the_grouping_is_accepted
+
+# The grain must carry the column itself. Without that check a position-only
+# dataset validates a strike column and the compiler reads a table that does
+# not store it — a binder error at query time instead of a named refusal.
+run_mutation "unanimity: validate refuses an ungrouped dimension no grain carries" \
+  crates/geode-core/src/view.rs \
+  '        let carries_column = ds.carries(*g, column);' \
+  '        let carries_column = true;' \
+  geode-core \
+  an_ungrouped_dimension_no_grain_carries_refuses_the_view
+
+# Judged against every grouping column: a grain that does not carry one of them
+# cannot join its aggregate to the spine at that level.
+run_mutation "unanimity: the grain carries the whole grouping" \
+  crates/geode-core/src/view.rs \
+  '        let carries_grouping = grouping.iter().all(|c| ds.carries(*g, dims.base_column(c)));' \
+  '        let carries_grouping = grouping.iter().all(|_c| true);' \
+  geode-core \
+  the_unanimity_grain_is_the_coarsest_carrying_the_column_and_the_whole_grouping
+
+# The rule itself: a value only where every row agrees. `any_value` paints an
+# arbitrary instrument's strike on a position that holds several — a plausible
+# wrong value, worse than the explicit marker.
+run_mutation "unanimity: disagreeing rows are mixed, never any_value" \
+  crates/geode-data/src/query/compile.rs \
+  '        format!("case when count({c}) = count(*) and min({c}) = max({c}) then min({c}) end as {c}"),' \
+  '        format!("any_value({c}) as {c}"),' \
+  geode-data \
+  an_ungrouped_dimension_shows_a_value_only_where_every_row_under_it_agrees
+
+# A NULL beside a value is mixed. Without the count comparison it paints blank
+# (the value is withheld and the flag not set), claiming no row has a value.
+run_mutation "unanimity: a NULL beside a value is mixed" \
+  crates/geode-data/src/query/compile.rs \
+  '(count({c}) < count(*) or min({c}) <> max({c}))' \
+  '(min({c}) <> max({c}))' \
+  geode-data \
+  a_null_beside_a_value_is_mixed_and_no_value_at_all_is_blank
+
+# Every row NULL is blank, not mixed: there is nothing to disagree about.
+run_mutation "unanimity: no value at all is blank, not mixed" \
+  crates/geode-data/src/query/compile.rs \
+  '"(count({c}) > 0 and (count({c})' \
+  '"((count({c})' \
+  geode-data \
+  a_null_beside_a_value_is_mixed_and_no_value_at_all_is_blank
+
+# The backstop for a caller that skipped validation: a required column no grain
+# can supply is an error, not a column silently absent from the row.
+run_mutation "unanimity: the compiler refuses a required uncarried dimension" \
+  crates/geode-data/src/query/compile.rs \
+  '            None if u.required => {' \
+  '            None if false => {' \
+  geode-data \
+  an_unreachable_ungrouped_dimension_is_dropped_if_optional_and_an_error_if_required
+
+# The aggregates ride an existing measure scan of their grain rather than a
+# second scan of the same table.
+run_mutation "unanimity: folded into the measure aggregate at its grain" \
+  crates/geode-data/src/query/compile.rs \
+  '        if !folded.is_empty() {' \
+  '        if false {' \
+  geode-data \
+  an_ungrouped_dimension_neither_changes_the_rows_nor_scans_twice
+
+# A flag index that is not a boolean companion would read an arbitrary column's
+# truthiness as "the rows disagree".
+run_mutation "unanimity: a mixed flag must be a boolean column" \
+  crates/geode-core/src/snapshot.rs \
+  '                    b.column(flag).data_type() == &arrow::datatypes::DataType::Boolean' \
+  '                    true' \
+  geode-core \
+  a_mixed_flag_must_name_a_boolean_companion_and_a_null_flag_is_not_mixed
+
+# Mixed is NULL in the data. Read the value first and it paints blank — the one
+# thing it must not look like.
+run_mutation "unanimity: a mixed cell paints the marker, not blank" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            if snapshot.is_mixed_at(idx, row) {' \
+  '            if false {' \
+  geode-blotter \
+  a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing
+
+run_mutation "unanimity: a mixed cell sorts ahead of the blanks" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            TextKey::Mixed => 2,' \
+  '            TextKey::Mixed => 3,' \
+  geode-blotter \
+  a_mixed_dimension_sorts_after_values_and_before_blanks_both_ways
+
+# As text "100" sorts before "95". A numeric dimension must reach the blotter
+# as a number and be compared as one.
+run_mutation "unanimity: a numeric dimension keeps its type in the result" \
+  crates/geode-data/src/query/compile.rs \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\" as \"{name}\""));' \
+  '        unanimity_selects.push(format!("{alias}.\"{name}\"::varchar as \"{name}\""));' \
+  geode-data \
+  the_mixed_flag_reaches_the_snapshot_beside_a_null_value
+
+run_mutation "unanimity: a numeric dimension sorts by number" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.total_cmp(&y),' \
+  '                (TextKey::Number(x), TextKey::Number(y)) => x.to_string().cmp(&y.to_string()),' \
+  geode-blotter \
+  a_numeric_dimension_sorts_by_number_with_mixed_and_blanks_last
+
+# The text format's precision is 0: through it 4250.5 paints as a strike of
+# 4251 that does not exist.
+run_mutation "unanimity: a numeric dimension paints its exact value" \
+  crates/geode-blotter/src/core/cache.rs \
+  '        Some(v) => Some(v.to_string()),' \
+  '        Some(v) => Some(format!("{v:.0}")),' \
+  geode-blotter \
+  a_mixed_dimension_cell_paints_the_marker_and_a_blank_one_paints_nothing
+
+run_mutation "unanimity: a mixed cell yanks the marker, not blank" \
+  crates/geode-blotter/src/core/yank.rs \
+  '                    Some(i) if snapshot.is_mixed_at(i, row) => MIXED.to_string(),' \
+  '                    Some(i) if false => MIXED.to_string(),' \
+  geode-blotter \
+  a_mixed_dimension_yanks_its_marker_and_a_blank_one_yanks_nothing
 
 run_mutation "views: a measure column must really be a measure" \
   crates/geode-core/src/view.rs \
@@ -1215,8 +1427,8 @@ run_mutation "scope: conjuncts routed separately" \
 
 run_mutation "spine: assembled from every aggregate, not the finest" \
   crates/geode-data/src/query/compile.rs \
-  '.filter(|d| own_present[*d] == *d).collect();' \
-  '.filter(|d| own_present[*d] == *d && own.len() == depth).collect();' \
+  '.filter(|d| shape.own_present[*d] == *d)' \
+  '.filter(|d| shape.own_present[*d] == *d && shape.own.len() == depth)' \
   geode-data \
   a_cash_only_position_has_a_row_at_the_lhu_level
 
@@ -2050,7 +2262,7 @@ run_mutation "keymap: a reset counts a desk override as the user's" \
 run_mutation "keymap: a reset names the rendered key, not the file's spelling" \
   crates/geode-shell/src/keymap/build.rs \
   '                    key_source: spec.clone(),' \
-  '                    key_source: crate::palette::render_binding(&keystrokes),' \
+  '                    key_source: crate::palette::render_binding(&parse_binding(spec, mod_alias).unwrap_or_default()),' \
   geode-shell \
   the_override_carries_the_files_own_key_spelling
 
@@ -2237,9 +2449,9 @@ run_mutation "keybindings: d performs its write without acknowledging it" \
 # is open the root must carry a context the reclaim names.
 run_mutation "dialog: tab escapes the modal in normal mode" \
   crates/geode-shell/src/shell/render.rs \
-  '            .key_context(if self.modal.is_some() {
+  '            .key_context(if self.modal_open() {
                 "GeodeShell GeodeModalOpen"' \
-  '            .key_context(if self.modal.is_some() {
+  '            .key_context(if self.modal_open() {
                 "GeodeModalUnreclaimed"' \
   geode-shell \
   tab_in_normal_mode_leaves_focus_on_the_shell_root
@@ -2514,8 +2726,20 @@ run_mutation "hosting: a closed tile drops its occupant" \
 
 run_mutation "field chords: a modified keystroke in the focused field dispatches its shell binding" \
   crates/geode-shell/src/shell/input.rs \
-  '                && ks.mods.is_chord()' \
-  '                && false' \
+  '            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()' \
+  '            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && false' \
   geode-shell \
   a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
 
@@ -2528,8 +2752,14 @@ run_mutation "field chords: shift alone is typing, not a chord" \
 
 run_mutation "field chords: resolved against the workspace context alone, never the focused tile's" \
   crates/geode-shell/src/shell/input.rs \
-  '                let stack = [KeyContext::new("workspace")];' \
-  '                let stack = self.context_stack(cx);' \
+  '            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()
+            {
+                let stack = [KeyContext::new("workspace")];' \
+  '            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()
+            {
+                let stack = self.context_stack(cx);' \
   geode-shell \
   a_chord_in_the_focused_tiles_own_context_does_not_fire_from_the_field
 
@@ -2553,6 +2783,211 @@ run_mutation "field chords: a dispatched chord reflects the frame's text back in
   '' \
   geode-shell \
   a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it
+
+# ---- dialog stack: pop one level, route by the top kind, chords and palette
+#
+# A pop that clears every kind shows up only when a second dialog was open, and
+# routing by "first Some field" shows up only when two states coexist. Neither
+# single-dialog test can see these.
+
+run_mutation "dialog stack: close clears the whole stack instead of the top" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if let Some(top) = self.modals.pop() {' \
+  '        if let Some(top) = std::mem::take(&mut self.modals).pop() {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: typed queries route to the Object state regardless of the top" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            match view.top_kind() {' \
+  '            match view.top_kind().map(|_| dialog::DialogKind::Object) {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: sync writes the Object query whatever is on top" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    let (mode, listening, query) = match shell.top_kind() {' \
+  '    let (mode, listening, query) = match shell.top_kind().map(|_| DialogKind::Object) {' \
+  geode-shell \
+  a_pushed_dialog_owns_the_shared_input_until_it_pops
+
+run_mutation "dialog stack: a pop does not restore the covered input" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if let Some(saved) = top.saved_input.take() {' \
+  '    if let Some(saved) = top.saved_input.take().filter(|_| false) {' \
+  geode-shell \
+  a_covered_expression_dialog_gets_its_typed_text_back
+
+run_mutation "dialog stack: a covered expression field refreshes from the top dialog's text" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => None,' \
+  '            Some(state.expr.get_or_insert_with(ExprCompletion::default))
+        }
+        _ => view.scope_expr_dialog.as_mut().map(|s| &mut s.completion),' \
+  geode-shell \
+  a_covered_expression_dialog_gets_its_typed_text_back
+
+run_mutation "dialog stack: a kind already in the stack is pushed again" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    let Some(at) = view.modals.iter().position(|m| m.kind == kind) else {' \
+  '    let Some(at) = view.modals.iter().position(|_| false) else {' \
+  geode-shell \
+  a_kind_already_in_the_stack_is_refused
+
+run_mutation "dialog stack: a nested push overwrites the base's return-to-field flag" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    if view.modals.is_empty() {' \
+  '    if true {' \
+  geode-shell \
+  the_last_pop_returns_to_the_field_after_a_palette_mid_stack
+
+run_mutation "dialog stack: a palette over the stack records the return-to-field flag" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if !self.modal_open() {' \
+  '        if true {' \
+  geode-shell \
+  the_last_pop_returns_to_the_field_after_a_palette_mid_stack
+
+run_mutation "dialog stack: every chord reaches through a dialog" \
+  crates/geode-shell/src/shell/input.rs \
+  '                        && dialog::opens_dialog(&action)' \
+  '                        && true' \
+  geode-shell \
+  a_non_dialog_chord_is_inert_behind_a_dialog
+
+# Task 4's render guard: an open dialog must own `pending_focus_restore`'s
+# focus hand-off, or a reload that closes a palette mid-stack leaves the
+# keyboard on the shell root instead of the top dialog. Mutated to always
+# skip the modal branch, `a_reload_closing_a_palette_over_the_stack_
+# refocuses_the_top_dialog` sees focus land on the root.
+run_mutation "dialog stack: render hands focus to the root under a dialog" \
+  crates/geode-shell/src/shell/render.rs \
+  '            if self.modal_open() {' \
+  '            if false {' \
+  geode-shell \
+  a_reload_closing_a_palette_over_the_stack_refocuses_the_top_dialog
+
+# ---- dialog stack: Normal-mode catch-alls decline an unrecognized chord
+#
+# Ruling 2026-09-26 (Task 3): a Normal-mode surface with a bare-key
+# catch-all must still let an unrecognized ctrl/alt/cmd chord fall through
+# to the shell, or a dialog-opening chord can never reach the shell while
+# that surface is on top. Each site's own claim (a bare key stays claimed)
+# is unaffected; only the chord's decline is mutated back to a claim.
+
+run_mutation "dialog stack: the object dialog's browse stage claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();' \
+  '            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_an_open_dialog
+
+run_mutation "dialog stack: the object dialog's edit stage claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return !ks.mods.is_chord();' \
+  '        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_the_object_edit_stage
+
+run_mutation "dialog stack: keybindings Normal mode claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();' \
+  '            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return true;' \
+  geode-shell \
+  a_dialog_chord_pushes_over_keybindings_in_normal_mode
+
+run_mutation "dialog stack: settings route claims a chord instead of declining it" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            None if ks.mods.is_chord() => KeyAction::PassThrough,' \
+  '            None if ks.mods.is_chord() => KeyAction::Drop,' \
+  geode-shell \
+  a_dialog_chord_pushes_over_settings_in_normal_mode
+
+# ---- final review (2026-09-27): the palette catcher over a dialog stack,
+# and palette-run transient chrome refused over a dialog
+#
+# gpui fires `on_mouse_down` for every hovered hitbox, not only the topmost.
+# Without `occlude()`, a click on the full-window palette click-catcher also
+# reaches whatever it covers: the modal backdrop beneath it (popping the
+# dialog) or a dialog row (committing or opening it).
+run_mutation "dialog stack: the palette click-catcher does not occlude an open dialog" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .when(self.modal_open(), |d| d.occlude())' \
+  '                        .when(false, |d| d.occlude())' \
+  geode-shell \
+  a_click_outside_the_palette_over_a_dialog_closes_only_the_palette
+
+# The modal backdrop occludes likewise: without it a click outside the panel
+# pops the dialog and also reaches the chrome beneath (a scope chip's `×`).
+run_mutation "dialog stack: the modal backdrop does not occlude the chrome beneath" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        // and also reaches the chrome beneath (a scope chip'"'"'s `×`, a tile press).
+        .occlude()' \
+  '        // and also reaches the chrome beneath (a scope chip'"'"'s `×`, a tile press).' \
+  geode-shell \
+  a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip
+
+# Every expression field shares one pool key; a covering dialog's request can
+# replace the covered field's, so a revealed field must forget its values and
+# ask again, or it says "loading values…" forever.
+run_mutation "dialog stack: a revealed expression field keeps a request that never replies" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        super::expr_suggest::revealed(view, cx);' \
+  '' \
+  geode-shell \
+  a_revealed_field_asks_again_for_the_values_a_covering_dialog_may_have_replaced
+
+# The palette reaches every action (ruling 5), including three that would
+# open real transient chrome behind the stack; they must be refused rather
+# than left running unreachable behind it.
+run_mutation "dialog stack: transient chrome runs behind the stack instead of being refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.modal_open()
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  '        if false
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  geode-shell \
+  palette_transient_chrome_is_refused_over_a_dialog
 
 # ---- overlays return focus to the field they opened from (ruling 2026-09-12)
 
@@ -4126,7 +4561,7 @@ run_mutation "palette: extending a run outbids restarting at a word start" \
 run_mutation "palette: query words match in any order" \
   crates/geode-shell/src/palette.rs \
   '        combine_words(alone).or_else(|| align_words_disjoint(&words, candidate, title_len));' \
-  '        { let _ = alone; None };' \
+  '        { let _ = alone; None::<(u32, Vec<usize>)> };' \
   geode-shell words_typed_out_of_order_still_match
 
 # When the words' best alignments collide, each is placed again on the
@@ -5013,8 +5448,8 @@ run_mutation "objectdialog: the browse list ignores the query it displays" \
 # records for `settings`.
 run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
   crates/geode-shell/src/shell/mod.rs \
-  '        self.object_dialog = None;' \
-  '' \
+  '            DialogKind::Object => self.object_dialog = None,' \
+  '            DialogKind::Object => {}' \
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
@@ -5265,9 +5700,7 @@ run_mutation "objectdialog: a fork asks first" \
   '    match super::apply::commit_edit(shell, cx) {
         Some(refusal) => set_notice(shell, refusal),' \
   '    if fork.is_some() {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Overwrite);
-        }
+        arm_confirm(shell, Confirm::Overwrite);
         return;
     }
     match super::apply::commit_edit(shell, cx) {
@@ -6844,7 +7277,8 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            Ok(frame.set_scope(scope))' \
+  '            scope.expression = parsed;
+            Ok(frame.set_scope(scope))' \
   '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
@@ -6908,20 +7342,16 @@ run_mutation "expr-chips: a term edit replaces only that term" \
 # Appending joins with `and`; replacing loses the existing expression.
 run_mutation "expr-chips: append joins the existing expression with and" \
   crates/geode-shell/src/frame.rs \
-  '            Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
-  '            Some(_) => term,' \
+  '        Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '        Some(_) => term,' \
   geode-shell \
-  append_expression_joins_with_and_or_sets_it
+  and_join_joins_with_and_or_sets_it
 
 # The dialog's add mode appends; committing as whole mode replaces.
 run_mutation "expr-chips: the add dialog appends rather than replaces" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
-  '        Mode::Add => {
-            let mut scope = frame.scope().clone();
-            scope.expression = parsed;
-            Ok(frame.set_scope(scope))
-        }' \
+  '                scope.expression = Some(crate::frame::and_join(scope.expression.take(), term));' \
+  '                scope.expression = Some(term);' \
   geode-shell \
   the_plus_menus_expression_row_appends_with_and
 
@@ -7002,9 +7432,9 @@ run_mutation "add-filter: the menu's own close returns focus to the field" \
 # menu's record so closing that dialog returns to the field.
 run_mutation "add-filter: a row's dialog returns focus to the field" \
   crates/geode-shell/src/shell/addfilter.rs \
-  '            if self.modal.is_some() {
+  '            if self.modal_open() {
                 self.overlay_return_to_filter = true;' \
-  '            if self.modal.is_some() {
+  '            if self.modal_open() {
                 self.overlay_return_to_filter = false;' \
   geode-shell \
   focus_returns_to_the_text_field_after_the_menu
@@ -7650,7 +8080,7 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
             if let Some(presentation) = domain.presentation_doc() {
                 docs.push(presentation);
             }' \
-  '            let docs = [Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
+  '            let mut docs = vec![Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
   geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
 # ---- Phase 4c part 2a, Task 5: the Scopes adapter ----------------------
@@ -8036,8 +8466,8 @@ run_mutation "fullscreen: the double-click door runs ahead of the drag arm" \
 # restore, the frame after the press hands the keyboard to the shell root.
 run_mutation "focus: a tile in insert mode keeps focus through the mouse-down restore" \
   crates/geode-shell/src/shell/render.rs \
-  '            if !self.occupant_holds_insert_focus(window, cx) {' \
-  '            if true {' \
+  '            } else if !self.occupant_holds_insert_focus(window, cx) {' \
+  '            } else if true {' \
   geode-shell a_tile_in_insert_mode_keeps_focus_through_the_mouse_down_restore
 
 # Review C-1 on that rule: the skip keys on OWNERSHIP — the focused tile's
@@ -8092,15 +8522,13 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
 # the backstop is the only thing left.
 run_mutation "focus: a departed tile's focus returns to the shell root" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        if any_tile_left_the_screen
-            && let Some(focused) = window.focused(cx)
-            && !self.holds_shell_focus(&focused, cx)
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
         {
             self.focus_handle.focus(window, cx);
         }' \
-  '        if any_tile_left_the_screen
-            && let Some(focused) = window.focused(cx)
-            && !self.holds_shell_focus(&focused, cx)
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+            })
         {
             let _ = &focused;
         }' \
@@ -8630,9 +9058,9 @@ run_mutation "dialog: a click on the frozen filter row enters filter mode" \
 # reading `filter`.
 run_mutation "dialog: the frozen-row click cancels a capture in progress" \
   crates/geode-shell/src/shell/dialog.rs \
-  '        state.listening = None;
-        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
-  '        dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
+  '            state.listening = None;
+            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
+  '            dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);' \
   geode-shell clicking_the_frozen_filter_row_while_listening_cancels_the_capture
 
 # ---- Task 8: the object dialog to the mock (§18.1) ---------------------
@@ -9447,8 +9875,8 @@ run_mutation "settings: filter mode drops printable keys instead of passing them
 # field blurred exactly as normal mode would.
 run_mutation "dialog: sync_dialog_text ignores the settings dialog" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.settings.as_ref() {' \
-  '    } else if let Some(state) = shell.settings.as_ref().filter(|_| false) {' \
+  '            let Some(state) = shell.settings.as_ref() else {' \
+  '            let Some(state) = shell.settings.as_ref().filter(|_| false) else {' \
   geode-shell \
   slash_enters_settings_filter_mode_and_typing_narrows
 
@@ -9456,8 +9884,8 @@ run_mutation "dialog: sync_dialog_text ignores the settings dialog" \
 # settings state, or the row paints as typeable and does nothing.
 run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.settings.as_mut() {' \
-  '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
+  '            let Some(state) = shell.settings.as_mut() else {' \
+  '            let Some(state) = shell.settings.as_mut().filter(|_| false) else {' \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
 
@@ -11525,7 +11953,7 @@ run_mutation "blotter: the colour cache invalidates on a changed anchor" \
 run_mutation "blotter: an unknown colour name resolves to none" \
   crates/geode-blotter/src/delegate.rs \
   '        self.colour_cache.get(&self.colours, name, anchors, tokens)' \
-  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(gpui::Hsla::default()))' \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(ColourResolved::plain(gpui::Hsla::default())))' \
   geode-blotter \
   a_named_column_paints_its_resolved_colour
 
@@ -12210,13 +12638,12 @@ run_mutation "matrix: a hole in the pivot is an error, not a zero" \
                         spec.rows.column
                     ));
                 }' \
-  '                None => cells.push(Cell {
-                    text: SharedString::from(format_number(0.0, &spec.format).text),
-                    value: Some(0.0),
-                    edited: false,
-                    sent: false,
-                    cell_ref: (ri, ci),
-                }),' \
+  '                None => cells.push(cell_of(
+                    Some(Value::F64(0.0)),
+                    (ri, slice_columns + ci),
+                    &column_kinds[slice_columns + ci],
+                    draft,
+                )),' \
   geode-marketdata \
   a_missing_cell_is_a_hole_and_the_error_names_the_pair
 
@@ -14568,7 +14995,7 @@ run_mutation "picker: a values row double-click toggles its tick" \
 run_mutation "asof: the preset list takes the full nav set (spec §20.5)" \
   crates/geode-shell/src/shell/asof_view.rs \
   '    if let Some(cmd) = listfilter::nav_command(ks) {' \
-  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, vimnav::NavCommand::Move(1 | -1))) {' \
+  '    if let Some(cmd) = listfilter::nav_command(ks).filter(|c| matches!(c, crate::vimnav::NavCommand::Move(1 | -1))) {' \
   geode-shell \
   nav_past_the_visible_rows_scrolls_the_highlight_into_view
 
@@ -14677,18 +15104,12 @@ run_mutation "asof: a DST-gap custom value is refused" \
 # the one under the highlight.
 run_mutation "asof: sync_dialog_text reconciles the shared Input" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    if let Some(state) = shell.as_of_dialog.as_ref() {
-        let query = state.query();
-        let input = shell.dialog_input.clone();
-        if input.read(cx).text() != query {
-            input.update(cx, |i, cx| i.set_value(query, window, cx));
-        }
-        input.read(cx).focus_handle(cx).focus(window, cx);
-        return;
-    }' \
-  '    if false && shell.as_of_dialog.is_some() {
-        return;
-    }' \
+  '            let Some(state) = shell.as_of_dialog.as_ref() else {
+                return;
+            };' \
+  '            let Some(state) = shell.as_of_dialog.as_ref().filter(|_| false) else {
+                return;
+            };' \
   geode-shell \
   tab_then_escape_then_down_then_enter_commits_the_highlighted_row
 
@@ -14829,19 +15250,39 @@ run_mutation "ingest: a failed load still ends the strip" \
   geode-data \
   a_failed_load_still_ends_the_strip
 
-# Final whole-branch review, finding 1 (2026-09-19): a file re-queued
-# after it already loaded must not even announce `Started` — one with
-# nothing to end it would stick the status bar's strip forever.
+# A file re-queued after it already loaded must not even announce
+# `Started`: one with nothing to end it would stick the status bar's strip
+# forever. The mutation keeps the skip and moves the announcement above it.
 run_mutation "ingest: a stale skip does not start the strip" \
   crates/geode-data/src/ingest/runner.rs \
   '        if stale {
             clear_in_flight(&queue);
             continue;
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.
+        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
         }' \
-  '        if false {
+  '        if !sink(IngestEvent::Started {
+            source: item.source.clone(),
+            path: item.candidate.csv_path.to_string_lossy().into_owned(),
+            queued,
+        }) {
+            log_refused_event(&refusal_logged, "a load-started announcement");
+        }
+        if stale {
             clear_in_flight(&queue);
             continue;
-        }' \
+        }
+
+        // Announce Started only after the stale check, so every announcement has a
+        // terminal operation outcome.' \
   geode-data \
   a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time
 
@@ -15004,16 +15445,14 @@ run_mutation "objectdialog: the chip door refuses a read-only domain (spec §20.
 # the `Input` over the open question.
 run_mutation "dialog: the keybindings frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    if let Some(state) = shell.keybindings.as_mut() {
-        // Keep the confirmation'"'"'s exclusive input route until it is answered.
-        if state.confirm.is_some() {
-            return;
-        }' \
-  '    if let Some(state) = shell.keybindings.as_mut() {
-        // Keep the confirmation'"'"'s exclusive input route until it is answered.
-        if false {
-            return;
-        }' \
+  '            // Keep the confirmation'"'"'s exclusive input route until it is answered.
+            if state.confirm.is_some() {
+                return;
+            }' \
+  '            // Keep the confirmation'"'"'s exclusive input route until it is answered.
+            if false {
+                return;
+            }' \
   geode-shell \
   a_row_click_while_a_confirm_is_armed_is_dropped
 
@@ -15022,18 +15461,16 @@ run_mutation "dialog: the keybindings frozen-row click is dropped while a confir
 # the click enters filter mode under a pending `d`/`r`.
 run_mutation "dialog: the object-dialog frozen-row click is dropped while a confirm is armed (spec §20.1)" \
   crates/geode-shell/src/shell/dialog.rs \
-  '    } else if let Some(state) = shell.object_dialog.as_mut() {
-        // `build_edit` still paints the frozen row during confirmation, so guard
-        // the transition here as well as in keyboard routing.
-        if state.confirm.is_some() {
-            return;
-        }' \
-  '    } else if let Some(state) = shell.object_dialog.as_mut() {
-        // `build_edit` still paints the frozen row during confirmation, so guard
-        // the transition here as well as in keyboard routing.
-        if false {
-            return;
-        }' \
+  '            // `build_edit` still paints the frozen row during confirmation, so guard
+            // the transition here as well as in keyboard routing.
+            if state.confirm.is_some() {
+                return;
+            }' \
+  '            // `build_edit` still paints the frozen row during confirmation, so guard
+            // the transition here as well as in keyboard routing.
+            if false {
+                return;
+            }' \
   geode-shell \
   an_edit_row_click_is_dropped_while_a_confirm_is_armed
 
@@ -16118,6 +16555,150 @@ run_mutation "stacks: stacking onto a fullscreen tile exits fullscreen" \
   geode-shell \
   stacking_onto_a_fullscreen_tile_exits_fullscreen
 
+# Split and pull: `stack::split` (mod+s) turns the focused stack into an
+# equal split in its own slot; `stack::pull_*` (mod+shift+h/j/k/l) pulls
+# the visible neighbour into the focused tile's slot in screen order.
+# The stack's `active` index is left to `set_focus`, the one door.
+run_mutation "stack split: members get equal ratios" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        let share = 1.0 / children.len() as f32;' \
+  '        let share = 0.5;' \
+  geode-shell \
+  split_stack_gives_three_members_equal_room
+
+run_mutation "stack split: exits fullscreen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        // operation trumps a stale fullscreen.
+        self.fullscreen = None;' \
+  '        // operation trumps a stale fullscreen.' \
+  geode-shell \
+  split_stack_exits_fullscreen
+
+run_mutation "stack pull: the pulled tile leaves its old slot" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '            .and_then(|n| remove_leaf(n, pulled, &mut done))' \
+  '            .map(|n| {
+                done = true;
+                n
+            })' \
+  geode-shell \
+  pull_right_stacks_the_neighbour_behind_the_focused_tile
+
+run_mutation "stack pull: stack order follows the screen" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        let first = matches!(dir, Direction::Left | Direction::Up);' \
+  '        let first = false;' \
+  geode-shell \
+  repeated_pulls_sweep_a_row_in_screen_order_either_way
+
+run_mutation "stack pull: focus stays on its tile" \
+  crates/geode-shell/src/tiling/tree.rs \
+  '        insert(&mut root, focused, pulled, first);
+        self.root = Some(root);
+        self.set_focus(focused);' \
+  '        insert(&mut root, focused, pulled, first);
+        self.root = Some(root);
+        self.set_focus(pulled);' \
+  geode-shell \
+  pull_right_stacks_the_neighbour_behind_the_focused_tile
+
+run_mutation "stack pull: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).pull(dir)' \
+  '        self.tree_for_mut(FocusRegion::Main).pull(dir)' \
+  geode-shell \
+  pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone
+
+run_mutation "stack split: acts in the focused region" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let region = self.region;
+        self.tree_for_mut(region).split_stack(orientation)' \
+  '        self.tree_for_mut(FocusRegion::Main).split_stack(orientation)' \
+  geode-shell \
+  pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone
+
+run_mutation "stack split: mod+s is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+s" = "stack::split"
+' \
+  '' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "add expression: mod+x is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+x" = "frame::add_expression"
+' \
+  '' \
+  geode-shell \
+  mod_x_opens_the_add_expression_dialog
+
+run_mutation "stack pull: mod+shift+k is bound" \
+  crates/geode-shell/src/defaults.rs \
+  '"mod+shift+k" = "stack::pull_up"
+' \
+  '' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack pull: each action names its own direction" \
+  crates/geode-shell/src/shell/input.rs \
+  '        "stack::pull_up" => Some(Direction::Up),' \
+  '        "stack::pull_up" => Some(Direction::Down),' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack split: takes the add direction" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let orientation = self.add_direction.resolve(None, rect);
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .split_stack(orientation)' \
+  '            let _ = rect;
+            let orientation = crate::tiling::Orientation::Horizontal;
+            if self
+                .services
+                .workspaces
+                .active_mut()
+                .split_stack(orientation)' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack split: dirties the session" \
+  crates/geode-shell/src/shell/input.rs \
+  '                .split_stack(orientation)
+            {
+                self.session_dirty = true;' \
+  '                .split_stack(orientation)
+            {' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "stack pull: dirties the session" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.services.workspaces.active_mut().pull(dir) {
+                self.session_dirty = true;' \
+  '            if self.services.workspaces.active_mut().pull(dir) {' \
+  geode-shell \
+  mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
+
+run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                    .is_some_and(|o| o.content.holds_focus(window, cx))' \
+  '                    .is_some_and(|_| false)' \
+  geode-shell \
+  a_pull_from_insert_mode_leaves_the_typing_tile_its_input
+
+run_mutation "stack pull: a refusal leaves a notice" \
+  crates/geode-shell/src/shell/input.rs \
+  '                self.notice = Some(NO_TILE_THAT_WAY);' \
+  '                {}' \
+  geode-shell \
+  a_stack_split_or_pull_with_nothing_to_act_on_leaves_a_notice
+
 # Brief's original pick (drop the `ix < active` branch entirely) turned
 # out unreachable: both `remove_focused` and `pop_out` always target
 # `self.focused`, which the `set_focus`/`activate` invariant guarantees is
@@ -16925,8 +17506,8 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
             entry.history = history(&self.sheet);
             entry.history_ix = None;
         }
-        self.resolve_plan();' \
-  '        self.resolve_plan();' \
+        // New templates (the type slot) and a new provider revision.' \
+  '        // New templates (the type slot) and a new provider revision.' \
   geode-pricer a_reload_with_the_bar_open_reprints_its_history
 
 # The reload observer must hand the factory the configured set.
@@ -19831,6 +20412,47 @@ run_mutation "pricer core: a tick stales no line" \
                 self.state[row] = LineState::Stale;' \
   geode-pricer mark_all_stale_stales_every_line_and_bumps_no_revision
 
+# Only a single C or P leg takes a barrier; a package's fifth token is
+# past the end.
+run_mutation "pricer complete: a package offers barrier kinds" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        4 if type_tok.is_some_and(|t| is_single_leg(text(t))) => Slot::BarrierKind,' \
+  '        4 => Slot::BarrierKind,' \
+  geode-pricer barrier_kinds_follow_only_a_single_leg
+
+# Expiries and strikes write only the `/` part at the caret.
+run_mutation "pricer complete: a write replaces the whole slash token" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        Slot::Expiry | Slot::Strikes if !range.is_empty() => slash_part(line, range, caret),' \
+  '        Slot::Expiry | Slot::Strikes if false => slash_part(line, range, caret),' \
+  geode-pricer tab_writes_cycles_and_shift_tab_goes_back_over_the_slash_part
+
+# A leading quantity shifts every later slot by one.
+run_mutation "pricer complete: a leading qty is not skipped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    let index = k - usize::from(qty);' \
+  '    let index = k;' \
+  geode-pricer the_slot_follows_parse_order_with_an_optional_qty
+
+# A range cached against other text is refused, never sliced.
+run_mutation "pricer complete: a stale range is sliced" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        if !fits(line, &token) {' \
+  '        if false {' \
+  geode-pricer a_range_that_does_not_fit_the_line_writes_nothing
+
+# A caret inside a character clamps back to a boundary before a slash
+# token is sliced at it; unclamped, the slice panics.
+run_mutation "pricer complete: a caret inside a character is not clamped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    while !line.is_char_boundary(caret) {
+        caret -= 1;
+    }' \
+  '    while false {
+        caret -= 1;
+    }' \
+  geode-pricer a_caret_inside_a_character_clamps_back
+
 run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
@@ -19856,18 +20478,34 @@ run_mutation "pricer entry: the label names a leg for a root place" \
 # clear it, or the bar blames text that is no longer there.
 run_mutation "pricer entry bar: an edit keeps a stale error" \
   crates/geode-pricer/src/tile.rs \
-  '                && entry.error.take().is_some()' \
-  '                && entry.error.clone().is_some()' \
+  '            entry.error = None;
+            this.refresh_entry_completion(cx);' \
+  '            this.refresh_entry_completion(cx);' \
   geode-pricer a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it
 
 # A refused insert must put the place back, or the next enter lands
 # past a line that never went in.
 run_mutation "pricer entry bar: a refusal keeps the advanced place" \
   crates/geode-pricer/src/tile.rs \
-  '                    entry.place = at;
+  '                    entry.place = before;
                     entry.error = Some(e.to_string().into());' \
   '                    entry.error = Some(e.to_string().into());' \
   geode-pricer a_refused_line_puts_the_place_back
+
+# A package typed inside a package lands just after it rather than being
+# refused ("a package cannot hold a package").
+run_mutation "pricer entry: a package inside a package is refused" \
+  crates/geode-pricer/src/core/entry.rs \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) => Place::Root {' \
+  '        (Place::Leg { package, .. }, RowSpec::Package { .. }) if false => Place::Root {' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
+
+# The bar must insert at the landing place, not the raw leg place.
+run_mutation "pricer entry bar: enter ignores the landing place" \
+  crates/geode-pricer/src/tile.rs \
+  '        let at = landing_place(&self.sheet, before, &spec);' \
+  '        let at = before;' \
+  geode-pricer a_package_typed_inside_a_package_lands_after_it
 
 # The label follows the place after each enter.
 run_mutation "pricer entry bar: the label stays on the first place" \
@@ -20919,13 +21557,51 @@ run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
-# the tile's cancel closes the entry field.
+# the tile's cancel closes the cell editor, which lives inside the table.
+# (The entry bar sits outside the table, so it no longer sees this.)
 run_mutation "pricer init: DataTable keeps its own escape" \
   crates/geode-pricer/src/lib.rs \
   '            "escape",
 ' \
   '' \
-  geode-app escape_after_a_committed_line_closes_the_entry_field
+  geode-app escape_closes_the_cell_editor_inside_the_table
+
+# gpui-component's Root binds tab to focus cycling, and a matched action
+# runs before the bar's key listener: without the reclaim, Tab leaves the
+# field instead of completing.
+run_mutation "pricer init: the entry bar does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        ["tab", "shift-tab"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  '        ["f24"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# An empty hint must keep its row, or the table jumps as the caret enters
+# the last slot.
+run_mutation "pricer entry bar: an empty hint drops its row" \
+  crates/geode-pricer/src/header.rs \
+  '            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  '            div()
+                .when(hint.is_empty(), |d| d.hidden())
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  geode-pricer the_hint_and_list_follow_the_slot
+
+# A malformed [pricing] underlyings on reload keeps the last list.
+run_mutation "pricer app: a malformed underlyings reload empties the list" \
+  crates/geode-app/src/bridge.rs \
+  '                if let Some(names) = names {
+                    underlyings.set(&names);
+                }' \
+  '                underlyings.set(&names.unwrap_or_default());' \
+  geode-app a_malformed_underlyings_reload_keeps_the_last_list
 
 run_mutation "pricer retiring: a restore opens a sheet being removed" \
   crates/geode-pricer/src/tile.rs \
@@ -20988,24 +21664,30 @@ run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   '            if false {
                 return self.switch_sheet(name, true, cx);' \
   geode-pricer colon_e_of_a_blocked_sheets_own_name_reloads_it
-# A date cell's field paints unframed. Mutated to the strip's frame, a
-# second rounded border sits inside the cursor's and the padding pushes
-# the day off the cell's right edge.
-run_mutation "mdedit: a date cell's field paints without the strip's frame" \
-  crates/geode-marketdata/src/delegate.rs \
-  '                            self.tile_id,
-                            false,' \
-  '                            self.tile_id,
-                            true,' \
-  geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
-
-# ...and with flush segments. Mutated to padded ones, the digits spread
-# apart and the field outgrows the plain date, clipping the year.
+# A date field paints flush segments. Mutated to padded ones, the digits
+# spread apart and the field outgrows the plain date, clipping the year.
 run_mutation "mdedit: a date cell's segments paint flush" \
   crates/geode-marketdata/src/header.rs \
-  '        flush: !framed,' \
+  '        flush: true,' \
   '        flush: false,' \
   geode-marketdata a_date_cells_field_is_right_aligned_inside_its_cell
+
+# A header text editor paints no frame of its own. Mutated to the
+# input's appearance, a bordered, rounded control appears inside the
+# attribute's box and grows it to the input's height.
+run_mutation "mdedit: a header text editor paints no frame of its own" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(true).px_0().py_0().h_auto())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
+
+# ...and takes its line's height, not the control's. Mutated to keep the
+# input's own height and padding, the box grows while editing.
+run_mutation "mdedit: a header text editor takes its line's height" \
+  crates/geode-marketdata/src/header.rs \
+  '.child(Input::new(state).appearance(false).px_0().py_0().h_auto())' \
+  '.child(Input::new(state).appearance(false).px_0())' \
+  geode-marketdata opening_an_attribute_editor_keeps_its_value_box
 
 # ---- Market-data line numbers (2026-09-26): `[ui] line_numbers` ----
 
@@ -21913,8 +22595,8 @@ run_mutation "expr suggest: enter refuses an unknown column" \
 # A row click inserts it.
 run_mutation "expr suggest: a row click inserts" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '                    on_click(&label, window, cx);' \
-  '                    let _ = (&label, window, cx);' \
+  '                    on_click(named, &label, window, cx);' \
+  '                    let _ = (named, &label, window, cx);' \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
@@ -21952,6 +22634,152 @@ run_mutation "expr suggest: a double-click inserts once" \
   '                    if event.click_count > 99 {' \
   geode-shell \
   double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# A name stands for a whole term: offered past the column position it
+# would stage mid-comparison.
+run_mutation "expr suggest: named rows only at a column position" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        let mut candidates = if matches!(context.position, Position::Column) {' \
+  '        let mut candidates = if true {' \
+  geode-shell \
+  named_offers_never_appear_past_the_column_position
+
+# A named row stages its name; writing it as text would leave a column
+# reference that does not exist.
+run_mutation "expr suggest: accepting a named row stages it" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            RowKind::Insert => Accept::Write(Write {' \
+  '            _ => Accept::Write(Write {' \
+  geode-shell \
+  accepting_a_named_row_stages_it_and_erases_the_token
+
+# Whole mode's Enter replaces the frame's names with the staged ones; left
+# out, a removed chip would stay in the scope.
+run_mutation "scope expr: whole apply sets the staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            scope.named = staged.to_vec();' \
+  '            let _ = staged;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# Backspace at the field's start removes the last staged chip.
+run_mutation "scope expr: backspace at the start unstages" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        return backspace_unstages(shell, cx);' \
+  '        return false;' \
+  geode-shell \
+  backspace_at_the_start_unstages_the_last_name_and_undo_restores
+
+# A reload re-offers the new definitions under an open dialog.
+run_mutation "scope expr: a reload re-offers named expressions" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                super::scope_expr_view::sync_named_offers(self, cx);' \
+  '' \
+  geode-shell \
+  a_reload_offers_a_new_named_expression_under_an_open_dialog
+
+# A staged name is not offered again.
+run_mutation "scope expr: offers exclude staged names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        .filter(|name| !staged.iter().chain(joined).any(|s| s == name))' \
+  '        .filter(|name| !joined.iter().any(|s| s == name))' \
+  geode-shell \
+  a_staged_name_leaves_the_named_rows
+
+# Add mode joins the frame's names, so it does not offer them.
+run_mutation "scope expr: add mode offers the frame's own names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => frame_named,' \
+  '        Mode::Add => &[],' \
+  geode-shell \
+  add_mode_leaves_out_the_frames_own_names
+
+# A saved name must resolve at once: the write promotes on a timer, and
+# until then the staged name would read as missing.
+run_mutation "scope expr: saving refreshes the frame's definitions at once" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '            if f.replace_named_expressions(named) {' \
+  '            if false && f.replace_named_expressions(named) {' \
+  geode-shell \
+  mod_s_saves_the_text_as_a_named_expression_and_stages_it
+
+# Saving under a defined name would overwrite that definition.
+run_mutation "scope expr: saving refuses a taken name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.name_taken(config, &name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_taken_name
+
+# An empty field names nothing; opening the entry for it would ask for a
+# name that can only be refused.
+run_mutation "scope expr: mod+s on an empty field opens the name entry" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '    if text.trim().is_empty() {' \
+  '    if false {' \
+  geode-shell \
+  mod_s_on_an_empty_field_refuses_and_writes_nothing
+
+# Naming a term checks the term before the write: a term changed underneath
+# would otherwise save a definition the refused swap then never uses.
+run_mutation "scope expr: naming a changed term writes the definition anyway" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        && !shell.frame.read(cx).expression_term_is(*index, seeded)' \
+  '        && (false && !shell.frame.read(cx).expression_term_is(*index, seeded))' \
+  geode-shell \
+  naming_a_changed_term_refuses_and_writes_nothing
+
+# The name joins the frame's named list in the same set_scope that drops the
+# term; without it the term's filter silently vanishes from the scope.
+run_mutation "scope expr: naming a term drops it without joining the name" \
+  crates/geode-shell/src/frame.rs \
+  '            s.named.push(name.to_string());' \
+  '            let _ = name;' \
+  geode-shell \
+  mod_s_in_term_mode_names_the_term
+
+# A scope may already list the name (its definition missing); naming a term
+# after it must not list it twice.
+run_mutation "scope expr: naming a term lists an already-listed name twice" \
+  crates/geode-shell/src/frame.rs \
+  '            && !s.named.iter().any(|n| n == name)' \
+  '            && true' \
+  geode-shell \
+  name_expression_term_swaps_the_term_for_the_name_in_one_undo_step
+
+# A reserved name belongs to a built-in row; saving under it would shadow it.
+run_mutation "scope expr: saving refuses a reserved name" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        if Domain::Expressions.is_reserved(&name) {' \
+  '        if false {' \
+  geode-shell \
+  mod_s_refuses_a_reserved_name
+
+# The name entry shares the field; suggestions there would write an
+# expression into a name.
+run_mutation "expr suggest: no suggestions while naming" \
+  crates/geode-shell/src/shell/expr_suggest.rs \
+  '        if state.naming.is_some() {' \
+  '        if false {' \
+  geode-shell \
+  naming_offers_no_suggestions
+
+# A named chip's body is the mouse door to its definition.
+run_mutation "named chip: the body opens its expression" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                on_open(&open_name, window, cx)' \
+  '                { let _ = (&on_open, &open_name, &window, &cx); }' \
+  geode-shell \
+  a_named_chips_body_opens_its_expression
+
+# An undefined name must not enter an edit stage: its draft is empty, and
+# an edit there would write an object nobody asked to create.
+run_mutation "named chip: a missing name stays in browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if defined {' \
+  '    if true {' \
+  geode-shell \
+  a_missing_named_chips_body_opens_browse_with_a_notice
 
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.
@@ -22149,8 +22977,8 @@ run_mutation "named expr: a named chip's x removes nothing" \
 # A missing name paints the danger chip.
 run_mutation "named expr: a missing name paints the plain chip" \
   crates/geode-shell/src/shell/toolbar.rs \
-  '        let (fg, bg, close_states, broken_marker) = if named.broken {' \
-  '        let (fg, bg, close_states, broken_marker) = if false && named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if named.broken {' \
+  '        let (fg, bg, states, broken_marker) = if false && named.broken {' \
   geode-shell \
   a_missing_name_paints_the_broken_chip
 
@@ -22162,6 +22990,15 @@ run_mutation "named expr: document distinct drops unresolved names" \
   '    if false {' \
   geode-data \
   distinct_over_a_document_only_dimension_refuses_unresolved_names
+
+# Staging a name changes the values' narrowing, so the cached column is
+# dropped and asked for again under the new scope.
+run_mutation "named expr: staging keeps the old values" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) {' \
+  '    pub fn forget_values(&mut self, vocab: &ExprVocab) { return;' \
+  geode-shell \
+  staging_a_name_requests_values_again_under_it
 
 # A Scopes item's missing/invalid named note is danger text.
 run_mutation "named expr: a missing named note is muted" \
@@ -22201,8 +23038,8 @@ run_mutation "launch: a panel with a key is prompted anyway" \
   '        if self.popup.is_none() {' \
   geode-marketdata a_launched_panel_on_an_underlying_opens_no_picker
 
-# The two entries below share an anchor (`--anchors-only` reports DUP as a
-# non-failing warning): they mutate different behaviours of the same line.
+# The two entries below share an anchor on purpose: their replacements
+# mutate different behaviours of the same line.
 run_mutation "launch: blotter reads a subtotal as its first child's underlying" \
   crates/geode-blotter/src/core/launch.rs \
   '    path.get(level)?.clone()' \
@@ -22227,139 +23064,79 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
   '        &[]' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
 
+# A reload must reach the underlying list, or a desk edit to it waits for
+# a restart.
+run_mutation "pricer app: a reload leaves the underlying list stale" \
+  crates/geode-app/src/bridge.rs \
+  '                underlyings.set(&names);' \
+  '' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_underlyings
+
+# The revision moves only on a real change; a bump on every set makes
+# every tile re-rank on every unrelated reload.
+run_mutation "pricer underlyings: an unchanged set bumps the revision" \
+  crates/geode-pricer/src/content.rs \
+  '        if *self.list.borrow().as_ref() == next[..] {' \
+  '        if false {' \
+  geode-pricer an_underlying_list_normalises_and_bumps_only_on_change
+
+# The echo of the tile's own write must not reset the cycle, or a second
+# Tab writes the first suggestion again.
+run_mutation "pricer entry bar: the write's echo resets the cycle" \
+  crates/geode-pricer/src/tile.rs \
+  '            if entry.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if entry.echo.take().is_some_and(|_| false) {' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# A Tab at a caret moved without typing must re-rank there first.
+run_mutation "pricer entry bar: a Tab at a moved caret uses the old range" \
+  crates/geode-pricer/src/tile.rs \
+  '        if entry.completion.stale_at(entry.input.read(cx).cursor()) {' \
+  '        if false {' \
+  geode-pricer a_tab_after_the_caret_moved_ranks_at_the_live_caret
+
+# A provider change must reach an open bar on the next keystroke.
+run_mutation "pricer entry bar: the provider is read once" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.underlyings_rev != Some(rev) {' \
+  '        if self.underlyings_rev.is_none() {' \
+  geode-pricer a_revision_bump_reaches_an_open_bar
+
+# A history step sets the text without a Change; it must re-rank itself.
+run_mutation "pricer entry bar: a history step leaves the list stale" \
+  crates/geode-pricer/src/tile.rs \
+  $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
+  '' \
+  geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
+if (( ! anchors_only && selected == 0 )); then
+  # A mistyped substring selects nothing, and a run that checked nothing
+  # must not read as a pass. --changed skipping every candidate is the one
+  # legitimate empty run: nothing anchored changed, and the skipped line
+  # above says so.
+  if [[ -n "$changed_ref" ]] && (( skipped > 0 )); then
+    exit 0
+  fi
+  echo "ran 0 entries (nothing selected)" >&2
+  exit 1
+fi
+if (( build_only )); then
+  noun="mutations"
+  verb="do"
+  (( built == 1 )) && noun="mutation"
+  (( build_failures == 1 )) && verb="does"
+  echo "build-checked $built $noun: $build_failures $verb not compile"
+  if (( anchor_failures )); then
+    echo "stale entries not built: $anchor_failures (see ANCHOR lines)"
+  fi
+fi
+if (( build_failures || anchor_failures )); then
+  exit 1
+fi
 if (( anchors_only )); then
-  # Check anchors and test-name filters in one pass with per-file caches.
-  # Missing/ambiguous anchors, invalid filters, and an empty selection fail;
-  # loose filters and overlapping anchors remain warnings.
-  python3 - "$anchors" <<'PY' || exit 1
-import collections, pathlib, re, sys
-
-raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
-fields = raw.split(b"\0")[:-1] if raw else []
-entries = [tuple(f.decode() for f in fields[i:i + 5]) for i in range(0, len(fields), 5)]
-if not entries:
-    print("checked 0 anchors (nothing selected)")
-    sys.exit(1)
-
-FN_DECL = re.compile(r"(?:pub\s*(?:\([^)]*\)\s*)?)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)")
-TEST_ATTR = re.compile(r"^#\[(?:\w+::)*test(\]|\()")
-
-_fn_cache = {}
-
-
-def test_fns(pkg):
-    """Names of test-attributed functions in a package.
-
-    A filter is what cargo is handed, and cargo matches a substring against
-    the test's path. Matching against every `fn` would let a filter naming a
-    plain helper pass, so only functions carrying a `test` attribute count.
-    """
-    if pkg in _fn_cache:
-        return _fn_cache[pkg]
-    names = set()
-    for path in sorted((pathlib.Path("crates") / pkg / "src").rglob("*.rs")):
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            continue
-        saw_test_attr = False
-        for line in lines:
-            stripped = line.strip()
-            declared = FN_DECL.match(stripped)
-            if declared:
-                if saw_test_attr:
-                    names.add(declared.group(1))
-                saw_test_attr = False
-            elif stripped.startswith("#["):
-                if TEST_ATTR.match(stripped):
-                    saw_test_attr = True
-            elif stripped and not stripped.startswith("//"):
-                saw_test_attr = False
-    _fn_cache[pkg] = names
-    return names
-
-
-texts = {}
-stale = ambiguous = bad_filters = loose = 0
-for name, file, anchor, pkg, filt in entries:
-    if file not in texts:
-        try:
-            texts[file] = pathlib.Path(file).read_text(encoding="utf-8")
-        except OSError:
-            texts[file] = None
-    text = texts[file]
-    if text is None:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- file missing: {file}")
-        continue
-    hits = text.count(anchor)
-    if hits == 0:
-        stale += 1
-        print(f"ANCHOR    {name}  <-- anchor no longer matches; mutation is stale")
-    elif hits > 1:
-        ambiguous += 1
-        print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
-    if not filt:
-        continue
-    matched = sorted(n for n in test_fns(pkg) if filt in n)
-    if not matched:
-        bad_filters += 1
-        print(f"FILTER    {name}  <-- '{filt}' matches no test in {pkg}")
-    elif len(matched) > 1 and filt not in matched:
-        # Several function names match the substring but none is the exact
-        # requested name; require an unambiguous detecting-test declaration.
-        bad_filters += 1
-        print(f"FILTERx {len(matched)}  {name}  <-- '{filt}' matches {len(matched)} tests, none of them exactly")
-    elif len(matched) > 1:
-        # The named test does run; the siblings only make the entry slower and
-        # make "which test caught it" unanswerable.
-        loose += 1
-        print(f"FILTER? {len(matched)}  {name}  <-- '{filt}' also matches {len(matched) - 1} sibling test(s)")
-
-# Shared source anchors may carry different replacements. Report the overlap
-# for review without treating it as proof that the mutations are redundant.
-by_anchor = collections.defaultdict(list)
-for name, file, anchor, _pkg, _filt in entries:
-    by_anchor[(file, anchor)].append(name)
-dup_groups = {k: v for k, v in by_anchor.items() if len(v) > 1}
-dup_entries = sum(len(v) for v in dup_groups.values())
-for (file, _anchor), names in sorted(dup_groups.items()):
-    for shadowed_name in names[1:]:
-        print(f"DUP       {shadowed_name}  <-- shares (file, anchor) with {names[0]}")
-
-# An anchor that occurs once but sits inside a longer anchor another entry
-# uses. AMBIG counts occurrences of one anchor and cannot see this.
-anchors_by_file = collections.defaultdict(set)
-for _name, file, anchor, _pkg, _filt in entries:
-    anchors_by_file[file].add(anchor)
-shadowed_anchors = sorted(
-    (file, anchor)
-    for file, anchors in anchors_by_file.items()
-    for anchor in anchors
-    if any(other != anchor and anchor in other for other in anchors)
-)
-example_of = {}
-for name, file, anchor, _pkg, _filt in entries:
-    example_of.setdefault((file, anchor), name)
-for file, anchor in shadowed_anchors:
-    print(f"SHADOW    {example_of[(file, anchor)]}  <-- anchor is a substring of a longer anchor in {file}")
-
-print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, {bad_filters} bad filters")
-warnings = []
-if loose:
-    warnings.append(f"{loose} loose filters")
-if dup_entries:
-    warnings.append(f"{dup_entries} duplicate anchors in {len(dup_groups)} groups")
-if shadowed_anchors:
-    warnings.append(f"{len(shadowed_anchors)} shadowed anchors")
-if warnings:
-    print(f"  {', '.join(warnings)}")
-    print("  (warnings; see the anchor-uniqueness follow-up)")
-# Shared and overlapping anchors are advisory; only stale/ambiguous locations
-# and invalid test filters fail this check.
-sys.exit(1 if stale or ambiguous or bad_filters else 0)
-PY
+  # Static checks over every selected entry; see scripts/mutation_anchors.py.
+  python3 scripts/mutation_anchors.py "$anchors" || exit 1
 fi

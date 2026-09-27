@@ -13,9 +13,11 @@ bench = false
 # dev-dependencies turn it on.
 test-support = []
 
-# The core uses shared pricing vocabulary and calendar types. The tile uses
-# shell hosting, GPUI components, and the shared date field. Pricing and sheet
-# persistence go through DataHandle, without depending on a pricing implementation.
+# The core uses shared pricing vocabulary and calendar types; entry completion
+# also uses the shell's pure filtering/completion helpers and GPUI SharedString.
+# The tile uses shell hosting, GPUI components, and the shared date field. Pricing
+# and sheet persistence go through DataHandle, without a pricing implementation
+# or sibling feature dependency.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true

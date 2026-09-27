@@ -88,8 +88,10 @@ cargo bench -p geode-marketdata    # matrix model and draft
   while the cursor is in the attribute strip, all numbers are absolute.
 - Cell editors share the text's alignment: row labels left, values right.
   Text inputs omit their own frame and horizontal padding. Grid date fields
-  use flush segments inside the cursor border; header date fields retain
-  their separate padded frame. Fixed column widths can still constrain dates.
+  use flush segments inside the cursor border. Header attribute editors use
+  the value box's existing frame, preserving its top and height; date fields
+  also preserve its width, while text fields may grow. Fixed column widths
+  can still constrain dates.
 - `LABEL_WIDTH`/`CELL_WIDTH` are not on the rem scale, a known gap:
   `TableDelegate::column` has no window to read a rem from.
 - A panel opened through an add (palette, tile picker, `open_with`,

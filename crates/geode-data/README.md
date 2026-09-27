@@ -99,6 +99,13 @@ often tripped:
 - Scope lowering and distinct queries refuse unresolved named-expression
   references with `StoreError::Scope`. The shell resolves names before
   submission so a missing definition cannot silently widen a query.
+- Ungrouped primary dimensions use a unanimity aggregate: the common value
+  when all contributing rows agree, `mixed` when they disagree (including a
+  value alongside NULL), and blank when all values are NULL or no rows match.
+  The aggregate reads the coarsest declared grain carrying the column and
+  the whole grouping. It joins the tree spine without changing tree rows.
+  Views without these dimensions retain the SQL shape checked by
+  `testdata/demo_tree_view.sql`.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows

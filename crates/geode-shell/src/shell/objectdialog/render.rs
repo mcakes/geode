@@ -70,15 +70,15 @@ const VISIBLE_ROWS: usize = 10;
 const WIDTH: f32 = 640.0;
 
 /// Open the object dialog on `domain` (`config::views`, palette-only —
-/// see `defaults::register_builtin_actions`). A no-op if a modal is
-/// already open, mirroring the other dialogs' own guard.
+/// see `defaults::register_builtin_actions`). A no-op when this kind is
+/// already open (see `dialog::can_open`).
 pub fn open(
     view: &mut ShellView,
     domain: Domain,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Object) {
         return;
     }
     // Fresh state every open — nothing survives a close/reopen, the same
@@ -89,6 +89,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Object,
         domain.title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -309,10 +310,13 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             }
         }
         let Some(cmd) = dialogmode::normal_command(ks) else {
-            // Claimed and dropped: in normal mode a key with no meaning
-            // does nothing at all, rather than falling through to the
-            // shell still listening underneath the modal.
-            return true;
+            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();
         };
         match cmd {
             NormalCommand::Nav(nav) => {
@@ -661,7 +665,7 @@ pub(in crate::shell) fn open_save_scope(
     // own `begin_naming` read `shell.object_dialog` regardless of whose it is. Guarding
     // here, before either branch touches it, is what makes "no modal is already open"
     // the one precondition both branches share with `open` itself.
-    if shell.modal.is_some() {
+    if !dialog::can_open(shell, dialog::DialogKind::Object) {
         return;
     }
     if shell.frame.read(cx).scope().is_empty() {
@@ -681,6 +685,43 @@ pub(in crate::shell) fn open_save_scope(
     // shared `Input` the keys — `sync_dialog_text` is the only thing allowed to move
     // focus onto it, and `open` above already called it once for the browse stage it
     // opened in, so this second call is what actually focuses the name field.
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// Open `domain`'s dialog straight into `name`'s edit stage (a scope-bar named chip's
+/// click). A name no layer of the pending-aware config defines stays in Browse with a
+/// notice: `enter_edit` would otherwise build an empty draft for it, and a field edit
+/// there would write a new object the user never asked to create. A defined object
+/// whose content is invalid still opens, since editing it is how it gets fixed.
+pub(in crate::shell) fn open_object(
+    shell: &mut ShellView,
+    domain: Domain,
+    name: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    // `open` refuses a second object dialog silently; without this guard the edit
+    // below would land on whatever object dialog is already up (see `open_save_scope`).
+    if !dialog::can_open(shell, dialog::DialogKind::Object) {
+        return;
+    }
+    let defined = {
+        let folded = apply::config_with_pending(shell);
+        let config = folded.as_ref().unwrap_or(&shell.services.config);
+        config
+            .layered_docs(domain.doc())
+            .iter()
+            .any(|layered| layered.table.contains_key(name))
+    };
+    open(shell, domain, window, cx);
+    if defined {
+        enter_edit_stage(shell, name, None, cx);
+    } else {
+        set_notice(shell, format!("'{name}' is not defined"));
+    }
+    // `open` synchronized the shared input for Browse; the edit stage needs its own
+    // pass so focus and text match the stage now on screen.
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
@@ -1401,7 +1442,10 @@ fn handle_edit_key_inner(
     }
 
     let Some(cmd) = dialogmode::normal_command(ks) else {
-        return true;
+        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return !ks.mods.is_chord();
     };
 
     // every verb that would change the object is refused here, in one place, on a
@@ -2244,18 +2288,9 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
 }
 
-/// Put the edit list's viewport back over the draft's cursor.
-///
-/// Every verb that moves the row the cursor is on has to call this, not
-/// just the ones that look like motions: `space`/`shift+space` promote a
-/// row to the end of the object's own list and `x` demotes one to the
-/// end of the available catalogue, both of which are routinely a
-/// screenful away on a list with more rows than the panel can show — and
-/// a cursor left off screen makes the next `j` look like a jump.
-/// `shift+j`'s arm was the
-/// only one that did call it, inline; all four go through here now, so
-/// the next verb that moves a row has one obvious thing to call rather
-/// than a snippet to copy from whichever arm happens to have it.
+/// Keep the draft's cursor visible after motion or row reordering. Promotion
+/// and demotion can move a row beyond the viewport just as navigation can;
+/// each route must scroll to the resulting selection.
 fn scroll_to_cursor(shell: &mut ShellView) {
     let selected = shell
         .object_dialog
@@ -4223,9 +4258,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 c,
                 &shell.expr_scroll,
                 cx.theme(),
-                move |label, window, cx| {
+                move |named, label, window, cx| {
                     entity.update(cx, |shell, cx| {
-                        super::super::expr_suggest::accept_label(shell, label, window, cx)
+                        super::super::expr_suggest::accept_row(shell, named, label, window, cx)
                     });
                 },
             )

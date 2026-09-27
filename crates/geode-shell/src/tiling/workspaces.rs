@@ -357,6 +357,20 @@ impl Workspace {
         self.tree_for_mut(region).unstack_focused(orientation)
     }
 
+    /// Split the focused region's focused stack in its own slot; return false
+    /// for a plain tile or an empty region.
+    pub fn split_stack(&mut self, orientation: Orientation) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).split_stack(orientation)
+    }
+
+    /// Pull the visible tile beside focus in `dir`, within the focused
+    /// region, into the focused tile's slot; return false with no neighbour.
+    pub fn pull(&mut self, dir: Direction) -> bool {
+        let region = self.region;
+        self.tree_for_mut(region).pull(dir)
+    }
+
     /// Find `id`'s member index and stack length across this workspace's trees.
     pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
         let region = self.region_of(id)?;
@@ -1593,6 +1607,31 @@ mod tests {
     }
 
     #[test]
+    fn pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let remaining = ws.active().tree().focused().expect("one tile left in main");
+        assert!(ws.active_mut().focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let main_before = ws.active().tree().clone();
+        let dirs = [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ];
+        assert!(
+            dirs.into_iter().any(|d| ws.active_mut().pull(d)),
+            "the dock's other tile is beside focus"
+        );
+        let dock = |ws: &Workspaces| ws.active().docks().get(DockSide::Left).tree().clone();
+        assert_eq!(dock(&ws).visible_tiles().len(), 1, "pulled into one slot");
+        assert!(ws.active_mut().split_stack(Orientation::Vertical));
+        assert_eq!(dock(&ws).visible_tiles().len(), 2, "split back");
+        assert_eq!(ws.active().tree(), &main_before);
+    }
+
+    #[test]
     fn drag_dock_divider_resizes_within_the_docks_own_tree() {
         let mut ws = two_tiles();
         // Park both tiles in the left dock so its tree has a split (a
@@ -2125,9 +2164,8 @@ mod tests {
 
     #[test]
     fn move_from_main_into_an_occupied_dock_inserts_into_the_docks_tree() {
-        // Dock-trees semantics: the old occupied-target *swap* rule is
-        // gone — moving into an occupied dock splits the moved tile in at
-        // the dock tree's focused leaf, so the dock simply holds both.
+        // Moving into an occupied dock inserts beside its focused leaf,
+        // preserving both tiles in the destination tree.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let parked = ws.active().docks().get(DockSide::Left).tree().focused();
@@ -2736,9 +2774,8 @@ mod tests {
 
     #[test]
     fn splits_while_a_dock_is_focused_grow_the_docks_tree() {
-        // Dock-trees semantics: the old "splits are refused in a dock"
-        // rule is gone — a split lands within the focused dock's tree,
-        // allocating from the same app-wide id counter.
+        // Splits land within the focused dock's tree and allocate from the
+        // same app-wide tile ID counter as main-region splits.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let main_before = ws.active().tree().layout(Rect::UNIT);

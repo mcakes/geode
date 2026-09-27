@@ -27,7 +27,7 @@ Reader defaults, partial validation, and presentation rules are described in
 | `scopes` | Saved scopes from `scopes.toml`, including named-expression references. Reading and persistence retain names; `Scope::resolve` validates their definitions when used. |
 | `groupings` | The nine numbered grouping slots. |
 | `dimensions` | Derived dimensions the desk groups by that are not in the source files (`desk` from `book`). |
-| `view` | View definitions, presentation, and validation of datasets, joins, column roles, reachability, and grouping. Required failures refuse the view; supported optional failures warn. Derived SQL and sort keys are checked when the generated SQL is bound and executed. |
+| `view` | View definitions, presentation, and validation of datasets, joins, column roles, reachability, and grouping. Ungrouped primary dimensions use the coarsest declared grain carrying the column and the entire grouping, shared by validation and compilation. Required failures refuse the view; supported optional failures warn. Derived SQL and sort keys are checked when the generated SQL is bound and executed. |
 | `attribution` | Whether a measure can be summed at a grouping level, and how a scope predicate reached it. |
 | `grid` | Row and cell-block selections anchored by identity and resolved against current display order. Selection summaries exclude descendants of selected parents to avoid double-counting, and suppress totals for non-additive cells or unsummable columns. |
 | `launch` | Typed cursor context shared between feature modules. Missing or ambiguous values remain absent; the shell offers targets that accept every populated field. |
@@ -84,6 +84,9 @@ for its readiness strategy; the data service checks those boundaries.
 - `Snapshot` and `DocumentRows` store columns; the tree index stores parallel
   arrays. Snapshot construction prepares concatenated columns and the tree
   before UI delivery.
+- An ungrouped dimension's mixed state is a boolean companion column linked by
+  `ColumnMeta::mixed_flag`; its value is NULL there. Read it with
+  `Snapshot::is_mixed_at` before the value, or a mixed cell reads as blank.
 - Cell access preserves NULL separately from zero. Raw value slices omit null
   bitmaps and are suitable only when the caller has established null handling.
   Dictionary codes are local to a column; code-based grouping requires one

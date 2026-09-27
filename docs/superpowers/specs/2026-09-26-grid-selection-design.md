@@ -147,8 +147,35 @@ itself; its hidden children are not visited.
   type accepts it. Others are skipped; a notice counts them
   (`set 12 cells, skipped 3 (read-only)`). If none accept, the commit
   refuses and the draft is unchanged.
-- The insert-mode nudge (`up`/`down`, `shift` ×10) applies the same delta to
-  every selected numeric editable cell.
+- The insert-mode nudge (`up`/`down`, `shift` ×10) is a **live relative
+  step** (ruling 2026-09-27):
+  - Opening the editor on a selection snapshots the draft.
+  - While the editor text is untouched, each step moves every selected
+    editable Number cell from its own current value (an earlier edit
+    included) by its own column's displayed precision. That is
+    `nudge_text`'s rule applied per cell, so a block that spans ladder and
+    slice columns steps each column at its own places. The steps are
+    written to the draft at once and the grid paints them. The editor
+    text follows the cursor cell's new value.
+  - NULL cells, non-numeric cells and read-only cells are skipped. The
+    notice counts both groups (`stepped 9 cells +12, skipped 3`).
+  - All steps are validated before any is written, as `Draft::bump` does. A
+    fractional step on an integer column refuses the whole press.
+  - `enter` keeps the steps (nothing further is written). `escape` restores
+    the snapshot, so one escape undoes every step since `i`.
+  - Once the user types in the editor it is an absolute edit. Arrows then
+    nudge only the text, as they do today, and `enter` writes that value
+    to every accepting cell (above), replacing any live steps.
+  - When the cursor cell is not numeric, the editor keeps its own
+    behaviour (a date field's segment step, a choice list) and the commit
+    is absolute.
+  - The gates are `:bump`'s (`held_refusal`, `edit_base`: no document,
+    `Behind`). Cells on a deleted row are skipped and counted.
+  - `space` / `shift+space` (choice step) keeps acting on the cursor cell
+    alone in this part.
+- The header attribute strip and the row-label column are never selection
+  members: a typed row label on many rows would collide, and attributes
+  are not grid cells.
 - `:bump <delta>` with no axis applies to the selection; with `row|col` it
   keeps today's behaviour.
 - `d` in `Rows` deletes the selected rows. `d` in `Block` refuses:

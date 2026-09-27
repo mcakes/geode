@@ -50,23 +50,32 @@ impl ShellView {
         self.palette_input
             .update(cx, |input, cx| input.set_value("", window, cx));
         // Recorded before the palette takes focus, for `close_palette`
-        // (see `ShellView::overlay_return_to_filter`).
-        self.overlay_return_to_filter = self.filter_field_focused(window, cx);
+        // (see `ShellView::overlay_return_to_filter`). The flag belongs to the
+        // stack's base when dialogs are open: a palette over them returns to the
+        // top dialog, not to the field.
+        if !self.modal_open() {
+            self.overlay_return_to_filter = self.filter_field_focused(window, cx);
+        }
         self.palette_input
             .read(cx)
             .focus_handle(cx)
             .focus(window, cx);
     }
 
-    /// Close an open palette and restore focus through the overlay-return path.
-    /// A closed palette is a no-op. Reload closes without a Window through its separate
-    /// deferred focus-restoration path.
+    /// Close an open palette and restore focus through the overlay-return path,
+    /// or, over an open dialog stack, to the top dialog. A closed palette is a
+    /// no-op. Reload closes without a Window through its separate deferred
+    /// focus-restoration path.
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Do not move focus when this method is called with no palette open.
         if self.palette.take().is_none() {
             return;
         }
-        self.return_focus_from_overlay(window, cx);
+        if self.modal_open() {
+            super::dialog::refocus_top(self, window, cx);
+        } else {
+            self.return_focus_from_overlay(window, cx);
+        }
     }
 
     /// Scroll to the selected result after query or selection changes; no-op when closed.
@@ -116,12 +125,20 @@ impl ShellView {
 
     /// Capture the selected item, close and restore focus, then dispatch it.
     /// Keyboard Enter and row clicks share this route so actions opening another
-    /// overlay start after the palette is gone. Empty results simply close.
+    /// overlay start after the palette is gone. Empty results simply close. Over
+    /// a dialog stack, dialog actions may push another entry; other actions run
+    /// behind it and restore focus to the top dialog. Tile command-line, find,
+    /// and stack-list actions refuse while a dialog remains open.
     pub(super) fn commit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
         self.close_palette(window, cx);
         if let Some(item) = selected {
             self.dispatch_palette_item(&item, window, cx);
+            // A non-dialog action runs behind the stack and may have moved focus
+            // (a tile's own input, the shell root). The top dialog keeps it.
+            if self.modal_open() {
+                super::dialog::refocus_top(self, window, cx);
+            }
         }
     }
 

@@ -42,7 +42,7 @@ fn keybindings_open_paints_the_modal_with_rows(cx: &mut gpui::TestAppContext) {
     });
 
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "keybindings::open should have set ShellView's own modal state"
     );
     assert!(
@@ -250,7 +250,7 @@ fn escape_cancels_a_capture_without_closing_the_dialog(cx: &mut gpui::TestAppCon
         (
             state.listening.is_some(),
             state.query.clone(),
-            shell.modal.is_some(),
+            shell.modal_open(),
         )
     });
     assert!(!listening, "escape should cancel the capture");
@@ -269,7 +269,7 @@ fn escape_closes_the_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppConte
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     cx.simulate_keystrokes("escape");
     shell.read_with(&cx, |shell, _| {
-        assert!(shell.modal.is_none(), "escape should close the modal");
+        assert!(!shell.modal_open(), "escape should close the modal");
         assert!(
             shell.keybindings.is_none(),
             "close_modal must clear the dialog state too, or the shared \
@@ -399,7 +399,7 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
         "enter should have committed and left listening mode"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&cx, |shell, _| shell.modal_open()),
         "committing a rebind must not close the dialog"
     );
 
@@ -724,13 +724,13 @@ fn escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
         "the second escape clears the query"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and does not close"
     );
 
     cx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the third closes"
     );
 }
@@ -763,7 +763,7 @@ fn escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAp
     assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
     assert_eq!(query, "theme", "escape must put back the entry query");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and must not close the dialog"
     );
 
@@ -995,13 +995,13 @@ fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppC
         "ctrl+escape must clear the query, exactly as escape does"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and not close on that rung"
     );
 
     cx.simulate_keystrokes("alt-escape");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "alt+escape on the last rung must close the dialog, not be \
          swallowed by normal mode's claim-and-drop"
     );

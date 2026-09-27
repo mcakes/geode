@@ -313,10 +313,14 @@ dropped. Unknown columns and invalid derived-dimension sources remain errors.
 A join keyed outside the grouping that supplies no selected column only warns,
 regardless of `required`, because no selected value depends on it.
 
-A per-query grouping override validates a copy of the view with the requested
-grouping. Removing a grouping needed by a required dimension column refuses
-that query. Grouping by the column again or making that column optional lets
-the query proceed; an override cannot rescue a view already refused at load.
+The same checks run against a **per-query grouping override**, which validates a
+copy of the view with the override's grouping in place. Regrouping away from a
+`dimension` column that the view's own grouping supplied makes it an ungrouped
+dimension (below): it is shown by the unanimity rule when a grain carries it
+alongside the new grouping, and otherwise the query is refused rather than
+painting the column blank for as long as the override lasts. The remedy is in
+the message: group by the column again, or declare it `required = false`.
+An override cannot rescue a view already refused during load validation.
 
 The compiler also checks joins against available datasets and grains. An
 unusable required join produces an error naming the dataset; an optional join
@@ -366,6 +370,54 @@ and grouping columns are not summable. Document-query and catalog snapshot
 builders mark their columns false; custom builders must supply the flag
 explicitly. Selection totals require this flag and additive contributing
 values. Attribution alone cannot justify a total of maxima or ratios.
+
+### Ungrouped dimension columns
+
+A view may show a `dimension` column it does not group by — `strike` or
+`expiry` beside an `lhu → underlying_ref → position_ref` tree. When the column
+is declared with the dimension role in the primary (measure-family) dataset, is
+not a derived dimension, and no join supplies it, the compiler computes it by
+the **unanimity rule**, at every depth including the grand total:
+
+- the value, when every stored row under the tree row has that one non-NULL
+  value;
+- **mixed**, when they disagree — including a NULL beside a value, since
+  showing the value would claim it for rows that have none;
+- blank (NULL), when no row under it has a value.
+
+Unanimity prevents an arbitrary leg's strike from appearing as the strike
+for a position containing several instruments.
+
+The column is read from one table: the coarsest declared grain of the dataset
+that carries it and every column of the view's grouping (`unanimity_grain` in
+`geode-core`'s `view` module). The whole grouping, not a query's bounded prefix,
+so one grain serves every depth and a view that validates compiles at every
+`max_depth`. Per column the aggregate is `case when count(c) = count(*) and
+min(c) = max(c) then min(c) end` plus a flag `count(c) > 0 and (count(c) <
+count(*) or min(c) <> max(c))`, over the same grouping sets and level marker as
+a measure aggregate at that grain, joined to the spine the same way, with the
+grain's scope predicate and era. When a measure aggregate already reads that
+grain the two aggregates ride its scan; otherwise one `dim_<table>` CTE per grain
+holds them. That CTE is joined to the spine but never feeds it, so adding a
+display column never adds or removes tree rows. Views without ungrouped
+dimension columns do not add this aggregation.
+
+The result carries the value in the column's own type, so a numeric dimension
+sorts as a number and paints its shortest exact form (`4250`, `4250.5`), and a
+boolean companion column named `<column>#mixed` (false where the grain has no
+rows under the spine row). `ColumnMeta::mixed_flag` links the value to its
+companion by index and `Snapshot::from_batches` refuses a flag that is not a
+boolean column of the batch; `Snapshot::is_mixed_at` reads it. The column is not
+summable and is `Additive` at every depth, because the rule is already exact,
+and takes the chosen grain's scope semantics. A consumer reading the snapshot
+without the flag sees NULL, not a value.
+
+Known limitations: the unanimity is over the chosen grain table's rows, so an
+instrument with no row in that table (a cash instrument absent from the
+underlying table when the grouping forces the underlying grain) does not take
+part; choosing the coarsest carrying grain minimises this. A derived
+column over the dimension sees only the value column, so where the input is
+mixed the derived cell is blank, not marked.
 
 ## Retention and maintenance
 
@@ -526,8 +578,22 @@ to the report time if adding the interval overflows.
   measurement log.
 - Ordinary tests verify outcomes. Targeted mutations in
   [`mutation-check.sh`](../../scripts/mutation-check.sh) check whether tests
-  can detect particular wrong-data behaviors; `--anchors-only` validates
-  their source anchors without running Cargo.
+  can detect particular wrong-data behaviors. `--anchors-only` validates the
+  table without running Cargo or editing source: it rejects a stale or
+  ambiguous anchor, a filter matching no test or several without an exact
+  name, an entry with no filter, a replacement equal to its anchor, and a
+  mutation repeated under the same test. The checker,
+  [`mutation_anchors.py`](../../scripts/mutation_anchors.py), has its own
+  unittest suite in `scripts/test_mutation_anchors.py`. A mutation that
+  does not compile is reported as `BUILD`, not caught, and fails the run,
+  as does a stale entry; the exit status reports only such harness errors,
+  while `SURVIVED`, `caught` and `FILTER` are verdicts read from the output.
+  `--build-check` compiles each selected mutation without running tests,
+  on the same target and test profile a mutation run builds, to find
+  replacements left stale by signature changes that the static check
+  cannot see. A mutation run or build check that selects no entry exits
+  nonzero, unless `--changed` skipped every candidate because no anchored
+  file changed.
 
 The code linked above is the implementation authority. If this guide and the
 code disagree, correct the guide and assess whether the behavior is an

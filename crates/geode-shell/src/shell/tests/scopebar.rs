@@ -257,7 +257,7 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     vcx.simulate_click(save.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
             .object_dialog
@@ -353,7 +353,7 @@ fn services_with_saved_scope() -> ShellServices {
 }
 
 /// [`services_with_saved_scope`]'s registration over any builtin docs.
-fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
+pub(super) fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
     let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: docs,
         ..ConfigSources::default()
@@ -449,11 +449,11 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
 
     vcx.simulate_keystrokes("ctrl-,");
     assert!(
-        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&vcx, |shell, _| shell.modal_open()),
         "ctrl+, from the focused field must open the settings dialog"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
 
     vcx.simulate_keystrokes("alt-/");
     assert!(filter_is_focused(&shell, &mut vcx));
@@ -602,13 +602,13 @@ fn a_dialog_opened_from_the_field_returns_focus_to_it_when_closed(cx: &mut gpui:
         let _ = window.draw(cx);
     });
     vcx.simulate_keystrokes("ctrl-,");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_some()));
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal_open()));
     assert!(
         !filter_is_focused(&shell, &mut vcx),
         "the open dialog owns the keyboard, not the field"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "escape must return focus to the field the dialog was opened from"
@@ -664,12 +664,12 @@ fn a_dialog_opened_through_the_palette_from_the_field_returns_focus_to_the_field
     vcx.simulate_keystrokes("enter");
     assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
     assert!(
-        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&vcx, |shell, _| shell.modal_open()),
         "the palette must have opened the settings dialog"
     );
     assert!(!filter_is_focused(&shell, &mut vcx));
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "escape must return focus to the field the whole chain started from"
@@ -941,4 +941,106 @@ fn a_missing_name_paints_the_broken_chip(cx: &mut gpui::TestAppContext) {
         "the missing name paints in the danger tone"
     );
     assert!(vcx.debug_bounds("scope-named-chip-close-gone").is_some());
+}
+
+/// The object dialog's state, read through the shell.
+fn object_dialog_state<T>(
+    shell: &Entity<ShellView>,
+    vcx: &gpui::VisualTestContext,
+    f: impl FnOnce(&objectdialog::ObjectDialogState) -> T,
+) -> T {
+    shell.read_with(vcx, |s, _| {
+        f(s.object_dialog
+            .as_ref()
+            .expect("the object dialog should be open"))
+    })
+}
+
+/// A click on a named chip's body opens the Expressions dialog on that
+/// object, in its edit stage; the dialog then owns the keyboard, so
+/// `escape` steps back to its browse list.
+#[gpui::test]
+fn a_named_chips_body_opens_its_expression(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("liq"));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    click_selector(&mut vcx, "scope-named-chip-liq");
+    let (domain, stage) = object_dialog_state(&shell, &vcx, |s| (s.domain, s.stage.clone()));
+    assert_eq!(domain, objectdialog::Domain::Expressions);
+    assert_eq!(
+        stage,
+        objectdialog::Stage::Edit {
+            object: "liq".to_string()
+        }
+    );
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(
+        object_dialog_state(&shell, &vcx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "the keyboard reaches the dialog the click opened"
+    );
+}
+
+/// A missing name has no object to edit: the click opens the browse list
+/// with a notice rather than an edit stage over a phantom empty draft.
+#[gpui::test]
+fn a_missing_named_chips_body_opens_browse_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("gone"));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    click_selector(&mut vcx, "scope-named-chip-gone");
+    let (domain, stage, notice, has_draft) = object_dialog_state(&shell, &vcx, |s| {
+        (
+            s.domain,
+            s.stage.clone(),
+            s.notice.clone(),
+            s.draft.is_some(),
+        )
+    });
+    assert_eq!(domain, objectdialog::Domain::Expressions);
+    assert_eq!(stage, objectdialog::Stage::Browse);
+    assert_eq!(notice.as_deref(), Some("'gone' is not defined"));
+    assert!(!has_draft, "no edit draft was built");
+}
+
+/// An invalid name is still defined: its chip opens the edit stage, which
+/// is where the broken text gets fixed.
+#[gpui::test]
+fn an_invalid_named_chips_body_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
+    let services = services_with_builtin_docs(vec![
+        LayerDoc::builtin("scopes", "[mine]\nnamed = [\"bad\"]\n").unwrap(),
+        LayerDoc::builtin("expressions", "[bad]\nexpression = \"npv >\"\n").unwrap(),
+    ]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-named-chip-broken-bad").is_some(),
+        "the fixture's name is broken"
+    );
+    click_selector(&mut vcx, "scope-named-chip-bad");
+    assert_eq!(
+        object_dialog_state(&shell, &vcx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "bad".to_string()
+        }
+    );
+}
+
+/// The `×` occludes the body: clicking it drops the name and opens
+/// nothing.
+#[gpui::test]
+fn a_named_chips_close_glyph_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("liq"));
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    click_selector(&mut vcx, "scope-named-chip-close-liq");
+    assert!(frame.read_with(&vcx, |f, _| f.scope().named.is_empty()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open() && s.object_dialog.is_none()));
 }

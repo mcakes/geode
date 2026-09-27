@@ -141,7 +141,7 @@ fn typing_eod_and_enter_commits_eod_t_minus_one(cx: &mut gpui::TestAppContext) {
         panic!()
     };
     assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("as-of-stripe").is_some());
 }
@@ -168,7 +168,7 @@ fn a_digit_after_typing_is_a_filter_character(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_as_of(cx);
     vcx.simulate_input("t-");
     vcx.simulate_keystrokes("1");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(state_of(&shell, &vcx).query(), "t-1");
     assert_eq!(state_of(&shell, &vcx).painted()[0].label, "EOD T-1");
 }
@@ -201,7 +201,7 @@ fn tab_opens_the_custom_field_up_steps_the_day_and_enter_commits(cx: &mut gpui::
         frame.read_with(&vcx, |f, _| f.as_of().clone()),
         AsOf::At(expected)
     );
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 #[gpui::test]
@@ -211,12 +211,12 @@ fn escape_closes_the_field_first_and_the_dialog_second(cx: &mut gpui::TestAppCon
     assert!(state_of(&shell, &vcx).field().is_some());
     vcx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        shell.read_with(&vcx, |s, _| s.modal_open()),
         "first escape: field closed, dialog up"
     );
     assert!(state_of(&shell, &vcx).field().is_none());
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 #[gpui::test]
@@ -252,7 +252,7 @@ fn a_row_click_commits_it(cx: &mut gpui::TestAppContext) {
         panic!("row 1 expected to be an At commit")
     };
     assert_eq!(frame.read_with(&vcx, |f, _| f.as_of().clone()), AsOf::At(t));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 #[gpui::test]

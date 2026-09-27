@@ -1,4 +1,6 @@
-//! The scope bar's menu for adding dimension and expression filters.
+//! The scope bar's menu for adding dimension and expression filters. The
+//! expression dialog offers named expressions beside typed ones, so they
+//! have no row of their own.
 //!
 //! The `+` control opens the menu below its glyph. Rows show live bindings
 //! through [`kbd::menu_binding`]. `j`/`k`/`up`/`down` move the selection;
@@ -204,7 +206,7 @@ impl super::ShellView {
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) {
-        if self.modal.is_some() {
+        if self.modal_open() {
             return;
         }
         self.close_palette(window, cx);
@@ -276,7 +278,7 @@ impl super::ShellView {
             cx,
         );
         if return_to_filter {
-            if self.modal.is_some() {
+            if self.modal_open() {
                 self.overlay_return_to_filter = true;
             } else {
                 // Nothing opened (the action refused): back to the field now.

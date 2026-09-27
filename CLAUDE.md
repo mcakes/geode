@@ -46,12 +46,14 @@ cargo check -p geode-shell --features test-support --all-targets
 
 zsh scripts/mutation-check.sh "name substring"   # targeted mutation entries
 zsh scripts/mutation-check.sh --changed           # entries for changed files
-zsh scripts/mutation-check.sh --anchors-only      # validate every anchor, no Cargo
+zsh scripts/mutation-check.sh --anchors-only      # validate anchors, filters and entries, no Cargo
+zsh scripts/mutation-check.sh --build-check "name substring"  # compile mutations, no tests
 ```
 
 CI runs formatting, Clippy, tests, benchmark compilation, and the shell
-`test-support` check on macOS and Windows. The macOS job also runs mutation
-anchor and test-name filter validation with `--anchors-only`.
+`test-support` check on macOS and Windows. The macOS job first runs the
+mutation checker's unit tests and the `--anchors-only` anchor and test-name
+filter gate, before any toolchain step.
 
 ## Dependency and ownership rules
 

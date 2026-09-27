@@ -115,6 +115,9 @@ cargo check -p geode-app --features profiling
   but reloads only when `pricer_config_key` changed from the last applied key
   (seeded with the startup key `start` carries on `Bridge`), so an unrelated reload
   neither restarts its tiles' refresh timers nor repeats a bad value's warning.
+- `[pricing] underlyings` backs the pricer's `UnderlyingSource` through the
+  one `UnderlyingList` on `Bridge`; `start` hands it to the factory and the
+  reload observer sets it, so the pricer only ever reads it.
 
 Upload targets resolve against registered adapters at startup. The bridge passes
 target/document lists to market-data factories and routes outcomes to the
