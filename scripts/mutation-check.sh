@@ -21998,10 +21998,18 @@ run_mutation "scope expr: a reload re-offers named expressions" \
 # A staged name is not offered again.
 run_mutation "scope expr: offers exclude staged names" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        .filter(|name| !staged.iter().any(|s| s == name))' \
-  '        .filter(|_| true)' \
+  '        .filter(|name| !staged.iter().chain(joined).any(|s| s == name))' \
+  '        .filter(|name| !joined.iter().any(|s| s == name))' \
   geode-shell \
   a_staged_name_leaves_the_named_rows
+
+# Add mode joins the frame's names, so it does not offer them.
+run_mutation "scope expr: add mode offers the frame's own names" \
+  crates/geode-shell/src/shell/scope_expr_view.rs \
+  '        Mode::Add => frame_named,' \
+  '        Mode::Add => &[],' \
+  geode-shell \
+  add_mode_leaves_out_the_frames_own_names
 
 # A saved name must resolve at once: the write promotes on a timer, and
 # until then the staged name would read as missing.
