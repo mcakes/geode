@@ -18145,11 +18145,9 @@ run_mutation "pricer sheets: a switch keeps the old sheet's pricing tag" \
   crates/geode-pricer/src/tile.rs \
   '        self.data.cancel(QueryKey(self.id.0));
         self.tag += 1;
-        self.in_flight.clear();
-        self.sheet = Sheet::new(&name);' \
+        self.in_flight.clear();' \
   '        self.data.cancel(QueryKey(self.id.0));
-        self.in_flight.clear();
-        self.sheet = Sheet::new(&name);' \
+        self.in_flight.clear();' \
   geode-pricer an_old_sheets_pricing_answer_never_lands_on_the_new_one
 
 run_mutation "pricer load: a load starting leaves a refusal streak standing" \
@@ -20594,7 +20592,7 @@ run_mutation "pricer tile: a refused save is silent" \
 
 run_mutation "pricer tile: a close drops a pending save" \
   crates/geode-pricer/src/tile.rs \
-  '            this.flush_save();' \
+  '            this.flush_save(cx);' \
   '' \
   geode-pricer closing_flushes_a_pending_save_and_the_next_tile_reopens_it
 
@@ -21005,8 +21003,10 @@ run_mutation "pricer tile: a refusal destroys the standing notice" \
 run_mutation "pricer tile: an edit prunes the open set" \
   crates/geode-pricer/src/tile.rs \
   '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.rebuild(cx);' \
   '    pub(crate) fn after_edit(&mut self, cx: &mut Context<Self>) {
+        self.edit_seq += 1;
         self.expansion.retain_packages(&self.sheet);
         self.rebuild(cx);' \
   geode-pricer dd_then_u_on_an_open_package_restores_it_open_under_the_cursor
@@ -21725,7 +21725,7 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
 
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \
-  '                t.flush_save();' \
+  $'                if t.flush_save(cx) {\n                    t.rebuild(cx);\n                }' \
   '' \
   geode-pricer flush_all_saves_every_unsaved_sheet_now
 
