@@ -24322,7 +24322,7 @@ run_mutation "pricer sheets: the rename field skips :name's refusals" \
 run_mutation "pricer sheets: a refused rename closes the field" \
   crates/geode-pricer/src/tile.rs \
   '            Ok(()) => self.close_rename_field(window, cx),' \
-  '            Ok(()) | Err(_) if true => self.close_rename_field(window, cx),' \
+  '            _ => self.close_rename_field(window, cx),' \
   geode-pricer a_refused_rename_keeps_the_field_and_escape_or_a_press_outside_cancels
 
 run_mutation "pricer sheets: the menu's rename row is never greyed" \
