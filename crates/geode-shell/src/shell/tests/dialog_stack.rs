@@ -639,3 +639,57 @@ fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::Tes
         "the click must not also reach the row and open it"
     );
 }
+
+/// Reverses the earlier "known limitation": `tile::command_line`, `tile::find`,
+/// and `stack::pick`, run from the palette over a dialog, used to open real
+/// transient chrome behind the stack that the user could not see or usefully
+/// reach. Each must now refuse with a notice and leave the stack untouched.
+#[gpui::test]
+fn palette_transient_chrome_is_refused_over_a_dialog(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, _log, _left, _right, _top) = super::stacks::stacked_shell(cx);
+    for (query, id) in [
+        ("Open the tile command line", "tile::command_line"),
+        ("Find in tile", "tile::find"),
+        ("Stack: Pick", "stack::pick"),
+    ] {
+        dispatch_action(&shell, "config::views", &mut vcx);
+        draw(&mut vcx);
+        assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
+
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.simulate_input(query);
+        let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+        assert!(
+            matches!(&selected, Some(crate::palette::PaletteItem::Action(a, ..)) if a.0 == id),
+            "{id}: {selected:?}"
+        );
+        vcx.simulate_keystrokes("enter");
+        draw(&mut vcx);
+
+        assert!(
+            shell.read_with(&vcx, |s, _| s.notice.is_some()),
+            "{id} must set a notice"
+        );
+        assert!(
+            shell.read_with(&vcx, |s, _| s.command_line.is_none()),
+            "{id} must not open the command line"
+        );
+        assert!(
+            shell.read_with(&vcx, |s, _| s.stack_list.is_none()),
+            "{id} must not open the stack list"
+        );
+        assert_eq!(
+            kinds(&shell, &mut vcx),
+            vec![DialogKind::Object],
+            "{id} must not change the stack"
+        );
+
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                while s.modal_open() {
+                    s.close_modal(window, cx);
+                }
+            });
+        });
+    }
+}

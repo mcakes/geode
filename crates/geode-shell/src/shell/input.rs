@@ -28,6 +28,10 @@ use super::{
 /// The notice produced when a stack verb targets a tile outside a stack.
 pub(super) const NOT_IN_A_STACK: &str = "not in a stack";
 
+/// The notice produced when a palette action tries to open transient chrome
+/// (the command line, find, or the stack list) while a dialog is open.
+pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
+
 impl ShellView {
     /// Active contexts, outermost first: workspace, then tile and occupant when
     /// an occupant is focused, then palette while open. Used for ordinary matching
@@ -105,6 +109,24 @@ impl ShellView {
         self.notice = None;
         self.stack_list = None;
         self.add_filter_menu = None;
+
+        // The palette reaches every action, including these three, even while a
+        // dialog is open (ruling 5). Each would open real transient chrome behind
+        // the stack that the user cannot see and, being blocked from the keyboard
+        // by the modal branch, can barely reach: an unfocusable command line that
+        // cancels itself on the next render, a find prompt with the same fate, or
+        // a stack list that only becomes usable once the stack closes. Refuse
+        // instead of running them behind the stack, unlike an ordinary palette
+        // action (see `commit_selected`), which is allowed to run there.
+        if self.modal_open()
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {
+            self.notice = Some(CLOSE_DIALOG_FIRST);
+            return;
+        }
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
             // Stack cycling consumes the count before the count-free workspace router.
