@@ -24356,6 +24356,76 @@ run_mutation "tile menu: the menu does not occlude" \
   '        // Occlude what the menu covers so its hover and presses do not also reach it.' \
   geode-tile a_hover_lights_its_row_and_the_menu_occludes_what_it_covers
 
+# ---- geode-tile: confirm door ------------------------------------------
+#
+# Only a bare `y` confirms.
+run_mutation "tile confirm: any key confirms" \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if true {
+        host.confirmed(payload, window, cx);' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+run_mutation "tile confirm: a modified y confirms" \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if ks.key == "y" {
+        host.confirmed(payload, window, cx);' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+# Focus leaving the prompt answers no.
+run_mutation "tile confirm: a blur leaves the question standing" \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
+  geode-tile a_blur_cancels
+
+# A pointer press in the tile answers no.
+run_mutation "tile confirm: a press leaves the question standing" \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
+  '            let _ = (&tile, window, cx);' \
+  geode-tile a_pointer_press_cancels
+
+# A press on the prompt itself does not hand the keyboard back to it.
+run_mutation "tile confirm: a press on the prompt refocuses it" \
+  crates/geode-tile/src/confirm.rs \
+  '        .on_any_mouse_down(|_, window, _| window.prevent_default())' \
+  '        .on_any_mouse_down(|_, _, _| {})' \
+  geode-tile a_pointer_press_cancels
+
+# Blur, then drop.
+run_mutation "tile confirm: the prompt drops still focused" \
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {
+            window.blur(cx);
+        }' \
+  '        let _ = (&self.focus, &window, &cx);' \
+  geode-tile y_confirms_once_and_gives_the_keyboard_back
+
+# Every key under the question is the question's alone.
+run_mutation "tile confirm: an answering key reaches the tile too" \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
+  geode-tile any_other_key_cancels_and_is_consumed
+
+# A withdrawal is not an answer: its blur answer is gone before the next
+# draw dispatches blur. gpui dispatches blur at draw, after deferrals run,
+# so only a subscription that outlives the deferral can be heard; the test
+# arms a second question in the withdrawal's update, whose focus move
+# reaches a surviving blur answer.
+run_mutation "tile confirm: a withdrawal is heard as a no" \
+  crates/geode-tile/src/confirm.rs \
+  '    drop(_blur);' \
+  '    std::mem::forget(_blur);' \
+  geode-tile a_question_armed_behind_a_withdrawal_stands
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
