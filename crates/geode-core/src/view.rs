@@ -1625,7 +1625,7 @@ kind = "dimension"
 
     /// The same join declared optional is dropped and said so, never refused.
     #[test]
-    fn an_optional_join_whose_keys_no_grain_carries_is_dropped_with_an_info() {
+    fn an_optional_join_whose_keys_no_grain_carries_is_dropped_with_a_warning() {
         let text = r#"
 [v]
 dataset = "risk_snapshot"
@@ -1713,7 +1713,7 @@ kind = "dimension"
 
     /// The opt-out on a column, with the drop named.
     #[test]
-    fn an_optional_unreachable_column_is_dropped_with_an_info_naming_it() {
+    fn an_optional_unreachable_column_is_dropped_with_a_warning_naming_it() {
         let text = r#"
 [v]
 dataset = "risk_snapshot"

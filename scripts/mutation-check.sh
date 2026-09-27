@@ -779,6 +779,20 @@ run_mutation "views: a join keyed outside the grouping is refused" \
 # repeats across every row of its grain — so the total on screen looks like a
 # number and is not one. `kind` defaults to "measure", so this is the mistake
 # the shorthand form makes.
+# A dimension reaches the row only by being grouped or by coming off a join;
+# the spine selects nothing else. Mutated so the grouping test never holds, a
+# dimension column the view declares but nothing supplies goes unreported, and
+# the blotter paints that column empty on every row forever with no diagnostic
+# anywhere the trader would look.
+run_mutation "views: a dimension column must be reachable" \
+  crates/geode-core/src/view.rs \
+  '                    if let ViewColumn::Dimension { required, .. } = other
+                        && !self.grouping.iter().any(|g| g == name)' \
+  '                    if let ViewColumn::Dimension { required, .. } = other
+                        && false' \
+  geode-core \
+  a_dimension_column_neither_grouped_nor_joined_refuses_the_view
+
 run_mutation "views: a measure column must really be a measure" \
   crates/geode-core/src/view.rs \
   '                            .is_some_and(|c| matches!(c.role, ColumnRole::Measure { .. }))' \
@@ -796,7 +810,7 @@ run_mutation "views: required = false is dropped rather than refused" \
   '        let report = |required: bool, message: String| {
             if true {' \
   geode-core \
-  an_optional_unreachable_column_is_dropped_with_an_info_naming_it
+  an_optional_unreachable_column_is_dropped_with_a_warning_naming_it
 
 # The compiler's own backstop for the same defect, for a view that reaches it
 # without having been through validation: dropping the join here is what made
