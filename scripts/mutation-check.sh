@@ -1750,35 +1750,35 @@ run_mutation "egress config: a config_version header is not a spurious diagnosti
 
 run_mutation "egress: a write error answers Err" \
   crates/geode-data/src/egress.rs \
-  '            Err(e) => return refuse(e.to_string()),' \
-  '            Err(_) => Vec::new(),' \
+  '        Ok(Err(e)) => return Err(format!("egress '"'"'{name}'"'"': {e}")),' \
+  '        Ok(Err(_)) => Vec::new(),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 run_mutation "egress: an adapter error answers Err naming the target" \
   crates/geode-data/src/egress.rs \
-  '            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
-  '            Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
+  '        Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),' \
+  '        Ok(outcome) => outcome.map_err(|e| e.to_string()),' \
   geode-data \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 # A transport panic must fail its own upload, not the worker. Mutated, it
-# unwinds past `answer`, so the job is never answered and the dropped
-# receiver strands every queued upload.
+# unwinds the worker, so the job is never answered and the queued uploads
+# behind it are stranded.
 run_mutation "egress: a panicking transport is contained" \
   crates/geode-data/src/egress.rs \
-  '        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
-        };' \
-  '        let result = egress
-            .upload(&job.address, job.bytes)
-            .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"));' \
+  '    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| egress.upload(&job.address, bytes))
+    })) {
+        Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
+        Err(payload) => Err(format!(
+            "egress '"'"'{name}'"'"': transport panicked: {}",
+            crate::ingest::runner::panic_payload_message(&*payload)
+        )),
+    }' \
+  '    egress
+        .upload(&job.address, bytes)
+        .map_err(|e| format!("egress '"'"'{name}'"'"': {e}"))' \
   geode-data \
   a_panicking_transport_answers_the_upload_and_keeps_the_worker
 
@@ -20008,62 +20008,23 @@ run_mutation "egress: an unknown target answers Err" \
   a_write_error_an_unknown_target_and_a_closed_bus_each_answer_err_naming_the_target
 
 # One worker per target runs uploads in submission order: the later of two
-# uploads of one document must land last. Mutated to drain what is queued
-# and run each drained batch newest first, the order inverts.
+# uploads of one document must land last. Mutated to run a second queued
+# job ahead of the first, the order inverts.
 run_mutation "egress: uploads to one target run in submission order" \
   crates/geode-data/src/egress.rs \
   '    while let Ok(job) = jobs.recv() {
-        // Convert transport panics into this upload'"'"'s error and keep servicing the
-        // queue. Mark the catch boundary so the app logs a contained panic without
-        // creating a crash report.
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
-        };
-        answer(
-            &sink,
-            &name,
-            &job.document,
-            &job.document_key,
-            job.key,
-            job.tag,
-            result,
-        );
-    }
-}' \
+        let result = run_job(&name, egress.as_mut(), &job);' \
   '    while let Ok(first) = jobs.recv() {
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let mut batch = vec![first];
-        while let Ok(more) = jobs.try_recv() {
-            batch.push(more);
-        }
-        for job in batch.into_iter().rev() {
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            geode_core::panic::contained(|| egress.upload(&job.address, job.bytes))
-        })) {
-            Ok(outcome) => outcome.map_err(|e| format!("egress '"'"'{name}'"'"': {e}")),
-            Err(payload) => Err(format!(
-                "egress '"'"'{name}'"'"': transport panicked: {}",
-                crate::ingest::runner::panic_payload_message(&*payload)
-            )),
+        let job = match jobs.try_recv() {
+            Ok(second) => {
+                let result = run_job(&name, egress.as_mut(), &second);
+                answer(&sink, &name, &second.document, &second.document_key, second.key, second.tag, result);
+                first
+            }
+            Err(_) => first,
         };
-        answer(
-            &sink,
-            &name,
-            &job.document,
-            &job.document_key,
-            job.key,
-            job.tag,
-            result,
-        );
-        }
-    }
-}' \
+        let result = run_job(&name, egress.as_mut(), &job);' \
   geode-data \
   uploads_to_one_target_run_in_submission_order
 
@@ -22875,6 +22836,17 @@ run_mutation "supervise: an egress worker's death is announced to no one" \
   '                        format!("geode-egress-{}", spec.name),
                         crate::supervise::unwatched(),' \
   geode-data an_egress_worker_that_dies_is_declared
+
+# An encoder panic must fail its own upload. Mutated, it unwinds the worker
+# (now declared by supervision), the upload is never answered, and the one
+# queued behind it is stranded.
+run_mutation "egress: an encoding panic is contained" \
+  crates/geode-data/src/egress.rs \
+  '    let bytes = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| job.kind.write(&job.rows))
+    })) {' \
+  '    let bytes = match Ok::<_, Box<dyn std::any::Any + Send>>(job.kind.write(&job.rows)) {' \
+  geode-data an_encoding_panic_answers_the_upload_and_keeps_the_worker
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
