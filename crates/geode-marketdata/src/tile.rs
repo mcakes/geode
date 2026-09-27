@@ -1210,6 +1210,15 @@ impl MarketDataTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        // An editor left open (orphaned by a focus move) is cancelled, as
+        // every other verb that is not its commit does: blur, then drop.
+        // First, before anything reads the draft: a selection editor's
+        // close takes its live steps back out, so a document assembled
+        // before it would send steps the draft no longer holds, and the
+        // `y` check (armed draft against current) could not tell.
+        if self.editor.is_some() {
+            self.close_editor(window, cx);
+        }
         let document = self.spec.document;
         let target = match target {
             Some(t) => {
@@ -1252,11 +1261,6 @@ impl MarketDataTile {
             return Err("no document to upload".into());
         };
         let rows = crate::core::upload::assemble(&snapshot, self.spec, &self.model, &self.draft)?;
-        // An editor left open (orphaned by a focus move) is cancelled, as
-        // every other verb that is not its commit does: blur, then drop.
-        if self.editor.is_some() {
-            self.close_editor(window, cx);
-        }
         // A confirm already armed is replaced, never stacked.
         self.disarm_upload(window, cx);
         let cells = match self.draft.cell_count() {

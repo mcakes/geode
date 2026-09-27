@@ -1648,3 +1648,43 @@ fn i_on_a_slice_value_in_a_block_edits_it(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.row_texts(&vcx, 0)[..2], ["4600.00", "4600.0000"]);
     assert_eq!(notice_of(&h, &vcx).as_deref(), Some("set 2 cells"));
 }
+
+/// `:upload` with a stepping editor open closes it first: the steps are
+/// undone before anything is assembled, so what goes upstream is the
+/// draft as `i` found it, never the live steps the close takes back.
+#[gpui::test]
+fn an_upload_armed_mid_step_sends_the_draft_as_it_was_before_i(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_upload(cx);
+    h.with_document(&mut vcx);
+    h.edit_one_cell(&mut vcx); // fwd on the first term: the one edit to send
+    let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+    let expected = h.tile.read_with(&vcx, |t, _| {
+        crate::core::upload::assemble(&t.painted_snapshot().unwrap(), t.spec, t.model(), t.draft())
+            .unwrap()
+    });
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "upload", None);
+    assert!(h.editor_value(&vcx).is_none(), "the editor closed");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().clone()), before);
+    draw(&mut vcx);
+    type_keys(&mut vcx, "y");
+    let sent = h.upload_request().expect("y submits");
+    assert_eq!(sent.rows, expected, "no stepped value went upstream");
+}
+
+/// With nothing but live steps in the draft, the close leaves nothing to
+/// upload.
+#[gpui::test]
+fn an_upload_of_live_steps_alone_is_refused_as_empty(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_upload(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.dispatch(&mut vcx, "upload", None);
+    assert_eq!(notice_of(&h, &vcx).as_deref(), Some("nothing to upload"));
+    assert_eq!(h.upload_prompt(&vcx), None, "nothing armed");
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+}
