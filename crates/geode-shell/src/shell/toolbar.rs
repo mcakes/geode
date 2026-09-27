@@ -44,7 +44,7 @@ const FILTER_WIDTH: f32 = 200.0;
 /// The square a chip's `×` and each bare verb glyph occupy, in design
 /// pixels — a hit target inside a 20 px chip, and the same box for the
 /// `+`/save glyphs so the verbs sit on the chips' centre line.
-const GLYPH_BOX: f32 = 14.0;
+pub(super) const GLYPH_BOX: f32 = 14.0;
 
 /// The inset hairline between two segments, in design pixels: shorter
 /// than the row so it reads as a segment boundary inside the bar, not a

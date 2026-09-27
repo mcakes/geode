@@ -564,10 +564,6 @@ fn build(
         .into_any_element()
 }
 
-/// The square a staged chip's `×` occupies, in design pixels: the
-/// toolbar's chip glyph box, so the two chip rows read as one object.
-const GLYPH_BOX: f32 = 14.0;
-
 /// One `≡ name` chip per staged name, in staged order, each with a `×`
 /// that unstages it. A name the frame cannot resolve (missing or invalid)
 /// takes the danger tone, as its scope-bar chip does, since Enter would
@@ -618,7 +614,6 @@ fn staged_chips(
                 .bg(bg)
                 .text_color(fg)
                 .text_sm()
-                .font_family(crate::fonts::MONO)
                 .debug_selector(move || body.clone())
                 .child(SharedString::from(format!("≡ {name}")))
                 .child(
@@ -627,7 +622,9 @@ fn staged_chips(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .size(scale::design(GLYPH_BOX))
+                        // The toolbar chip's glyph box, so a staged chip
+                        // and its scope-bar chip read as one object.
+                        .size(scale::design(super::toolbar::GLYPH_BOX))
                         .rounded(theme.radius_tokens().sm)
                         .text_color(fg)
                         .child(Icon::new(IconName::Close).small())
