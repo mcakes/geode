@@ -27,7 +27,7 @@ layer:
    | Site | Today |
    |---|---|
    | Fetch worker, `Identities` work (`fetch.rs`, identity `None`) | log line only |
-   | Ingest runner, pop-time stale check (`runner.rs`) | fails open: the panic reads as "not stale" and the file loads anyway |
+   | Ingest runner, pop-time stale check (`runner.rs`) | fails open (deliberately) but silently: nobody learns the catalog check failed |
    | Ingest runner, `sweep_local` (`runner.rs`) | `warn!` only |
    | Discovery poll (`scheduler.rs`) | Health `Failed{"discovery panicked"}`, payload discarded |
    | Query pool delivery (`query/pool.rs`) | the sink call, and an `.expect` building the `Distinct` payload (`service.rs`), run outside the worker's boundary, so a panic there kills the worker |
@@ -135,7 +135,7 @@ Every reason below carries the panic payload.
 | Site | After |
 |---|---|
 | Fetch `Identities` | Error `Diagnostic`: `identity listing for <source> panicked: <payload>` |
-| Pop-time stale check | **fails closed**: the load is skipped, and load-lane Health `Failed` for that file names the payload. The next discovery poll re-queues the file, so it retries rather than vanishing. **Planning must first read `a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner`.** If fail-open was deliberate (for example, so a corrupt catalog row cannot block a source forever), the plan stops and asks for a ruling before changing it. |
+| Pop-time stale check | **stays fail-open, and is reported** (Matthew, 2026-09-27). Fail-open is deliberate (`runner.rs`: a failed lookup must not silently discard the load), and the cost is a redundant reload that republishes the same data as a new generation, never a wrong total. The load still proceeds. A lookup panic or store error becomes a **warning** `Diagnostic` naming the file and the payload or error, where today it is silent. The existing `a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner` keeps its assertions and gains one for the diagnostic. |
 | `sweep_local` | Error `Diagnostic`: `local sweep panicked: <payload>` |
 | Discovery | the same Health `Failed`, reason `discovery panicked: <payload>` |
 | Query-pool delivery | the event is *built* inside the worker's boundary, and the `.expect` in the `Distinct` payload becomes an `Err` answer to that key. Only the channel send stays outside, and the worker is supervised (§4.1), so if it dies anyway, that is declared. |
