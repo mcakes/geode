@@ -40,7 +40,8 @@ A pin glyph at the toolbar's leading edge, before the scope segment, built on
 the `shell::control` door (hover and pressed fills, arrow cursor).
 
 - Off: muted. Tooltip "Pin the frame to workspace N".
-- On: accent tone. Tooltip "Frame pinned to workspace N — scope, grouping,
+- On: the Neutral chip tone (`chip::Tone::Neutral`, the shell's tone for a
+  user-selected state with no hazard). Tooltip "Frame pinned to workspace N — scope, grouping,
   and as-of changes stay here. Click to rejoin the shared frame."
 
 The glyph is the pinned indicator and follows the active workspace. User-
@@ -49,9 +50,9 @@ blotter's tile-level "pinned grouping".
 
 ### 3.2 Keyboard route
 
-`frame::pin_workspace`, Frame palette category, labelled "Pin frame to
-workspace" when the active workspace is unpinned and "Unpin frame" when it is
-pinned. Unbound by default.
+`frame::pin_workspace`, Frame palette category, titled "Toggle the frame pin
+for this workspace" (palette titles are static; the glyph shows the state).
+Unbound by default.
 
 ### 3.3 Pin and unpin
 
@@ -127,9 +128,11 @@ value, in any lane.**
 - After unpin, a tile's last-seen generation equals the shared lane's only if
   the content is equal. Tiles keep their one-integer compare per field, and a
   lane switch can never read as "no change" when the content differs.
-- `replace_slots` (a `groupings.toml` reload or a slot save) gives a fresh
-  grouping generation to every lane — pinned ones in hidden workspaces
-  included — whose active slot's content changed.
+- `replace_slots` (a `groupings.toml` reload) gives a fresh grouping
+  generation to every lane, pinned ones in hidden workspaces included, as it
+  bumps the one grouping counter today, and clears an active slot that
+  vanished in any lane. `save_slot` gives a fresh grouping generation to every
+  lane whose active slot is the saved one.
 
 `FrameVersions` keeps its shape; `versions(ws)` fills scope/grouping/as-of
 from `lane(ws)` and the rest from the shared fields. `versions_for` likewise
@@ -194,9 +197,12 @@ UI thread.
 
 - Workspace switch during a scope text session: the session ends as it does
   on focus loss; the text field resyncs to the new active lane.
-- Frame dialogs (pick, as-of, expression, grouping, Scopes save/load) record
-  their target `WorkspaceIx` at open and commit into that lane. Modality
-  already prevents a switch in between; the explicit target makes it testable.
+- Frame dialogs (pick, as-of, expression, grouping, Scopes save/load) target
+  the workspace recorded on the modal stack's base entry
+  (`ShellModal::workspace`, set at push). Every shell frame read or write goes
+  through one door, `ShellView::target_frame()`: the base modal's workspace
+  while a modal is open, else the active workspace. Modality already prevents
+  a switch in between; the recorded target makes it explicit and testable.
 - A pinned workspace with no tiles keeps its lane.
 - Named-expression edits reach every lane (definitions are shared). A missing
   or invalid name is still a per-query refusal in whichever lane references it.
