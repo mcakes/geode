@@ -8266,8 +8266,8 @@ run_mutation "scope-save: the save chip's savable gate" \
 # both in the palette and in `input.rs`'s `scope::<name>` dispatch arm.
 run_mutation "scope-save: save_current is a reserved scope name" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            Domain::Scopes => &geode_core::scopes::RESERVED_NAMES,' \
-  '            Domain::Scopes => &[],' \
+  '            Domain::Scopes | Domain::Expressions => &geode_core::scopes::RESERVED_NAMES,' \
+  '            Domain::Scopes | Domain::Expressions => &[],' \
   geode-shell \
   scope_save_current_refuses_its_own_name_as_reserved
 
@@ -8877,14 +8877,26 @@ run_mutation "groupings: an unchanged chain is applied anyway" \
 # Re-anchored (30fcede gave this arm `.min_h_6()` — item 2 of the final
 # review's re-review — so the bare-`div()` text the old anchor matched
 # no longer exists). The three match arms together are still the
-# unique text: `confirm_row(confirm, &draft.name, entity, cx)` and
+# unique text: the edit stage's `confirm_row(` call on `&draft.name` and
 # `action_bar(shell, entity)` each occur nowhere else in this file.
 run_mutation "objectdialog: the action bar stays up under the chain field" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (false, None) => action_bar(shell, entity),' \
-  '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+  '        (_, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (_, None) => action_bar(shell, entity),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
