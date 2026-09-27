@@ -98,13 +98,24 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
         .unwrap_or_default()
 }
 
+/// The Scopes expression grammar, plus one refusal: a named expression must say
+/// something. An empty one is an invalid definition every scope ticking it would
+/// fail on, and a fresh expression's field opens empty, so Enter on it is refused
+/// with the field kept open rather than closing on nothing.
+pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
+    if key == "expression" && text.trim().is_empty() {
+        return Err("expression: a named expression cannot be empty".to_string());
+    }
+    super::scopes::parse_text(key, text)
+}
+
 /// What the field means, for the edit footer's help line
 /// ([`Domain::help`](super::Domain::help)). One footer line holds at most
 /// 90 characters.
 pub fn help(key: &str) -> &'static str {
     match key {
         "expression" => {
-            "The expression this name stands for; scopes that tick it AND it in — tab completes"
+            "The expression this name stands for; scopes that tick it AND it in. tab completes columns."
         }
         _ => "",
     }
@@ -148,6 +159,46 @@ mod tests {
         let diags = validate(&draft, &config);
         assert!(!diags.is_empty());
         assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+    }
+
+    #[test]
+    fn an_empty_expression_is_refused_and_a_typed_one_parses() {
+        assert_eq!(
+            parse_text("expression", "  "),
+            Err("expression: a named expression cannot be empty".to_string())
+        );
+        assert_eq!(
+            parse_text("expression", " npv > 0 "),
+            Ok("npv > 0".to_string())
+        );
+        assert!(parse_text("expression", "npv >").is_err());
+    }
+
+    #[test]
+    fn the_used_by_sentence_lists_scopes_in_order_then_the_frame() {
+        use super::super::used_by_sentence;
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(used_by_sentence(Vec::new(), false), None);
+        assert_eq!(
+            used_by_sentence(names(&["EQ liquid"]), false).as_deref(),
+            Some("Used by EQ liquid.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), false).as_deref(),
+            Some("Used by EQ liquid and RATES liquid.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["c", "a", "b"]), false).as_deref(),
+            Some("Used by a, b and c.")
+        );
+        assert_eq!(
+            used_by_sentence(names(&["RATES liquid", "EQ liquid"]), true).as_deref(),
+            Some("Used by EQ liquid, RATES liquid and the current scope.")
+        );
+        assert_eq!(
+            used_by_sentence(Vec::new(), true).as_deref(),
+            Some("Used by the current scope.")
+        );
     }
 
     #[test]

@@ -7400,8 +7400,9 @@ fn config_expressions_lists_each_name_with_its_expression(cx: &mut gpui::TestApp
     assert_eq!(liq.summary, "npv > 0");
 }
 
-/// `n` names a new expression, `i` opens its only field, and the typed
-/// expression reaches the user file.
+/// `n` names a new expression and opens its only field at once, with no
+/// refusal for the still-empty text; the first valid Enter creates the
+/// object in the user file.
 #[gpui::test]
 fn a_new_named_expression_is_written_to_the_user_file(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -7419,8 +7420,20 @@ fn a_new_named_expression_is_written_to_the_user_file(cx: &mut gpui::TestAppCont
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Edit { ref object } if object == "hedges"
     ));
-    cx.simulate_keystrokes("i");
+    assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the field is open without `i`"
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.diagnostics.is_empty()));
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+    // An empty Enter is refused with the field kept open.
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("expression: a named expression cannot be empty")
+    );
     assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
     cx.simulate_input("npv < 0");
     cx.simulate_keystrokes("enter");
@@ -7437,6 +7450,44 @@ fn a_new_named_expression_is_written_to_the_user_file(cx: &mut gpui::TestAppCont
         written.contains("[hedges]\nexpression = \"npv < 0\""),
         "{written}"
     );
+}
+
+/// Escape out of a fresh expression's open field, before any valid Enter,
+/// writes nothing and shows no error; leaving the edit stage loses only the
+/// unsaved name.
+#[gpui::test]
+fn escaping_a_fresh_named_expression_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("hedges");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
+    assert!(edit_draft(&shell, &cx, |d| d.diagnostics.is_empty()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    flush_config_write(&mut cx);
+    assert!(!dir.path().join("expressions.toml").exists());
+    assert!(shell.read_with(&cx, |s, _| {
+        s.services
+            .config
+            .doc("expressions")
+            .is_none_or(|d| d.value.get("hedges").is_none())
+    }));
 }
 
 /// Enter on an expression naming a column the schema lacks refuses with

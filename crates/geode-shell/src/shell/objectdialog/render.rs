@@ -512,6 +512,11 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .as_ref()
         .map(|s| s.naming_seed.clone())
         .unwrap_or(NameSeed::Empty);
+    // A fresh named expression has no valid default: an empty expression is an
+    // invalid definition, so creating it would refuse on naming and Escape would then
+    // lose the name. Instead the field opens at once and the first valid Enter writes
+    // the object. A copy has its source's expression and is created as usual.
+    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;
     // One `match` rather than two `if let`s: `seed` is an owned, non-`Copy` value with
     // exactly one consumer, and a second `if let` reading it after a first one already
     // moved it needed a defensive `.clone()` that a single exhaustive match makes
@@ -561,7 +566,14 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
-    if let Some(notice) = apply::commit_create(shell, cx) {
+    if opens_expression {
+        // The empty-text error stays unpainted until the first Enter revalidates; the
+        // write gate re-derives it then, so an empty Enter is still refused.
+        if let Some(draft) = draft_mut(shell) {
+            draft.diagnostics.clear();
+        }
+        open_field(shell);
+    } else if let Some(notice) = apply::commit_create(shell, cx) {
         set_notice(shell, notice);
     }
     cx.notify();
@@ -2571,7 +2583,7 @@ fn in_domain(shell: &ShellView, domain: Domain) -> bool {
 fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
     let pending = apply::config_with_pending(shell);
     let config = pending.as_ref().unwrap_or(&shell.services.config);
-    let mut users: Vec<String> = config
+    let users: Vec<String> = config
         .doc(scopes::DOC)
         .map(|doc| {
             doc.value
@@ -2586,16 +2598,8 @@ fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<Str
                 .collect()
         })
         .unwrap_or_default();
-    users.sort();
-    if shell.frame.read(cx).scope().named.iter().any(|n| n == name) {
-        users.push("the current scope".to_string());
-    }
-    let list = match users.as_slice() {
-        [] => return None,
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    };
-    Some(format!("Used by {list}."))
+    let frame = shell.frame.read(cx).scope().named.iter().any(|n| n == name);
+    super::used_by_sentence(users, frame)
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.
@@ -4498,22 +4502,22 @@ fn confirm_row(
     let on_no: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
     let selector = format!("objectdialog-confirm-prompt-{name}");
-    // The detail joins the question's own text so it paints in the prompt's place and
-    // colour; the empty marker lets a test see that it was painted.
-    let prompt = match detail {
-        Some(detail) => format!("{} {detail}", confirm.prompt(name)),
-        None => confirm.prompt(name),
-    };
-    div()
+    // Context for the question, not part of it: muted, on its own line under the row.
+    let detail = detail.map(|detail| {
+        div()
+            .debug_selector(|| "objectdialog-confirm-detail".to_string())
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(detail.to_string())
+    });
+    v_flex()
+        .gap_1()
         // Names the object the prompt is about, so a test can tell which
         // one the row was painted for — `dialog::confirm_row`'s own
         // selectors are per surface, not per object.
         .debug_selector(move || selector.clone())
-        .when(detail.is_some(), |el| {
-            el.child(div().debug_selector(|| "objectdialog-confirm-detail".to_string()))
-        })
         .child(dialog::confirm_row(
-            prompt,
+            confirm.prompt(name),
             yes_label,
             "objectdialog",
             entity,
@@ -4521,6 +4525,7 @@ fn confirm_row(
             on_no,
             cx,
         ))
+        .children(detail)
         .into_any_element()
 }
 

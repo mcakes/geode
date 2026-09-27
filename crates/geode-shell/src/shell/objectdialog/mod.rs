@@ -2675,8 +2675,8 @@ impl Domain {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
-            // One grammar for an expression wherever it is typed.
-            Domain::Scopes | Domain::Expressions => scopes::parse_text(key, text),
+            Domain::Scopes => scopes::parse_text(key, text),
+            Domain::Expressions => expressions::parse_text(key, text),
             // Schema joins Views for the reason `text_editable` gives:
             // the two column stages are the same seven rows, so `width`
             // must have the same grammar through either door.
@@ -2987,6 +2987,22 @@ pub struct ObjectDialogState {
     /// field never shows values fetched under another scope. Read only while
     /// [`expression_entry_open`] holds.
     pub expr: Option<crate::exprcomplete::ExprCompletion>,
+}
+
+/// The delete question's "Used by …" sentence for a named expression: `scopes` in
+/// name order, then the frame when `frame` ticks it, joined "A", "A and B" or
+/// "A, B and C". `None` when nothing uses it, so no sentence is painted.
+pub(crate) fn used_by_sentence(mut scopes: Vec<String>, frame: bool) -> Option<String> {
+    scopes.sort();
+    if frame {
+        scopes.push("the current scope".to_string());
+    }
+    let list = match scopes.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    };
+    Some(format!("Used by {list}."))
 }
 
 /// Whether an `expression` field — a saved scope's or a named expression's —

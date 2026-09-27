@@ -21838,6 +21838,14 @@ run_mutation "named expr: a copy's field is built empty" \
   geode-shell \
   c_copies_a_named_expression_with_its_text
 
+# Naming a fresh expression opens its field instead of creating an invalid one.
+run_mutation "named expr: naming a fresh expression creates it at once" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;' \
+  '    let opens_expression = false;' \
+  geode-shell \
+  a_new_named_expression_is_written_to_the_user_file
+
 # The Expressions dialog's expression field turns suggestions on.
 run_mutation "named expr: the expressions field has no suggestions" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
