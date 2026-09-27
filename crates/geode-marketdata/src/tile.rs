@@ -69,6 +69,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod select;
+use select::StepsUndo;
 
 /// How many rows `ctrl+d`/`ctrl+u` step — `vimnav`'s own ±5, the same
 /// fixed offset every list in this codebase uses, multiplied by the count
@@ -286,6 +287,30 @@ const ALREADY_DELETED: &str = "row is already deleted — :revert restores it";
 struct Editing {
     state: EditorState,
     target: EditTarget,
+    /// Set only on a text cell editor opened over a live selection.
+    bulk: Option<Bulk>,
+}
+
+/// A text cell editor opened over a live selection. While its text is
+/// untouched, arrows step every selected number in the draft at once,
+/// so the grid shows the steps as they are made; closing the editor any
+/// way but a commit puts `before` back, so a trader who escapes never
+/// leaves half a block stepped.
+struct Bulk {
+    /// The draft when `i` opened the editor.
+    before: Draft,
+    /// The generation painted then. An automatic rebase or replace while
+    /// the editor is open moves it, and `before` is then keyed to a grid
+    /// that is no longer painted: restoring it would put edits on the
+    /// wrong cells, so the steps are kept instead.
+    painted: Option<DocumentBase>,
+    /// The text the tile last put in the editor. Any other value means
+    /// the trader typed, which turns the edit absolute.
+    seeded: String,
+    /// Signed steps since `i`, for the notice.
+    steps: i64,
+    /// Whether any step reached the draft, so a close must undo it.
+    stepped: bool,
 }
 
 /// Text and segmented-date editor states, chosen by cell kind or attribute type.
@@ -2520,11 +2545,27 @@ impl MarketDataTile {
             }
         } else {
             let state = cx.new(|cx| InputState::new(window, cx));
-            state.update(cx, |s, cx| s.set_value(text, window, cx));
+            state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
             state.read(cx).focus_handle(cx).focus(window, cx);
             EditorState::Text(state)
         };
-        self.editor = Some(Editing { state, target });
+        // A date cell has its own segment stepping and commits absolutely,
+        // so only a text cell editor steps the selection live.
+        let bulk = (self.selection.is_some()
+            && matches!(target, EditTarget::Cell { .. })
+            && matches!(state, EditorState::Text(_)))
+        .then(|| Bulk {
+            before: self.draft.clone(),
+            painted: self.model.base.clone(),
+            seeded: text.to_string(),
+            steps: 0,
+            stepped: false,
+        });
+        self.editor = Some(Editing {
+            state,
+            target,
+            bulk,
+        });
         self.notice = None;
     }
 
@@ -2620,6 +2661,13 @@ impl MarketDataTile {
         match (&mut editing.state, target) {
             (EditorState::Text(state), EditTarget::Cell { cell, labels }) => {
                 let text = state.read(cx).value().to_string();
+                if editing.bulk.as_ref().is_some_and(|b| text == b.seeded) {
+                    // Untouched text: the live steps are the edit. Taken
+                    // before the close, which would otherwise undo them.
+                    editing.bulk = None;
+                    self.close_editor(window, cx);
+                    return true;
+                }
                 self.commit_cell_edit(cell, labels, &text, window, cx)
             }
             (EditorState::Text(state), EditTarget::Attr { index, column }) => {
@@ -2739,6 +2787,9 @@ impl MarketDataTile {
     /// their own segment stepping. Invalid text remains unchanged with a notice. Return
     /// whether the header needs rebuilding.
     fn nudge(&mut self, steps: i64, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(chrome) = self.bulk_step(steps, window, cx) {
+            return chrome;
+        }
         let Some(editing) = self.editor.as_mut() else {
             return false;
         };
@@ -3037,17 +3088,28 @@ impl MarketDataTile {
     /// Closing an unfinished typed row-label editor removes its provisional row.
     /// Successful commit renames that row first, so the minted target is no longer
     /// present for cancellation to remove.
+    ///
+    /// Closing a selection editor that stepped undoes its steps: every
+    /// commit that keeps them takes the `bulk` out first, so a close here
+    /// is a cancel (`escape`, a click elsewhere, the menu, a row verb, a
+    /// key switch before the draft is parked).
     fn close_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(e) = &self.editor
             && e.state.is_focused(window, cx)
         {
             window.blur(cx);
         }
-        let Some(Editing {
-            target: EditTarget::RowLabel { label, .. },
-            ..
-        }) = self.editor.take()
-        else {
+        let Some(editing) = self.editor.take() else {
+            return;
+        };
+        // After the take, so the rebuild's mirror no longer paints the
+        // closed editor in its cell.
+        if let Some(bulk) = editing.bulk
+            && self.undo_steps(bulk) == StepsUndo::Restored
+        {
+            self.rebuild_model(cx);
+        }
+        let EditTarget::RowLabel { label, .. } = editing.target else {
             return;
         };
         let provisional = matches!(
@@ -3188,6 +3250,7 @@ impl MarketDataTile {
         self.editor = Some(Editing {
             state,
             target: EditTarget::RowLabel { row, label },
+            bulk: None,
         });
     }
 

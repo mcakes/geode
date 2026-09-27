@@ -2,6 +2,7 @@
 //! `dispatch`, `:` commands and deliveries.
 
 use super::*;
+use crate::core::bulk::step_delta;
 use geode_core::grid::selection::SelectKind;
 
 type Shape = (SelectKind, std::ops::Range<usize>, std::ops::Range<usize>);
@@ -733,4 +734,301 @@ fn a_date_commit_over_a_selection_writes_every_date_cell(cx: &mut gpui::TestAppC
     assert_eq!(h.col_texts(&vcx, 0), vec!["2027-03-02", "2027-03-02"]);
     assert!(h.header_texts(&vcx).contains(&"set 2 cells".to_string()));
     assert_eq!(h.mode(&vcx), "visual", "a date commit keeps the selection");
+}
+
+/// A block over the first two nodes of both terms, the cursor ending on
+/// row 1's second node.
+fn select_two_nodes_by_two_terms(h: &Harness, vcx: &mut gpui::VisualTestContext) {
+    h.dispatch(vcx, "right", Some(SLICE as u32));
+    h.dispatch(vcx, "visual_block", None);
+    h.dispatch(vcx, "down", None);
+    h.dispatch(vcx, "right", None);
+    // cursor ends on row 1, col 4 (0.5000)
+}
+
+/// With the editor untouched, arrows step every selected number in the
+/// draft at once; `enter` keeps the steps and the selection.
+#[gpui::test]
+fn arrows_step_every_selected_number_live_and_enter_keeps_them(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(2));
+    h.dispatch(&mut vcx, "insert_up_big", None);
+    assert_eq!(
+        h.row_texts(&vcx, 0)[3..],
+        ["0.1012", "0.2012", "0.3000"],
+        "the grid paints the steps at once"
+    );
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4012", "0.5012", "0.6000"]);
+    assert_eq!(
+        h.editor_value(&vcx).as_deref(),
+        Some("0.5012"),
+        "the editor follows the cursor cell"
+    );
+    assert!(
+        h.header_texts(&vcx)
+            .iter()
+            .any(|t| t == "stepped 4 cells +12")
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&vcx), "visual");
+    assert_eq!(h.row_texts(&vcx, 1)[4], "0.5012");
+    // Each cell keeps its own step: the editor's text is not written
+    // across the block.
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1012", "0.2012", "0.3000"]);
+    assert!(h.editor_value(&vcx).is_none());
+}
+
+/// One step is one unit of each column's own places: `fwd` at two,
+/// `atm` at four.
+#[gpui::test]
+fn a_block_steps_each_column_at_its_own_places(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None); // anchor on fwd (2 places)
+    h.dispatch(&mut vcx, "right", None); // … through atm (4 places)
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_down", None);
+    assert_eq!(h.row_texts(&vcx, 0)[..2], ["4499.99", "0.1799"]);
+}
+
+/// One `escape` puts the draft back exactly as `i` found it, an
+/// earlier edit included, and leaves the selection.
+#[gpui::test]
+fn escape_after_steps_restores_the_draft_as_it_was_before_i(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.command(&mut vcx, "bump 1 col").unwrap(); // an earlier edit that must survive
+    let before = h.tile.read_with(&vcx, |t, _| t.draft().clone());
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(5));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().clone()), before);
+    assert_eq!(h.mode(&vcx), "visual");
+}
+
+/// An F64 column steps by its places, an I64 column by one whole unit.
+#[gpui::test]
+fn a_mixed_block_steps_each_column_by_its_own_unit(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_mixed(cx);
+    h.dispatch(&mut vcx, "visual_rows", None); // cursor on amount (F64)
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let unit = step_delta(ColumnType::F64, ColumnFormat::MEASURE.precision, 1);
+    let edits = h.tile.read_with(&vcx, |t, _| t.draft().edits.clone());
+    assert_eq!(
+        edits.get(&(0, 0)),
+        Some(&Value::F64(1.25 + unit)),
+        "amount by its places"
+    );
+    assert_eq!(
+        edits.get(&(0, 1)),
+        Some(&Value::I64(2)),
+        "units by one whole unit"
+    );
+}
+
+/// Typed text is absolute: `enter` replaces the steps, and a cell that
+/// refuses the value returns to its pre-`i` value rather than keeping a
+/// half-step.
+#[gpui::test]
+fn typing_after_steps_replaces_them_and_a_refusing_cell_returns_to_before(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_mixed(cx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None); // amount and units both stepped
+    h.set_editor(&mut vcx, "2.5"); // typed: absolute from here
+    h.dispatch(&mut vcx, "commit", None);
+    let edits = h.tile.read_with(&vcx, |t, _| t.draft().edits.clone());
+    assert_eq!(
+        edits.get(&(0, 0)),
+        Some(&Value::F64(2.5)),
+        "the typed value replaced the step"
+    );
+    assert_eq!(
+        edits.get(&(0, 1)),
+        None,
+        "units refused 2.5 and is back to its pre-`i` value, no half-step"
+    );
+    assert!(
+        h.header_texts(&vcx)
+            .contains(&"set 1 cell, skipped 1 (1 wrong type)".to_string())
+    );
+}
+
+/// Once typed, arrows nudge the editor text alone and write nothing.
+#[gpui::test]
+fn after_typing_arrows_nudge_only_the_text(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.set_editor(&mut vcx, "0.3000");
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert_eq!(h.editor_value(&vcx).as_deref(), Some("0.3001"));
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.draft().is_empty()),
+        "typed: nothing live"
+    );
+}
+
+/// A newer generation held behind while the steps were live stays news
+/// after the escape restores the draft.
+#[gpui::test]
+fn escape_after_steps_keeps_a_behind_that_arrived_meanwhile(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let tag = h.with_document_tagged(&mut vcx);
+    // An earlier edit, so the restored draft is non-empty and can stay Behind.
+    h.command(&mut vcx, "bump 1 col").unwrap(); // fwd, both terms
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    // A newer generation lands under Hold → Behind; the base stays painted.
+    h.deliver(&mut vcx, tag, Arc::new(document_of(&TERMS, &NODES, NEWER)));
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.draft().len()),
+        2,
+        "only the fwd bump remains"
+    );
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.draft().is_behind()),
+        "and the delivery is still news"
+    );
+}
+
+/// A behind draft refuses both the selection editor and a selection
+/// bump, writing nothing.
+#[gpui::test]
+fn the_selection_edit_refuses_while_behind(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    let tag = h.with_document_tagged(&mut vcx);
+    h.command(&mut vcx, "bump 1 col").unwrap();
+    h.deliver(
+        &mut vcx,
+        tag,
+        Arc::new(document_of(&["2026-11-20"], &NODES, NEWER)),
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_behind()));
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(
+        h.editor_value(&vcx).is_none(),
+        "no editor opens while behind"
+    );
+    assert_eq!(h.mode(&vcx), "visual");
+    assert_eq!(
+        h.command(&mut vcx, "bump 1"),
+        Err("the draft is behind — :rebase or :revert first".to_string())
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.draft().len()),
+        2,
+        "nothing further was written"
+    );
+}
+
+/// An automatic rebase while the editor is open moves the painted
+/// generation; the pre-`i` draft is keyed to a grid no longer on screen,
+/// so an escape keeps the steps and says so rather than misplacing them.
+#[gpui::test]
+fn escape_after_an_auto_rebase_keeps_the_steps_and_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "auto rebase").unwrap();
+    let tag = h.with_document_tagged(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.deliver(&mut vcx, tag, Arc::new(document_of(&TERMS, &NODES, NEWER)));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.model().base.clone().map(|b| b.as_of)),
+        Some(NEWER.to_string()),
+        "the rebase painted the newer generation"
+    );
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1001", "0.2001", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4001", "0.5001", "0.6000"]);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().len()), 4);
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("steps kept: the document moved")
+    );
+    assert_eq!(h.mode(&vcx), "visual");
+}
+
+/// The same moved generation under a typed commit: the steps are not
+/// restored away (that would misplace the pre-`i` draft), the typed
+/// value lands, and the notice carries both facts.
+#[gpui::test]
+fn a_typed_commit_after_an_auto_rebase_keeps_the_steps_and_says_so(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "auto rebase").unwrap();
+    let tag = h.with_document_tagged(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    h.deliver(&mut vcx, tag, Arc::new(document_of(&TERMS, &NODES, NEWER)));
+    h.set_editor(&mut vcx, "0.25");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.2500", "0.2500", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.2500", "0.2500", "0.6000"]);
+    assert_eq!(
+        notice_of(&h, &vcx).as_deref(),
+        Some("set 4 cells; steps kept: the document moved")
+    );
+}
+
+/// A key switch closes the editor before it parks the draft, so live
+/// steps are undone and never parked under the outgoing underlying.
+#[gpui::test]
+fn a_key_switch_mid_step_parks_the_draft_as_it_was_before_i(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.command(&mut vcx, "bump 1 col").unwrap();
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(3));
+    h.command(&mut vcx, "key SPX.Y").unwrap();
+    assert!(h.editor_value(&vcx).is_none());
+    h.document_request().expect("SPX.Y's request");
+    h.command(&mut vcx, "key SPX.Z").unwrap();
+    // A parked draft places its edits against the next delivery.
+    let tag = h.document_request().expect("the key's request").tag;
+    h.deliver(&mut vcx, tag, Arc::new(cvi(BASE)));
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.draft().len()),
+        2,
+        "only the earlier fwd bump was parked"
+    );
+    assert_eq!(
+        h.row_texts(&vcx, 0)[..5],
+        ["4501.00", "0.1800", "-1.0000", "0.1000", "0.2000"]
+    );
+    assert_eq!(h.row_texts(&vcx, 1)[3..5], ["0.4000", "0.5000"]);
+}
+
+/// A click on another cell is a cancel like `escape`: the steps go.
+#[gpui::test]
+fn a_click_elsewhere_undoes_the_steps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    select_two_nodes_by_two_terms(&h, &mut vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    assert!(!h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    draw(&mut vcx);
+    let at = vcx
+        .debug_bounds("marketdata-cell-0-0")
+        .expect("the fwd cell paints")
+        .center();
+    click_at(&mut vcx, at, 1);
+    assert!(h.editor_value(&vcx).is_none());
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
 }

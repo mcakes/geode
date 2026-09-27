@@ -13,6 +13,21 @@ use geode_core::grid::selection::{Lost, Selection};
 /// make the edit portable across generations, and the new value.
 type StepWrite = ((usize, usize), (String, String), Value);
 
+/// The notice when a selection editor closes over steps it cannot undo.
+pub(super) const STEPS_KEPT: &str = "steps kept: the document moved";
+
+/// What closing a selection editor did with its live steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StepsUndo {
+    /// Nothing was stepped; the draft is as it was.
+    Nothing,
+    /// The draft is back as `i` found it; the caller rebuilds.
+    Restored,
+    /// The painted generation moved while the editor was open, so the
+    /// steps stay in the draft and the notice says so.
+    Kept,
+}
+
 impl MarketDataTile {
     /// `v`/`V`: start at the cursor cell, switch kind keeping the anchor,
     /// or clear on the same kind again. Refused in the attribute strip,
@@ -308,6 +323,100 @@ impl MarketDataTile {
         Ok(())
     }
 
+    /// The editor's arrow keys with a selection live and its text
+    /// untouched: step every selected number by its own column's unit, in
+    /// the draft, now, so the grid shows the block as it moves. `None`
+    /// when this is not that case (typed text, a cursor cell that is not
+    /// a number, no selection editor), so `nudge` keeps its own
+    /// single-cell behaviour; `Some(chrome)` otherwise. A refusal (behind,
+    /// no numbers) writes nothing and leaves the editor as it was.
+    pub(super) fn bulk_step(
+        &mut self,
+        steps: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<bool> {
+        let editing = self.editor.as_ref()?;
+        let bulk = editing.bulk.as_ref()?;
+        let EditorState::Text(state) = &editing.state else {
+            return None;
+        };
+        let EditTarget::Cell { cell, labels } = editing.target.clone() else {
+            return None;
+        };
+        let state = state.clone();
+        if state.read(cx).value().as_ref() != bulk.seeded {
+            return None;
+        }
+        if !matches!(self.model.kind_of(cell.1), Some(CellKind::Number(_))) {
+            return None;
+        }
+        let precisions: Vec<Option<u8>> = (0..self.model.columns.len())
+            .map(|c| match self.model.kind_of(c) {
+                Some(CellKind::Number(f)) => Some(f.precision),
+                _ => None,
+            })
+            .collect();
+        let result = self.step_selection_cells(|col, ty| {
+            precisions
+                .get(col)
+                .copied()
+                .flatten()
+                .map(|p| bulk::step_delta(ty, p, steps))
+        });
+        let (n, skips) = match result {
+            Ok(done) => done,
+            Err(e) => {
+                self.notice = Some(e.into());
+                return Some(true);
+            }
+        };
+        self.rebuild_model(cx);
+        // The editor follows its own cell by label: the rebuild keeps rows
+        // in place (a step never inserts or drops one), and a grid that
+        // moved anyway seeds nothing rather than another cell's value.
+        let text = (self.model.label_of(cell) == labels)
+            .then(|| self.model.rows[cell.0].cells[cell.1].text.to_string());
+        if let Some(text) = &text {
+            state.update(cx, |s, cx| s.set_value(text.clone(), window, cx));
+        }
+        let bulk = self.editor.as_mut()?.bulk.as_mut()?;
+        if let Some(text) = text {
+            bulk.seeded = text;
+        }
+        bulk.steps += steps;
+        bulk.stepped = true;
+        self.notice = Some(bulk::step_notice(n, bulk.steps, &skips).into());
+        Some(true)
+    }
+
+    /// Take a closing selection editor's live steps back out of the
+    /// draft. Only while the generation it opened on is still painted:
+    /// after an automatic rebase or replace, `before` is keyed to a grid
+    /// no longer on screen, and restoring it would put edits on the wrong
+    /// cells, so the steps are kept and the notice says so. A delivery
+    /// held behind meanwhile stays news (`Draft::restore_from`), and an
+    /// empty restore is never behind, so the retained base is dropped.
+    /// Does not rebuild; on `Restored` the caller does.
+    pub(super) fn undo_steps(&mut self, bulk: Bulk) -> StepsUndo {
+        if !bulk.stepped {
+            return StepsUndo::Nothing;
+        }
+        // Whole-pair equality: a generation this snapshot cannot vouch for
+        // is treated as moved, which keeps work rather than misplacing it.
+        if bulk.painted != self.model.base {
+            self.notice = Some(STEPS_KEPT.into());
+            return StepsUndo::Kept;
+        }
+        self.draft.restore_from(bulk.before);
+        if !self.draft.is_behind() {
+            self.leave_behind();
+        }
+        // The step count is no longer true of the draft.
+        self.notice = None;
+        StepsUndo::Restored
+    }
+
     /// `enter` on a typed value with a selection live: write it to every
     /// selected cell whose kind accepts it, skipping and counting the
     /// rest. Every member is judged before any write, so when nothing
@@ -375,6 +484,15 @@ impl MarketDataTile {
             self.notice = Some(nothing_accepts(&skips).into());
             return true;
         }
+        // Typed text replaces any live steps: a cell that refuses the
+        // value goes back to its pre-`i` value rather than keeping a
+        // half-step. The restore changes no row structure (a step never
+        // inserts or drops a row), so the model's labels and `cell_ref`s
+        // read below still hold.
+        let kept = match self.editor.as_mut().and_then(|e| e.bulk.take()) {
+            Some(bulk) => self.undo_steps(bulk) == StepsUndo::Kept,
+            None => false,
+        };
         // Labels and `cell_ref`s are read from the model as it stands; it
         // is rebuilt only after every write, so no write shifts another's
         // target.
@@ -416,7 +534,15 @@ impl MarketDataTile {
         self.close_editor(window, cx);
         self.close_popup_with_window(window, cx);
         self.rebuild_model(cx);
-        self.notice = Some(bulk::set_notice(n, &skips).into());
+        let set = bulk::set_notice(n, &skips);
+        self.notice = Some(
+            if kept {
+                format!("{set}; {STEPS_KEPT}")
+            } else {
+                set
+            }
+            .into(),
+        );
         true
     }
 
