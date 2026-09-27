@@ -145,14 +145,19 @@ The panel reports `normal`, `visual`, `menu`, or `insert` in the shared
 is live. An open editor or popup outranks the selection: a selection editor
 is `insert`. Editors, underlying and choice inputs, and upload confirmation
 use insert mode. Insert bindings leave shell chords available; confirmation consumes
-every key, including chords, while armed. The upload confirm is
-`geode_tile::confirm`'s.
+every key, including chords, while armed; a pointer press on the tile or focus
+leaving cancels it, and a delivery that moves the painted document withdraws
+it silently. The upload confirm is `geode_tile::confirm`'s; after an answer
+the shell's focus restoration path returns the keyboard to the tile.
 
 Action-menu stepping, hover, picking and painting are `geode_tile::menu`'s:
-motion counts enabled actions and skips disabled rows, headings and separators
-without wrapping; hover can light a refused action so its reason stays
-readable; key hints are the live keymap's and follow a reload while the menu is
-open. A key-only row whose action the keymap binds nowhere shows an empty lane;
+the menu opens on its first enabled action; motion counts enabled actions and
+skips disabled rows, headings and separators without wrapping, and from a row
+that is not an action lands on the first enabled one; hover can light a
+refused action, which takes no fill, and Enter or a click on it makes its
+reason the notice and keeps the menu open; key hints are the live keymap's,
+resolved when the menu opens, and follow a reload while the menu is open. A
+key-only row whose action the keymap binds nowhere shows an empty lane;
 `Upload`, `Rebase` and `Revert edits` fall back to their `:` verbs.
 
 Underlying and choice lists retain every ranked match but paint a moving window

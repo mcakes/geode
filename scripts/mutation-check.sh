@@ -3907,8 +3907,8 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '                self.error = Some((e, Tone::DangerText));' \
-  '                self.error = Some((e, Tone::DangerText));
+  '                self.error = Some(Notice::danger(e));' \
+  '                self.error = Some(Notice::danger(e));
                 self.table
                     .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
@@ -23769,8 +23769,8 @@ run_mutation "bridge: refused submissions are not read" \
 
 run_mutation "blotter: a stopped query refusal reads as something else" \
   crates/geode-blotter/src/tile.rs \
-  '            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));' \
-  '            self.error = Some(({ let _ = refusal; "query refused".to_string() }, Tone::DangerText));' \
+  '            self.error = Some(Notice::danger(format!("query refused: {refusal}")));' \
+  '            self.error = Some(Notice::danger({ let _ = refusal; "query refused".to_string() }));' \
   geode-blotter a_refused_query_says_busy_or_stopped
 
 run_mutation "mdtile: a document refusal loses its kind" \

@@ -14,7 +14,7 @@ Current behavior and rationale:
 |---|---|
 | `core` | Column plans, expansion paths, visible-row traversal, cursor movement, find, selection summaries, cursor-row launch context, TSV export, command parsing, and visible-window formatting without GPUI. |
 | `delegate` | `TableDelegate` adapter with prepared rows and cached cell text. Holds `:autosize`'s fitted widths by column name, which `column()` prefers over the plan's; `fit_columns` measures the header and the format cache's window only. Owns selection and paint caches; reports cell gestures and chevron clicks to the tile. |
-| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. |
+| `tile` | `BlotterTile`, the entity per tile: local query overrides, requests through `DataHandle`, frame observation, snapshot staging and application, header and footer rendering. The header notice is a `geode_tile::notice::Notice`: dropped sorts and selections are warnings, query and configuration failures danger. |
 | `content` | The `TileContent` wrapper and `BlotterFactory`, the roster entry the app builds with the data handle. |
 | `colour_cache` | Caches each named color's base and sign variants until theme inputs or definitions change. |
 

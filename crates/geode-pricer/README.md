@@ -227,7 +227,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   the header that consumes every key (bare `y` confirms), the tile in
   `insert` mode while armed, cancelled by focus leaving or a pointer press,
   blurred before it drops. A `:` command arriving under it withdraws it
-  unanswered.
+  unanswered. After an answer the shell's focus restoration path returns the
+  keyboard to the tile.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus
@@ -272,11 +273,13 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - A disabled action can hold the menu highlight but paints no highlight
   fill. Picking it reports its reason and keeps the menu open.
 - A menu command's title is its palette title (`content::action_title`) and
-  its key hint the action's live chord (`:price` when the keymap binds none),
-  re-resolved on every keymap publish while the menu is open; the
-  menu's keyboard navigation skips separators, section headers, and disabled
-  rows. Disabled actions can still hold the highlight after a pointer move,
-  opening the menu, or rebuilding its rows.
+  its key hint the action's live chord (`:price` when the keymap binds none,
+  an empty lane for the other actions), resolved when the menu opens or its
+  rows rebuild and again on every keymap publish while it is open. The menu
+  opens on its first enabled action; keyboard navigation skips separators,
+  section headers, and disabled rows, and from a row that is not an action
+  lands on the first enabled one. Disabled actions can still hold the
+  highlight after a pointer move or a rebuild of the rows under it.
 - Default column widths are checked against labels and representative large
   values at the largest font size, including padding and cursor borders.
   These samples are not numeric limits: an overflowing right-aligned value

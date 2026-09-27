@@ -60,8 +60,9 @@ cargo bench -p geode-timeseries
 - Menu rows are prepared on open, on chrome rebuilds, and on frame changes
   while the menu is up; a rebuild keeps the highlight on its row, or snaps it
   to the nearest action. Key hints are action identities resolved against the
-  live keymap at those moments and again when the keymap is republished. Theme or named-color changes can trigger a chrome
-  rebuild during render. A frequency the point cap refuses is disabled and
+  live keymap at those moments and again when the keymap is republished, so
+  an open menu follows a reload; an action bound nowhere shows an empty lane.
+  Theme or named-color changes can trigger a chrome rebuild during render. A frequency the point cap refuses is disabled and
   carries the model's refusal; range presets are validated when chosen.
 - Menu picks and empty-state buttons dispatch registered actions, or write a
   range or frequency through the model's own setters. Other pointer controls
@@ -101,8 +102,8 @@ cargo bench -p geode-timeseries
 ## Range and frequency menus
 
 `r` (or the range trigger) opens the range menu: the seven presets written out
-with their short labels as text, then `Custom dates…` with its live chord (`c` as shipped) painted as a
-key. `f` (or the frequency trigger) opens the frequency menu; a frequency the
+with their short labels as text, then `Custom dates…` with its live chord
+(`c` as shipped) painted as a key. `f` (or the frequency trigger) opens the frequency menu; a frequency the
 point cap refuses over the range as resolved under the frame's as-of is a
 disabled row reading `over cap`, and choosing it gives the full refusal as the
 notice. Both tick the value in force and open with the highlight on it. There
@@ -154,6 +155,9 @@ nearest featured entry by summed channel distance; ties keep the first.
 Escape and outside close discard uncommitted hex preview, but preserve slider
 changes already applied to the model.
 
-Menu keyboard navigation skips disabled actions, separators, and headings.
-Hover can still select a disabled action, which stays unlit; picking it reports
-the refusal and leaves the menu open. Refresh preserves that selected action.
+A menu opens on the enabled value in force, else its first enabled action.
+Keyboard navigation skips disabled actions, separators, and headings, and
+from a row that is not an action lands on the first enabled action. Hover can
+still select a disabled action, which stays unlit; Enter or a click on it
+reports the refusal and leaves the menu open. Refresh preserves that selected
+action.

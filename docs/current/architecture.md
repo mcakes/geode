@@ -11,19 +11,27 @@ Dependencies point toward smaller and more stable crates:
 ```text
                          geode-app
                  composition and process setup
-                    /         |          \
-             feature modules  |       geode-data
-               /      \       |           |
-        geode-tile  shared widgets    geode-core
-               |        |                 /
-        geode-shell     |                /
-               \        |               /
-                └──── geode-core ──────┘
+                  /           |             \
+          feature modules     |          geode-data
+            |       \         |              |
+            |    geode-tile   |              |
+            |       /         |              |
+            └──► geode-shell ◄┘              |
+                     |                       |
+               shared widgets                |
+                     |                       |
+                     └─────► geode-core ◄────┘
 
 calculation leaf: geode-pricing ─────────────────► geode-core
 pure presentation: geode-chart, geode-widgets ───► geode-core
 wire formats: geode-documents ───────────────────► geode-core
 ```
+
+A feature module depends on `geode-shell` directly (the `TileContent`
+contract, key chips, the rem scale) as well as through `geode-tile`, and may
+also name `geode-widgets`, `geode-chart` and `geode-core` directly.
+`geode-diagnostics` has no popover, menu, confirm or notice line and does not
+depend on `geode-tile`.
 
 `geode-core` is shared vocabulary without window, database, or network
 ownership. Typed interpretation and merging are I/O-free; its configuration
