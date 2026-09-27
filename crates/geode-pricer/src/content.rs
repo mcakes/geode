@@ -379,6 +379,13 @@ impl Shared {
             || self.retiring.borrow().contains(name)
     }
 
+    /// Whether a new sheet may not take `name`: open in any tile (the
+    /// asking tile's own included) or reserved (`taken`). `:name` and a
+    /// named `:new` refuse such a name.
+    pub(crate) fn exists(&self, name: &str) -> bool {
+        self.open.borrow().contains(name) || self.taken(name)
+    }
+
     /// Whether a save of `name` is queued and unanswered.
     pub(crate) fn save_pending(&self, name: &str) -> bool {
         self.pending_saves.borrow().contains_key(name)
