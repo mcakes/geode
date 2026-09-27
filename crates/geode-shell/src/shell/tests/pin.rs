@@ -37,6 +37,16 @@ fn ws(n: u8) -> WorkspaceIx {
     WorkspaceIx::new(n).unwrap()
 }
 
+/// Add a recorder tile to the active workspace. A flip barrier opens only
+/// over visible occupied tiles, so a barrier assertion without one can
+/// never fail.
+fn add_tile(vcx: &mut gpui::VisualTestContext) {
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
 /// A frame dialog commits into the workspace it was opened from, even if
 /// the active workspace changed underneath it.
 #[gpui::test]
@@ -112,6 +122,7 @@ fn keys_in_a_pinned_workspace_stay_there(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn switching_workspace_reseeds_the_barrier_without_opening_one(cx: &mut gpui::TestAppContext) {
     let (_w, mut vcx, shell, frame) = open_pinnable(cx);
+    add_tile(&mut vcx); // workspace 1, the one switched back to
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
     vcx.simulate_keystrokes("ctrl-1");
@@ -272,6 +283,7 @@ fn a_pin_mid_session_ends_the_shared_session(cx: &mut gpui::TestAppContext) {
 fn a_lane_changed_while_hidden_promotes_without_waiting(cx: &mut gpui::TestAppContext) {
     let (_w, mut vcx, shell, frame) = open_pinnable(cx);
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    add_tile(&mut vcx); // workspace 2, the hidden lane's
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     // Workspace 2's lane changes while hidden (a hot reload bumps it).
