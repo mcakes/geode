@@ -15,7 +15,7 @@ this order:
 
 | Owner | Routing |
 |---|---|
-| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead — see [palette and which-key](#palette-and-which-key). |
+| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead, as are workspace switches (`workspace::switch_*`) and the pin toggle (`frame::pin_workspace`) — see [palette and which-key](#palette-and-which-key). |
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only. |
@@ -186,6 +186,14 @@ stack member list that only becomes usable once the stack closes. This
 differs from an ordinary palette action, which is allowed to run behind the
 stack, as described just above: these three are refused instead of left
 stranded.
+
+"Switch to workspace N" (`workspace::switch_*`) and "Toggle the frame pin for
+this workspace" (`frame::pin_workspace`) are refused the same way, with the
+same notice. Either would change which frame lane the active workspace reads
+while the dialog stays bound to the lane it opened in, so the toolbar would
+mix two lanes (historical tiles without the historical stripe, for example).
+Refusing them keeps the dialog's lane and the active lane the same workspace
+for as long as a dialog is open.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and
 category, not action id. Category matches receive half weight, rounded up.

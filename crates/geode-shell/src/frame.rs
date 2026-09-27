@@ -1156,9 +1156,20 @@ mod tests {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.shared_mut().set_scope(book_scope("BK000"));
         f.shared_mut().set_active_slot(Some(1));
+        f.shared_mut().set_as_of(AsOf::At(chrono::Utc::now()));
+        // Every generation has moved off its initial value, so a copy that
+        // dropped any of them would differ from the shared lane's.
+        let initial = Frame::new(slots(), SavedScopes::new(), None)
+            .shared()
+            .versions();
+        let shared = f.shared().versions();
+        assert_ne!(shared.scope, initial.scope);
+        assert_ne!(shared.grouping, initial.grouping);
+        assert_ne!(shared.as_of, initial.as_of);
         assert!(f.pin(ws(2)));
         assert_eq!(f.view(ws(2)).scope(), f.shared().scope());
         assert_eq!(f.view(ws(2)).active_slot(), Some(1));
+        assert_eq!(f.view(ws(2)).as_of(), f.shared().as_of());
         assert_eq!(f.view(ws(2)).versions(), f.shared().versions());
         assert!(!f.view_mut(ws(2)).undo_scope(), "a new lane has no history");
         assert!(!f.pin(ws(2)), "pinning twice is refused");

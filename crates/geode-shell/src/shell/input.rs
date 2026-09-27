@@ -130,12 +130,15 @@ impl ShellView {
 
         // The palette reaches every action while a dialog is open. Refuse
         // transient tile controls here: the modal would hide them and block
-        // their keyboard route. Other palette actions may run behind the stack.
+        // their keyboard route. Refuse workspace switches and the pin toggle
+        // too: they would move the active lane under a dialog that commits
+        // to the lane it opened in, and the toolbar would then mix the two.
+        // Other palette actions may run behind the stack.
         if self.modal_open()
-            && matches!(
+            && (matches!(
                 action.0.as_str(),
-                "tile::command_line" | "tile::find" | "stack::pick"
-            )
+                "tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"
+            ) || action.0.starts_with("workspace::switch_"))
         {
             self.notice = Some(CLOSE_DIALOG_FIRST);
             return;

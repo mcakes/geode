@@ -1183,9 +1183,10 @@ impl ShellView {
         // runs before the flip seed below so a restored lane never reads as
         // "just changed".
         for (ws, record) in services.restored_pinned.clone() {
-            // A pin on a workspace the layout lacks would be written by no
-            // save and silently lost; both come from one session read, so
-            // this only guards a hand-assembled `ShellServices`.
+            // A pin on a workspace the layout lacks would surface as an
+            // unexpected pin if that workspace were created later. Both come
+            // from one session read, so this only guards a hand-assembled
+            // `ShellServices`.
             if !services.workspaces.spaces().any(|(ix, _)| ix == ws.get()) {
                 tracing::warn!(
                     target: "geode::session",
@@ -1198,6 +1199,10 @@ impl ShellView {
                 f.pin(ws);
                 let mut lane = f.view_mut(ws);
                 lane.set_scope(record.scope);
+                // Pinning copied the shared slot. Clear it first so a
+                // recorded slot that is now empty (refused below) leaves
+                // no slot rather than the shared lane's.
+                lane.set_active_slot(None);
                 lane.set_active_slot(record.active_slot);
                 lane.set_as_of(record.as_of);
                 lane.clear_history();

@@ -2734,6 +2734,20 @@ run_mutation "frame: pinning copies the shared generations" \
   geode-shell \
   unpinning_an_untouched_lane_keeps_the_generations
 
+run_mutation "frame: pinning copies the shared grouping generation" \
+  crates/geode-shell/src/frame.rs \
+  '            grouping_gen: self.grouping_gen,' \
+  '            grouping_gen: 0,' \
+  geode-shell \
+  pinning_copies_values_and_generations_with_empty_history
+
+run_mutation "frame: pinning copies the shared as-of generation" \
+  crates/geode-shell/src/frame.rs \
+  '            as_of_gen: self.as_of_gen,' \
+  '            as_of_gen: 0,' \
+  geode-shell \
+  pinning_copies_values_and_generations_with_empty_history
+
 # ---- module hosting (Phase 3 §3)
 
 run_mutation "hosting: an unknown action reaches the focused occupant with its count" \
@@ -3003,19 +3017,29 @@ run_mutation "dialog stack: a revealed expression field keeps a request that nev
 run_mutation "dialog stack: transient chrome runs behind the stack instead of being refused" \
   crates/geode-shell/src/shell/input.rs \
   '        if self.modal_open()
-            && matches!(
-                action.0.as_str(),
-                "tile::command_line" | "tile::find" | "stack::pick"
-            )
-        {' \
+            && (matches!(
+                action.0.as_str(),' \
   '        if false
-            && matches!(
-                action.0.as_str(),
-                "tile::command_line" | "tile::find" | "stack::pick"
-            )
-        {' \
+            && (matches!(
+                action.0.as_str(),' \
   geode-shell \
   palette_transient_chrome_is_refused_over_a_dialog
+
+# A switch or pin behind a dialog moves the active lane under a dialog that
+# commits to the lane it opened in; the toolbar then mixes the two lanes.
+run_mutation "dialog stack: a workspace switch runs behind the stack instead of being refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '            ) || action.0.starts_with("workspace::switch_"))' \
+  '            ) || false)' \
+  geode-shell \
+  switching_and_pinning_are_refused_behind_a_dialog
+
+run_mutation "dialog stack: the pin toggle runs behind the stack instead of being refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '"tile::command_line" | "tile::find" | "stack::pick" | "frame::pin_workspace"' \
+  '"tile::command_line" | "tile::find" | "stack::pick"' \
+  geode-shell \
+  switching_and_pinning_are_refused_behind_a_dialog
 
 # ---- overlays return focus to the field they opened from (ruling 2026-09-12)
 
@@ -16736,16 +16760,10 @@ run_mutation "occupants: a tile is framed by its own workspace" \
   geode-shell \
   a_tile_restored_into_a_hidden_workspace_is_framed_by_it
 
-run_mutation "shell: a dialog targets the workspace it opened from" \
-  crates/geode-shell/src/shell/mod.rs \
-  '        let ws = self
-            .modals
-            .first()
-            .map(|m| m.workspace)
-            .unwrap_or_else(|| self.active_ix());' \
-  '        let ws = self.active_ix();' \
-  geode-shell \
-  a_frame_dialog_commits_into_the_workspace_it_opened_from
+# `target_frame` reading the modal's recorded workspace has no entry: switching
+# and pinning are refused behind a dialog, so no production route can make the
+# recorded workspace differ from the active one. The refusal itself is guarded
+# by the "dialog stack: a workspace switch runs behind the stack" entries.
 
 run_mutation "stack pull: a refusal leaves a notice" \
   crates/geode-shell/src/shell/input.rs \
@@ -24042,7 +24060,17 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
   '' \
   geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
 
-# A pin restored onto a workspace the layout lacks would never be written back.
+# Pinning copies the shared slot; a recorded slot that is now empty is
+# refused, so without the clear the pinned lane keeps the shared slot.
+run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                lane.set_active_slot(None);
+                lane.set_active_slot(record.active_slot);' \
+  '                lane.set_active_slot(record.active_slot);' \
+  geode-shell a_restored_pin_with_an_empty_slot_drops_the_slot
+
+# A pin restored onto a workspace the layout lacks would surface as an
+# unexpected pin if that workspace were created later.
 run_mutation "shell: a restored pin without its workspace is skipped" \
   crates/geode-shell/src/shell/mod.rs \
   '                    ws.get()

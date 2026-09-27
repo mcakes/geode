@@ -234,7 +234,12 @@ Shell surfaces resolve their lane through `ShellView::target_frame`: the
 workspace recorded on the base entry of the modal stack when a dialog is
 open, else the active workspace. A dialog therefore reads and commits the
 lane it was opened from. The flip barrier and the toolbar's scope text field
-use the active workspace's lane directly. The session's `[frame]` record is
+use the active workspace's lane directly. Under a modal the two name the same
+workspace: the palette refuses `workspace::switch_*` and
+`frame::pin_workspace` while a dialog is open (see
+[input and dialogs](input-and-dialogs.md#palette-and-which-key)), so the
+active lane cannot move, and the toolbar cannot mix two lanes, beneath an
+open dialog. The session's `[frame]` record is
 written from and restored into the shared lane explicitly, whatever is
 active.
 
@@ -519,9 +524,13 @@ The shell applies scope, slot, and as-of, then clears scope history. Undo/redo
 history and recent publishes start fresh; saved scopes come from config.
 A `workspaces.N.frame` table is read by the same reader, so a partial record
 keeps its usable fields. Each restored pinned lane is pinned, filled, and has
-its history cleared like the shared one, before the flip baseline is seeded,
-so a restored lane never reads as just changed. A pinned record whose
-workspace the restored layout lacks is skipped with a warning.
+its scope history cleared like the shared one, before the flip baseline is
+seeded, so a restored lane never reads as just changed. Its active slot is
+cleared before the recorded one applies, so a recorded slot that is now empty
+leaves the lane with no slot rather than the shared lane's. A pinned record
+whose workspace the restored layout lacks is skipped with a warning; this is
+a defensive check, since one session read supplies both the layout and the
+pins and cannot produce such a record.
 
 The shell creates occupants from restored records through the module roster.
 Only the factory matching a record's module name receives its state. An
@@ -535,9 +544,10 @@ so ordinary additions do not reuse them.
 Workspace actions mark layout state dirty and return without session file I/O.
 The shared reload watcher checks for a session snapshot on its 500 ms tick,
 before any configuration-scan early return. It also compares serialized module
-state, the frame's generation counter, and palette usage versions, so those changes can trigger
-a save independently of layout dirt. This is periodic coalescing, not a timer
-reset after each action; other work adds to the interval.
+state, the frame's generation counter, and palette usage versions, so those
+changes can trigger a save independently of layout dirt. This is periodic
+coalescing, not a timer reset after each action; other work adds to the
+interval.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.

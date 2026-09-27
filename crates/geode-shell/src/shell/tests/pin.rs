@@ -47,31 +47,85 @@ fn add_tile(vcx: &mut gpui::VisualTestContext) {
     });
 }
 
-/// A frame dialog commits into the workspace it was opened from, even if
-/// the active workspace changed underneath it.
+/// A frame dialog opened in a pinned workspace commits into that
+/// workspace's lane, not the shared one. Switching and pinning are refused
+/// while it is open, so the lane active when it opened is the lane it
+/// commits to.
 #[gpui::test]
-fn a_frame_dialog_commits_into_the_workspace_it_opened_from(cx: &mut gpui::TestAppContext) {
+fn a_frame_dialog_commits_into_the_lane_active_when_it_opened(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     let ws1 = WorkspaceIx::FIRST;
-    let ws2 = WorkspaceIx::new(2).unwrap();
     frame.update(&mut vcx, |f, _| assert!(f.pin(ws1)));
     dispatch_and_draw(&shell, &mut vcx, "frame::scope_expression");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
-    // Test-only: move the active workspace underneath the open modal.
-    shell.update(&mut vcx, |s, _| assert!(s.services.workspaces.switch(2)));
     vcx.simulate_input("book = 'BK000'");
     vcx.simulate_keystrokes("enter");
     vcx.run_until_parked();
     let (pinned, shared) = frame.read_with(&vcx, |f, _| {
         (
             f.view(ws1).scope().expression.is_some(),
-            f.view(ws2).scope().expression.is_some(),
+            f.shared().scope().expression.is_some(),
         )
     });
     assert!(pinned, "the expression lands in workspace 1's pinned lane");
     assert!(!shared, "the shared lane is untouched");
+}
+
+/// The palette runs non-dialog actions behind an open dialog, but a
+/// workspace switch or a pin toggle there would move the lane the toolbar
+/// and the dialog read out from under the dialog. Both are refused with the
+/// close-the-dialog notice, leaving the workspace and the pin unchanged.
+#[gpui::test]
+fn switching_and_pinning_are_refused_behind_a_dialog(cx: &mut gpui::TestAppContext) {
+    let (_w, mut vcx, shell, frame) = open_pinnable(cx);
+    for (query, id) in [
+        ("Switch to workspace 2", "workspace::switch_2"),
+        (
+            "Toggle the frame pin for this workspace",
+            "frame::pin_workspace",
+        ),
+    ] {
+        dispatch_and_draw(&shell, &mut vcx, "frame::scope_expression");
+        assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
+        vcx.simulate_keystrokes("ctrl-k");
+        vcx.simulate_input(query);
+        let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
+        assert!(
+            matches!(&selected, Some(crate::palette::PaletteItem::Action(a, ..)) if a.0 == id),
+            "{id}: {selected:?}"
+        );
+        vcx.simulate_keystrokes("enter");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.notice),
+            Some(crate::shell::input::CLOSE_DIALOG_FIRST),
+            "{id} must be refused with the notice"
+        );
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.active_ix()),
+            WorkspaceIx::FIRST,
+            "{id} must not switch the workspace"
+        );
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.is_pinned(WorkspaceIx::FIRST)),
+            "{id} must not pin"
+        );
+        assert!(
+            shell.read_with(&vcx, |s, _| s.modal_open()),
+            "{id}: the dialog stays open"
+        );
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                while s.modal_open() {
+                    s.close_modal(window, cx);
+                }
+            });
+        });
+    }
 }
 
 #[gpui::test]
@@ -252,6 +306,58 @@ fn unpinning_mid_session_leaves_the_shared_history_clean(cx: &mut gpui::TestAppC
     );
 }
 
+/// After an unpin drops a pinned typing session, `mod+z` through the keymap
+/// undoes the shared lane's own earlier edit; the pinned text never
+/// surfaces in the shared lane, neither on Enter nor as an undo target.
+#[gpui::test]
+fn undo_after_an_unpin_mid_session_undoes_the_shared_edit(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx, shell, frame) = open_pinnable(cx);
+    vcx.update(|window, _| window.activate_window());
+    let _ = window;
+    vcx.run_until_parked();
+    // A shared-lane edit through the field, committed.
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("shared");
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
+            .as_deref(),
+        Some("shared")
+    );
+    dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("pinned");
+    dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace"); // unpin
+    vcx.simulate_keystrokes("enter");
+    vcx.run_until_parked();
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.shared().scope().text.clone())
+            .as_deref(),
+        Some("shared"),
+        "Enter after the unpin commits no pinned text"
+    );
+    vcx.simulate_keystrokes("alt-z"); // mod+z under the default mod
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None,
+        "the chord undoes the shared lane's own edit"
+    );
+    assert!(
+        !frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()),
+        "and nothing pinned is left to undo"
+    );
+}
+
 /// Pinning ends the shared lane's open text session before the field moves
 /// to the pinned lane. A session whose edits returned to their base has
 /// pushed that base; only ending it pops the no-op entry again.
@@ -387,8 +493,48 @@ fn a_restored_pinned_workspace_is_pinned_with_its_record(cx: &mut gpui::TestAppC
     );
 }
 
-/// A restored pin for a workspace the layout does not hold is skipped: no
-/// save would write it, so pinning it would lose the lane silently.
+/// A restored pinned lane whose recorded slot is empty in the current
+/// slots starts with no active slot. It must not keep the shared lane's
+/// slot, which pinning copied before the record applied.
+#[gpui::test]
+fn a_restored_pin_with_an_empty_slot_drops_the_slot(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let groupings = LayerDoc::builtin("groupings", "1 = [\"book\"]\n2 = [\"lhu\"]\n").unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![groupings, datasets],
+        ..ConfigSources::default()
+    });
+    let record = |slot| crate::session::FrameRecord {
+        scope: geode_core::scope::Scope::default(),
+        active_slot: slot,
+        as_of: geode_core::query::AsOf::Live,
+    };
+    services.restored_frame = Some(record(Some(1)));
+    services.restored_pinned.insert(ws(1), record(Some(5)));
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().active_slot()),
+        Some(1),
+        "the shared record's slot applied, so the pinned check is not vacuous"
+    );
+    assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws(1))));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.view(ws(1)).active_slot()),
+        None,
+        "slot 5 is empty, so the pinned lane has no active slot"
+    );
+}
+
+/// A restored pin for a workspace the layout does not hold is skipped. A
+/// session read cannot produce one; kept, it would surface as an unexpected
+/// pin if that workspace were created later.
 #[gpui::test]
 fn a_restored_pin_without_its_workspace_is_skipped(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();

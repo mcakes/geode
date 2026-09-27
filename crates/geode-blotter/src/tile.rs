@@ -2146,6 +2146,10 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(options, |window, cx| {
+                    // The tile sits in unpinned workspace 1, so the shared lane
+                    // is its lane and tests address it as `f.shared()` /
+                    // `f.shared_mut()`. A test that pins must reach the tile's
+                    // lane through its `FrameRef` instead.
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
