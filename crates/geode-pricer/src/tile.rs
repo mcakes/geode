@@ -367,8 +367,9 @@ pub struct PricerTile {
     menu_tip: SharedString,
     stack: Option<StackHandle>,
     pub(crate) clock: Clock,
-    /// What `p`/`shift+p` put: the last `y y` or `d d`.
-    pub(crate) register: Option<crate::core::RowSpec>,
+    /// What `p`/`shift+p` put: the last `y y`, `d d`, or `y`/`d` over a
+    /// `V` selection, in sheet order.
+    pub(crate) register: Option<Vec<crate::core::RowSpec>>,
     find: Option<FindState>,
     /// Latest pricing submission tag. An outcome with any other tag is dropped whole.
     pub(crate) tag: u64,
@@ -2318,7 +2319,7 @@ impl PricerTile {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                         self.sheet.shorthand(row),
                     ));
-                    self.register = Some(crate::core::clip::spec_of(&self.sheet, row));
+                    self.register = Some(vec![spec_of(&self.sheet, row)]);
                 }
             }
             "yank_col" => {
@@ -2353,8 +2354,8 @@ impl PricerTile {
             "visual_rows" => self.start_selection(SelectKind::Rows),
             "visual_block" => self.start_selection(SelectKind::Block),
             "yank" => {
-                if self.selection.is_none() {
-                    self.footer = Some("select with V or v first".into());
+                if let Err(why) = self.yank_selection(cx) {
+                    self.footer = Some(why.into());
                 }
             }
             "price" => {
@@ -2402,8 +2403,11 @@ impl PricerTile {
             | "group" | "ungroup" => {
                 if self.loading {
                     self.footer = Some("the sheet is still loading".into());
+                } else if let Some(why) = self.row_verb_refusal(verb) {
+                    self.footer = Some(why.into());
                 } else {
                     let result = match verb {
+                        "delete" if self.selection.is_some() => self.delete_selection(cx),
                         "delete" => self.delete_row(cx),
                         "undo" => self.history_step(false, cx),
                         "redo" => self.history_step(true, cx),
@@ -2464,7 +2468,7 @@ impl PricerTile {
         let spec = spec_of(&self.sheet, row);
         self.apply_edit(Edit::Remove { at: row }, cx)
             .map_err(|e| e.to_string())?;
-        self.register = Some(spec);
+        self.register = Some(vec![spec]);
         Ok(())
     }
 
@@ -2513,11 +2517,22 @@ impl PricerTile {
         }
     }
 
-    /// `p` / `shift+p` insert register contents with fresh IDs and requests at
-    /// `put_place`'s position, then select the first inserted row.
+    /// `p` / `shift+p` insert every register row together, with fresh IDs
+    /// and requests, as one edit (one undo entry), then select the first
+    /// landed row. Any package among them takes the place: packages cannot
+    /// nest, so the whole run lands at a root boundary rather than being
+    /// refused at a leg place.
     fn put(&mut self, below: bool, cx: &mut Context<Self>) -> Result<(), String> {
-        let spec = self.register.clone().ok_or("nothing to put")?;
-        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, &spec);
+        let specs = self
+            .register
+            .clone()
+            .filter(|v| !v.is_empty())
+            .ok_or("nothing to put")?;
+        let lead = specs
+            .iter()
+            .find(|s| matches!(s, RowSpec::Package { .. }))
+            .unwrap_or(&specs[0]);
+        let place = put_place(&self.sheet, self.cursor_sheet_row(), below, lead);
         // Open the parent before inserting a leg so the new row is visible and
         // cursor reconciliation can select it.
         if let Place::Leg { package, .. } = place {
@@ -2526,16 +2541,22 @@ impl PricerTile {
         self.apply_edit(
             Edit::Insert {
                 place,
-                rows: vec![spec.clone()],
+                rows: specs.clone(),
             },
             cx,
         )
         .map_err(|e| e.to_string())?;
-        let id = self.sheet.id(landed_row(place));
-        if matches!(spec, RowSpec::Package { .. }) {
-            self.expansion.set(id, true);
+        // Landed rows are contiguous: a package occupies itself and its legs.
+        let first = landed_row(place);
+        let mut at = first;
+        for spec in &specs {
+            if let RowSpec::Package { legs, .. } = spec {
+                self.expansion.set(self.sheet.id(at), true);
+                at += legs.len();
+            }
+            at += 1;
         }
-        self.cursor.line = Some(id);
+        self.cursor.line = Some(self.sheet.id(first));
         self.rebuild(cx);
         Ok(())
     }

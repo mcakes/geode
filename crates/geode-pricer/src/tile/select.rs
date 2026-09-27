@@ -155,6 +155,101 @@ impl PricerTile {
         (lines, cols)
     }
 
+    /// A row verb's refusal under a `v` block, whose cells are not a set
+    /// of rows: acting on the block's rows would edit rows the user never
+    /// picked as rows.
+    pub(crate) fn row_verb_refusal(&self, verb: &str) -> Option<&'static str> {
+        if self.selection.as_ref().map(|s| s.kind) != Some(SelectKind::Block) {
+            return None;
+        }
+        match verb {
+            "delete" => Some("d deletes rows — use V"),
+            "move_down" | "move_up" => Some("shift+j/k move rows — use V"),
+            "group" => Some("g p groups rows — use V"),
+            "ungroup" => Some("g u ungroups rows — use V"),
+            _ => None,
+        }
+    }
+
+    /// `y` over a selection, which it ends. Under `V` the clipboard gets
+    /// the top-most rows' shorthand, one per line, and the register their
+    /// specs — a package's legs are already in its own spec, so copying
+    /// them too would double them on `p`. Under `v` the clipboard gets the
+    /// block as TSV under its column labels; a block is not rows, so the
+    /// register keeps what it held.
+    pub(crate) fn yank_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let Some(r) = self.resolved.clone() else {
+            return Err("select with V or v first".into());
+        };
+        match r.kind {
+            SelectKind::Rows => {
+                let top = top_most(&self.sheet, &self.selected_sheet_rows());
+                let text = top
+                    .iter()
+                    .map(|&row| self.sheet.shorthand(row))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                self.register = Some(top.iter().map(|&row| spec_of(&self.sheet, row)).collect());
+            }
+            SelectKind::Block => {
+                // Grid cells are indexed by plan column, as `Resolved.cols` is.
+                let header = r
+                    .cols
+                    .clone()
+                    .map(|c| self.plan.columns[c].label.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\t");
+                let mut lines = vec![header];
+                for g in r.rows.clone() {
+                    let row = &self.model.rows[g];
+                    lines.push(
+                        r.cols
+                            .clone()
+                            .map(|c| row.cells.get(c).map(|x| x.text.as_ref()).unwrap_or(""))
+                            .collect::<Vec<_>>()
+                            .join("\t"),
+                    );
+                }
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(lines.join("\n")));
+            }
+        }
+        self.clear_selection();
+        Ok(())
+    }
+
+    /// `d` over a `V` selection: the top-most rows go as ONE undo entry
+    /// and land in the register in sheet order. The specs are read before
+    /// any remove, since each remove shifts the indices after it; the
+    /// removes run bottom-up so the earlier indices stay valid.
+    pub(crate) fn delete_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        if let Some(why) = self.row_verb_refusal("delete") {
+            return Err(why.into());
+        }
+        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        if top.is_empty() {
+            return Err("no row".into());
+        }
+        let specs: Vec<RowSpec> = top.iter().map(|&row| spec_of(&self.sheet, row)).collect();
+        let mut at = top.clone();
+        at.sort_unstable_by(|a, b| b.cmp(a));
+        let edits = at.into_iter().map(|at| Edit::Remove { at }).collect();
+        // Cleared first: the rebuild after the edit would otherwise find the
+        // anchor gone and report a lost selection over a deliberate delete.
+        let kept = self.selection.take();
+        self.clear_selection();
+        if let Err(e) = self.apply_edits(edits, cx) {
+            // A refused batch leaves the sheet as it was, so the selection
+            // still names what the user picked.
+            self.selection = kept;
+            return Err(e.to_string());
+        }
+        let n = specs.len();
+        self.register = Some(specs);
+        self.notice = Some(format!("deleted {n} row{}", if n == 1 { "" } else { "s" }).into());
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn resolved(&self) -> Option<&Resolved> {
         self.resolved.as_ref()
