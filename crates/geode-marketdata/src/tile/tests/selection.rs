@@ -808,6 +808,9 @@ fn escape_after_steps_restores_the_draft_as_it_was_before_i(cx: &mut gpui::TestA
     h.dispatch(&mut vcx, "cancel", None);
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.draft().clone()), before);
     assert_eq!(h.mode(&vcx), "visual");
+    // The grid repaints the restore, not only the draft.
+    assert_eq!(h.row_texts(&vcx, 0)[3..], ["0.1000", "0.2000", "0.3000"]);
+    assert_eq!(h.row_texts(&vcx, 1)[3..], ["0.4000", "0.5000", "0.6000"]);
 }
 
 /// An F64 column steps by its places, an I64 column by one whole unit.
@@ -900,6 +903,12 @@ fn escape_after_steps_keeps_a_behind_that_arrived_meanwhile(cx: &mut gpui::TestA
     assert!(
         h.tile.read_with(&vcx, |t, _| t.draft().is_behind()),
         "and the delivery is still news"
+    );
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.model().base.clone().map(|b| b.as_of)),
+        Some(BASE.to_string()),
+        "a behind draft still paints the generation its edits were made on"
     );
 }
 
