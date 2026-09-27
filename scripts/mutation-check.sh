@@ -17904,15 +17904,15 @@ run_mutation "pricer sheets: :name renames a sheet whose load failed" \
   geode-pricer colon_name_refuses_a_sheet_that_did_not_load
 
 run_mutation "pricer sheets: :name takes a known name" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
-  '        if self.shared.open.borrow().contains(&name) {' \
+  crates/geode-pricer/src/content.rs \
+  '        self.open.borrow().contains(name) || self.taken(name)' \
+  '        self.open.borrow().contains(name)' \
   geode-pricer colon_name_renames_and_forgets_the_old_name_only_once_saved
 
 run_mutation "pricer sheets: :name takes a name with a queued save" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {' \
-  '        if self.shared.open.borrow().contains(&name) || self.shared.store.contains(&name) {' \
+  crates/geode-pricer/src/content.rs \
+  '        self.open.borrow().contains(name) || self.taken(name)' \
+  '        self.open.borrow().contains(name) || self.store.contains(name)' \
   geode-pricer colon_name_refuses_a_name_with_a_queued_save
 
 run_mutation "pricer rm: the tile's own sheet can be removed" \

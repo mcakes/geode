@@ -2863,7 +2863,7 @@ impl PricerTile {
             // own sheet is in `open`, so it counts too.
             Command::New(Some(name)) => {
                 self.shared.refuse_retiring(&name)?;
-                if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {
+                if self.shared.exists(&name) {
                     return Err(format!("sheet '{name}' already exists; :e {name} opens it"));
                 }
                 self.switch_sheet(name, false, cx)
@@ -3028,7 +3028,7 @@ impl PricerTile {
             return Err("the last rename is not saved yet".into());
         }
         self.shared.refuse_retiring(&name)?;
-        if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {
+        if self.shared.exists(&name) {
             return Err(format!("sheet '{name}' already exists"));
         }
         let old = std::mem::replace(&mut self.sheet.name, name.clone());
