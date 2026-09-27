@@ -94,6 +94,7 @@ fn a_restored_tile_is_not_launched(cx: &mut gpui::TestAppContext) {
         &crate::session::TileRecords::new(),
         None,
         &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
     );
     let ws1: toml::Table = r#"
         focused = 1

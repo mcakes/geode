@@ -287,6 +287,7 @@ fn bench_session(c: &mut Criterion) {
                 black_box(&no_tiles),
                 None,
                 &geode_shell::palette_usage::PaletteUsage::new(),
+                &geode_shell::session::PageRecords::new(),
             ))
         })
     });
@@ -296,6 +297,7 @@ fn bench_session(c: &mut Criterion) {
         &no_tiles,
         None,
         &geode_shell::palette_usage::PaletteUsage::new(),
+        &geode_shell::session::PageRecords::new(),
     );
     group.bench_function("from_toml_9_workspaces", |b| {
         b.iter(|| {

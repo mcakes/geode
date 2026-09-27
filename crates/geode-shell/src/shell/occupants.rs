@@ -45,6 +45,19 @@ impl ShellView {
         tiles
     }
 
+    /// Every created page's state (open or not), plus restored tables no
+    /// page has consumed, so an unknown kind survives a save.
+    pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
+        let mut pages: session::PageRecords = self.services.restored_pages.clone();
+        if let Some(page) = &self.page {
+            pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );
+        }
+        pages
+    }
+
     /// The module kind occupying `tile`, or `None` if it has no occupant
     /// (not a tile at all, or not yet created).
     pub fn occupant_kind(&self, tile: TileId) -> Option<&'static str> {

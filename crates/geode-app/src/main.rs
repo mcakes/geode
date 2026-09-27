@@ -194,9 +194,10 @@ fn main() {
                 tracing::warn!(target: "geode::theme", "{warning}");
             }
 
-            // Load layout, module records, frame state, and palette usage before
-            // constructing the shell. Themes are restored from layered config.
-            // Report session recovery warnings without aborting startup.
+            // Load layout, module records, frame state, palette usage, and page
+            // state before constructing the shell. Themes are restored from
+            // layered config. Report session recovery warnings without aborting
+            // startup.
             if let Some(path) = &services.session_path {
                 let restored = session::load(path);
                 for warning in &restored.warnings {
@@ -206,6 +207,7 @@ fn main() {
                 services.restored_tiles = restored.tiles;
                 services.restored_frame = restored.frame;
                 services.restored_palette_usage = restored.palette_usage;
+                services.restored_pages = restored.pages;
             }
 
             // Save current session state synchronously at quit, including changes

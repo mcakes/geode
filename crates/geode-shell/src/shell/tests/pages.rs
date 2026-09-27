@@ -199,6 +199,39 @@ fn tile_bindings_are_inert_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn the_session_flush_writes_pages_and_restore_hands_them_to_create(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    // Nothing created yet: no pages table.
+    let none = shell.update(&mut cx, |s, cx| {
+        s.services.session_path = Some(std::path::PathBuf::from("/nonexistent/session.toml"));
+        s.session_dirty = true;
+        s.take_dirty_session_write(cx)
+    });
+    assert!(
+        !none.unwrap().1.contains("[pages"),
+        "no page created, nothing written"
+    );
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    let (_, text) = shell
+        .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
+        .unwrap();
+    assert!(
+        text.contains("[pages.diagnostics]") && text.contains("recorded = true"),
+        "{text}"
+    );
+    // A flush with nothing changed writes nothing.
+    assert!(
+        shell
+            .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
+            .is_none()
+    );
+}
+
+#[gpui::test]
 fn the_overlay_mirror_follows_a_keyboard_toggle(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(
         cx,

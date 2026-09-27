@@ -181,6 +181,7 @@ fn services_with_an_unknown_restored_kind() -> (
         &session::TileRecords::new(),
         None,
         &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
     );
     let ws1: toml::Table = r#"
         focused = 1
@@ -299,6 +300,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
         &session::TileRecords::new(),
         None,
         &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
     );
     // Workspace 1 (the default active one) stays empty. Workspace 2
     // gets one tile, restored with the recorder's own kind — this is

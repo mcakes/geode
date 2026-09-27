@@ -3112,8 +3112,8 @@ run_mutation "session: tile state round-trips" \
 
 run_mutation "session: a state-only change alone still flushes" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty {' \
+  '            && tiles == self.last_tiles_written' \
+  '            && true' \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
@@ -4710,8 +4710,8 @@ run_mutation "palette: the backtrack continues a run by the discounted bonus" \
 # layout change.
 run_mutation "palette usage: a usage change alone dirties the session flush" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
+  '            && !usage_dirty' \
+  '            && true' \
   geode-shell a_palette_dispatch_reaches_the_session_flush
 
 run_mutation "bar: a keystroke sets the frame text" \

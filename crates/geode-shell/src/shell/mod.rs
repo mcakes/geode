@@ -475,6 +475,10 @@ pub struct ShellView {
     /// initially empty. Compared every tick to catch module-only state changes.
     /// Updated before disk I/O; a failed write does not reset this baseline.
     last_tiles_written: crate::session::TileRecords,
+    /// Page records from the last successfully serialized periodic snapshot,
+    /// initially empty. Compared every tick like `last_tiles_written`, since
+    /// a page's state changes do not set the layout flag.
+    last_pages_written: crate::session::PageRecords,
     /// Frame `(scope, grouping, as_of)` versions captured by the last
     /// successfully serialized periodic snapshot, initially zero. Detects
     /// frame-only changes; updated before the disk write completes.
@@ -1225,6 +1229,7 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),
+            last_pages_written: crate::session::PageRecords::new(),
             last_frame_versions_written: (0, 0, 0),
             pending_focus_restore: false,
             overlay_return_to_filter: false,

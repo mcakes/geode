@@ -14508,6 +14508,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &geode_shell::session::TileRecords::new(),
             None,
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             r#"

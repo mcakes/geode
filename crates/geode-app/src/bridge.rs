@@ -2142,6 +2142,7 @@ role = "key"
             &TileRecords::new(),
             None,
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -2526,6 +2527,7 @@ role = "key"
             &TileRecords::new(),
             None,
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = format!(
             r#"
@@ -2644,6 +2646,7 @@ role = "key"
             &TileRecords::new(),
             None,
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -3584,6 +3587,7 @@ role = "key"
             &TileRecords::new(),
             None,
             &geode_shell::palette_usage::PaletteUsage::new(),
+            &geode_shell::session::PageRecords::new(),
         );
         let ws1: toml::Table = r#"
             focused = 1
