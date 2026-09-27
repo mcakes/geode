@@ -16927,8 +16927,8 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
             entry.history = history(&self.sheet);
             entry.history_ix = None;
         }
-        self.resolve_plan();' \
-  '        self.resolve_plan();' \
+        // New templates (the type slot) and a new provider revision.' \
+  '        // New templates (the type slot) and a new provider revision.' \
   geode-pricer a_reload_with_the_bar_open_reprints_its_history
 
 # The reload observer must hand the factory the configured set.
@@ -19899,8 +19899,9 @@ run_mutation "pricer entry: the label names a leg for a root place" \
 # clear it, or the bar blames text that is no longer there.
 run_mutation "pricer entry bar: an edit keeps a stale error" \
   crates/geode-pricer/src/tile.rs \
-  '                && entry.error.take().is_some()' \
-  '                && entry.error.clone().is_some()' \
+  '            entry.error = None;
+            this.refresh_entry_completion(cx);' \
+  '            this.refresh_entry_completion(cx);' \
   geode-pricer a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it
 
 # A refused insert must put the place back, or the next enter lands
