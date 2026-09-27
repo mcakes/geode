@@ -335,6 +335,9 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
     match target {
         Target::Grouping { .. } => ("Grouping", "grouping", "grouping-hints", GROUPING_HINTS),
         Target::TileKind { .. } => ("Add a tile", "tile", "tile-hints", TILE_HINTS),
+        // This fallback title shows only if the target is built with no
+        // underlying; `tile::open_with` never builds it that way. `title()`
+        // supplies `Open {underlying} in…` instead.
         Target::TileKindWith { .. } => ("Open in\u{2026}", "tile", "tile-hints", TILE_HINTS),
         Target::LogLevel { .. } => ("Log level", "loglevel", "loglevel-hints", LOG_HINTS),
     }

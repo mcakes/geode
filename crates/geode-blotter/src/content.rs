@@ -353,6 +353,13 @@ mod tests {
                 "{id} is registered but the default keymap binds nothing to it"
             );
         }
+        for action in &bound {
+            assert!(
+                action.starts_with("blotter::") || *action == "tile::open_with",
+                "{action} is a shell action this module's keymap binds but does not name; \
+                 only tile::open_with is deliberately named here"
+            );
+        }
     }
 
     /// Moved here from the shell's own `defaults.rs` with the bindings

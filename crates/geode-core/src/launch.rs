@@ -24,7 +24,8 @@ pub enum ContextField {
 
 impl LaunchContext {
     pub fn is_empty(&self) -> bool {
-        self.underlying.is_none()
+        let LaunchContext { underlying } = self;
+        underlying.is_none()
     }
 
     pub fn has(&self, field: ContextField) -> bool {
@@ -36,10 +37,8 @@ impl LaunchContext {
     /// Whether a kind accepting `accepts` can open on every field set here.
     /// An empty context is covered by nothing: there is nothing to open on.
     pub fn covered_by(&self, accepts: &[ContextField]) -> bool {
-        !self.is_empty()
-            && [ContextField::Underlying]
-                .iter()
-                .all(|f| !self.has(*f) || accepts.contains(f))
+        let LaunchContext { underlying } = self;
+        !self.is_empty() && (underlying.is_none() || accepts.contains(&ContextField::Underlying))
     }
 }
 

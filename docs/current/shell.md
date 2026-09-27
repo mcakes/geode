@@ -86,8 +86,9 @@ change what a pick creates.
 `TileContent::launched` runs once, deferred with `cx.defer_in` past the
 current render, for an occupant `ShellView::add_tile` created (an add or a
 duplicate, never a session restore) that is the focused tile on its first
-render. A module that is useless without further state, such as one opened
-by `tile::open_with` with an empty context, asks for it here.
+render. A module that is useless without further state, such as a panel
+added with no state — from the palette, the tile picker, or
+`tile::open_with` falling back to the picker — asks for it here.
 
 ## Actions and keyboard routing
 

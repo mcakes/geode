@@ -98,7 +98,7 @@ fn launch_state(&self, _ctx: &LaunchContext) -> Option<toml::Table> {
 
 ### 3.3 The `tile::open_with` action
 
-A shell action, registered as "Open with context…" in the `Tile` category,
+A shell action, registered as "Open with context…" in the `Tiles` category,
 handled in `ShellView`'s action dispatch beside `tile::add`:
 
 1. Read the focused occupant's `launch_context`. With no focused occupant,
