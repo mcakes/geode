@@ -1,9 +1,9 @@
 //! Formatting model for the frame's scope, grouping slot, and as-of.
-//! `Frame::bar_model` caches it by versions excluding flip, configured clock,
+//! `FrameView::bar_model` caches it by versions excluding flip, configured clock,
 //! and local date. Formatting receives those inputs explicitly; toolbar
 //! rendering clones the prepared strings instead of rebuilding them.
 
-use crate::frame::Frame;
+use crate::frame::FrameView;
 use chrono::NaiveDate;
 use geode_core::clock::Clock;
 use geode_core::named::{NamedExpr, NamedExpressions};
@@ -31,7 +31,7 @@ pub struct Chip {
 /// One expression-term chip: the term's canonical source, elided for the
 /// chip and whole for the tooltip, plus the per-index selectors the chip
 /// and its `×` paint with. Indexed by position (`Expr::conjuncts` order),
-/// which is also what `Frame::drop_expression_term` and the dialog's
+/// which is also what `FrameViewMut::drop_expression_term` and the dialog's
 /// term mode address — the index IS the term's identity within one scope
 /// version, and the model is rebuilt whenever the scope changes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,7 +158,7 @@ fn named_chip(name: &str, defined: &NamedExpressions) -> NamedChip {
 
 /// Build labels using the supplied clock and local date. Explicit inputs
 /// keep formatting deterministic and avoid clock reads during render.
-pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarModel {
+pub fn build_model(frame: &FrameView<'_>, clock: Clock, today: NaiveDate) -> ScopeBarModel {
     let scope = frame.scope();
     let slot = frame
         .active_slot()
@@ -266,7 +266,7 @@ mod tests {
             ..Scope::default()
         });
         let clock = geode_core::clock::Clock::utc();
-        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
+        let m = build_model(&f.shared(), clock, clock.today(chrono::Utc::now()));
         assert_eq!(m.chips[0].summary, "book ∈ {3}");
         assert_eq!(m.chips[0].full, "book ∈ A, B, C");
     }
@@ -283,7 +283,7 @@ mod tests {
             ..Scope::default()
         });
         let clock = geode_core::clock::Clock::utc();
-        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
+        let m = build_model(&f.shared(), clock, clock.today(chrono::Utc::now()));
         assert_eq!(m.terms.len(), 2, "an or inside an and is one term");
         assert_eq!(m.terms[0].label, "npv > 1000000");
         assert_eq!(m.terms[0].full, "npv > 1000000");
@@ -326,7 +326,7 @@ mod tests {
             ..Scope::default()
         });
         let clock = geode_core::clock::Clock::utc();
-        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
+        let m = build_model(&f.shared(), clock, clock.today(chrono::Utc::now()));
         let labels: Vec<&str> = m.named.iter().map(|c| c.label.as_ref()).collect();
         assert_eq!(
             labels,
@@ -377,7 +377,7 @@ mod tests {
         f.set_as_of(AsOf::At(at));
         let today = clock.today(at);
 
-        let m = build_model(&f, clock, today);
+        let m = build_model(&f.shared(), clock, today);
         assert_eq!(
             m.text.as_deref(),
             Some("spx"),
@@ -407,7 +407,7 @@ mod tests {
         f.set_as_of(AsOf::At(at));
         let today = clock.today(at);
 
-        let m = build_model(&f, clock, today);
+        let m = build_model(&f.shared(), clock, today);
         assert_eq!(m.as_of.as_deref(), Some("14:05"), "the elided badge form");
         assert_eq!(
             m.as_of_full.as_deref(),
@@ -420,7 +420,7 @@ mod tests {
     fn no_active_slot_labels_as_view_default() {
         let f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
         let clock = geode_core::clock::Clock::utc();
-        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
+        let m = build_model(&f.shared(), clock, clock.today(chrono::Utc::now()));
         assert_eq!(m.slot, None);
         assert_eq!(m.slot_label, "view default");
         assert_eq!(m.text, None);
@@ -437,13 +437,13 @@ mod tests {
         let t = chrono::Utc.with_ymd_and_hms(2026, 9, 18, 22, 0, 0).unwrap();
         f.set_as_of(geode_core::query::AsOf::At(t));
         let utc = geode_core::clock::Clock::utc();
-        let m = build_model(&f, utc, utc.today(t));
+        let m = build_model(&f.shared(), utc, utc.today(t));
         assert_eq!(
             m.as_of.as_deref(),
             Some("22:00"),
             "today on the clock: HH:MM alone"
         );
-        let m = build_model(&f, utc, utc.today(t).succ_opt().unwrap());
+        let m = build_model(&f.shared(), utc, utc.today(t).succ_opt().unwrap());
         assert_eq!(
             m.as_of.as_deref(),
             Some("2026-09-18 22:00"),
@@ -456,13 +456,13 @@ mod tests {
         // time, by hand here, not through `clock.local` (which would
         // just prove the arithmetic agrees with itself).
         let tokyo = geode_core::clock::Clock::in_zone_named("Asia/Tokyo");
-        let m = build_model(&f, tokyo, tokyo.today(t));
+        let m = build_model(&f.shared(), tokyo, tokyo.today(t));
         assert_eq!(
             m.as_of.as_deref(),
             Some("07:00"),
             "22:00 UTC is 07:00 the next day in Tokyo — today on the clock"
         );
-        let m = build_model(&f, tokyo, tokyo.today(t).succ_opt().unwrap());
+        let m = build_model(&f.shared(), tokyo, tokyo.today(t).succ_opt().unwrap());
         assert_eq!(
             m.as_of.as_deref(),
             Some("2026-09-19 07:00"),

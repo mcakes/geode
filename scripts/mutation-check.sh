@@ -2679,32 +2679,60 @@ run_mutation "schema: a non-string dimension does not default to categorical" \
 
 run_mutation "frame: an empty slot cannot be activated" \
   crates/geode-shell/src/frame.rs \
-  '            && self.slots.get(n).is_none()' \
+  '            && self.frame.slots.get(n).is_none()' \
   '            && false' \
   geode-shell \
   an_empty_slot_cannot_be_activated
 
 run_mutation "frame: set_scope bumps only the scope counter" \
   crates/geode-shell/src/frame.rs \
-  '        let outgoing = std::mem::replace(&mut self.scope, scope);
-        self.push_undo(outgoing);
-        self.versions.scope += 1;' \
-  '        let outgoing = std::mem::replace(&mut self.scope, scope);
-        self.push_undo(outgoing);
-        self.versions.scope += 1;
-        self.versions.grouping += 1;' \
+  '        let outgoing = std::mem::replace(&mut lane.scope, scope);
+        lane.push_undo(outgoing);
+        self.bump_scope();' \
+  '        let outgoing = std::mem::replace(&mut lane.scope, scope);
+        lane.push_undo(outgoing);
+        self.bump_scope();
+        self.bump_grouping();' \
   geode-shell \
   each_mutation_bumps_exactly_its_own_counter
 
 run_mutation "frame: a vanished active slot is cleared on reload" \
   crates/geode-shell/src/frame.rs \
-  '        if self
-            .active_slot
-            .is_some_and(|n| self.slots.get(n).is_none())
-        {' \
-  '        if false {' \
+  '            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+  '            if false {' \
   geode-shell \
   replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
+
+run_mutation "frame: a pinned lane is resolved for its workspace" \
+  crates/geode-shell/src/frame.rs \
+  '        ws.and_then(|w| self.pinned.get(&w)).unwrap_or(&self.shared)' \
+  '        &self.shared' \
+  geode-shell \
+  an_edit_in_one_lane_leaves_the_other_alone
+
+run_mutation "frame: lane generations come from the shared counter" \
+  crates/geode-shell/src/frame.rs \
+  '    *counter += 1;
+    *counter' \
+  '    1' \
+  geode-shell \
+  generations_are_unique_across_lanes
+
+run_mutation "frame: a slot reload regroups hidden pinned lanes" \
+  crates/geode-shell/src/frame.rs \
+  '        for lane in std::iter::once(shared).chain(pinned.values_mut()) {
+            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+  '        for lane in std::iter::once(shared) {
+            if lane.active_slot.is_some_and(|n| slots.get(n).is_none()) {' \
+  geode-shell \
+  a_slot_reload_regroups_every_lane_and_clears_a_vanished_slot_in_a_hidden_lane
+
+run_mutation "frame: pinning copies the shared generations" \
+  crates/geode-shell/src/frame.rs \
+  '            scope_gen: self.scope_gen,' \
+  '            scope_gen: 0,' \
+  geode-shell \
+  unpinning_an_untouched_lane_keeps_the_generations
 
 # ---- module hosting (Phase 3 §3)
 
@@ -3301,7 +3329,7 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
   '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
-            self.bar_cache.borrow().as_ref()
+            self.frame.bar_cache.borrow().as_ref()
             && *cached_versions == versions
             && *cached_clock == clock
             && *cached_today == today
@@ -3309,7 +3337,7 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
             return Rc::clone(cached);
         }' \
   '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
-            self.bar_cache.borrow().as_ref()
+            self.frame.bar_cache.borrow().as_ref()
             && *cached_versions != versions
             && *cached_clock == clock
             && *cached_today == today
@@ -4506,14 +4534,14 @@ run_mutation "frame: a text session pushes once" \
   crates/geode-shell/src/frame.rs \
   '            Some(_) => {}' \
   '            Some(_) => {
-                let outgoing = self.scope.clone();
-                self.push_undo(outgoing);
+                let outgoing = lane.scope.clone();
+                lane.push_undo(outgoing);
             }' \
   geode-shell a_text_session_coalesces_into_one_undo_entry
 
 run_mutation "frame: as-of undo swaps rather than consumes" \
   crates/geode-shell/src/frame.rs \
-  '        self.previous_as_of = Some(current);' \
+  '        lane.previous_as_of = Some(current);' \
   '        let _ = current;' \
   geode-shell as_of_remembers_one_previous_value_in_both_directions
 
@@ -5010,8 +5038,8 @@ run_mutation "publication routing: document watches advance" \
 
 run_mutation "publication routing: consumer versions exclude unrelated publications" \
   crates/geode-shell/src/frame.rs \
-  '.map(|watch| watch.revision.get())' \
-  '.map(|_watch| self.versions.data)' \
+  '.map(|w| w.revision.get())' \
+  '.map(|_w| self.frame.versions.data)' \
   geode-shell publication_watches_are_exact_retained_and_reclaimed
 
 run_mutation "publication routing: closed interests are reclaimed" \
@@ -5938,17 +5966,18 @@ run_mutation "reload: the builtin layer is reused, not rebuilt from the keymap a
 run_mutation "M2: a text session that ends where it began pops its own undo entry" \
   crates/geode-shell/src/frame.rs \
   '    pub fn end_scope_session(&mut self) {
-        if let Some(session) = self.scope_session.take()
+        let lane = self.lane();
+        if let Some(session) = lane.scope_session.take()
             && session.pushed
-            && self.scope_undo.last() == Some(&session.base)
-            && self.scope == session.base
+            && lane.scope_undo.last() == Some(&session.base)
+            && lane.scope == session.base
         {
-            self.scope_undo.pop();
-            self.scope_redo = session.redo_snapshot;
+            lane.scope_undo.pop();
+            lane.scope_redo = session.redo_snapshot;
         }
     }' \
   '    pub fn end_scope_session(&mut self) {
-        self.scope_session = None;
+        self.lane().scope_session = None;
     }' \
   geode-shell a_text_session_that_ends_where_it_began_leaves_no_undo_entry
 
@@ -5990,20 +6019,20 @@ run_mutation "M10: Expr Display escapes an embedded quote in a string literal" \
 
 run_mutation "M11: save_scope bumps saved_scopes, not config" \
   crates/geode-shell/src/frame.rs \
-  '        self.versions.saved_scopes += 1;' \
-  '        self.versions.config += 1;' \
+  '        self.frame.versions.saved_scopes += 1;' \
+  '        self.frame.versions.config += 1;' \
   geode-shell save_scope_bumps_saved_scopes_not_config
 
 run_mutation "M12: the bar-model cache key includes today's date" \
   crates/geode-shell/src/frame.rs \
   '        if let Some((cached_versions, cached_clock, cached_today, cached)) =
-            self.bar_cache.borrow().as_ref()
+            self.frame.bar_cache.borrow().as_ref()
             && *cached_versions == versions
             && *cached_clock == clock
             && *cached_today == today
         {' \
   '        if let Some((cached_versions, cached_clock, _cached_today, cached)) =
-            self.bar_cache.borrow().as_ref()
+            self.frame.bar_cache.borrow().as_ref()
             && *cached_versions == versions
             && *cached_clock == clock
         {' \
