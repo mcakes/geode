@@ -38,7 +38,7 @@ The tile:
 | `paint` | The per-theme paint memo, floored to a readable ratio. |
 | `delegate` | The table delegate: cells, the tree column (indent, chevron, template tag), editor, expiry date field. |
 | `header` | The prepared header row and footer. |
-| `popup` | The typeahead, the entry bar's completion list, and the `.` action menu. |
+| `popup` | The typeahead, the entry bar's completion list, the `.` action menu, and the sheet picker (`sheet_rows`, `SheetPicker`). |
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
@@ -55,7 +55,8 @@ cargo bench -p geode-pricer
 ```
 
 The `test-support` feature exposes read-only accessors a host's tests observe
-a tile through (`PricerTile::sheet`, `PricerTile::is_loading`). `geode-app`'s
+a tile through (`PricerTile::sheet`, `PricerTile::is_loading`,
+`PricerTile::sheet_field_text`). `geode-app`'s
 dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 `--workspace` builds on one feature set.
 
@@ -65,7 +66,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   history step, commit and reload, and a Tab at a moved caret re-ranks first.
   A completion write is one range replace (one undo step) whose own `Change`
   is skipped as its echo, so the Tab cycle survives it. `lib::init` reclaims
-  `tab`/`shift-tab` in the bar's `PricerEntry` context from gpui-component's
+  `tab`/`shift-tab` in the bar's `PricerEntry` context (and the sheet
+  picker's `PricerSheetPicker`, where `tab` completes) from gpui-component's
   focus cycling.
 - Entry completion suggests configured underlyings, upcoming monthly expiries,
   tenors, option types, templates, and barrier kinds. It replaces the token at
@@ -226,7 +228,23 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - The `:rm` confirmation uses a focused prompt in the
   header whose `on_key_down` consumes every key (bare `y` confirms), the
   tile in `insert` mode while armed, cancelled by focus leaving or a pointer
-  press, blurred before it drops.
+  press, blurred before it drops. Its Yes/No buttons (`confirm_clicked`) are
+  `y` and "any other key"; the pointer cancel is the buttons' own
+  outside-press listener, so a press on a button reaches its click (gpui's
+  `Button` stops its press and prevents the focus move) instead of first
+  cancelling the question.
+- The sheet picker and the rename field are pointer forms of `:e`/`:rm` and
+  `:name`: a pick goes through `edit_sheet`/`arm_remove`, and the field's
+  text through `commands::parse` and `rename`, so no refusal is restated.
+  Both report `mode == insert` and count in `holds_focus`, blur before they
+  drop, and close on any other verb, `:` and `/`. `RenameBlock` is the
+  rename refusal known before a name is typed (the menu greys the row with
+  its reason). The name's press listener runs in the capture phase (a
+  second click toggles the picker closed before its outside-press closer
+  runs) and prevents default so no focus-tracking ancestor takes the new
+  field's focus; the tile root's capture listener (`note_press`) records
+  whether the previous press hit the name, so a double-click renames only
+  when both presses did.
 - Known names are the store's (`set_known` from the diagnostics catalog,
   which only adds and never re-adds a name confirmed forgotten until a
   save of it is confirmed; confirmed saves; less confirmed forgets) plus

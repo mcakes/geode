@@ -707,7 +707,7 @@ the application roster.
 ### The tile
 
 The tile (titled `Pricer · <sheet>`) shows one named sheet under a single
-dense header: the sheet name with `view <name>`, any sheet-wide shift chips
+dense header: the sheet name (a control: see [sheets by pointer](#sheets-by-pointer)) with `view <name>`, any sheet-wide shift chips
 (`spot +2.0%`, `vol -1.0`, spelled as the shift cells spell them), `N pricing…`
 while lines are stale, `N failed` in danger text while any line's last answer
 was a failure, `pricer <name>`, the last priced time, which reads `stale` once
@@ -826,7 +826,9 @@ Normal-mode keys:
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
-and view selection. Key hints show default bindings and do not reflect
+the sheet verbs (Open sheet…, Rename sheet…, New sheet, Remove sheet…; see
+[sheets by pointer](#sheets-by-pointer)), and view selection. Key hints show
+default bindings (for the sheet rows, their `:` verbs) and do not reflect
 rebindings. Keyboard stepping skips disabled rows, separators, and headings.
 Pointer selection, the initial highlight, or a rebuilt menu can still leave a
 disabled row selected. It has no highlight fill; choosing it shows its reason
@@ -935,10 +937,11 @@ tile holds:
   documents remain.
 - `:rm <sheet>` is refused for any open sheet (this tile's own: close it or
   `:e` another sheet first) and for a name that is not a document. Otherwise
-  the header asks `remove sheet 'x' and all its history? (y/n)` and holds the
-  keyboard (the tile is in insert mode). Bare `y` removes the document and its
-  whole history; any other key, a pointer press on the tile, or focus leaving
-  it answers no (`sheet not removed` in the footer). `y` checks the name
+  the header asks `remove sheet 'x' and all its history? (y/n)` beside Yes
+  and No buttons and holds the keyboard (the tile is in insert mode). Bare `y`
+  or Yes removes the document and its whole history; any other key, No, a
+  pointer press anywhere but the two buttons, or focus leaving it answers no
+  (`sheet not removed` in the footer). `y` checks the name
   again: if a tile opened it, or a `:name` began retiring it, while the
   question stood, nothing is removed (`sheet 'x' not removed: it is open in
   another tile` / `…: it is being removed`). A removal the data service
@@ -951,6 +954,38 @@ tile holds:
 
 A sheet name may not hold a control character: the store joins document key
 parts with `U+001F`.
+
+#### Sheets by pointer
+
+Each sheet verb has a pointer and palette form that takes the command's own
+route, so every refusal above applies unchanged. The palette actions
+(`Open sheet…`, `Rename sheet…`, `New sheet`, `Remove sheet…`) have no
+default key.
+
+- A click on the header's sheet name (tooltip `Sheets`) opens the sheet
+  picker under it: a filter field over every known sheet, every sheet a tile
+  holds, and this tile's own, opened on the current sheet (ticked). A sheet
+  another tile holds says `open`. Typing filters (the shared fuzzy match),
+  `up`/`down` step, `tab` completes the field to the highlighted name, a
+  hover moves the highlight, and `enter` or a row click picks through `:e`.
+  A refusal shows in the footer and keeps the picker open; `enter` with
+  nothing matching says `no sheet matches`. `escape`, a second click on the
+  name, or a press outside closes it. The rows are prepared when the picker
+  opens and do not follow later catalog changes; the pick itself decides.
+- A double-click on the name replaces it with a rename field holding the
+  name, all selected. `enter` renames through `:name`'s parse and route; a
+  refusal shows in the footer and keeps the field; `escape` or a press
+  outside cancels without renaming. A double-click renames only when both
+  presses reached the name: one whose first press landed on something
+  painted over the name is a single click. A rename refused whatever the
+  name (loading, a failed load, an unconfirmed rename) never opens the
+  field; the footer says why, and the menu's row is greyed with the reason.
+- The menu's `Remove sheet…` opens the same picker to remove: a pick arms
+  `:rm`'s confirm, and the current sheet is refused with `:rm`'s words.
+  `New sheet` is `:new` without a name.
+- The picker's filter and the rename field put the tile in insert mode, so
+  letters typed into them never reach shell bindings. A command, a search,
+  or any other verb closes them, as it closes the other fields.
 
 A save's outcome goes to the tile that queued it, not to whichever tile holds
 the name now. A tile that has moved on (`:e`, `:new`) and hears its old
