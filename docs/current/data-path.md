@@ -526,7 +526,9 @@ to the report time if adding the interval overflows.
   mutation repeated under the same test. The checker,
   [`mutation_anchors.py`](../../scripts/mutation_anchors.py), has its own
   unittest suite in `scripts/test_mutation_anchors.py`. A mutation that
-  does not compile is reported as `BUILD`, not caught, and fails the run;
+  does not compile is reported as `BUILD`, not caught, and fails the run,
+  as does a stale entry; the exit status reports only such harness errors,
+  while `SURVIVED`, `caught` and `FILTER` are verdicts read from the output.
   `--build-check` compiles each selected mutation without running tests,
   on the same target and test profile a mutation run builds, to find
   replacements left stale by signature changes that the static check

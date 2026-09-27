@@ -135,27 +135,32 @@ def check(entries, root):
     # mutates a sub-span of the same site; and different replacements of one
     # anchor are different mutations of one line. Neither can make a verdict
     # lie, so neither is reported. What can is the same mutation twice: under
-    # the same test it only repeats a verdict (REDUNDANT, an error); under
-    # another test it is a second detector of one mutation (ALSO, information).
+    # the same test (package and filter) it only repeats a verdict (REDUNDANT,
+    # an error); under another test it is a second detector of one mutation
+    # (ALSO, information).
     groups = collections.defaultdict(list)
     for e in entries:
         if e.filter:
             groups[(e.file, e.anchor, e.replacement)].append(e)
     also = 0
     for group in groups.values():
-        first_by_filter = {}
+        # Keyed on (package, filter): one test-fn name in two packages names
+        # two different tests, so the second entry is a second detector, not
+        # a repeated verdict.
+        first_by_test = {}
         for e in group:
-            if e.filter in first_by_filter:
+            test = (e.pkg, e.filter)
+            if test in first_by_test:
                 bad_entries += 1
                 out.append(
-                    f"REDUNDANT {e.name}  <-- repeats {first_by_filter[e.filter].name}: "
+                    f"REDUNDANT {e.name}  <-- repeats {first_by_test[test].name}: "
                     "same anchor, replacement and test"
                 )
                 continue
-            if first_by_filter:
+            if first_by_test:
                 also += 1
                 out.append(f"ALSO      {e.name}  <-- same mutation as {group[0].name}, detected by '{e.filter}'")
-            first_by_filter[e.filter] = e
+            first_by_test[test] = e
 
     out.append(
         f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous, "

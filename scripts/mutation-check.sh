@@ -16,9 +16,9 @@
 # means an exact name plus other substring matches and is a warning. This is a
 # source scan, not Cargo test discovery: it does not evaluate cfg attributes,
 # expand macros, or distinguish identical function names in different modules.
-# REDUNDANT (an entry repeating another's anchor, replacement and filter),
-# NOFILTER (an empty test filter) and NOOP (a replacement equal to its anchor)
-# are errors. ALSO is information: a second test detecting the same mutation.
+# REDUNDANT (an entry repeating another's anchor, replacement, package and
+# filter), NOFILTER (an empty test filter) and NOOP (a replacement equal to
+# its anchor) are errors. ALSO is information: a second test detecting the same mutation.
 # A shared anchor with a different replacement, or an anchor nested in a
 # longer one, is a different mutation and is not reported.
 #
@@ -42,7 +42,8 @@
 #
 # A mutation that does not compile is reported as BUILD, not caught: cargo
 # failed before any test ran, so the entry defends nothing. BUILD is an error
-# and makes the run exit 1. --build-check applies each selected mutation and
+# and makes the run exit 1, as does a stale entry (ANCHOR: file missing or
+# anchor unmatched) in a mutation run or build check. --build-check applies each selected mutation and
 # compiles it with `cargo check --profile test` on the target a mutation run
 # tests (the lib, or geode-app's bins, with their unit tests; not integration
 # tests) without running tests. It audits for replacements left stale by
@@ -53,6 +54,10 @@
 # because no anchored file changed exits 0. Repeating a deterministic fixture
 # does not add coverage; the fixture must exercise the behavior the mutation
 # changes.
+#
+# The exit status reports harness errors only (a BUILD, a stale entry, an
+# empty selection, bad arguments); SURVIVED, caught* and FILTER are verdicts
+# read from the output lines and do not change the exit status.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -159,6 +164,11 @@ skipped=0
 # Entries past the substring and --changed filters, whatever their verdict.
 selected=0
 build_failures=0
+# Stale entries in a mutation run or build check: a missing file, an
+# unreadable one, or an anchor that no longer matches. Each defends nothing,
+# so any of them fails the run; otherwise a substring selecting only stale
+# entries would read as a pass.
+anchor_failures=0
 built=0
 changed_files=""
 
@@ -223,6 +233,7 @@ run_mutation() {
   # traceback that ends the run (`set -e` would otherwise stop here).
   if [[ ! -f "$file" ]]; then
     echo "ANCHOR    $name  <-- file missing: $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   # How many times the anchor occurs, checked before anything is written.
@@ -238,6 +249,7 @@ PY
   ) || hits=-1
   if (( hits < 0 )); then
     echo "ANCHOR    $name  <-- could not read $file"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits == 0 )); then
@@ -245,6 +257,7 @@ PY
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
+    anchor_failures=$((anchor_failures + 1))
     return 0
   fi
   if (( hits > 1 )); then
@@ -22007,8 +22020,11 @@ if (( build_only )); then
   (( built == 1 )) && noun="mutation"
   (( build_failures == 1 )) && verb="does"
   echo "build-checked $built $noun: $build_failures $verb not compile"
+  if (( anchor_failures )); then
+    echo "stale entries not built: $anchor_failures (see ANCHOR lines)"
+  fi
 fi
-if (( build_failures )); then
+if (( build_failures || anchor_failures )); then
   exit 1
 fi
 if (( anchors_only )); then

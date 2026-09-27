@@ -110,20 +110,28 @@ class Check(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         self.assertIn("ALSO      b  <-- same mutation as a, detected by 't_two'", lines)
 
+    def test_one_filter_in_two_packages_is_not_redundant(self):
+        other = "crates/q/src/lib.rs"
+        lines, code = self.run_check(
+            {LIB: SRC, other: "#[test]\nfn t_one() {}\n"},
+            [entry(name="a"), entry(name="b", pkg="q")],
+        )
+        self.assertEqual(code, 0, lines)
+        self.assertFalse([l for l in lines if l.startswith("REDUNDANT")], lines)
+        self.assertIn("ALSO      b  <-- same mutation as a, detected by 't_one'", lines)
+
     def test_different_mutations_of_one_anchor_are_silent(self):
         lines, code = self.run_check(
             {LIB: SRC}, [entry(name="a"), entry(name="b", replacement="let x = 3;")]
         )
-        self.assertEqual(code, 0)
-        self.assertFalse([l for l in lines if l.startswith(("DUP", "ALSO", "REDUNDANT"))], lines)
+        self.assertEqual((lines, code), (["checked 2 anchors: 0 stale, 0 ambiguous, 0 bad filters, 0 bad entries"], 0))
 
     def test_a_nested_anchor_is_silent(self):
         lines, code = self.run_check(
             {LIB: SRC},
             [entry(name="a"), entry(name="b", anchor="x = 1", replacement="x = 4")],
         )
-        self.assertEqual(code, 0)
-        self.assertFalse([l for l in lines if l.startswith("SHADOW")], lines)
+        self.assertEqual((lines, code), (["checked 2 anchors: 0 stale, 0 ambiguous, 0 bad filters, 0 bad entries"], 0))
 
     def test_an_entry_without_a_filter_fails(self):
         lines, code = self.run_check({LIB: SRC}, [entry(filt="")])
