@@ -43,7 +43,7 @@ use geode_core::snapshot::Snapshot;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::colfit::{
-    FitMetrics, FittedWidths, SESSION_KEY, widths_from_record, widths_to_toml,
+    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
@@ -3936,10 +3936,9 @@ impl MarketDataTile {
                 self.toggle_menu(window, cx);
                 Ok(())
             }
-            Command::Autosize { reset } => {
-                self.autosize_columns(reset, window, cx);
-                Ok(())
-            }
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string),
         }
     }
 
@@ -3950,18 +3949,32 @@ impl MarketDataTile {
     /// window's current rem, never in render. The widths persist in the
     /// session record; a column a later document lacks is ignored and a new
     /// one gets the default width.
-    pub fn autosize_columns(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let metrics = FitMetrics::xsmall_mono(window.rem_size());
+    ///
+    /// With no rows (no document yet, or an empty one) a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics)
+                .ok_or(NOTHING_TO_FIT)?
+        };
         self.table.update(cx, |t, cx| {
-            let fitted = if reset {
-                FittedWidths::new()
-            } else {
-                t.delegate().fit_columns(&metrics)
-            };
             t.delegate_mut().fitted = fitted;
             t.refresh(cx);
         });
         cx.notify();
+        Ok(())
     }
 
     /// Set the policy used by a future new generation. Existing Behind state and
@@ -12080,6 +12093,33 @@ edits = [["2026-11-20", "-1", 9.5]]
 
         h.command(&mut vcx, "autosize reset").unwrap();
         assert_eq!(width_of_column(&h, &vcx, "status"), default);
+    }
+
+    /// Before any document, `:autosize` refuses and keeps the restored
+    /// widths; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_with_no_document_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let mut widths = toml::Table::new();
+        widths.insert("status".into(), toml::Value::Float(200.0));
+        let mut record = toml::Table::new();
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h, mut vcx) = open_spec(cx, &test_fixtures::SCHEDULE, Some(record));
+        let fitted = |h: &Harness, vcx: &gpui::VisualTestContext| {
+            h.tile
+                .read_with(vcx, |t, cx| t.table().read(cx).delegate().fitted.clone())
+        };
+        let before = fitted(&h, &vcx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted(&h, &vcx), before);
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert!(fitted(&h, &vcx).is_empty());
     }
 
     /// Fitted widths ride the session record. On restore a key the model

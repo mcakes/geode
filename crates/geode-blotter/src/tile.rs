@@ -20,7 +20,7 @@ use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
 use geode_shell::actions::ActionId;
 use geode_shell::colfit::{
-    FitMetrics, FittedWidths, SESSION_KEY, widths_from_record, widths_to_toml,
+    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions, PublicationWatch};
@@ -264,6 +264,10 @@ impl BlotterTile {
                     .map(|v| v.name.clone())
             })
             .unwrap_or_default();
+        let restored_view_kept = restored
+            .and_then(|t| t.get("view"))
+            .and_then(|v| v.as_str())
+            == Some(view_name.as_str());
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
                 Pin::Slot(t["pinned_slot"].as_integer().unwrap() as u8)
@@ -359,7 +363,12 @@ impl BlotterTile {
             let mut delegate = BlotterDelegate::new();
             delegate.line_numbers = line_numbers;
             // A missing or garbled record is an empty map, never a refusal.
-            delegate.fitted = widths_from_record(restored);
+            // Widths fitted for a view the record names but that no longer
+            // exists belong to other columns: the fallback view starts
+            // without them.
+            if restored_view_kept {
+                delegate.fitted = widths_from_record(restored);
+            }
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
@@ -1316,7 +1325,9 @@ impl BlotterTile {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         match parse(line)? {
-            Command::Autosize { reset } => self.autosize_columns(reset, window, cx),
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string)?,
             Command::Group(g) => {
                 self.pin = Pin::Grouping(g);
                 self.requery(cx);
@@ -1427,18 +1438,32 @@ impl BlotterTile {
     /// `tile::autosize_columns`. Measures on the UI thread at the window's
     /// current rem, never in render; see `BlotterDelegate::fit_columns`
     /// for which rows count.
-    pub fn autosize_columns(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let metrics = FitMetrics::xsmall_mono(window.rem_size());
+    ///
+    /// With nothing loaded (no snapshot yet, or no rows) a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics, cx)
+                .ok_or(NOTHING_TO_FIT)?
+        };
         self.table.update(cx, |t, cx| {
-            let fitted = if reset {
-                FittedWidths::new()
-            } else {
-                t.delegate().fit_columns(&metrics, cx)
-            };
             t.delegate_mut().fitted = fitted;
             t.refresh(cx);
         });
         cx.notify();
+        Ok(())
     }
 
     pub fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
@@ -6067,9 +6092,7 @@ mod tests {
         let p = next_query(&h.requests);
         deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
         let configured = column_width(&h, &cx, "delta01");
-        h.tile
-            .update_in(&mut cx, |t, window, cx| t.command("autosize", window, cx))
-            .unwrap();
+        content_command(&h, &mut cx, "autosize").unwrap();
         let fitted = column_width(&h, &cx, "delta01");
         assert!(
             fitted > configured,
@@ -6085,12 +6108,100 @@ mod tests {
         deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
         assert_eq!(column_width(&h, &cx, "delta01"), fitted);
 
-        h.tile
-            .update_in(&mut cx, |t, window, cx| {
-                t.command("autosize reset", window, cx)
-            })
-            .unwrap();
+        content_command(&h, &mut cx, "autosize reset").unwrap();
         assert_eq!(column_width(&h, &cx, "delta01"), configured);
+    }
+
+    /// A `:` line through the shell's door, `TileContent::command`.
+    fn content_command(
+        h: &Harness,
+        cx: &mut gpui::VisualTestContext,
+        line: &str,
+    ) -> Result<(), String> {
+        use geode_shell::module::TileContent as _;
+        let content = crate::content::BlotterContent::for_tile(h.tile.clone());
+        cx.update(|window, cx| content.command(line, window, cx))
+    }
+
+    /// A record carrying fitted widths for the `tree` view.
+    fn record_with_widths() -> toml::Table {
+        let mut widths = toml::Table::new();
+        widths.insert("delta01".into(), toml::Value::Float(200.0));
+        widths.insert(String::new(), toml::Value::Float(150.0));
+        let mut record = toml::Table::new();
+        record.insert("view".into(), toml::Value::String("tree".into()));
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        record
+    }
+
+    fn fitted_of(h: &Harness, cx: &gpui::VisualTestContext) -> geode_shell::colfit::FittedWidths {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().fitted.clone())
+    }
+
+    /// With nothing loaded, `:autosize` refuses and leaves the restored
+    /// widths alone; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_with_nothing_loaded_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open_with(cx, Some(&record_with_widths()));
+        let before = fitted_of(&h, &cx);
+        assert_eq!(before.len(), 2);
+        assert_eq!(
+            content_command(&h, &mut cx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted_of(&h, &cx), before);
+        content_command(&h, &mut cx, "autosize reset").unwrap();
+        assert!(fitted_of(&h, &cx).is_empty());
+    }
+
+    /// A record whose view no longer exists opens the fallback view without
+    /// the old view's widths.
+    #[gpui::test]
+    fn a_restored_record_for_a_missing_view_drops_its_widths(cx: &mut gpui::TestAppContext) {
+        let mut record = record_with_widths();
+        record.insert("view".into(), toml::Value::String("gone".into()));
+        let (h, cx) = open_with(cx, Some(&record));
+        assert!(fitted_of(&h, &cx).is_empty());
+    }
+
+    /// A regroup reaches the delegate with the next snapshot: the tree
+    /// column's fitted width goes (its labels and depths changed), the
+    /// measures' stay.
+    #[gpui::test]
+    fn a_regroup_drops_only_the_tree_columns_fitted_width(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        content_command(&h, &mut cx, "autosize").unwrap();
+        let fitted = fitted_of(&h, &cx);
+        assert!(fitted.contains_key("") && fitted.contains_key("delta01"));
+
+        content_command(&h, &mut cx, "group lhu").unwrap();
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        let after = fitted_of(&h, &cx);
+        assert!(!after.contains_key(""), "{after:?}");
+        assert_eq!(after.get("delta01"), fitted.get("delta01"));
+    }
+
+    /// A redelivery at the same grouping keeps the tree column's width.
+    #[gpui::test]
+    fn a_redelivery_at_the_same_grouping_keeps_the_tree_width(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        content_command(&h, &mut cx, "autosize").unwrap();
+        let fitted = fitted_of(&h, &cx);
+        h.tile.update(&mut cx, |t, cx| t.requery(cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(wide_snapshot()));
+        assert_eq!(fitted_of(&h, &cx), fitted);
     }
 
     /// Fitted widths ride the session record and come back on restore; a

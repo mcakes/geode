@@ -30,9 +30,16 @@ cargo bench -p geode-blotter   # the pure core
 - `:autosize` and the shell's `tile::autosize_columns` run one method,
   `BlotterTile::autosize_columns`. It measures only rows in the format
   cache (the window the table last asked for), never the whole snapshot. A
-  wider value outside that window does not widen the column. A view switch
-  clears the fitted widths; the session record keeps them under
-  `column_widths`.
+  wider value outside that window does not widen the column. With no plan
+  or no cached rows, a fit refuses with "nothing loaded to fit" and keeps
+  its widths.
+- A view switch clears the fitted widths, and a restored record whose view
+  is gone starts without them. `apply_snapshot` drops only the tree column's
+  width (key `""`) when the grouping differs from the plan's. That method is
+  the one place every grouping change reaches the delegate. The session
+  record keeps the widths under `column_widths`.
+- A fitted width overrides the view's `presentation.width`, including one
+  changed later, until `:autosize reset` or a refit.
 
 - `geode_blotter::init` binds `DataTable`'s key context to `NoAction` and
   the table is never focused, so it cannot swallow the vim keys the

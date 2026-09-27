@@ -240,6 +240,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - Column widths are fixed pixels and do not follow font size. The defaults
   fit the tested samples at the largest font step and leave more space at
   smaller steps. `:autosize` (or the palette's "Autosize columns") fits
-  every column to every row at the current rem size. It stores the widths
-  by vocabulary name (`__tree` for the tree) in the session record. A font
-  change does not rescale fitted widths; run `:autosize` again.
+  every column to the visible grid rows at the current rem size, so a
+  collapsed package's legs are not measured. It refuses with "nothing loaded
+  to fit" while the sheet loads or has no rows. It stores the widths by
+  vocabulary name (`__tree` for the tree) in the session record. A font
+  change does not rescale fitted widths; run `:autosize` again. A fitted
+  width also overrides a view width changed later, until `:autosize reset`.

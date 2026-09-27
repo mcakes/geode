@@ -266,7 +266,9 @@ pub trait TileContent {
     ///
     /// `Err` is a refusal the shell paints as a status notice. The default
     /// refuses with [`crate::colfit::NO_TABLE`], so an occupant without a
-    /// table needs no override.
+    /// table needs no override. A table with no rows to measure refuses a
+    /// fit with [`crate::colfit::NOTHING_TO_FIT`] and keeps its widths; a
+    /// `reset` never refuses.
     fn autosize_columns(
         &self,
         _reset: bool,

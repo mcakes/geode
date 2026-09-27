@@ -226,7 +226,13 @@ impl SheetDelegate {
     /// Fit the tree column and every plan column to its header and every
     /// grid row's prepared text. The tree column adds each row's indent and
     /// the chevron slot, both on the rem scale as `render_cell` paints them.
-    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> FittedWidths {
+    ///
+    /// `None` with nothing to measure: the sheet is still loading, or has
+    /// no rows.
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
+        if self.loading || self.model.rows.is_empty() {
+            return None;
+        }
         let design = |px: f32| px * m.rem_px / scale::DESIGN_REM;
         let mut out = FittedWidths::new();
         out.insert(
@@ -246,7 +252,7 @@ impl SheetDelegate {
                 .filter_map(|r| r.cells.get(col).map(|cell| cell.text.as_ref()));
             out.insert(c.name.to_string(), m.fit_text(&c.label, cells));
         }
-        out
+        Some(out)
     }
 
     /// Re-derive the gutter text and width when the model's shape, the

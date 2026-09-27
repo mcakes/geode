@@ -173,7 +173,12 @@ impl MatrixDelegate {
     /// Fit the row-label column (when shown) and every value column to its
     /// header and every row's prepared text. The whole model is measured:
     /// a document grid is small and already formatted.
-    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> FittedWidths {
+    ///
+    /// `None` with no rows to measure (no document yet, or an empty one).
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
+        if self.model.rows.is_empty() {
+            return None;
+        }
         let mut out = FittedWidths::new();
         if self.label_column {
             out.insert(
@@ -192,7 +197,7 @@ impl MatrixDelegate {
                 .filter_map(|r| r.cells.get(col).map(|c| c.text.as_ref()));
             out.insert(name.to_string(), m.fit_text(name, cells));
         }
-        out
+        Some(out)
     }
 
     /// The fitted width for `key`, else `default`.

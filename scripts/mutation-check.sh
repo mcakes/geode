@@ -23144,6 +23144,119 @@ run_mutation "autosize: the pricer delegate ignores the fitted width" \
   '            width: px(c.width),' \
   geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
 
+# A view switch is another column set: its fitted widths go.
+run_mutation "autosize: the blotter keeps widths across a view switch" \
+  crates/geode-blotter/src/tile.rs \
+  '                    d.fitted.clear();' \
+  '                    let _ = &d.fitted;' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+# Each module restores its fitted widths from the session record.
+run_mutation "autosize: the blotter restores no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '                delegate.fitted = widths_from_record(restored);' \
+  '                delegate.fitted = FittedWidths::new();' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter restores widths for a missing view" \
+  crates/geode-blotter/src/tile.rs \
+  '            if restored_view_kept {' \
+  '            if true {' \
+  geode-blotter a_restored_record_for_a_missing_view_drops_its_widths
+
+run_mutation "autosize: the blotter writes no widths" \
+  crates/geode-blotter/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-blotter autosize_widths_round_trip_the_session_and_a_view_switch_clears_them
+
+run_mutation "autosize: the blotter reset fits instead" \
+  crates/geode-blotter/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-blotter autosize_fits_the_loaded_rows_survives_a_redelivery_and_resets
+
+# Nothing to measure refuses and keeps the widths already held.
+run_mutation "autosize: the blotter fits an empty table" \
+  crates/geode-blotter/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-blotter autosize_with_nothing_loaded_refuses_and_keeps_the_widths
+
+run_mutation "autosize: a regroup keeps the tree column's width" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.fitted.remove("");' \
+  '            let _ = &self.fitted;' \
+  geode-blotter a_regroup_drops_only_the_tree_columns_fitted_width
+
+run_mutation "autosize: the market-data panel restores no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '            delegate.fitted = widths_from_record(restored);' \
+  '            delegate.fitted = FittedWidths::new();' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data panel writes no widths" \
+  crates/geode-marketdata/src/tile.rs \
+  '        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {' \
+  '        if let Some(w) = None::<toml::Value> {' \
+  geode-marketdata autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the market-data reset fits instead" \
+  crates/geode-marketdata/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-marketdata autosize_fits_every_row_survives_a_model_install_and_resets
+
+run_mutation "autosize: the market-data panel fits an empty table" \
+  crates/geode-marketdata/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-marketdata autosize_with_no_document_refuses_and_keeps_the_widths
+
+run_mutation "autosize: the pricer tile restores no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '        delegate.fitted = record.widths.clone();' \
+  '        delegate.fitted = FittedWidths::new();' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer record reads no widths" \
+  crates/geode-pricer/src/session.rs \
+  '            widths: widths_from_record(Some(t)),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer a_record_round_trips_through_its_table
+
+run_mutation "autosize: the pricer writes no widths" \
+  crates/geode-pricer/src/tile.rs \
+  '            widths: self.table.read(cx).delegate().fitted.clone(),' \
+  '            widths: FittedWidths::new(),' \
+  geode-pricer autosize_widths_round_trip_the_session
+
+run_mutation "autosize: the pricer reset fits instead" \
+  crates/geode-pricer/src/tile.rs \
+  '        let fitted = if reset {' \
+  '        let fitted = if false {' \
+  geode-pricer autosize_fits_every_row_survives_a_rebuild_and_resets
+
+run_mutation "autosize: the pricer fits an empty sheet" \
+  crates/geode-pricer/src/tile.rs \
+  '                .ok_or(NOTHING_TO_FIT)?' \
+  '                .unwrap_or_default()' \
+  geode-pricer autosize_on_an_empty_sheet_refuses
+
+# A hand-edited width is clamped to what a fit can produce.
+run_mutation "autosize: a restored width is not clamped" \
+  crates/geode-shell/src/colfit.rs \
+  '                        .then(|| (k.clone(), w.clamp(RESTORED_MIN_PX, RESTORED_MAX_PX)))' \
+  '                        .then(|| (k.clone(), w))' \
+  geode-shell a_restored_width_is_clamped_to_what_a_fit_can_produce
+
+# An occupant without a table refuses by default.
+run_mutation "autosize: the trait default accepts a fit" \
+  crates/geode-shell/src/module.rs \
+  '        Err(crate::colfit::NO_TABLE)' \
+  '        Ok(())' \
+  geode-shell autosize_on_a_tile_without_a_table_shows_the_refusal
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

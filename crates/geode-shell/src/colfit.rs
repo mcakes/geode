@@ -40,6 +40,11 @@ pub const MAX_REM: f32 = 40.0;
 /// with, and the one the shell shows when no tile is focused.
 pub const NO_TABLE: &str = "this tile has no table";
 
+/// The refusal a table module answers a fit with while it has no rows to
+/// measure (nothing delivered or loaded yet, or an empty result). The fitted
+/// widths already held stay as they are; `reset` still works.
+pub const NOTHING_TO_FIT: &str = "nothing loaded to fit";
+
 /// The session-record key under which a table module stores its fitted
 /// widths ([`widths_to_toml`], [`widths_from_record`]).
 pub const SESSION_KEY: &str = "column_widths";
@@ -125,9 +130,21 @@ pub fn widths_to_toml(widths: &FittedWidths) -> Option<toml::Value> {
     ))
 }
 
+/// The narrowest width a restored record may carry: [`MIN_REM`] at the
+/// smallest font scale. A fit never produces less at any scale, so a smaller
+/// stored value was edited by hand or corrupted.
+pub const RESTORED_MIN_PX: f32 = MIN_REM * 10.0;
+/// The widest width a restored record may carry: [`MAX_REM`] at the largest
+/// font scale, for the same reason. The scales are `FontSize`'s 10 and
+/// 14 px rems; a test pins the two against it.
+pub const RESTORED_MAX_PX: f32 = MAX_REM * 14.0;
+
 /// Read [`SESSION_KEY`] from a restored record. Lenient like every session
 /// read: a missing key, a value that is not a table, or an entry that is
-/// not a positive finite number is dropped, never a failure.
+/// not a positive finite number is dropped, never a failure. A kept entry is
+/// clamped to [`RESTORED_MIN_PX`]..=[`RESTORED_MAX_PX`], the range a fit can
+/// produce at any font scale, so a hand-edited `3e38` cannot build a column
+/// wider than any layout.
 pub fn widths_from_record(record: Option<&toml::Table>) -> FittedWidths {
     record
         .and_then(|t| t.get(SESSION_KEY))
@@ -136,7 +153,8 @@ pub fn widths_from_record(record: Option<&toml::Table>) -> FittedWidths {
             t.iter()
                 .filter_map(|(k, v)| {
                     let w = v.as_float().or_else(|| v.as_integer().map(|i| i as f64))? as f32;
-                    (w.is_finite() && w > 0.0).then(|| (k.clone(), w))
+                    (w.is_finite() && w > 0.0)
+                        .then(|| (k.clone(), w.clamp(RESTORED_MIN_PX, RESTORED_MAX_PX)))
                 })
                 .collect()
         })
@@ -234,5 +252,24 @@ mod tests {
         let read = widths_from_record(Some(&mixed));
         assert_eq!(read.len(), 1);
         assert_eq!(read["a"], 90.0);
+    }
+
+    #[test]
+    fn a_restored_width_is_clamped_to_what_a_fit_can_produce() {
+        let t: toml::Table = toml::from_str(
+            "[column_widths]
+huge = 3e38
+tiny = 0.001
+ok = 120.0
+",
+        )
+        .unwrap();
+        let read = widths_from_record(Some(&t));
+        assert_eq!(read["huge"], RESTORED_MAX_PX);
+        assert_eq!(read["tiny"], RESTORED_MIN_PX);
+        assert_eq!(read["ok"], 120.0);
+        use crate::fontsize::FontSize;
+        assert_eq!(RESTORED_MIN_PX, MIN_REM * FontSize::Small.rem_px());
+        assert_eq!(RESTORED_MAX_PX, MAX_REM * FontSize::Large.rem_px());
     }
 }

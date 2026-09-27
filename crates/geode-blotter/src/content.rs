@@ -117,6 +117,15 @@ pub struct BlotterContent {
     tile: Entity<BlotterTile>,
 }
 
+impl BlotterContent {
+    /// The content wrapper over an existing tile, so a test drives the
+    /// shell's own door (`TileContent`) rather than the tile's methods.
+    #[cfg(test)]
+    pub(crate) fn for_tile(tile: Entity<BlotterTile>) -> BlotterContent {
+        BlotterContent { tile }
+    }
+}
+
 impl TileContent for BlotterContent {
     fn key_context(&self, cx: &App) -> KeyContext {
         self.tile.read(cx).key_context(cx)
@@ -133,7 +142,7 @@ impl TileContent for BlotterContent {
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String> {
         self.tile.update(cx, |t, cx| t.command(line, window, cx))
     }
-    /// The same route as `:autosize [reset]`; never refuses.
+    /// The same route as `:autosize [reset]`.
     fn autosize_columns(
         &self,
         reset: bool,
@@ -141,8 +150,7 @@ impl TileContent for BlotterContent {
         cx: &mut App,
     ) -> Result<(), &'static str> {
         self.tile
-            .update(cx, |t, cx| t.autosize_columns(reset, window, cx));
-        Ok(())
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor, cx)

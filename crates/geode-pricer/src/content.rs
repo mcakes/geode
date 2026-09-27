@@ -353,7 +353,7 @@ impl TileContent for PricerContent {
     fn serialize(&self, cx: &App) -> toml::Table {
         self.tile.read(cx).serialize(cx)
     }
-    /// The same route as `:autosize [reset]`; never refuses.
+    /// The same route as `:autosize [reset]`.
     fn autosize_columns(
         &self,
         reset: bool,
@@ -361,8 +361,7 @@ impl TileContent for PricerContent {
         cx: &mut App,
     ) -> Result<(), &'static str> {
         self.tile
-            .update(cx, |t, cx| t.autosize_columns(reset, window, cx));
-        Ok(())
+            .update(cx, |t, cx| t.autosize_columns(reset, window, cx))
     }
 
     fn holds_focus(&self, window: &Window, cx: &App) -> bool {

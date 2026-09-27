@@ -43,11 +43,18 @@ default widths. Each tile runs one method for both doors.
   to 2.5–40 rem: at least about three characters, and never so wide that one
   long cell pushes the other columns off-screen. The fit runs once on the UI
   thread and never in render.
-- **What is measured.** Market data and the pricer measure every row of their
-  prepared model. The blotter measures only the header and the rows in its
-  format cache, which holds the window the table last asked to see.
-  Formatting a whole snapshot would break the UI budget, so a wider value in
-  a row that was never on screen does not widen its column.
+- **What is measured.** Market data measures every row of its prepared
+  model. The pricer measures every visible grid row, so the legs of a
+  collapsed package are not measured. The blotter measures only the header
+  and the rows in its format cache, which holds the window the table last
+  asked to see. Formatting a whole snapshot would break the UI budget, so a
+  wider value in a row that was never on screen does not widen its column.
+- **Nothing to fit.** When there are no rows to measure, `:autosize` refuses
+  with "nothing loaded to fit" and keeps the widths it already has. This
+  covers a blotter with no snapshot or an empty result, a panel with no
+  document or no rows, and a sheet that is still loading or empty. The
+  palette action shows the same refusal as a notice. `:autosize reset` always
+  runs.
 - **Storage.** The delegate holds fitted widths in pixels, keyed by a stable
   column key: the blotter's column name (empty for the tree column), the
   market-data column label (`__row_axis` for row labels), or the pricer's
@@ -55,7 +62,17 @@ default widths. Each tile runs one method for both doors.
   to the default, so every refresh keeps it. A key the current model lacks is
   ignored, and a new column gets its default width. The widths persist in the
   session record's `column_widths` table. A missing or malformed table
-  restores as no fitted widths. Switching the blotter's view clears them.
+  restores as no fitted widths. A restored width is clamped to 25–560 px,
+  the range a fit can produce at any font scale (2.5 rem at the 10 px rem to
+  40 rem at the 14 px rem).
+- **Blotter specifics.** Switching the blotter's view clears its fitted widths.
+  A restored record whose view no longer exists opens the fallback view
+  without them. A grouping change drops the tree column's fitted width,
+  because its labels and depths belong to the grouping, and keeps the other
+  columns' widths.
+- **Fitted beats configured.** A fitted width overrides the configured one,
+  including a `presentation.width` or pricer view width changed later, until
+  `:autosize reset` or a refit.
 - **Limits.** Widths are pixels because `TableDelegate::column` has no window
   from which to rescale rem. After a font-size change, fitted widths behave
   like configured ones: run `:autosize` again. The blotter's header is painted

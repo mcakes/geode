@@ -268,7 +268,9 @@ default) calls `TileContent::autosize_columns` on the focused tile's
 occupant alone, which in the three table modules is the same method the
 command runs. The trait default refuses with "this tile has no table", and
 the shell paints a refusal, or the same text when no tile is focused, as a
-status notice that clears on the next dispatch. Measurement and storage are
+status notice that clears on the next dispatch. A table tile with no rows to
+measure refuses a fit with "nothing loaded to fit" and keeps its widths.
+`:autosize reset` never refuses. Measurement and storage are
 described in [features](features.md#autosized-columns).
 
 ## Scope text and stack selection

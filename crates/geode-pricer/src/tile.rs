@@ -36,7 +36,7 @@ use geode_core::query::{QueryKey, QueryOutcome};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::choice::{ChoiceList, DEFAULT_CAP};
-use geode_shell::colfit::{FitMetrics, FittedWidths};
+use geode_shell::colfit::{FitMetrics, FittedWidths, NOTHING_TO_FIT};
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::linenumbers::{LineNumbers, UiSettings};
@@ -2802,10 +2802,9 @@ impl PricerTile {
             }
             Command::Name(name) => self.rename(name, cx),
             Command::Remove(name) => self.arm_remove(name, window, cx),
-            Command::Autosize { reset } => {
-                self.autosize_columns(reset, window, cx);
-                Ok(())
-            }
+            Command::Autosize { reset } => self
+                .autosize_columns(reset, window, cx)
+                .map_err(str::to_string),
         }
     }
 
@@ -2815,18 +2814,32 @@ impl PricerTile {
     /// shell's `tile::autosize_columns`; measured on the UI thread at the
     /// window's current rem, never in render. The widths ride the session
     /// record, not the sheet's stored document.
-    pub fn autosize_columns(&mut self, reset: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let metrics = FitMetrics::xsmall_mono(window.rem_size());
+    ///
+    /// While the sheet loads or has no rows a fit refuses with
+    /// [`NOTHING_TO_FIT`] and the widths already held stay; a reset always
+    /// runs.
+    pub fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics)
+                .ok_or(NOTHING_TO_FIT)?
+        };
         self.table.update(cx, |t, cx| {
-            let fitted = if reset {
-                FittedWidths::new()
-            } else {
-                t.delegate().fit_columns(&metrics)
-            };
             t.delegate_mut().fitted = fitted;
             t.refresh(cx);
         });
         cx.notify();
+        Ok(())
     }
 
     // ---- sheets: `:e`, `:new`, `:name`, `:rm` -------------------------
@@ -6538,6 +6551,52 @@ pub(crate) mod tests {
 
         h.command(&mut vcx, "autosize reset").unwrap();
         assert_eq!(width_of_column(&h, &vcx, "qty"), default);
+    }
+
+    fn fitted_of(h: &Harness, vcx: &VisualTestContext) -> geode_shell::colfit::FittedWidths {
+        h.tile
+            .read_with(vcx, |t, cx| t.table.read(cx).delegate().fitted.clone())
+    }
+
+    /// While the sheet loads, `:autosize` refuses and keeps the restored
+    /// widths; `:autosize reset` still drops them.
+    #[gpui::test]
+    fn autosize_while_loading_refuses_and_keeps_the_widths(cx: &mut gpui::TestAppContext) {
+        let (store, mut record) = seeded(&BOOK);
+        store.set_pending(true);
+        let mut widths = toml::Table::new();
+        widths.insert("qty".into(), toml::Value::Float(90.0));
+        record.insert(
+            geode_shell::colfit::SESSION_KEY.into(),
+            toml::Value::Table(widths),
+        );
+        let (h, mut vcx) = open_full(cx, Some(record), store, PricerSettings::default());
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.is_loading()),
+            "not loaded yet"
+        );
+        let before = fitted_of(&h, &vcx);
+        assert_eq!(before.len(), 1);
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert_eq!(fitted_of(&h, &vcx), before);
+        h.command(&mut vcx, "autosize reset").unwrap();
+        assert!(fitted_of(&h, &vcx).is_empty());
+    }
+
+    /// An empty sheet has nothing to fit either.
+    #[gpui::test]
+    fn autosize_on_an_empty_sheet_refuses(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.visible(&mut vcx, true);
+        assert!(!h.tile.read_with(&vcx, |t, _| t.is_loading()));
+        assert_eq!(
+            h.command(&mut vcx, "autosize"),
+            Err(geode_shell::colfit::NOTHING_TO_FIT.to_string())
+        );
+        assert!(fitted_of(&h, &vcx).is_empty());
     }
 
     /// Fitted widths ride the session record and come back on restore; a

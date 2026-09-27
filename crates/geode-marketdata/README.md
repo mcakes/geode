@@ -45,8 +45,10 @@ cargo bench -p geode-marketdata    # matrix model and draft
 ## Rules this crate pins
 
 - `:autosize` and the shell's `tile::autosize_columns` run one method,
-  `MarketDataTile::autosize_columns`, which measures every prepared row. The
-  widths persist in the session record's `column_widths`. On a later
+  `MarketDataTile::autosize_columns`, which measures every prepared row.
+  With no document or no rows, a fit refuses with "nothing loaded to fit"
+  and keeps its widths. The widths persist in the session record's
+  `column_widths`. On a later
   document, a label that is no longer present is ignored and a new column
   takes the default width. Columns remain non-resizable by drag.
 

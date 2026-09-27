@@ -675,6 +675,17 @@ impl BlotterDelegate {
             .as_ref()
             .and_then(|p| p.columns.get(self.cursor.col))
             .map(|c| c.name.clone());
+        // The tree column's labels and depths are the grouping's: a width
+        // fitted under another grouping measured different text. This is
+        // the one door every grouping change (a pin, a slot, the frame)
+        // reaches the delegate through. The measures' widths stay.
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|p| p.grouping.as_slice() != grouping)
+        {
+            self.fitted.remove("");
+        }
         let fresh = ColumnPlan::build(view, grouping, &snapshot);
         let rebuild = self.plan.as_ref() != Some(&fresh);
         self.dropped_sort = None;
@@ -1137,10 +1148,14 @@ impl BlotterDelegate {
     /// `px_1`, a sortable header's sort icon, and in the tree column each
     /// row's indent and chevron slot. The gutter is not included:
     /// `column()` adds it to the tree column's width on its own.
-    pub fn fit_columns(&self, m: &FitMetrics, cx: &App) -> FittedWidths {
-        let Some(plan) = self.plan.as_ref() else {
-            return FittedWidths::new();
-        };
+    ///
+    /// `None` while there is nothing to measure: no plan yet, or no row in
+    /// the cache (an empty result).
+    pub fn fit_columns(&self, m: &FitMetrics, cx: &App) -> Option<FittedWidths> {
+        let plan = self.plan.as_ref()?;
+        if self.cache.window().is_empty() {
+            return None;
+        }
         let m = m.with_extra_padding(0.5 * m.rem_px);
         // `Icon::size_3` (0.75rem) inside the sort toggle's `p(px(2.))`.
         let sort_icon = 0.75 * m.rem_px + 4.0;
@@ -1170,7 +1185,8 @@ impl BlotterDelegate {
                 });
                 (c.name.clone(), m.fit(std::iter::once(header).chain(cells)))
             })
-            .collect()
+            .collect::<FittedWidths>()
+            .into()
     }
 }
 
