@@ -3229,7 +3229,7 @@ run_mutation "status: the diagnostics summary click opens the page" \
 run_mutation "sidebar: the page button dispatches the toggle" \
   crates/geode-shell/src/shell/sidebar.rs \
   '                        view.dispatch(&ActionId(toggle.to_string()), None, window, cx);' \
-  '                        let _ = (view, toggle, window, cx);' \
+  '                        let _ = (&view, toggle, &window);' \
   geode-shell \
   the_sidebar_button_toggles_the_page_and_shows_it_active
 
