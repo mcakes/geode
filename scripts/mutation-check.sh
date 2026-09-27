@@ -21915,8 +21915,8 @@ run_mutation "expr suggest: enter refuses an unknown column" \
 # A row click inserts it.
 run_mutation "expr suggest: a row click inserts" \
   crates/geode-shell/src/shell/expr_suggest.rs \
-  '                    on_click(&label, window, cx);' \
-  '                    let _ = (&label, window, cx);' \
+  '                    on_click(named, &label, window, cx);' \
+  '                    let _ = (named, &label, window, cx);' \
   geode-shell \
   clicking_a_row_inserts_it_and_typing_continues
 
@@ -21954,6 +21954,24 @@ run_mutation "expr suggest: a double-click inserts once" \
   '                    if event.click_count > 99 {' \
   geode-shell \
   double_clicking_a_row_that_stays_listed_inserts_it_once
+
+# A name stands for a whole term: offered past the column position it
+# would stage mid-comparison.
+run_mutation "expr suggest: named rows only at a column position" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '        let mut candidates = if matches!(context.position, Position::Column) {' \
+  '        let mut candidates = if true {' \
+  geode-shell \
+  named_offers_never_appear_past_the_column_position
+
+# A named row stages its name; writing it as text would leave a column
+# reference that does not exist.
+run_mutation "expr suggest: accepting a named row stages it" \
+  crates/geode-shell/src/exprcomplete.rs \
+  '            RowKind::Insert => Accept::Write(Write {' \
+  '            _ => Accept::Write(Write {' \
+  geode-shell \
+  accepting_a_named_row_stages_it_and_erases_the_token
 
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.

@@ -79,7 +79,7 @@ pub struct NamedChip {
 
 /// Elide to 40 characters plus `…`, the scope bar's one rule for
 /// expression text.
-fn elide(s: &str) -> String {
+pub(crate) fn elide(s: &str) -> String {
     if s.chars().count() > 40 {
         format!("{}…", s.chars().take(40).collect::<String>())
     } else {

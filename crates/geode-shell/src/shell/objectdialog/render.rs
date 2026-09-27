@@ -4223,9 +4223,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 c,
                 &shell.expr_scroll,
                 cx.theme(),
-                move |label, window, cx| {
+                move |named, label, window, cx| {
                     entity.update(cx, |shell, cx| {
-                        super::super::expr_suggest::accept_label(shell, label, window, cx)
+                        super::super::expr_suggest::accept_row(shell, named, label, window, cx)
                     });
                 },
             )
