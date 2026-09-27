@@ -50,6 +50,13 @@ pub trait PageContent {
     /// The page is on screen. Opening announces `true`; closing `false`.
     /// A fresh occupant assumes it is hidden until the first call.
     fn set_visible(&self, visible: bool, cx: &mut App);
+    /// The handle the shell focuses on open; the page view tracks it.
+    fn focus_handle(&self, cx: &App) -> gpui::FocusHandle;
+    /// `true` while one of the page's own text inputs owns keyboard focus.
+    /// The shell then routes bare keys to the input and only chords to
+    /// the keymap, exactly as `TileContent::holds_focus` does for a tile's
+    /// insert mode; the page's `key_context` carries `mode = insert` then.
+    fn holds_focus(&self, window: &Window, cx: &App) -> bool;
     fn title(&self, cx: &App) -> SharedString;
     /// Opaque state for `[pages.<kind>]` in the session file.
     fn serialize(&self, cx: &App) -> toml::Table;
@@ -74,6 +81,11 @@ pub trait PageFactory {
     fn register_actions(&self, registry: &mut ActionRegistry);
     fn contexts(&self) -> Vec<&'static str> { vec![self.kind()] }
     fn default_keymap(&self) -> Option<&'static str> { None }
+    /// A context-free default binding for `page::toggle_<kind>`, e.g.
+    /// `"mod+d"`. The roster turns it into a shell-generated fragment; a
+    /// module fragment could not carry it because the fragment checker
+    /// requires a page context and the toggle must fire from the workspace.
+    fn toggle_binding(&self) -> Option<&'static str> { None }
     fn create(
         &self,
         restored: Option<&toml::Table>,
@@ -91,8 +103,10 @@ pub trait PageFactory {
 - `impl<F: PageFactory + ?Sized> PageFactory for Rc<F>` forwards every method,
   defaulted ones included, for the same reason the module forwarder does.
 - `PageRoster`: ordered factories with `add`, `factory(kind)`, `kinds`,
-  `register_actions`, and `default_keymaps` (fragments checked against each
-  factory's `contexts`, spliced with the module fragments).
+  `entries` (kind, title, icon for the sidebar), `register_actions`, and
+  `keymap_fragments` (each factory's default keymap checked against its
+  `contexts`, plus one unchecked shell-generated doc per `toggle_binding`),
+  spliced with the module fragments.
 
 ### 2.2 Shell-registered actions
 
@@ -103,18 +117,14 @@ Builtin keymap:
 
 ```toml
 [[bindings]]
-[bindings.keys]
-"mod+d" = "page::toggle_diagnostics"
-
-[[bindings]]
 context = "page"
 [bindings.keys]
 "escape" = "page::close"
 ```
 
-`mod+d` is unbound today. The diagnostics toggle binding is builtin rather
-than a fragment because the fragment checker requires a page context and the
-toggle must work from the workspace.
+`mod+d` is unbound today; the diagnostics factory's `toggle_binding` returns
+it, and the roster emits the context-free binding as a shell-generated
+fragment (a module fragment cannot carry a context-free binding).
 
 ### 2.3 `ShellView` state and routing
 
@@ -132,9 +142,12 @@ toggle must work from the workspace.
 - **Context stack** while open: `["page", "<kind>"]`, then `"palette"` if
   open. `workspace` and `tile` are absent. Tile movement, `:`, `/`, add-tile,
   dock, and stack bindings cannot fire into a page.
-- **Escape order**: modal → palette → page's own `dispatch(page::close)`
+- **Escape order**: modal → palette → insert branch (a page input holds
+  focus: the page's own `mode == insert` binding for Escape blurs it) →
+  matcher resolves `page::close` → page's own `dispatch(page::close)`
   returning `true` → shell closes the page. Drag cancellation precedes all
-  of these as today.
+  of these as today. `occupant_insert_stack` consults the open page's
+  `holds_focus` before the focused tile's.
 - Divider strips, tile drags, the command line, the stack list, and
   `ensure_occupants` visibility announcements treat an open page as they
   treat an open modal: not created, and cancelled if armed. Tile occupants
@@ -207,15 +220,20 @@ ignored with a warning, like an unmatched tile record.
 
 ### 3.3 Sections
 
-**Sources.** Toolbar: filter input, "Expand all" / "Collapse all". Table
-columns: expander, Source, Health (dot and label with reason), Since (time
-and age), Shape, Last poll, Next poll, Ready, Loading (path and start time,
-shown for the cold-start case too). Order: worst health first, then name;
-unreported sources last. An expanded row adds a detail row: spec detail by
-shape (paths, adapter, priority, readiness; adapter and topics; adapter and
-fetch), then the health history as ordered chips (up to the entity's 16).
-Ages come from a one-second timer that runs only while the page is visible
-and Sources is selected, updating the age text without rebuilding the table.
+**Detail strip.** gpui-component's `DataTable` paints every row at one
+height, so a row cannot grow to show more. Instead, every table section has
+a detail strip under the table showing the cursor row's detail lines. Click
+or `j`/`k` move the cursor; the strip follows.
+
+**Sources.** Toolbar: filter input. Table columns: Source, Health (dot and
+label with reason), Since (time and age), Shape, Last poll, Next poll,
+Ready, Loading (path and start time, shown for the cold-start case too).
+Order: worst health first, then name; unreported sources last. The detail
+strip shows the cursor source's spec detail by shape (paths, adapter,
+priority, readiness; adapter and topics; adapter and fetch) and the health
+history as ordered chips (up to the entity's 16). Ages come from a
+one-second timer that runs only while the page is visible and Sources is
+selected, updating the age text without rebuilding the table.
 
 **Data.** Toolbar: filter input, "Expand all" / "Collapse all", a chip
 stating "catalog as-of = frame" or "catalog pending", and a "Refresh
@@ -228,19 +246,20 @@ hidden until catalog and frame as-of agree, as today.
 **Config.** Two panels side by side. Left, diagnostics: a Current / History
 toggle; a table with Severity chip, Lane (config or data), Where (document
 and path when the diagnostic carries them, else the diagnostic's own text),
-Message; history groups by batch time. An "Open config directory" button
-dispatches `config::open_directory` through the shell-actions handle.
-Right, effective values: a tree by document then table, leaves as `key =
-value` with the layer chip from `Config::explain`; a key filter that
-narrows leaves across documents; the 2,000-leaf cap per expanded document
-with an omitted-count row.
+Message; history groups by batch time; the detail strip shows the cursor
+diagnostic in full. An "Open config directory" button dispatches
+`config::open_directory` through the shell-actions handle. Right, effective
+values: a table with one expandable row per document and, under an expanded
+document, one row per leaf with Key, Value, and Layer (the layer chip from
+`Config::explain`); a key filter that narrows leaves across documents; the
+2,000-leaf cap per expanded document with an omitted-count row.
 
 **Log.** Toolbar: level toggles (ERROR, WARN, INFO, DEBUG, TRACE; all on by
 default), a target select over targets seen in the tail plus "all", a message
 filter input, a Follow switch, "Clear", and "Levels…". Table columns: Time
-(with milliseconds), Level chip, Target, Message. Click or `zo` expands a row
-to the full record with a Copy button (clipboard). A loss row reports the gap
-measured at the last drain. Follow turns off when the cursor moves and on
+(with milliseconds), Level chip, Target, Message. The detail strip shows the
+cursor record in full with a Copy button (clipboard). A loss row reports the
+gap measured at the last drain. Follow turns off when the cursor moves and on
 with `G` or the switch. Retained tail stays at 4,096 records, drained with a
 reused buffer, starting at the ring's sequence when the page is first
 created.
@@ -290,15 +309,17 @@ Default keymap fragment, context `diagnostics`:
 | `ctrl+d` / `ctrl+u` | half page |
 | `ctrl+f` / `ctrl+b`, `pagedown` / `pageup` | full page |
 | `[` / `]` | `diagnostics::prev_section` / `diagnostics::next_section` |
-| `z o` / `z c` | `diagnostics::expand` / `diagnostics::collapse` |
+| `z o` / `z c` | `diagnostics::expand` / `diagnostics::collapse` (Data datasets, Config documents) |
 | `/` | `diagnostics::filter` — focus the selected section's filter input |
-| `enter` | `diagnostics::activate` — toggle expansion of the cursor row |
+| `enter` | `diagnostics::activate` — toggle expansion of the cursor row where it expands |
+| `escape` (mode == insert) | `diagnostics::blur` — blur the focused input, back to normal mode |
 
 Action ids that keep their meaning keep their names so user overrides of
 the tile bindings still apply. Tab moves between the toolbar controls and
-the table through the components' own focus order. A focused input consumes
-Escape by blurring; the page's `dispatch(page::close)` returns `true` in that
-case and `false` otherwise.
+the table through the components' own focus order. While an input is
+focused the page's context carries `mode = insert`, so bare keys type and
+the insert-mode Escape binding blurs; `page::close` is reached only from
+normal mode.
 
 ### 3.6 Persistence
 
@@ -341,8 +362,9 @@ shell's drain and the log control. The overlay switch reflects the mirrored
 value.
 
 **Page UI (`geode-diagnostics`, test-support).** Section switch by click and
-by `[` / `]`; row click sets the cursor; `enter` and click expand; `/` focuses
-the filter input and Escape blurs it before the shell sees Escape; Follow
+by `[` / `]`; row click sets the cursor and the detail strip follows; `enter`
+and click expand a dataset; `/` focuses the filter input and the page reports
+`holds_focus`, and `diagnostics::blur` returns to normal mode; Follow
 turns off on cursor move and on with `G`; the ages timer runs only while
 visible and on Sources.
 
