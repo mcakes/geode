@@ -90,6 +90,7 @@ context = "workspace"
 "mod+shift+z" = "frame::scope_redo"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
+"mod+x" = "frame::add_expression"
 "mod+t" = "frame::as_of"
 "mod+g" = "frame::grouping"
 "mod+n" = "tile::add"
@@ -358,8 +359,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Frame",
     );
     // Join a new expression to the current one with `and` (the toolbar's
-    // add-a-filter menu reaches the same action), and drop the whole
-    // expression layer undoably. Neither has a default chord.
+    // add-a-filter menu reaches the same action; `mod+x`), and drop the
+    // whole expression layer undoably (no default chord).
     action(
         reg,
         "frame::add_expression",

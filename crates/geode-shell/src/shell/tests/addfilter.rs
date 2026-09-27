@@ -78,8 +78,8 @@ fn the_plus_menus_expression_row_appends_with_and(cx: &mut gpui::TestAppContext)
         "Dimension… shows frame::pick's live binding"
     );
     assert!(
-        vcx.debug_bounds("scope-add-menu-key-expression").is_none(),
-        "Expression… has no default chord, so no key"
+        vcx.debug_bounds("scope-add-menu-key-expression").is_some(),
+        "Expression… shows frame::add_expression's live binding"
     );
     click(&mut vcx, "scope-add-menu-row-expression");
     assert!(shell.read_with(&vcx, |s, _| s.add_filter_menu.is_none()));
@@ -543,5 +543,26 @@ fn the_plus_menus_expression_row_offers_named_rows(cx: &mut gpui::TestAppContext
         dialog_text(&shell, &vcx),
         "npv",
         "typing after the click reaches the field"
+    );
+}
+
+/// `mod+x` (alt under the test alias) opens the add dialog as `mod+p` opens the
+/// dimension picker.
+#[gpui::test]
+fn mod_x_opens_the_add_expression_dialog(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("alt-x");
+    vcx.run_until_parked();
+    assert_eq!(
+        modal_title(&shell, &vcx).as_deref(),
+        Some("Add scope expression")
+    );
+    vcx.simulate_input("npv");
+    vcx.run_until_parked();
+    assert_eq!(
+        dialog_text(&shell, &vcx),
+        "npv",
+        "the field takes the typing"
     );
 }
