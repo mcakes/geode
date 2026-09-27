@@ -2354,7 +2354,12 @@ impl MarketDataTile {
                 true
             }
             "delete_row" => {
-                if let Err(e) = self.delete_row(window, cx) {
+                let deleted = if self.selection.is_some() {
+                    self.delete_selected_rows(window, cx)
+                } else {
+                    self.delete_row(window, cx)
+                };
+                if let Err(e) = deleted {
                     self.notice = Some(e.into());
                 }
                 true

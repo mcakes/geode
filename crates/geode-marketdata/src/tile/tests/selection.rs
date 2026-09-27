@@ -236,3 +236,47 @@ fn y_over_a_block_copies_its_columns_header_and_cells_only(cx: &mut gpui::TestAp
         Some(format!("{columns}\n0.2000\t0.3000\n0.5000\t0.6000").as_str())
     );
 }
+
+/// `d` over a `Rows` selection deletes every selected row as one draft
+/// change (a single `:revert` restores them all) and ends the selection.
+#[gpui::test]
+fn d_over_rows_deletes_them_in_one_draft_change_and_ends_the_selection(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "delete_row", None);
+    let states = h.tile.read_with(&vcx, |t, _| {
+        t.model().rows.iter().map(|r| r.state).collect::<Vec<_>>()
+    });
+    assert_eq!(states, vec![RowState::Deleted, RowState::Deleted]);
+    assert_eq!(h.mode(&vcx), "normal");
+    h.command(&mut vcx, "revert").unwrap();
+    let states = h.tile.read_with(&vcx, |t, _| {
+        t.model().rows.iter().map(|r| r.state).collect::<Vec<_>>()
+    });
+    assert_eq!(
+        states,
+        vec![RowState::Document, RowState::Document],
+        "one revert restores both"
+    );
+}
+
+/// `d` over a `Block` refuses rather than deleting the rows it happens
+/// to touch, names `V`, and keeps the selection.
+#[gpui::test]
+fn d_over_a_block_refuses_and_names_v(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.with_document(&mut vcx);
+    h.dispatch(&mut vcx, "visual_block", None);
+    h.dispatch(&mut vcx, "delete_row", None);
+    assert!(h.tile.read_with(&vcx, |t, _| t.draft().is_empty()));
+    assert!(
+        h.header_texts(&vcx)
+            .iter()
+            .any(|t| t == "d deletes rows — use V")
+    );
+    assert_eq!(h.mode(&vcx), "visual", "a refusal keeps the selection");
+}

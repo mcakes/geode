@@ -152,6 +152,50 @@ impl MarketDataTile {
         Some(out.join("\n"))
     }
 
+    /// `d` in visual mode: a `Rows` selection deletes every selected row
+    /// and ends the selection. Labels are collected before any delete,
+    /// because dropping an inserted row shifts every later index. A
+    /// `Block` refuses rather than deleting whole rows it only partly
+    /// covers. Refused outright (selection kept) only when every row was
+    /// already deleted.
+    pub(super) fn delete_selected_rows(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if self
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.kind == SelectKind::Block)
+        {
+            return Err("d deletes rows — use V".to_string());
+        }
+        let (_, base) = self.row_verb_target(window, cx)?;
+        let labels: Vec<String> = self
+            .resolved
+            .as_ref()
+            .map(|r| {
+                r.rows
+                    .clone()
+                    .filter_map(|i| self.model.rows.get(i).map(|m| m.label.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut already = 0usize;
+        for label in &labels {
+            if self.draft.delete_row(label, &base) == RowDelete::Already {
+                already += 1;
+            }
+        }
+        if already == labels.len() {
+            return Err(ALREADY_DELETED.to_string());
+        }
+        self.clear_selection();
+        self.notice = None;
+        self.rebuild_model(cx);
+        Ok(())
+    }
+
     /// The live selection as last resolved — the test reader for what
     /// the delegate was handed.
     #[cfg(test)]
