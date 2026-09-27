@@ -766,7 +766,7 @@ pub(crate) mod tests {
         s.apply(Edit::Group {
             first: 0,
             count: 2,
-            template: Template::Custom,
+            template: Template::CUSTOM,
             id: None,
         })
         .unwrap();
