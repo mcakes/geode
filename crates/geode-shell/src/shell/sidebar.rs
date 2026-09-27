@@ -1,4 +1,5 @@
-//! Workspace icon rail with a bottom settings button.
+//! Workspace icon rail with page buttons and a settings button at the
+//! bottom.
 //!
 //! The active workspace and all nonempty workspaces are visible; empty
 //! inactive workspaces are hidden. The rail has a fixed design width scaled
@@ -6,16 +7,19 @@
 //!
 //! Workspace indicators use custom rounded squares so their labels, fills,
 //! and radius follow the theme. The active indicator uses `sidebar_primary`
-//! on a tint of that colour; inactive indicators use `sidebar_foreground`
-//! on `secondary`. The settings button uses an unnamed `Avatar`, which
-//! shows a user glyph, with its text colour set for the sidebar surface.
+//! on a tint of that color; inactive indicators use `sidebar_foreground`
+//! on `secondary`. One button per registered page sits above the settings
+//! button; the open page's button takes the active indicator's treatment.
+//! The settings button uses an unnamed `Avatar`, which shows a user glyph,
+//! with its text color set for the sidebar surface.
 
 use gpui::prelude::*;
 use gpui::{Context, IntoElement, MouseButton, SharedString, Window, div};
 use gpui_component::avatar::Avatar;
-use gpui_component::{ActiveTheme as _, Sizable as _, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, Sizable as _, v_flex};
 
 use crate::actions::ActionId;
+use crate::module::PageEntry;
 use crate::shell::ShellView;
 use crate::shell::control::{self, PointerStates as _};
 use crate::shell::scale;
@@ -81,10 +85,17 @@ const WORKSPACE_TITLE: [&str; 9] = [
     "Workspace 9",
 ];
 
-/// Build indicators for the active and nonempty workspaces and the
-/// settings button. Listeners use the shell entity context to send
-/// workspace and settings actions through normal dispatch.
-pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl IntoElement {
+/// Build indicators for the active and nonempty workspaces, one button per
+/// registered page (`open_page` names the open one), and the settings
+/// button. Listeners use the shell entity context to send workspace, page,
+/// and settings actions through normal dispatch.
+pub fn sidebar(
+    active: u8,
+    non_empty: &[u8],
+    pages: &[PageEntry],
+    open_page: Option<&str>,
+    cx: &Context<ShellView>,
+) -> impl IntoElement {
     let theme = cx.theme();
     // Pointer states (design guide: every control owes a hover and a
     // pressed state; the cursor stays the arrow). An inactive disc is a
@@ -176,6 +187,66 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         );
     }
 
+    // The bottom column: page buttons, then the settings avatar. The column
+    // carries the bottom padding so the avatar's row and a page's row are
+    // the same shape.
+    let mut bottom = v_flex().w_full().items_center().gap_2().pb_2();
+    for (i, entry) in pages.iter().enumerate() {
+        let is_open = open_page == Some(entry.kind);
+        let selector = entry.selector;
+        let toggle = entry.toggle_action;
+        bottom = bottom.child(
+            div()
+                .id(gpui::ElementId::Name(SharedString::new_static(selector)))
+                .debug_selector(move || selector.to_string())
+                .tooltip(crate::tips::tip(
+                    entry.tip_selector,
+                    entry.title,
+                    Some(entry.toggle_action),
+                    None,
+                ))
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |view, _event, window, cx| {
+                        // Formatted on the click, not per render.
+                        view.dispatch(&ActionId(toggle.to_string()), None, window, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    // The same box the avatar sits in. Open = the selected
+                    // tab, the active workspace disc's treatment and, like
+                    // it, no pointer states: a click on it closes the page.
+                    div()
+                        .id(gpui::ElementId::NamedInteger(
+                            SharedString::new_static("sidebar-page-box"),
+                            i as u64,
+                        ))
+                        .when(is_open, |d| {
+                            d.debug_selector(move || format!("{selector}-active"))
+                        })
+                        .size(scale::design(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radius)
+                        .when(is_open, |d| {
+                            d.bg(theme.sidebar_primary.opacity(0.2))
+                                .text_color(theme.sidebar_primary)
+                        })
+                        .when(!is_open, |d| {
+                            d.pointer_states(gear_states)
+                                .text_color(theme.sidebar_foreground)
+                        })
+                        .child(Icon::new(entry.icon).small()),
+                ),
+        );
+    }
+
     let profile = div()
         .id("sidebar-profile")
         .debug_selector(|| "sidebar-profile".to_string())
@@ -189,7 +260,6 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .flex()
         .items_center()
         .justify_center()
-        .pb_2()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {
@@ -200,7 +270,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .child(
             // The hover box around the avatar, the shape a ghost icon
             // button has: the avatar keeps its own circle and glyph
-            // colour, the box behind it takes the pointer states.
+            // color, the box behind it takes the pointer states.
             div()
                 .id("sidebar-profile-box")
                 .size(scale::design(28.))
@@ -211,6 +281,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 .pointer_states(gear_states)
                 .child(Avatar::new().small().text_color(theme.sidebar_foreground)),
         );
+    let bottom = bottom.child(profile);
 
     v_flex()
         .flex_none()
@@ -225,5 +296,5 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .border_r_1()
         .border_color(theme.sidebar_border)
         .child(indicators)
-        .child(profile)
+        .child(bottom)
 }

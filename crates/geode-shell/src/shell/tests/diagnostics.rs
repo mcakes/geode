@@ -70,7 +70,7 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
 /// The diagnostics-summary tooltip explains its click action. This segment has no
 /// keyboard chord to display.
 #[gpui::test]
-fn hovering_the_diagnostics_summary_says_it_opens_the_tile(cx: &mut gpui::TestAppContext) {
+fn hovering_the_diagnostics_summary_says_it_opens_the_page(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
@@ -100,21 +100,21 @@ fn hovering_the_diagnostics_summary_says_it_opens_the_tile(cx: &mut gpui::TestAp
         .advance_clock(std::time::Duration::from_millis(600));
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("tip-diagnostics-summary").is_some());
+    // gpui's test API cannot read painted text: the title row is asserted
+    // painted, and the constant it paints is asserted to name the page.
+    assert!(vcx.debug_bounds("tip-diagnostics-summary-title").is_some());
+    assert_eq!(
+        crate::shell::status::DIAGNOSTICS_TIP_TITLE,
+        "Open the diagnostics page"
+    );
 }
 
-/// Clicking the diagnostics summary opens a tile through `open_module("diagnostics",
-/// ..)`. Register a diagnostics factory so the test distinguishes opening that kind
-/// from merely creating a tile.
+/// Clicking the diagnostics summary opens the diagnostics page through
+/// `page::toggle_diagnostics`; no tile is split open.
 #[gpui::test]
-fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) {
-    // Register the requested kind so the assertion identifies the diagnostics tile, not
-    // just a new split.
-    let (mut services, _log) = services_with_recorder();
-    services
-        .roster
-        .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
-        )));
+fn clicking_the_diagnostics_summary_opens_the_page(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let services = with_page(services, RecordingPageFactory::new("diagnostics"));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
@@ -147,13 +147,14 @@ fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) 
         let _ = window.draw(cx);
     });
 
-    let tile = shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile());
-    assert!(tile.is_some(), "the click split a tile open");
-    assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(tile.unwrap())),
-        Some("diagnostics"),
-        "the click must reach open_module(\"diagnostics\", ..), not just split something"
-    );
+    shell.read_with(&cx, |s, _| {
+        assert!(s.page_open(), "the click opened the page");
+        assert_eq!(s.open_page_kind(), Some("diagnostics"));
+        assert!(
+            s.services.workspaces.active().tree().is_empty(),
+            "no tile was split open"
+        );
+    });
 }
 
 /// A stopped data thread paints its own segment ahead of the diagnostics
@@ -216,17 +217,13 @@ fn hovering_the_stopped_segment_shows_its_reason(cx: &mut gpui::TestAppContext) 
     assert!(vcx.debug_bounds("tip-data-stopped").is_some());
 }
 
-/// Clicking the stopped segment opens the diagnostics tile through the
+/// Clicking the stopped segment opens the diagnostics page through the
 /// summary's own route. No health is reported, so the summary is absent and
 /// the click can only land on the stopped segment.
 #[gpui::test]
-fn clicking_the_stopped_segment_opens_the_diagnostics_tile(cx: &mut gpui::TestAppContext) {
-    let (mut services, _log) = services_with_recorder();
-    services
-        .roster
-        .add(Box::new(crate::module::recording::RecordingFactory::new(
-            "diagnostics",
-        )));
+fn clicking_the_stopped_segment_opens_the_diagnostics_page(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let services = with_page(services, RecordingPageFactory::new("diagnostics"));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
@@ -254,11 +251,14 @@ fn clicking_the_stopped_segment_opens_the_diagnostics_tile(cx: &mut gpui::TestAp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let tile = shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile());
-    assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(tile.expect("a tile opened"))),
-        Some("diagnostics")
-    );
+    shell.read_with(&cx, |s, _| {
+        assert!(s.page_open(), "the click opened the page");
+        assert_eq!(s.open_page_kind(), Some("diagnostics"));
+        assert!(
+            s.services.workspaces.active().tree().is_empty(),
+            "no tile was split open"
+        );
+    });
 }
 
 /// A changed `[log]` table applies through `LevelControl::set` exactly once and updates

@@ -3126,6 +3126,120 @@ run_mutation "session: a page-state-only change alone still flushes" \
   geode-shell \
   a_page_state_change_alone_flushes_once_and_is_quiet_afterwards
 
+# ---- pages over the workspace
+
+# The tiles beneath an open page are hidden by `ensure_occupants`'s
+# visibility pass alone: with the guard gone they stay announced visible.
+run_mutation "page: tiles beneath an open page are hidden" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.page_open() {
+            return;
+        }
+        let ws = self.services.workspaces.active();
+        out.extend(ws.tree().visible_tiles());' \
+  '        if false {
+            return;
+        }
+        let ws = self.services.workspaces.active();
+        out.extend(ws.tree().visible_tiles());' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# The tiles leaving the screen on the render after a page opens must not
+# pull focus off the page through the tile-left-the-screen net.
+run_mutation "page: hiding the tiles beneath does not pull focus off the page" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            && !self.page.as_ref().filter(|p| p.open).is_some_and(|p| {
+                p.occupant
+                    .content
+                    .focus_handle(cx)
+                    .contains_focused(window, cx)
+            })' \
+  '            && true' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# No flip barrier waits on a tile the page covers.
+run_mutation "page: no visible tile keys while a page is open" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if self.page_open() {
+            return;
+        }
+        // Placeholders never query or arrive; waiting on them would hold every' \
+  '        if false {
+            return;
+        }
+        // Placeholders never query or arrive; waiting on them would hold every' \
+  geode-shell \
+  tiles_beneath_are_hidden_on_open_and_shown_on_close
+
+# A synchronous handle re-enters the page entity that invoked it and panics
+# on the double lease.
+run_mutation "page: the ShellActions handle defers its dispatch" \
+  crates/geode-shell/src/shell/page.rs \
+  '                window.defer(cx, move |window, cx| {
+                    let _ = weak.update(cx, |view, cx| {
+                        view.dispatch(&action, None, window, cx);
+                        cx.notify();
+                    });
+                });' \
+  '                let _ = weak.update(cx, |view, cx| {
+                    view.dispatch(&action, None, window, cx);
+                    cx.notify();
+                });' \
+  geode-shell \
+  a_page_may_close_itself_through_shell_actions_from_inside_its_own_update
+
+# Focus returned to the shell root over a page leaves the page's own
+# bindings unreachable.
+run_mutation "page: closing an overlay over a page returns focus to the page" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            // not painted then, so the flag above is never set over a page).
+            self.focus_home(window, cx);' \
+  '            // not painted then, so the flag above is never set over a page).
+            self.focus_handle.focus(window, cx);' \
+  geode-shell \
+  closing_the_palette_over_a_page_returns_focus_to_the_page
+
+run_mutation "page: page::close under a modal is refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            if self.page_open() {' \
+  '            if false {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            if self.page_open() {' \
+  geode-shell \
+  page_close_under_a_modal_is_refused
+
+run_mutation "status: the diagnostics summary click opens the page" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    &crate::actions::ActionId(format!(
+                        "page::toggle_{}",
+                        crate::diagnostics::DIAGNOSTICS_PAGE_KIND
+                    )),' \
+  '                    &crate::actions::ActionId(String::new()),' \
+  geode-shell \
+  clicking_the_diagnostics_summary_opens_the_page
+
+run_mutation "sidebar: the page button dispatches the toggle" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '                        view.dispatch(&ActionId(toggle.to_string()), None, window, cx);' \
+  '                        let _ = (view, toggle, window, cx);' \
+  geode-shell \
+  the_sidebar_button_toggles_the_page_and_shows_it_active
+
+run_mutation "sidebar: the open page's button takes the active treatment" \
+  crates/geode-shell/src/shell/sidebar.rs \
+  '        let is_open = open_page == Some(entry.kind);' \
+  '        let is_open = false;' \
+  geode-shell \
+  the_sidebar_button_toggles_the_page_and_shows_it_active
+
 # ---- command line (Phase 3 §3.4)
 
 run_mutation "commandline: an ambiguous word is refused, never guessed" \
@@ -8501,10 +8615,10 @@ run_mutation "focus: an abandoned editor in the focused tile does not keep anoth
 run_mutation "focus: a window with nothing focused gets the shell root back" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   '        if false {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   geode-shell a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame
 
@@ -8516,10 +8630,10 @@ run_mutation "focus: a window with nothing focused gets the shell root back" \
 run_mutation "focus: the no-focus net never steals from a live focused element" \
   crates/geode-shell/src/shell/render.rs \
   '        if window.focused(cx).is_none() {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   '        if !self.focus_handle.is_focused(window) {
-            self.focus_handle.focus(window, cx);
+            self.focus_home(window, cx);
         }' \
   geode-shell the_focus_net_leaves_a_live_focused_input_alone
 
@@ -8539,12 +8653,12 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
 # the backstop is the only thing left.
 run_mutation "focus: a departed tile's focus returns to the shell root" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+  '                    .contains_focused(window, cx)
             })
         {
             self.focus_handle.focus(window, cx);
         }' \
-  '                    .is_some_and(|o| o.content.holds_focus(window, cx))
+  '                    .contains_focused(window, cx)
             })
         {
             let _ = &focused;
@@ -23765,7 +23879,7 @@ run_mutation "status: the stopped segment's click does nothing" \
   crates/geode-shell/src/shell/status.rs \
   '                    stopped_click(window, cx);' \
   '                    let _ = (&stopped_click, window, cx);' \
-  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_tile
+  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_page
 
 run_mutation "sections: stopped threads are not listed" \
   crates/geode-diagnostics/src/sections.rs \

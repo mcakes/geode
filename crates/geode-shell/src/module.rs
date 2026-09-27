@@ -571,7 +571,8 @@ impl<F: PageFactory + ?Sized> PageFactory for Rc<F> {
     }
 }
 
-/// What the sidebar needs to paint one page button.
+/// What the sidebar needs to paint one page button. The strings are leaked
+/// once at [`PageRoster::add`] so the sidebar formats nothing per render.
 #[derive(Debug, Clone, Copy)]
 pub struct PageEntry {
     pub kind: &'static str,
@@ -579,14 +580,20 @@ pub struct PageEntry {
     pub icon: gpui_kit_assets::IconName,
     /// `page::toggle_<kind>`, the action the button dispatches.
     pub toggle_action: &'static str,
+    /// `sidebar-page-<kind>`, the button's element id and debug selector.
+    pub selector: &'static str,
+    /// `tip-sidebar-page-<kind>`, the button's tooltip selector.
+    pub tip_selector: &'static str,
 }
 
-/// A registered page factory with its toggle action id, leaked once at
+/// A registered page factory with its sidebar strings, leaked once at
 /// [`PageRoster::add`] so [`PageRoster::entries`] never allocates: the
 /// sidebar paints from it on every render.
 struct RegisteredPage {
     factory: Box<dyn PageFactory>,
     toggle_action: &'static str,
+    selector: &'static str,
+    tip_selector: &'static str,
 }
 
 /// The app's registered page factories, in sidebar order.
@@ -601,11 +608,13 @@ impl PageRoster {
     }
 
     pub fn add(&mut self, factory: Box<dyn PageFactory>) {
-        let toggle_action: &'static str =
-            Box::leak(format!("page::toggle_{}", factory.kind()).into_boxed_str());
+        let kind = factory.kind();
+        let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         self.pages.push(RegisteredPage {
             factory,
-            toggle_action,
+            toggle_action: leak(format!("page::toggle_{kind}")),
+            selector: leak(format!("sidebar-page-{kind}")),
+            tip_selector: leak(format!("tip-sidebar-page-{kind}")),
         });
     }
 
@@ -626,6 +635,8 @@ impl PageRoster {
             title: p.factory.title(),
             icon: p.factory.icon(),
             toggle_action: p.toggle_action,
+            selector: p.selector,
+            tip_selector: p.tip_selector,
         })
     }
 
@@ -1237,7 +1248,10 @@ pub mod recording {
         Action(String),
     }
 
-    struct RecordingPageView {
+    /// The recording page's view. Public so a test can `update` it and
+    /// invoke the page's `ShellActions` handle from inside, the way a real
+    /// page's own handler would.
+    pub struct RecordingPageView {
         focus_handle: FocusHandle,
         kind: &'static str,
         input: Entity<InputState>,
@@ -1271,8 +1285,13 @@ pub mod recording {
             action: &ActionId,
             _count: Option<u32>,
             _window: &mut Window,
-            _cx: &mut App,
+            cx: &mut App,
         ) -> bool {
+            // Read the view first, as a real page's handler would: a
+            // `ShellActions` call made from inside the view's `update` and
+            // dispatched synchronously would re-enter here and panic on the
+            // double lease. The shell defers the handle for that reason.
+            let _kind = self.view.read(cx).kind;
             self.log
                 .borrow_mut()
                 .push(PageRecorded::Action(action.0.clone()));
@@ -1304,7 +1323,8 @@ pub mod recording {
     /// one real `Input` so `holds_focus` can be exercised, can be told to
     /// consume the next `page::close` (standing in for a page with a
     /// dismissable surface of its own), serializes a table the test can
-    /// change, and records the table `create` was handed.
+    /// change, records the table `create` was handed, and keeps the
+    /// `ShellActions` handle and the view it was created with.
     pub struct RecordingPageFactory {
         kind: &'static str,
         title: &'static str,
@@ -1312,6 +1332,8 @@ pub mod recording {
         consume_close: Rc<Cell<bool>>,
         toggle_binding: Option<&'static str>,
         created_input: Rc<RefCell<Option<Entity<InputState>>>>,
+        created_view: Rc<RefCell<Option<Entity<RecordingPageView>>>>,
+        actions: Rc<RefCell<Option<ShellActions>>>,
         serialized: Rc<RefCell<toml::Table>>,
         restored: Rc<RefCell<Option<toml::Table>>>,
     }
@@ -1327,6 +1349,8 @@ pub mod recording {
                 consume_close: Rc::new(Cell::new(false)),
                 toggle_binding: Some("mod+d"),
                 created_input: Rc::new(RefCell::new(None)),
+                created_view: Rc::new(RefCell::new(None)),
+                actions: Rc::new(RefCell::new(None)),
                 serialized: Rc::new(RefCell::new(serialized)),
                 restored: Rc::new(RefCell::new(None)),
             }
@@ -1354,6 +1378,14 @@ pub mod recording {
         /// The input the created page paints, once created.
         pub fn input(&self) -> Rc<RefCell<Option<Entity<InputState>>>> {
             self.created_input.clone()
+        }
+        /// The created page's view, once created.
+        pub fn view(&self) -> Rc<RefCell<Option<Entity<RecordingPageView>>>> {
+            self.created_view.clone()
+        }
+        /// The `ShellActions` handle `create` received, once created.
+        pub fn actions(&self) -> Rc<RefCell<Option<ShellActions>>> {
+            self.actions.clone()
         }
     }
 
@@ -1392,12 +1424,13 @@ pub mod recording {
             restored: Option<&toml::Table>,
             _frame: Entity<Frame>,
             _diagnostics: Entity<Diagnostics>,
-            _actions: ShellActions,
+            actions: ShellActions,
             window: &mut Window,
             cx: &mut App,
         ) -> PageOccupant {
             self.log.borrow_mut().push(PageRecorded::Created);
             *self.restored.borrow_mut() = restored.cloned();
+            *self.actions.borrow_mut() = Some(actions);
             let kind = self.kind;
             let input = cx.new(|cx| InputState::new(window, cx));
             *self.created_input.borrow_mut() = Some(input.clone());
@@ -1406,6 +1439,7 @@ pub mod recording {
                 kind,
                 input,
             });
+            *self.created_view.borrow_mut() = Some(view.clone());
             PageOccupant {
                 kind,
                 view: view.clone().into(),
@@ -1547,11 +1581,17 @@ mod tests {
         assert_eq!(roster.kinds(), vec!["diagnostics"]);
         let entries: Vec<_> = roster
             .entries()
-            .map(|e| (e.kind, e.title, e.toggle_action))
+            .map(|e| (e.kind, e.title, e.toggle_action, e.selector, e.tip_selector))
             .collect();
         assert_eq!(
             entries,
-            vec![("diagnostics", "Diagnostics", "page::toggle_diagnostics")]
+            vec![(
+                "diagnostics",
+                "Diagnostics",
+                "page::toggle_diagnostics",
+                "sidebar-page-diagnostics",
+                "tip-sidebar-page-diagnostics"
+            )]
         );
         let (docs, diags) = roster.keymap_fragments();
         assert!(diags.is_empty(), "{diags:?}");

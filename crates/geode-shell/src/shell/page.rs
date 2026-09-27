@@ -28,21 +28,39 @@ impl ShellView {
     }
 
     /// The handle a page dispatches registered shell actions through. Built
-    /// from the weak entity so a page never holds `ShellView`.
+    /// from the weak entity so a page never holds `ShellView`. The dispatch
+    /// is deferred: a page invokes the handle from inside its own entity
+    /// update, and a synchronous `page::close` would re-enter that entity
+    /// through `PageContent::dispatch` and panic on the double lease.
     pub(super) fn shell_actions(&self, cx: &Context<Self>) -> ShellActions {
         let weak = cx.entity().downgrade();
         Rc::new(
             move |action: &ActionId, window: &mut Window, cx: &mut App| {
-                let _ = weak.update(cx, |view, cx| {
-                    view.dispatch(action, None, window, cx);
-                    cx.notify();
+                let weak = weak.clone();
+                let action = action.clone();
+                window.defer(cx, move |window, cx| {
+                    let _ = weak.update(cx, |view, cx| {
+                        view.dispatch(&action, None, window, cx);
+                        cx.notify();
+                    });
                 });
             },
         )
     }
 
-    /// Create on first open, then show. Focus moves to the page. Tiles beneath
-    /// are hidden on the next render's `ensure_occupants` pass.
+    /// Where focus returns once an overlay closes or a deferred restore
+    /// runs: the open page's handle, else the shell root. The page's own
+    /// bindings are reachable only from inside its view.
+    pub(super) fn focus_home(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.page.as_ref().filter(|p| p.open) {
+            Some(page) => page.occupant.content.focus_handle(cx).focus(window, cx),
+            None => self.focus_handle.focus(window, cx),
+        }
+    }
+
+    /// Create on first open, then show. Focus moves to the page. Tiles
+    /// beneath are hidden by `ensure_occupants`'s visibility pass on the next
+    /// render: `fill_active_tiles` yields nothing while a page is open.
     pub(super) fn open_page(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(page) = &self.page
             && page.occupant.kind != kind
@@ -85,6 +103,11 @@ impl ShellView {
         page.open = true;
         page.occupant.content.set_visible(true, cx);
         page.occupant.content.focus_handle(cx).focus(window, cx);
+        // A sidebar or status-bar click opens the page: keep that mouse-down
+        // from bubbling to the tracked shell root and taking focus back. Inert
+        // for a keyboard open (the flag is per event and only mouse handling
+        // reads it).
+        window.prevent_default();
         self.session_dirty = true;
         cx.notify();
     }

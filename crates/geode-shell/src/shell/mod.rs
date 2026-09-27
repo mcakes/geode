@@ -543,6 +543,10 @@ pub struct ShellView {
     /// first `page::toggle_<kind>` and retained so a round trip keeps its
     /// state; `open` is the only flag a toggle changes. `None` until then.
     page: Option<page::OpenPage>,
+    /// The registered pages' sidebar entries, collected once at construction:
+    /// the roster never changes after startup, and the sidebar paints from
+    /// this on every render without collecting.
+    page_entries: Vec<crate::module::PageEntry>,
     /// The shared frame, created here so every occupant can hold it.
     frame: Entity<Frame>,
     /// Shared diagnostics state, fed by the app bridge and config load/reload.
@@ -1202,6 +1206,7 @@ impl ShellView {
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
+        let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
         Self {
             services,
@@ -1241,6 +1246,7 @@ impl ShellView {
             last_render_started: None,
             perf_overlay: false,
             page: None,
+            page_entries,
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
@@ -1359,7 +1365,9 @@ impl ShellView {
                 .focus_handle(cx)
                 .focus(window, cx);
         } else {
-            self.focus_handle.focus(window, cx);
+            // The open page's handle when one is open (the filter field is
+            // not painted then, so the flag above is never set over a page).
+            self.focus_home(window, cx);
         }
     }
 

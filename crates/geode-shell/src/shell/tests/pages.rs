@@ -2,10 +2,27 @@
 //! visibility announcements, and the insert-mode route for page inputs.
 
 use super::{
-    dispatch_action, open_shell, services_with_page, services_with_recorders, shell_of, with_pages,
+    dispatch_action, open_shell, services_with_page, services_with_recorders, shell_of, with_page,
+    with_pages,
 };
+use crate::actions::ActionId;
 use crate::module::recording::{PageRecorded, RecordingPageFactory};
 use crate::shell::ShellView;
+use crate::shell::input::{CLOSE_DIALOG_FIRST, CLOSE_PAGE_FIRST};
+
+/// Whether the open page's own focus handle holds the keyboard.
+fn page_focused(shell: &gpui::Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        let s = shell.read(cx);
+        s.page
+            .as_ref()
+            .expect("a page was created")
+            .occupant
+            .content
+            .focus_handle(cx)
+            .is_focused(window)
+    })
+}
 
 #[gpui::test]
 fn toggle_opens_then_closes_the_page_and_announces_visibility(cx: &mut gpui::TestAppContext) {
@@ -26,16 +43,7 @@ fn toggle_opens_then_closes_the_page_and_announces_visibility(cx: &mut gpui::Tes
         vec![PageRecorded::Created, PageRecorded::Visible(true)]
     );
     // The page view holds focus after open.
-    assert!(cx.update(|window, cx| {
-        let s = shell.read(cx);
-        s.page
-            .as_ref()
-            .unwrap()
-            .occupant
-            .content
-            .focus_handle(cx)
-            .is_focused(window)
-    }));
+    assert!(page_focused(&shell, &mut cx));
 
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     assert!(!shell.read_with(&cx, |s, _| s.page_open()));
@@ -125,8 +133,33 @@ fn toggle_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
     shell.read_with(&cx, |s, _| {
         assert!(s.modal_open());
         assert!(!s.page_open());
-        assert!(s.notice.is_some(), "refused with a notice");
+        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
     });
+}
+
+/// `page::close` under a modal is refused exactly as the toggle is: the
+/// palette can reach the id over the dialog stack, and closing the page
+/// beneath a dialog would leave the dialog over a workspace it was not
+/// opened from.
+#[gpui::test]
+fn page_close_under_a_modal_is_refused(cx: &mut gpui::TestAppContext) {
+    let factory = RecordingPageFactory::new("diagnostics");
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    dispatch_action(&shell, "settings::open", &mut cx);
+    dispatch_action(&shell, "page::close", &mut cx);
+    shell.read_with(&cx, |s, _| {
+        assert!(s.modal_open());
+        assert!(s.page_open(), "refused: still open");
+        assert_eq!(s.notice, Some(CLOSE_DIALOG_FIRST));
+    });
+    assert!(
+        !log.borrow()
+            .contains(&PageRecorded::Action("page::close".into())),
+        "the page never saw the refused close"
+    );
 }
 
 #[gpui::test]
@@ -144,6 +177,62 @@ fn escape_under_a_modal_closes_the_modal_not_the_page(cx: &mut gpui::TestAppCont
         assert!(!s.modal_open());
         assert!(s.page_open(), "the modal took the escape");
     });
+    assert!(
+        page_focused(&shell, &mut cx),
+        "the emptied modal stack returns focus to the page, not the shell root"
+    );
+}
+
+/// Closing the palette over an open page returns focus to the page's
+/// handle. Left on the shell root, the page's own bindings would be
+/// unreachable until the trader clicked into it.
+#[gpui::test]
+fn closing_the_palette_over_a_page_returns_focus_to_the_page(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |s, _| s.palette.is_some()));
+    assert!(!page_focused(&shell, &mut cx), "the palette input took it");
+    cx.simulate_keystrokes("escape");
+    shell.read_with(&cx, |s, _| {
+        assert!(s.palette.is_none());
+        assert!(s.page_open());
+    });
+    assert!(page_focused(&shell, &mut cx));
+}
+
+/// A page may invoke its `ShellActions` handle from inside its own entity
+/// update: the shell defers the dispatch, so `page::close` reaches the page's
+/// `dispatch` (which reads that same entity) only after the update returns.
+#[gpui::test]
+fn a_page_may_close_itself_through_shell_actions_from_inside_its_own_update(
+    cx: &mut gpui::TestAppContext,
+) {
+    let factory = RecordingPageFactory::new("diagnostics");
+    let view = factory.view();
+    let actions = factory.actions();
+    let log = factory.log();
+    let (window, mut cx) = open_shell(cx, services_with_page(factory));
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    let view = view.borrow().clone().expect("created");
+    let actions = actions.borrow().clone().expect("created");
+    cx.update(|window, cx| {
+        view.update(cx, |_view, cx| {
+            actions(&ActionId("page::close".into()), window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert!(!shell.read_with(&cx, |s, _| s.page_open()));
+    assert!(
+        log.borrow()
+            .contains(&PageRecorded::Action("page::close".into())),
+        "the page saw the close it asked for"
+    );
 }
 
 #[gpui::test]
@@ -183,7 +272,7 @@ fn a_workspace_switch_chord_from_a_focused_page_input_closes_the_page(
 }
 
 #[gpui::test]
-fn tile_bindings_are_inert_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
+fn tile_add_is_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(
         cx,
         services_with_page(RecordingPageFactory::new("diagnostics")),
@@ -197,8 +286,177 @@ fn tile_bindings_are_inert_while_a_page_is_open(cx: &mut gpui::TestAppContext) {
             "tile::add's picker did not open: refused over the page"
         );
         assert!(s.page_open());
-        assert!(s.notice.is_some(), "refused with a notice");
+        assert_eq!(s.notice, Some(CLOSE_PAGE_FIRST));
     });
+}
+
+/// The page takes the whole tile surface plus the toolbar's and stripe's
+/// rows: it starts at the top of the window beside the sidebar and reaches
+/// the status bar. Nothing but the sidebar and status bar remains around it.
+#[gpui::test]
+fn the_page_paints_where_the_workspace_was_and_the_toolbar_is_gone(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("shell-page").is_none());
+    assert!(cx.debug_bounds("shell-sidebar").is_some());
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let page = cx.debug_bounds("shell-page").expect("page painted");
+    let sidebar = cx.debug_bounds("shell-sidebar").expect("sidebar stays");
+    let status = cx
+        .debug_bounds("shell-status-bar")
+        .expect("status bar stays");
+    assert_eq!(page.origin.x, sidebar.origin.x + sidebar.size.width);
+    assert_eq!(page.origin.y, gpui::px(0.));
+    assert_eq!(
+        page.origin.y + page.size.height,
+        status.origin.y,
+        "the page reaches the status bar; no toolbar above it since it starts at y = 0"
+    );
+}
+
+/// Opening a page hides every tile beneath it (each hears `set_visible(false)`
+/// and no flip barrier waits on one); closing shows them again.
+#[gpui::test]
+fn tiles_beneath_are_hidden_on_open_and_shown_on_close(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::{Recorded, RecordingFactory};
+    // `rec`, not another kind: the fixture keymap binds `tile::add_rec_*`.
+    let recorder = RecordingFactory::new("rec");
+    let tile_log = recorder.log.clone();
+    let services = with_page(
+        services_with_recorders(vec![recorder]),
+        RecordingPageFactory::new("diagnostics"),
+    );
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_action(&shell, "tile::add_rec", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        tile_log
+            .borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Visible(_, true)))
+    );
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        matches!(tile_log.borrow().last(), Some(Recorded::Visible(_, false))),
+        "hidden beneath the page: {:?}",
+        tile_log.borrow().last()
+    );
+    // The tiles leaving the screen must not pull focus off the page: the
+    // render's "a tile left the screen" net is for tiles, not the page.
+    assert!(
+        page_focused(&shell, &mut cx),
+        "the page keeps focus through the render that hides the tiles"
+    );
+    let keys = shell.read_with(&cx, |s, _| {
+        let mut v = Vec::new();
+        s.visible_tile_keys(&mut v);
+        v
+    });
+    assert!(keys.is_empty(), "no visible tile keys while a page is open");
+    dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(matches!(
+        tile_log.borrow().last(),
+        Some(Recorded::Visible(_, true))
+    ));
+}
+
+/// One sidebar button per registered page, above the settings avatar. A
+/// click toggles the page through `page::toggle_<kind>`; the open page's
+/// button takes the active-tab treatment; a mouse-opened page then hears
+/// keys (escape closes it).
+#[gpui::test]
+fn the_sidebar_button_toggles_the_page_and_shows_it_active(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let shell = shell_of(&window, &mut cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let button = cx
+        .debug_bounds("sidebar-page-diagnostics")
+        .expect("one button per page");
+    let profile = cx.debug_bounds("sidebar-profile").unwrap();
+    assert!(
+        button.origin.y < profile.origin.y,
+        "above the settings avatar"
+    );
+    assert!(cx.debug_bounds("sidebar-page-diagnostics-active").is_none());
+    cx.simulate_mouse_down(
+        button.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        button.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(shell.read_with(&cx, |s, _| s.page_open()));
+    assert!(
+        cx.debug_bounds("sidebar-page-diagnostics-active").is_some(),
+        "active treatment"
+    );
+    // A mouse-opened page must then receive keys: escape closes it.
+    cx.simulate_keystrokes("escape");
+    assert!(!shell.read_with(&cx, |s, _| s.page_open()));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("sidebar-page-diagnostics-active").is_none());
+}
+
+/// The sidebar button's tooltip names the page and its toggle chord.
+#[gpui::test]
+fn hovering_the_sidebar_page_button_names_the_page_and_its_chord(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(
+        cx,
+        services_with_page(RecordingPageFactory::new("diagnostics")),
+    );
+    let _shell = shell_of(&window, &mut cx);
+    let button = cx
+        .debug_bounds("sidebar-page-diagnostics")
+        .expect("button painted");
+    assert!(cx.debug_bounds("tip-sidebar-page-diagnostics").is_none());
+    cx.simulate_mouse_move(
+        button.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("tip-sidebar-page-diagnostics").is_some());
+    assert!(
+        cx.debug_bounds("tip-sidebar-page-diagnostics-chord-alt+d")
+            .is_some()
+            || cx
+                .debug_bounds("tip-sidebar-page-diagnostics-chord-mod+d")
+                .is_some(),
+        "the chord chip names the toggle binding"
+    );
 }
 
 /// One `[pages.<kind>]` table with a single string field.

@@ -380,10 +380,11 @@ the count prefix, in the danger tone. Its text is one of:
 The tooltip carries the reason: the one thread's reason; `label: reason`
 pairs joined by `; ` for several; or the loop's reason followed by `; also
 stopped: …` naming the others. Its detail line reads `click to open
-diagnostics`. A click takes the diagnostics summary's route: it focuses an
-existing diagnostics tile or adds one, which opens on its Sources section.
-An existing tile keeps whatever section it is showing; the stopped block
-leads Sources. That section's first rows, ahead of every source, read `stopped threads —
+diagnostics`. A click takes the diagnostics summary's route: it dispatches
+`page::toggle_diagnostics`, the same action as `mod+d` and the sidebar's
+diagnostics button, so the diagnostics page opens over the workspace (or,
+already open, closes). The page keeps whatever section it is showing; the
+stopped block leads Sources. That section's first rows, ahead of every source, read `stopped threads —
 restart Geode to recover them` and then one error row per thread, `<label>:
 <reason> (at HH:MM:SS)`, timed through the display clock.
 

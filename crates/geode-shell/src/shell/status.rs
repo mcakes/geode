@@ -30,6 +30,11 @@ pub fn height(window: &Window) -> f32 {
     scale::design_px(HEIGHT, window.rem_size())
 }
 
+/// The diagnostics summary's tooltip title: a click opens the diagnostics
+/// page over the workspace, not a tile. Named so a test can assert the
+/// copy, since gpui's test API cannot read painted text.
+pub const DIAGNOSTICS_TIP_TITLE: &str = "Open the diagnostics page";
+
 /// The fullscreen segment's text for `hidden` other tiles. The common
 /// counts are literals so an idle repaint of a maximised tile formats
 /// nothing.
@@ -194,7 +199,7 @@ pub fn status_bar(
                 .child(message.to_string())
                 .tooltip(crate::tips::tip(
                     "tip-diagnostics-summary",
-                    "Open the diagnostics tile",
+                    DIAGNOSTICS_TIP_TITLE,
                     None,
                     Some(SharedString::new_static("click to open")),
                 ))

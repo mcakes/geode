@@ -188,6 +188,14 @@ impl ShellView {
             return;
         }
         if action.0 == "page::close" {
+            // Refused under a modal as the toggle is: the dialog was opened
+            // over this page and would otherwise be left over a workspace it
+            // did not come from. The modal route consumes Escape first, so
+            // only the palette reaches this id over a dialog.
+            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
             if self.page_open() {
                 // The page sees the close first: `true` means it dismissed
                 // something of its own and stays open.
