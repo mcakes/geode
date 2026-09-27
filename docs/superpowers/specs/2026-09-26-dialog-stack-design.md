@@ -25,8 +25,9 @@ Success means:
 
 1. **One instance per kind.** A dialog kind appears at most once in the
    stack. A request for a kind already on top does nothing. A request for a
-   kind lower in the stack is refused with the status notice
-   "`<Title>` is already open underneath". Nothing is discarded. The three
+   kind lower in the stack is refused with a status notice naming the kind,
+   for example "settings is already open underneath" or "a configuration
+   dialog is already open underneath". Nothing is discarded. The three
    pickers built on `shell::choicedialog` (tile kinds, grouping, log level)
    share one kind, `Choice`, because they share one state field.
 2. **Only the top dialog is live.** It alone paints and receives keys and
