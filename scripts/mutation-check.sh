@@ -18225,19 +18225,19 @@ run_mutation "pricer rm: an unknown name arms the confirm" \
   geode-pricer colon_rm_refuses_open_and_unknown_sheets
 
 run_mutation "pricer rm: any key confirms" \
-  crates/geode-pricer/src/tile.rs \
-  '        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);' \
-  '        if true {
-            self.submit_remove(window, cx);' \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if true {
+        host.confirmed(payload, window, cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: a modified y confirms" \
-  crates/geode-pricer/src/tile.rs \
-  '        if ks.key == "y" && !ks.modifiers.modified() {
-            self.submit_remove(window, cx);' \
-  '        if ks.key == "y" {
-            self.submit_remove(window, cx);' \
+  crates/geode-tile/src/confirm.rs \
+  '    if ks.key == "y" && !ks.modifiers.modified() {
+        host.confirmed(payload, window, cx);' \
+  '    if ks.key == "y" {
+        host.confirmed(payload, window, cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: y forgets nothing" \
@@ -18253,37 +18253,25 @@ run_mutation "pricer rm: the confirm is not insert mode" \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: focus leaving leaves the question standing" \
-  crates/geode-pricer/src/tile.rs \
-  '        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            if this.confirm.is_some() {
-                this.cancel_remove(window, cx);
-            }
-        });' \
-  '        let blur = cx.on_blur(&focus, window, |_, _, _| {});' \
+  crates/geode-tile/src/confirm.rs \
+  '    let blur = cx.on_blur(&focus, window, |host: &mut T, window, cx| {
+        cancel(host, window, cx);
+    });' \
+  '    let blur = cx.on_blur(&focus, window, |_: &mut T, _, _| {});' \
   geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 run_mutation "pricer rm: a pointer press leaves the question standing" \
-  crates/geode-pricer/src/tile.rs \
-  '        if self.confirm.is_some() {
-            self.cancel_remove(window, cx);
-        }
-    }
-
-    /// Drop the armed confirm' \
-  '        let _ = (window, cx);
-    }
-
-    /// Drop the armed confirm' \
+  crates/geode-tile/src/confirm.rs \
+  '            tile.update(cx, |t, cx| cancel(t, window, cx));' \
+  '            let _ = (&tile, window, cx);' \
   geode-pricer focus_leaving_or_a_pointer_press_cancels_the_rm_confirm
 
 run_mutation "pricer rm: the confirm drops still focused" \
-  crates/geode-pricer/src/tile.rs \
-  '        let pending = self.confirm.take()?;
-        if pending.focus.is_focused(window) {
+  crates/geode-tile/src/confirm.rs \
+  '        if self.focus.is_focused(window) {
             window.blur(cx);
         }' \
-  '        let pending = self.confirm.take()?;
-        let _ = (window, cx);' \
+  '        let _ = (&self.focus, &window, &cx);' \
   geode-pricer any_other_key_cancels_the_rm_confirm_and_is_consumed
 
 run_mutation "pricer rm: a failed forget is painted nowhere" \
@@ -21404,30 +21392,30 @@ run_mutation "pricer tile: a rebuild-closed editor blurs before it drops" \
 # answer or reload changes them with no verb to close the menu.
 run_mutation "pricer tile: an open menu re-checks its rows on a rebuild" \
   crates/geode-pricer/src/tile.rs \
-  '                m.items = items;' \
+  '                m.replace_rows(items, &self.chords);' \
   '                let _ = items;' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 run_mutation "pricer tile: a re-checked menu clamps its highlight" \
-  crates/geode-pricer/src/tile.rs \
-  '                m.highlighted = crate::popup::snap(&items, m.highlighted);' \
+  crates/geode-tile/src/menu/mod.rs \
+  '        self.highlighted = snap(&self.rows, self.highlighted);' \
   '' \
   geode-pricer a_reload_under_an_open_menu_relists_its_views
 
 # The menu's highlight steps over separators and section headers: a
 # highlight on structure makes `enter` pick nothing.
 run_mutation "pricer popup: menu steps land on pickable rows only" \
-  crates/geode-pricer/src/popup.rs \
-  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
-  '            (at + 1..items.len()).next()' \
-  geode-pricer the_highlight_steps_over_separators_and_sections_and_clamps
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).next()' \
+  geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # Nor on a disabled row (user report 2026-09-25): mutated, `j` from
 # Group lands on the greyed Ungroup instead of Delete row.
 run_mutation "pricer popup: menu steps skip disabled rows" \
-  crates/geode-pricer/src/popup.rs \
-  '            (at + 1..items.len()).find(|&i| items[i].lands())' \
-  '            (at + 1..items.len()).find(|&i| items[i].pickable())' \
+  crates/geode-tile/src/menu/mod.rs \
+  '            (at + 1..rows.len()).find(|&i| rows[i].lands())' \
+  '            (at + 1..rows.len()).find(|&i| rows[i].is_action())' \
   geode-pricer the_menu_groups_its_rows_names_keys_and_says_why_a_row_is_disabled
 
 # The empty table says "Loading sheet…" only while the tile is loading:
@@ -21441,12 +21429,20 @@ run_mutation "pricer tile: the delegate mirrors loading" \
 # A disabled menu row never takes the highlight fill: a fill there is a
 # misleading hover response on a row that will only refuse.
 run_mutation "pricer popup: a disabled menu row takes no fill" \
-  crates/geode-pricer/src/popup.rs \
-  '        (_, false) => MenuRowPaint {
+  crates/geode-tile/src/menu/paint.rs \
+  '        (_, false) => RowPaint {
             fill: None,' \
-  '        (_, false) => MenuRowPaint {
-            fill: Some(accent),' \
+  '        (_, false) => RowPaint {
+            fill: Some(p.active_fill),' \
   geode-pricer a_pointer_over_a_disabled_menu_row_lands_without_a_fill
+
+# The pricer menu's hints are the live keymap's: a user rebind shows, and
+# an open menu follows a keymap reload.
+run_mutation "pricer menu: a rebind does not reach the menu" \
+  crates/geode-pricer/src/tile.rs \
+  '            this.chords = menu::live_bindings(cx);' \
+  '            let _ = menu::live_bindings(cx);' \
+  geode-pricer an_open_menu_follows_a_keymap_reload
 
 # Row text is floored on the hover and selected-row grounds too: the
 # table paints them in place of the row's own ground.
@@ -21807,10 +21803,10 @@ run_mutation "pricer rm: a sheet open in another tile arms the confirm" \
 
 # Every key under the armed confirm is the confirm's alone.
 run_mutation "pricer rm: a key under the confirm reaches the tile too" \
-  crates/geode-pricer/src/header.rs \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                            cx.stop_propagation();' \
-  '                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {' \
+  crates/geode-tile/src/confirm.rs \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {
+                cx.stop_propagation();' \
+  '            if tile.update(cx, |t, cx| key(t, event, window, cx)) {' \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before

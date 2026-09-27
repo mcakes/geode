@@ -826,8 +826,8 @@ Normal-mode keys:
 package's when its legs share one; otherwise the plain tile picker.
 
 The action menu offers repricing, grouping, ungrouping, undo, redo, deletion,
-and view selection. Key hints show default bindings and do not reflect
-rebindings. Keyboard stepping skips disabled rows, separators, and headings.
+and view selection. Key hints are the actions' live chords (`:price` when the
+keymap binds none) and follow a keymap reload while the menu is open. Keyboard stepping skips disabled rows, separators, and headings.
 Pointer selection, the initial highlight, or a rebuilt menu can still leave a
 disabled row selected. It has no highlight fill; choosing it shows its reason
 and leaves the menu open.

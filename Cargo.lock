@@ -2658,6 +2658,7 @@ dependencies = [
  "geode-data",
  "geode-pricer",
  "geode-shell",
+ "geode-tile",
  "geode-widgets",
  "gpui-component",
  "gpui-pre",

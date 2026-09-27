@@ -15,12 +15,13 @@ test-support = []
 
 # The core uses shared pricing vocabulary and calendar types; entry completion
 # also uses the shell's pure filtering/completion helpers and GPUI SharedString.
-# The tile uses shell hosting, GPUI components, and the shared date field. Pricing
-# and sheet persistence go through DataHandle, without a pricing implementation
-# or sibling feature dependency.
+# The tile uses shell hosting, the geode-tile doors, GPUI components, and the
+# shared date field. Pricing and sheet persistence go through DataHandle,
+# without a pricing implementation or sibling feature dependency.
 [dependencies]
 geode-core.workspace = true
 geode-shell.workspace = true
+geode-tile.workspace = true
 geode-data = { path = "../geode-data" }
 geode-widgets.workspace = true
 gpui.workspace = true
