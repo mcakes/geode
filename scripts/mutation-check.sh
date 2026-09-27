@@ -7434,6 +7434,7 @@ run_mutation "objectdialog: an emptied Doc object removes the user's key instead
 run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                if included
+                    && !may_empty
                     && dest == Destination::Doc
                     && self.values.is_none()
                     && items.iter().filter(|i| i.included).count() == 1
@@ -9020,7 +9021,7 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
 # `Draft::toggle_selected`, which adds an empty selection instead.
 run_mutation "objectdialog: a tick on an available Scopes row opens its values" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
   '    if false {' \
   geode-shell clicking_an_available_dimensions_tick_opens_its_values_stage
 
@@ -21804,8 +21805,8 @@ run_mutation "named expr: the last named untick is refused" \
 # Space on a named expression ticks it rather than opening Values.
 run_mutation "named expr: space on a named row takes the dimensions door" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {' \
-  '    if !in_values_stage(shell) && is_scopes(shell) {' \
+  '            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),' \
+  '            ) => false,' \
   geode-shell \
   space_on_a_named_expression_never_opens_values
 
