@@ -21623,6 +21623,14 @@ run_mutation "pricer rm: y forgets a sheet retiring since the question" \
   '        } else if false {' \
   geode-pricer y_refuses_a_sheet_opened_or_retiring_since_the_rm_armed
 
+# A named `:new` must refuse an existing sheet, or a typo shows it empty
+# and a later save writes over it.
+run_mutation "pricer sheets: :new opens an existing name" \
+  crates/geode-pricer/src/tile.rs \
+  $'                    return Err(format!("sheet \'{name}\' already exists; :e {name} opens it"));' \
+  '                    let _ = &name;' \
+  geode-pricer colon_new_with_a_name_opens_it_empty_and_refuses_an_existing_one
+
 run_mutation "pricer sheets: :e of a blocked sheet's own name does nothing" \
   crates/geode-pricer/src/tile.rs \
   '            if self.save_blocked {

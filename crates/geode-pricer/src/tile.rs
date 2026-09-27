@@ -2852,10 +2852,20 @@ impl PricerTile {
                 self.ungroup(cx)
             }
             Command::Edit(name) => self.edit_sheet(name, cx),
-            Command::New => {
+            Command::New(None) => {
                 // Chosen while this tile still holds its name, so `:new`
                 // never lands back on the sheet it leaves.
                 let name = untitled(&self.shared);
+                self.switch_sheet(name, false, cx)
+            }
+            // A named `:new` never opens an existing sheet: a typo would
+            // otherwise show it empty and later save over it. This tile's
+            // own sheet is in `open`, so it counts too.
+            Command::New(Some(name)) => {
+                self.shared.refuse_retiring(&name)?;
+                if self.shared.open.borrow().contains(&name) || self.shared.taken(&name) {
+                    return Err(format!("sheet '{name}' already exists; :e {name} opens it"));
+                }
                 self.switch_sheet(name, false, cx)
             }
             Command::Name(name) => self.rename(name, cx),
@@ -8669,6 +8679,39 @@ pub(crate) mod tests {
         // Twice: `untitled-1` is this tile's own, so the next is 2.
         assert_eq!(h.command(&mut vcx, "new"), Ok(()));
         assert_eq!(h.title(&mut vcx), "Pricer · untitled-2");
+    }
+
+    /// `:new <sheet>` opens an empty sheet under that name; a name that
+    /// already exists is refused and the tile stays where it is, so a typo
+    /// never opens (and later saves over) a real sheet.
+    #[gpui::test]
+    fn colon_new_with_a_name_opens_it_empty_and_refuses_an_existing_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_seeded(cx, &BOOK);
+        answer_all(&h, &mut vcx, 1.0);
+        assert!(
+            h.store
+                .save("taken", sheet_rows("taken", &["NKY Z26 30000 C"]))
+                .is_ok()
+        );
+        edit(&h, &mut vcx, Edit::SetQty { row: 0, qty: 7 });
+        assert_eq!(
+            h.command(&mut vcx, "new taken"),
+            Err("sheet 'taken' already exists; :e taken opens it".into())
+        );
+        assert_eq!(
+            h.command(&mut vcx, "new book"),
+            Err("sheet 'book' already exists; :e book opens it".into()),
+            "this tile's own sheet counts"
+        );
+        assert_eq!(h.title(&mut vcx), "Pricer · book", "the tile did not move");
+        let loads = h.store.loads().len();
+        assert_eq!(h.command(&mut vcx, "new fresh"), Ok(()));
+        assert_eq!(h.title(&mut vcx), "Pricer · fresh");
+        assert_eq!(h.sheet_len(&vcx), 0);
+        assert_eq!(h.store.loads().len(), loads, "nothing to load");
+        assert_eq!(stored(&h).qty(0), 7, "the sheet left behind was saved");
     }
 
     #[gpui::test]

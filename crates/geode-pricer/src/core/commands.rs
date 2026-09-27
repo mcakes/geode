@@ -31,8 +31,9 @@ pub enum Command {
     Ungroup,
     /// `:e <sheet>`: open another sheet in this tile.
     Edit(String),
-    /// `:new`: the next `untitled-N`, empty.
-    New,
+    /// `:new [sheet]`: an empty sheet under that name, else the next
+    /// `untitled-N`.
+    New(Option<String>),
     /// `:name <sheet>`: rename this tile's sheet.
     Name(String),
     /// `:rm <sheet>`: remove a sheet no tile holds (asks first).
@@ -130,8 +131,9 @@ pub fn parse(line: &str) -> Result<Command, String> {
         ["ungroup", ..] => Err("usage: ungroup".into()),
         ["e", name] => sheet_name("e", name).map(Command::Edit),
         ["e", ..] => Err("usage: e <sheet>".into()),
-        ["new"] => Ok(Command::New),
-        ["new", ..] => Err("usage: new".into()),
+        ["new"] => Ok(Command::New(None)),
+        ["new", name] => sheet_name("new", name).map(|n| Command::New(Some(n))),
+        ["new", ..] => Err("usage: new [sheet]".into()),
         ["name", name] => sheet_name("name", name).map(Command::Name),
         ["name", ..] => Err("usage: name <sheet>".into()),
         ["rm", name] => sheet_name("rm", name).map(Command::Remove),
@@ -255,7 +257,8 @@ mod tests {
         assert_eq!(parse("group 3"), Ok(Command::Group(Some(3))));
         assert_eq!(parse("ungroup"), Ok(Command::Ungroup));
         assert_eq!(parse("e book"), Ok(Command::Edit("book".into())));
-        assert_eq!(parse("new"), Ok(Command::New));
+        assert_eq!(parse("new"), Ok(Command::New(None)));
+        assert_eq!(parse("new fresh"), Ok(Command::New(Some("fresh".into()))));
         assert_eq!(parse("name fresh"), Ok(Command::Name("fresh".into())));
         assert_eq!(parse("rm old"), Ok(Command::Remove("old".into())));
     }
@@ -292,7 +295,11 @@ mod tests {
         assert_eq!(parse("price now"), Err("usage: price".into()));
         assert_eq!(parse("e"), Err("usage: e <sheet>".into()));
         assert_eq!(parse("e a b"), Err("usage: e <sheet>".into()));
-        assert_eq!(parse("new x"), Err("usage: new".into()));
+        assert_eq!(parse("new a b"), Err("usage: new [sheet]".into()));
+        assert_eq!(
+            parse("new a\u{1f}b"),
+            Err(":new: a sheet name cannot hold a control character".into())
+        );
         assert_eq!(parse("name"), Err("usage: name <sheet>".into()));
         assert_eq!(parse("rm"), Err("usage: rm <sheet>".into()));
         assert_eq!(
