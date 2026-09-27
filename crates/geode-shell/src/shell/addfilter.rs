@@ -1,4 +1,5 @@
-//! The scope bar's menu for adding dimension and expression filters.
+//! The scope bar's menu for adding dimension, expression, and named-expression
+//! filters.
 //!
 //! The `+` control opens the menu below its glyph. Rows show live bindings
 //! through [`kbd::menu_binding`]. `j`/`k`/`up`/`down` move the selection;
@@ -34,16 +35,20 @@ const MIN_WIDTH: f32 = 180.0;
 pub enum Entry {
     Dimension,
     Expression,
+    /// Opens the same add dialog as `Expression`; its own action gives the
+    /// palette and keymaps a name for reaching the named rows.
+    Named,
 }
 
 impl Entry {
     /// The rows in menu order.
-    pub const ALL: [Entry; 2] = [Entry::Dimension, Entry::Expression];
+    pub const ALL: [Entry; 3] = [Entry::Dimension, Entry::Expression, Entry::Named];
 
     pub fn title(self) -> &'static str {
         match self {
             Entry::Dimension => "Dimension…",
             Entry::Expression => "Expression…",
+            Entry::Named => "Named expression…",
         }
     }
 
@@ -52,6 +57,7 @@ impl Entry {
         match self {
             Entry::Dimension => "frame::pick",
             Entry::Expression => "frame::add_expression",
+            Entry::Named => "frame::add_named_expression",
         }
     }
 
@@ -60,6 +66,7 @@ impl Entry {
         match self {
             Entry::Dimension => "dimension",
             Entry::Expression => "expression",
+            Entry::Named => "named",
         }
     }
 }
@@ -151,6 +158,7 @@ pub fn render(
                 .id(match entry {
                     Entry::Dimension => "scope-add-row-dimension",
                     Entry::Expression => "scope-add-row-expression",
+                    Entry::Named => "scope-add-row-named",
                 })
                 .h(scale::design(ROW_HEIGHT))
                 .px(scale::design(ROW_INSET))
@@ -361,11 +369,17 @@ mod tests {
             Some(parse_binding("ctrl+p", Modifiers::NONE).unwrap())
         );
         assert_eq!(menu.rows[1].keys, None, "an unbound action shows no key");
+        assert_eq!(menu.rows[2].keys, None);
         let menu = AddFilterMenu::new(&[binding("ctrl+e", "frame::add_expression")], false);
         assert_eq!(menu.rows[0].keys, None);
         assert!(
             menu.rows[1].keys.is_some(),
             "a bound add_expression shows it"
+        );
+        let menu = AddFilterMenu::new(&[binding("ctrl+n", "frame::add_named_expression")], false);
+        assert!(
+            menu.rows[2].keys.is_some(),
+            "a bound add_named_expression shows it"
         );
     }
 
@@ -376,8 +390,10 @@ mod tests {
         step(&mut m, 1);
         assert_eq!(m.selected(), Some(Entry::Expression));
         step(&mut m, 1);
+        assert_eq!(m.selected(), Some(Entry::Named));
+        step(&mut m, 1);
         assert_eq!(m.selected(), Some(Entry::Dimension), "wraps forward");
         step(&mut m, -1);
-        assert_eq!(m.selected(), Some(Entry::Expression), "wraps backward");
+        assert_eq!(m.selected(), Some(Entry::Named), "wraps backward");
     }
 }

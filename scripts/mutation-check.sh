@@ -22029,6 +22029,23 @@ run_mutation "expr suggest: no suggestions while naming" \
   geode-shell \
   naming_offers_no_suggestions
 
+# A named chip's body is the mouse door to its definition.
+run_mutation "named chip: the body opens its expression" \
+  crates/geode-shell/src/shell/toolbar.rs \
+  '                on_open(&open_name, window, cx)' \
+  '                { let _ = (&on_open, &open_name, &window, &cx); }' \
+  geode-shell \
+  a_named_chips_body_opens_its_expression
+
+# An undefined name must not enter an edit stage: its draft is empty, and
+# an edit there would write an object nobody asked to create.
+run_mutation "named chip: a missing name stays in browse" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if defined {' \
+  '    if true {' \
+  geode-shell \
+  a_missing_named_chips_body_opens_browse_with_a_notice
+
 # The old expression is blanked before the draft's scope is read, or an
 # unreadable one drops the selections from the values narrowing.
 run_mutation "expr suggest: Scopes narrowing survives an unreadable expression" \
