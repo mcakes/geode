@@ -31,7 +31,7 @@ role = "key"
 /// reproduced here rather than through `test_services()` (whose whole
 /// point is an *empty* config — see that function's own comment on why
 /// it still calls `register_pick_actions` anyway, over nothing).
-fn services_with_pickable() -> ShellServices {
+pub(super) fn services_with_pickable() -> ShellServices {
     let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![LayerDoc::builtin("datasets", DATASETS_DOC).unwrap()],
         desk: None,
@@ -177,7 +177,55 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
             .clone()
     });
     assert_eq!(books, vec!["BK000".to_string(), "BK001".to_string()]);
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
+}
+
+/// A frame scope naming an undefined expression is never sent as a
+/// distinct request: the picker's values area shows the resolution error,
+/// delivered on the picker's own key and latest tag.
+#[gpui::test]
+fn the_picker_shows_an_unresolved_named_expression_instead_of_requesting(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let requested = requested.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                requested.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            named: vec!["gone".into()],
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    vcx.run_until_parked();
+
+    assert!(
+        requested.borrow().is_empty(),
+        "no request for an unresolved scope: {:?}",
+        requested.borrow()
+    );
+    let values = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().values.clone());
+    assert_eq!(
+        values,
+        Some(Err("named expression 'gone' is missing".to_string()))
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
 }
 
 /// Clicking a scope chip's body opens its column's Values stage and emits a
@@ -226,7 +274,7 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     vcx.run_until_parked();
 
     assert!(
-        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        shell.read_with(&vcx, |s, _| s.modal_open()),
         "clicking the chip body should have opened the picker modal"
     );
     let stage = shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone()));
@@ -428,7 +476,7 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         "with the cursor on the column just left"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(
         shell.read_with(&vcx, |s, _| s.picker.is_none()),
         "and a second escape closes, clearing the picker like every other dialog"
@@ -698,7 +746,7 @@ fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::
     // Arrow to the second value and apply — no `tab`, nothing ticked.
     vcx.simulate_keystrokes("down enter");
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.versions().scope),
         v0 + 1,

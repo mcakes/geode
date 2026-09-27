@@ -6,6 +6,8 @@
 use crate::frame::Frame;
 use chrono::NaiveDate;
 use geode_core::clock::Clock;
+use geode_core::named::{NamedExpr, NamedExpressions};
+use geode_core::scope::Scope;
 use gpui::SharedString;
 
 /// One dimension chip. Tooltip content and selectors use `SharedString`
@@ -48,6 +50,33 @@ pub struct ExprTerm {
     pub close_tip_selector: SharedString,
 }
 
+/// One named-expression chip: `≡ name`, or `≡ name · missing` /
+/// `≡ name · invalid` when the frame's named expressions cannot resolve
+/// it. Keyed by the name, which is unique within `Scope.named`, so the
+/// chip's element ids and selectors survive reordering and removal of
+/// its neighbours.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedChip {
+    pub name: SharedString,
+    /// `≡ name`, with ` · missing` or ` · invalid` when broken.
+    pub label: SharedString,
+    /// Tooltip title: the expression text, or why the name cannot resolve.
+    pub full: SharedString,
+    /// Missing or invalid: painted in the danger tone. A tile scoped by it
+    /// refuses to query, so the chip must read as an error, not routine state.
+    pub broken: bool,
+    /// The chip body's element id and debug selector (`"scope-named-chip-{name}"`).
+    pub selector: SharedString,
+    /// The chip body's tooltip selector (`"tip-scope-named-chip-{name}"`).
+    pub tip_selector: SharedString,
+    /// The `×`'s element id and debug selector (`"scope-named-chip-close-{name}"`).
+    pub close_selector: SharedString,
+    /// The `×`'s tooltip selector (`"tip-scope-named-chip-close-{name}"`).
+    pub close_tip_selector: SharedString,
+    /// The `×`'s tooltip title (`"Remove {name}"`).
+    pub close_title: SharedString,
+}
+
 /// Elide to 40 characters plus `…`, the scope bar's one rule for
 /// expression text.
 fn elide(s: &str) -> String {
@@ -65,6 +94,9 @@ pub struct ScopeBarModel {
     /// `n · label` for an active slot, otherwise `view default`.
     pub slot_label: String,
     pub chips: Vec<Chip>,
+    /// One chip per `Scope.named` entry, in list order; the toolbar paints
+    /// them after the dimension chips and before the expression terms.
+    pub named: Vec<NamedChip>,
     /// The scope's text layer. The toolbar shows it in its text Input rather
     /// than a separate chip; this field retains it for model consumers.
     pub text: Option<String>,
@@ -86,6 +118,41 @@ pub struct ScopeBarModel {
     pub as_of_full: Option<SharedString>,
     /// Whether the scope is nonempty and its save chip should be shown.
     pub savable: bool,
+}
+
+/// The chip for one name in `Scope.named`. A broken name's tooltip is
+/// `Scope::resolve`'s own refusal for it, the same words the tile that
+/// refuses to query shows.
+fn named_chip(name: &str, defined: &NamedExpressions) -> NamedChip {
+    let (label, full, broken) = match defined.get(name) {
+        Some(NamedExpr::Valid { text, .. }) => (format!("≡ {name}"), text.clone(), false),
+        found => {
+            let state = if found.is_none() {
+                "missing"
+            } else {
+                "invalid"
+            };
+            let reason = Scope {
+                named: vec![name.to_string()],
+                ..Scope::default()
+            }
+            .resolve(defined)
+            .err()
+            .unwrap_or_default();
+            (format!("≡ {name} · {state}"), reason, true)
+        }
+    };
+    NamedChip {
+        name: name.to_string().into(),
+        label: label.into(),
+        full: full.into(),
+        broken,
+        selector: format!("scope-named-chip-{name}").into(),
+        tip_selector: format!("tip-scope-named-chip-{name}").into(),
+        close_selector: format!("scope-named-chip-close-{name}").into(),
+        close_tip_selector: format!("tip-scope-named-chip-close-{name}").into(),
+        close_title: format!("Remove {name}").into(),
+    }
 }
 
 /// Build labels using the supplied clock and local date. Explicit inputs
@@ -111,6 +178,11 @@ pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarMod
             close_selector: format!("tip-scope-chip-close-{}", d.column).into(),
             close_title: format!("Remove {}", d.column).into(),
         })
+        .collect();
+    let named = scope
+        .named
+        .iter()
+        .map(|name| named_chip(name, frame.named_expressions()))
         .collect();
     let terms = scope
         .expression
@@ -160,6 +232,7 @@ pub fn build_model(frame: &Frame, clock: Clock, today: NaiveDate) -> ScopeBarMod
         slot,
         slot_label,
         chips,
+        named,
         text: scope.text.clone(),
         terms,
         impossible,
@@ -221,6 +294,65 @@ mod tests {
         assert_eq!(m.terms[1].tip_selector, "tip-scope-expr-chip-1");
         assert_eq!(m.terms[1].close_selector, "scope-expr-chip-close-1");
         assert_eq!(m.terms[1].close_tip_selector, "tip-scope-expr-chip-close-1");
+    }
+
+    /// Named expressions defined by `text` (an `expressions` doc body);
+    /// invalid entries are kept, so their diagnostics are not asserted.
+    fn named_exprs(text: &str) -> geode_core::named::NamedExpressions {
+        use geode_core::config::{EXPRESSIONS_DOC, LayerDoc, merge_docs};
+        let doc = LayerDoc::builtin(EXPRESSIONS_DOC, text).unwrap();
+        let merged = merge_docs(EXPRESSIONS_DOC, &[doc]);
+        geode_core::named::NamedExpressions::from_doc(
+            &merged,
+            &geode_core::scope::complete::ExprVocab::default(),
+        )
+        .0
+    }
+
+    /// One chip per name in `Scope.named`, in list order, between the
+    /// dimension chips and the expression terms: a defined name reads
+    /// `≡ name` with its expression text as the tooltip; a missing or
+    /// invalid one is flagged broken and says why. Names alone make the
+    /// scope savable.
+    #[test]
+    fn each_named_expression_is_a_chip_and_a_broken_one_is_flagged() {
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        f.replace_named_expressions(named_exprs(
+            "[liq]\nexpression = \"npv > 0\"\n[bad]\nexpression = \"npv >\"\n",
+        ));
+        f.set_scope(Scope {
+            named: vec!["liq".into(), "gone".into(), "bad".into()],
+            ..Scope::default()
+        });
+        let clock = geode_core::clock::Clock::utc();
+        let m = build_model(&f, clock, clock.today(chrono::Utc::now()));
+        let labels: Vec<&str> = m.named.iter().map(|c| c.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            ["≡ liq", "≡ gone · missing", "≡ bad · invalid"],
+            "one chip per name, in list order"
+        );
+        assert!(!m.named[0].broken);
+        assert!(m.named[1].broken && m.named[2].broken);
+        assert_eq!(m.named[0].full, "npv > 0", "tooltip: the expression text");
+        assert_eq!(m.named[1].full, "named expression 'gone' is missing");
+        assert!(
+            m.named[2]
+                .full
+                .starts_with("named expression 'bad' is invalid: "),
+            "{}",
+            m.named[2].full
+        );
+        assert_eq!(m.named[0].name, "liq");
+        assert_eq!(m.named[0].selector, "scope-named-chip-liq");
+        assert_eq!(m.named[0].close_selector, "scope-named-chip-close-liq");
+        assert_eq!(m.named[0].tip_selector, "tip-scope-named-chip-liq");
+        assert_eq!(
+            m.named[0].close_tip_selector,
+            "tip-scope-named-chip-close-liq"
+        );
+        assert_eq!(m.named[0].close_title, "Remove liq");
+        assert!(m.savable, "a scope of names alone is not empty");
     }
 
     /// The model carries finished slot and as-of strings for rendering.

@@ -78,7 +78,7 @@ fn clicking_the_readout_opens_the_picker_and_enter_activates_the_typed_slot(
     vcx.run_until_parked();
 
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert!(shell.read_with(&vcx, |s, _| s.choice_dialog.is_none()));
 }
 
@@ -111,7 +111,7 @@ fn mod_g_opens_the_picker_on_the_active_slot(cx: &mut gpui::TestAppContext) {
         before,
         "re-picking the active slot bumps nothing"
     );
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// A digit on the empty field is the chord's twin: `1` activates slot 1
@@ -133,13 +133,13 @@ fn a_digit_jumps_to_a_filled_slot_and_zero_to_the_view_default(cx: &mut gpui::Te
     vcx.simulate_keystrokes("1");
     vcx.run_until_parked();
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(1));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 
     vcx.simulate_keystrokes("alt-g");
     vcx.simulate_keystrokes("0");
     vcx.run_until_parked();
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// A digit typed into a non-empty field is text, never a jump.
@@ -172,7 +172,7 @@ fn a_row_click_activates_that_slot(cx: &mut gpui::TestAppContext) {
     vcx.simulate_click(row.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), Some(3));
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// A query that matches nothing leaves nothing lit: `enter` keeps the
@@ -188,7 +188,7 @@ fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppCont
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
     vcx.simulate_keystrokes("escape");
     vcx.run_until_parked();
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
 /// `enter` picks from the field's LIVE text, not the last `Change` the
@@ -235,7 +235,7 @@ fn picking_a_slot_emptied_under_the_picker_says_so(cx: &mut gpui::TestAppContext
     vcx.simulate_keystrokes("3");
     vcx.run_until_parked();
     assert_eq!(frame.read_with(&vcx, |f, _| f.active_slot()), None);
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.notice),
         Some(crate::shell::choicedialog::SLOT_GONE)

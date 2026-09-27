@@ -30,7 +30,10 @@ pub use shorthand::{ParseError, parse, render_expiry, render_line, render_packag
 pub use storage::{
     LINE_AXIS, PRICER_SHEETS_DATASET, PRICER_SHEETS_DECLARATION, SHEET_KEY, from_rows, to_rows,
 };
-pub use template::{LegSpec, Template};
+pub use template::{
+    BUILTIN_TEMPLATES, LegSpec, MAX_TEMPLATE_NAME, PRICER_TEMPLATES_DOC, Template, TemplateDef,
+    TemplateSet, check_name,
+};
 pub use tree::{Expansion, visible_rows};
 pub use undo::{UNDO_DEPTH, UndoStack};
 pub use views::{

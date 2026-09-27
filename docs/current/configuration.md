@@ -22,7 +22,8 @@ are part of several document contracts.
 
 Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 `layouts`, `groupings`, `scopes`, `datasets`, `sources`, `egress`, `dimensions`,
-`colors`, `pricer_views`, and `overrides` replace whole named objects.
+`colors`, `expressions`, `pricer_views`, `pricer_templates`, and `overrides`
+replace whole named objects.
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
@@ -65,6 +66,7 @@ The main configuration documents have distinct owners:
 | `dimensions.toml` | Derived dimensions used for grouping and scope |
 | `groupings.toml` | The nine shared grouping slots |
 | `scopes.toml` | Named scopes |
+| `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `colors.toml` | Named semantic data colors |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
 | `view_presentation.toml` | Per-view column order, visibility, widths, and formatting overrides |
@@ -132,6 +134,19 @@ and [configuration-dialogs.md's Scope expression field](configuration-dialogs.md
 Source adapter names, document kinds, module keymap fragments, and pricer
 names depend on what the assembled application has registered, so `geode-app`
 performs those cross-crate checks at startup and reload.
+
+`expressions.toml` holds named scope expressions: an expression text saved
+under a name so a saved scope or the frame can refer to it instead of copying
+it (`geode_core::named::NamedExpressions`). Each entry is parsed at load time.
+One that fails to parse is kept as `Invalid`, carrying its text and parse
+reason, rather than dropped, so a reference to it can report "invalid" rather
+than "missing" — a deleted name and a broken definition must not look alike.
+An expression that parses but names a column the current schema lacks stays
+`Valid` and only warns; the column error surfaces the same way any scope
+expression's does, at query time. A scope's own list of names is read and
+persisted without validating them against this document at all: resolution,
+not the reader, is what a missing or invalid name fails against (see
+[the shared frame](shell.md#the-shared-frame)).
 
 Schema changes do not migrate an existing DuckDB database. `apply_schema`
 creates missing tables and columns needed by its own metadata, while payload
@@ -331,6 +346,7 @@ Accepted candidates update runtime state according to their inputs:
 | Effective `app.theme` | Apply the theme when changed; unrelated edits preserve the current theme |
 | `groupings`, `datasets`, or `dimensions` | Rebuild shared grouping slots |
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
+| `expressions`, `datasets`, or `dimensions` | Rebuild named expressions; a changed or redefined entry bumps the frame's config version so a tile whose scope references it requeries |
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, or colors | Emit `ConfigReloaded` for the app bridge |
 | Sources, datasets, egress, or `app.pricing.adapter` differing from startup | Mark restart required; return to the startup inputs to clear it |
@@ -412,6 +428,53 @@ it.
 carries the two bundled views; like other named objects, a desk or user entry
 replaces a whole view. A reload reaches open pricer tiles, and a tile whose
 view disappeared shows the first defined view with a header notice.
+
+`pricer_templates` holds the package templates the pricer's shorthand
+accepts. The builtin layer carries seven: `CS`, `PS`, `STRD`, `STRG`, `RR`,
+`FLY`, and `CAL`. Each entry is a table of legs; a leg names its signed
+`weight`, which typed `strike` it takes, which typed `expiry` it takes, and
+its option `kind`:
+
+```toml
+[CONDOR]
+legs = [
+  { weight = 1, strike = 1, kind = "C" },
+  { weight = -1, strike = 2, kind = "C" },
+  { weight = -1, strike = 3, kind = "C" },
+  { weight = 1, strike = 4, kind = "C" },
+]
+```
+
+`SPX Z26 4800/4900/5100/5200 CONDOR` then prices those four legs. `strike`
+and `expiry` are 1-based indices into the strikes and expiries typed in the
+shorthand; `expiry` defaults to 1, so only a multi-expiry template such as
+`CAL` names it. The number of strikes and expiries a template takes is the
+highest index its legs use.
+
+A name is 1 to 8 letters or digits, a letter first, and is case-insensitive:
+`condor` and `CONDOR` are the same template. `C`, `P`, and `CUSTOM` are
+reserved. Each entry is validated alone, and a bad one is dropped with an
+error diagnostic at its path while the rest load. An entry is bad when its
+name is invalid or reserved, it is not a table, `legs` is missing or has
+fewer than two legs, a leg is not a table, a `weight` is zero or not an
+integer, a `strike` or `expiry` is below 1 or above the number of legs,
+`kind` is not `"C"` or `"P"` (either case), or the strike or expiry numbers skip one (a
+template using strikes 1 and 3 has no strike 2). A dropped entry whose
+name had a definition keeps that previous definition, with a warning: the
+running one on a reload and the built-in one at startup, so a typo in a
+desk `RR` never makes `RR` disappear. Unknown keys, on the entry
+or on a leg, warn and are ignored. Two spellings of one name in the same
+merged document keep the later entry, in the earlier one's position, with a
+warning. When the later spelling is invalid, the name keeps its previous
+definition instead (at startup, its built-in one); only a name with no such
+definition falls back to the earlier spelling.
+
+Like other named objects, an entry in a higher layer replaces a lower-layer
+entry of the same name, including a built-in: a desk `RR` redefines the risk
+reversal for every sheet. A reload reaches open pricer tiles without a
+restart. Rows already on a sheet keep their legs and prices; see
+[the pricer](features.md) for how a package prints once its template is
+removed or redefined.
 
 ## Maintaining configuration
 

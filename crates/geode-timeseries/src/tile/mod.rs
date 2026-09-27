@@ -131,6 +131,9 @@ pub struct TimeseriesTile {
     /// The frame versions the request in flight was made under.
     acted: Option<FrameVersions>,
     query_in_flight: bool,
+    /// A view move is waiting for the request in flight to answer before it
+    /// asks for its own window's statistics. See [`Self::view_moved`].
+    view_waiting: bool,
     /// A delivery staged behind the flip barrier.
     staged: Option<(SeriesResult, FrameVersions)>,
     /// Most recently observed flip generation, whether or not a result was staged.
@@ -337,6 +340,7 @@ impl TimeseriesTile {
             tag: 0,
             acted: None,
             query_in_flight: false,
+            view_waiting: false,
             staged: None,
             last_flip: 0,
             visible: false,
@@ -430,6 +434,7 @@ impl TimeseriesTile {
             // request as completed work.
             self.acted = None;
             self.query_in_flight = false;
+            self.view_waiting = false;
             self.in_flight.clear();
         }
         self.rebuild_chrome(cx);
@@ -700,9 +705,19 @@ impl TimeseriesTile {
     /// Apply a view move without rebuilding prepared chart data or its header.
     /// Query again only when visible-window statistics require it; with density
     /// and percentiles off, movement can reuse the current points and paths.
+    ///
+    /// While a request is in flight the move waits for its answer instead of
+    /// superseding it: the pool interrupts a superseded query, so wheel or drag
+    /// events arriving faster than one query runs would leave the statistics
+    /// frozen until the pan stopped. The answer releases one request for the
+    /// latest view ([`Self::release_view`]).
     fn view_moved(&mut self, changed: Changed, cx: &mut Context<Self>) {
         if changed.query() && self.visible && !self.model.slots().is_empty() {
-            self.requery(cx);
+            if self.query_in_flight {
+                self.view_waiting = true;
+            } else {
+                self.requery(cx);
+            }
         }
         cx.notify();
     }

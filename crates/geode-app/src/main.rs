@@ -569,8 +569,9 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
 }
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
-/// views (a desk or user layer overrides a view by name), the pricer's
-/// `pricer_sheets` dataset, and the `--demo` layer.
+/// views and seven package templates (a desk or user layer overrides a
+/// view or a template by name), the pricer's `pricer_sheets` dataset, and
+/// the `--demo` layer.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
     let mut builtin = vec![
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
@@ -579,6 +580,11 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_pricer::core::BUILTIN_VIEWS,
         )
         .expect("BUILTIN_VIEWS is well-formed TOML"),
+        LayerDoc::builtin(
+            geode_pricer::core::PRICER_TEMPLATES_DOC,
+            geode_pricer::core::BUILTIN_TEMPLATES,
+        )
+        .expect("BUILTIN_TEMPLATES is well-formed TOML"),
         // The pricer's sheets, a local document dataset every build
         // declares. `datasets` merges per dataset name, so a demo, desk or
         // user `datasets` doc adds its own datasets beside this one.
@@ -929,6 +935,24 @@ mod tests {
         );
     }
 
+    /// The seven built-in templates are a builtin-layer doc a desk or user
+    /// layer merges over, and they read clean.
+    #[test]
+    fn the_builtin_layer_carries_the_seven_pricer_templates() {
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (set, diags) = geode_pricer::core::TemplateSet::from_doc(
+            config
+                .doc(geode_pricer::core::PRICER_TEMPLATES_DOC)
+                .expect("the doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(set, geode_pricer::core::TemplateSet::builtin());
+    }
+
     /// The pricer's sheets live in a local document dataset every build
     /// declares, demo or not: the builtin layer carries it, clean.
     #[test]
@@ -996,6 +1020,7 @@ mod tests {
                 data,
                 Rc::new(geode_pricer::store::MemorySheetStore::default()),
                 geode_pricer::core::Views::builtin(),
+                geode_pricer::core::TemplateSet::builtin(),
                 geode_pricer::content::PricerSettings::default(),
             ),
         )));

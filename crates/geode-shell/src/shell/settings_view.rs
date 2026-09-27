@@ -402,6 +402,12 @@ pub fn route(mode: DialogMode, query_is_empty: bool, choosing: bool, ks: &Keystr
             Some(NormalCommand::Toggle) => KeyAction::Step(StepDirection::Right),
             Some(NormalCommand::ToggleBack) => KeyAction::Step(StepDirection::Left),
             Some(NormalCommand::EditText) => KeyAction::OpenChoice,
+            // An unrecognized bare key is dropped, same as browse mode
+            // elsewhere. A chord is passed through instead: that decline
+            // is how the shell reaches a dialog-opening action stacked
+            // over Settings. `choosing` above already claims every key,
+            // chords included, while a row's choice field is open.
+            None if ks.mods.is_chord() => KeyAction::PassThrough,
             _ => KeyAction::Drop,
         },
     }
@@ -575,7 +581,7 @@ fn fetch_source_names(cx: &App) -> Vec<String> {
 /// Open fresh settings state through the shared modal lifecycle, preserving any
 /// already-open modal. The custom key handler routes the settings vocabulary.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Settings) {
         return;
     }
     // Install state before opening so synchronization parks Normal focus on the shell,
@@ -586,6 +592,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         view,
         window,
         cx,
+        dialog::DialogKind::Settings,
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -1407,9 +1414,10 @@ mod tests {
         );
         assert_eq!(
             route(n, true, false, &ks("v", Modifiers::CTRL)),
-            Drop,
-            "a chord normal mode does not name is dropped like any other \
-             unclaimed key (the modal branch would stop it regardless)"
+            PassThrough,
+            "a chord normal mode does not name is declined, not dropped: \
+             this is how the shell reaches a dialog-opening action stacked \
+             over Settings"
         );
     }
 

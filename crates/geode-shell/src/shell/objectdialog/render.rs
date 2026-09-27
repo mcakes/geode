@@ -70,15 +70,15 @@ const VISIBLE_ROWS: usize = 10;
 const WIDTH: f32 = 640.0;
 
 /// Open the object dialog on `domain` (`config::views`, palette-only —
-/// see `defaults::register_builtin_actions`). A no-op if a modal is
-/// already open, mirroring the other dialogs' own guard.
+/// see `defaults::register_builtin_actions`). A no-op when this kind is
+/// already open (see `dialog::can_open`).
 pub fn open(
     view: &mut ShellView,
     domain: Domain,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Object) {
         return;
     }
     // Fresh state every open — nothing survives a close/reopen, the same
@@ -89,6 +89,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Object,
         domain.title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -309,10 +310,13 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
             }
         }
         let Some(cmd) = dialogmode::normal_command(ks) else {
-            // Claimed and dropped: in normal mode a key with no meaning
-            // does nothing at all, rather than falling through to the
-            // shell still listening underneath the modal.
-            return true;
+            // A bare key with no meaning is claimed and dropped: normal
+            // mode does nothing with it rather than falling through to the
+            // shell still listening underneath the modal. A chord
+            // (ctrl/alt/cmd) this vocabulary does not name is declined
+            // instead — that decline is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();
         };
         match cmd {
             NormalCommand::Nav(nav) => {
@@ -358,7 +362,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 if !state.domain.writable(&state.stage) {
                     set_notice(shell, READ_ONLY_NOTICE.to_string());
                 } else if verb == 'd' {
-                    arm_delete(shell);
+                    arm_delete(shell, cx);
                 } else {
                     arm_revert(shell);
                 }
@@ -512,6 +516,11 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .as_ref()
         .map(|s| s.naming_seed.clone())
         .unwrap_or(NameSeed::Empty);
+    // A fresh named expression has no valid default: an empty expression is an
+    // invalid definition, so creating it would refuse on naming and Escape would then
+    // lose the name. Instead the field opens at once and the first valid Enter writes
+    // the object. A copy has its source's expression and is created as usual.
+    let opens_expression = domain == Domain::Expressions && seed == NameSeed::Empty;
     // One `match` rather than two `if let`s: `seed` is an owned, non-`Copy` value with
     // exactly one consumer, and a second `if let` reading it after a first one already
     // moved it needed a defensive `.clone()` that a single exhaustive match makes
@@ -561,7 +570,14 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
     }
     enter_edit_stage(shell, &name, Some(draft), cx);
-    if let Some(notice) = apply::commit_create(shell, cx) {
+    if opens_expression {
+        // The empty-text error stays unpainted until the first Enter revalidates; the
+        // write gate re-derives it then, so an empty Enter is still refused.
+        if let Some(draft) = draft_mut(shell) {
+            draft.diagnostics.clear();
+        }
+        open_field(shell);
+    } else if let Some(notice) = apply::commit_create(shell, cx) {
         set_notice(shell, notice);
     }
     cx.notify();
@@ -649,7 +665,7 @@ pub(in crate::shell) fn open_save_scope(
     // own `begin_naming` read `shell.object_dialog` regardless of whose it is. Guarding
     // here, before either branch touches it, is what makes "no modal is already open"
     // the one precondition both branches share with `open` itself.
-    if shell.modal.is_some() {
+    if !dialog::can_open(shell, dialog::DialogKind::Object) {
         return;
     }
     if shell.frame.read(cx).scope().is_empty() {
@@ -1015,6 +1031,25 @@ fn enter_values_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
     state.disarm();
     state.values_tag = tag;
     shell.object_dialog_scroll.scroll_to_item(0);
+    // An unresolved name paints as the stage's failed row, never a request:
+    // dropping it would widen the counts. The tag is recorded above, so the
+    // delivery is accepted.
+    let scope = match scope.resolve(shell.frame.read(cx).named_expressions()) {
+        Ok(scope) => scope,
+        Err(message) => {
+            deliver_values(
+                shell,
+                DistinctOutcome {
+                    key: SCOPES_KEY,
+                    tag,
+                    column: column.to_string(),
+                    values: Err(message),
+                },
+                cx,
+            );
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: SCOPES_KEY,
         tag,
@@ -1370,7 +1405,10 @@ fn handle_edit_key_inner(
     }
 
     let Some(cmd) = dialogmode::normal_command(ks) else {
-        return true;
+        // See the matching branch in `handle_browse_key`: a bare key stays
+        // claimed, a chord is declined so a dialog-opening action stacked
+        // over this dialog can reach the shell.
+        return !ks.mods.is_chord();
     };
 
     // every verb that would change the object is refused here, in one place, on a
@@ -1447,7 +1485,7 @@ fn handle_edit_key_inner(
                 None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
-        NormalCommand::Verb('d') => arm_delete(shell),
+        NormalCommand::Verb('d') => arm_delete(shell, cx),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => overwrite_scope(shell, cx),
         // `x` removes a member into its catalogue. Route its own refusal directly to
@@ -1459,9 +1497,14 @@ fn handle_edit_key_inner(
         // stage's ticks — but only on the dimensions list itself; on an available row
         // there is nothing to drop (`enter` picks its values instead), and inside the
         // Values stage a value's own row answers with `space`'s own wording rather than
-        // this domain's.
+        // this domain's. A named expression drops back to its catalogue the same way,
+        // with notices that name it rather than a dimension.
         NormalCommand::Verb('x') if is_scopes(shell) => {
+            let on_named = on_scopes_named_row(shell);
             match draft_ref(shell).map(Draft::selected_row) {
+                Some(Some(EditRow::Available { .. })) if on_named => {
+                    set_notice(shell, "not included — space adds it".to_string())
+                }
                 Some(Some(EditRow::Available { .. })) => {
                     set_notice(shell, "not selected — enter picks its values".to_string())
                 }
@@ -1474,6 +1517,9 @@ fn handle_edit_key_inner(
                         Some(Step::Refused(reason)) => set_notice(shell, reason),
                         _ => {}
                     }
+                }
+                _ if on_named => {
+                    set_notice(shell, "select a named expression to drop it".to_string())
                 }
                 _ => set_notice(
                     shell,
@@ -1819,10 +1865,11 @@ fn handle_text_key(
                 let domain = domain.expect("a draft implies an open dialog");
                 draft.apply_text_entry(&|key, text| {
                     let text = domain.parse_text(key, text)?;
-                    // A Scopes expression naming a column the schema lacks
-                    // parses, but its reader would drop the scope with a
-                    // warning later; refuse it here, with the field open.
-                    if domain == Domain::Scopes
+                    // An expression naming a column the schema lacks parses,
+                    // but a scope's reader would drop the scope with a warning
+                    // later, and a named one would fail every scope ticking it;
+                    // refuse it here, with the field open.
+                    if matches!(domain, Domain::Scopes | Domain::Expressions)
                         && key == "expression"
                         && let Some(w) = geode_core::scope::complete::check(&text, &vocab, None)
                             .into_iter()
@@ -1904,8 +1951,9 @@ fn step_selected_row(
     // state this domain can save — and on a selected one it names the door, since the
     // values themselves are the Values stage's to change. Checked ahead of the ordinary
     // step below and never inside the Values stage itself, where a tick is exactly what
-    // `space` already means.
-    if !in_values_stage(shell) && is_scopes(shell) {
+    // `space` already means. A named expression's row is an ordinary tick list, so
+    // it takes the ordinary step.
+    if !in_values_stage(shell) && is_scopes(shell) && !on_scopes_named_row(shell) {
         match draft_ref(shell).and_then(Draft::selected_row) {
             Some(EditRow::Available { .. }) => {
                 if let Some(column) = values_stage_target(shell) {
@@ -2092,6 +2140,21 @@ fn is_scopes(shell: &ShellView) -> bool {
         .is_some_and(|state| state.domain == Domain::Scopes)
 }
 
+/// Is the cursor on a row of a scope's `named` list? Those rows tick like any
+/// list's, so the dimensions-only doors (Values, `x`'s dimension wording) must
+/// not answer for them.
+fn on_scopes_named_row(shell: &ShellView) -> bool {
+    is_scopes(shell)
+        && draft_ref(shell).is_some_and(|draft| match draft.selected_row() {
+            Some(
+                EditRow::Item { field, .. }
+                | EditRow::Available { field, .. }
+                | EditRow::Field(field),
+            ) => draft.fields.get(field).is_some_and(|f| f.key == "named"),
+            None => false,
+        })
+}
+
 /// The one answer for a verb the column stage does not own: `x`, `shift+j` and
 /// `shift+k` all reorder or demote rows of a list this stage does not install, and
 /// `d`/`r` act on the whole view the crumb has narrowed away from — so each says the
@@ -2151,6 +2214,7 @@ fn arm_confirm(shell: &mut ShellView, confirm: Confirm) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.confirm = Some(confirm);
         state.confirm_target = target;
+        state.confirm_detail = None;
     }
 }
 
@@ -2458,7 +2522,7 @@ fn removal_edits(
 /// Arm deletion only for a user-defined object. Inherited objects cannot be deleted by
 /// a user-layer write. A presentation-only override instead points to revert; an
 /// unconfigured grouping slot reports that it is empty.
-fn arm_delete(shell: &mut ShellView) {
+fn arm_delete(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // Object deletion is unavailable inside column and Values projections. Apply the
     // guard here so pointer and keyboard actions enforce the same rule.
     if in_column_stage(shell) {
@@ -2474,6 +2538,12 @@ fn arm_delete(shell: &mut ShellView) {
     match target_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             arm_confirm(shell, Confirm::Delete);
+            let detail = in_domain(shell, Domain::Expressions)
+                .then(|| named_expression_users(shell, &row.name, cx))
+                .flatten();
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.confirm_detail = detail;
+            }
         }
         // The remedy names the stage: from the list there is nothing to
         // tick, the slot has to be opened first.
@@ -2502,6 +2572,41 @@ fn arm_delete(shell: &mut ShellView) {
         }
         None => set_notice(shell, no_target_notice(shell)),
     }
+}
+
+/// Is the open dialog browsing `domain`?
+fn in_domain(shell: &ShellView, domain: Domain) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain == domain)
+}
+
+/// Who ticks the named expression `name`, as the sentence the delete question
+/// carries: saved scopes in name order, then the frame. `None` when nothing
+/// does. Scopes are read off the raw pending-aware doc, not the reader, so a
+/// scope the reader drops for some other fault still counts as a user.
+/// Deleting never edits these users; the sentence is what says so.
+fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
+    let pending = apply::config_with_pending(shell);
+    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let users: Vec<String> = config
+        .doc(scopes::DOC)
+        .map(|doc| {
+            doc.value
+                .iter()
+                .filter(|(_, scope)| {
+                    scope
+                        .get("named")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|names| names.iter().any(|n| n.as_str() == Some(name)))
+                })
+                .map(|(scope, _)| scope.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let frame = shell.frame.read(cx).scope().named.iter().any(|n| n == name);
+    super::used_by_sentence(users, frame)
 }
 
 /// Arm reversion when a user definition or presentation overlays an inherited object.
@@ -3129,7 +3234,7 @@ fn build(
         // read here that derives nothing per frame.
         Some(confirm) => {
             let name = state.confirm_target.clone().unwrap_or_default();
-            confirm_row(confirm, &name, entity, cx)
+            confirm_row(confirm, &name, state.confirm_detail.as_deref(), entity, cx)
         }
         None => browse_action_bar(state, &rows, &visible, entity),
     };
@@ -3180,7 +3285,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // has no height of its own, so opening a field (`i`) would shift the footer up
         // by a button's height and `escape` would shift it back.
         (true, _) => div().min_h_6().into_any_element(),
-        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, Some(confirm)) => confirm_row(
+            confirm,
+            &draft.name,
+            state.confirm_detail.as_deref(),
+            entity,
+            cx,
+        ),
         (false, None) => action_bar(shell, entity),
     };
     let theme = cx.theme();
@@ -3494,7 +3605,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         // the Values stage installs its own list under the very same
                         // field key (`"values"`) the ordinary edit stage's `dimensions`
                         // list would carry, so `own` alone cannot tell the two apart —
-                        // `section_header_text(Domain::Scopes, true)` would paint
+                        // `section_header_text(Domain::Scopes, "dimensions", true)` would paint
                         // "DIMENSIONS" over a values list. `draft.values().is_some()`
                         // is the stage-aware override every other Values-stage site
                         // already reads by.
@@ -3504,7 +3615,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 "members",
                             )
                         } else {
-                            section_header_text(domain, own)
+                            section_header_text(domain, &draft.fields[field].key, own)
                         };
                         let field_key = draft.fields[field].key.clone();
                         section_header = Some(
@@ -3613,13 +3724,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         })
                         .filter(|s| !s.is_empty())
                     });
+                    // A scope's reference to a missing or invalid named
+                    // expression refuses every query it reaches, so its note
+                    // reads as an error rather than routine detail.
+                    let broken_reference = own
+                        && domain == Domain::Scopes
+                        && draft.values().is_none()
+                        && draft.fields[field].key == "named"
+                        && matches!(entry.note.as_deref(), Some("missing" | "invalid"));
                     if let Some(note) = note {
-                        name_row = name_row.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(note),
-                        );
+                        let note_row = div().text_xs().child(note);
+                        name_row = name_row.child(if broken_reference {
+                            let selector = format!("objectdialog-note-danger-{}", entry.name);
+                            note_row
+                                .text_color(
+                                    super::super::chip::chip_paint(
+                                        theme,
+                                        super::super::chip::Tone::DangerText,
+                                    )
+                                    .text,
+                                )
+                                .debug_selector(move || selector)
+                        } else {
+                            note_row.text_color(theme.muted_foreground)
+                        });
                     }
                     let name = name_row.into_any_element();
                     (
@@ -4128,8 +4256,14 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 /// as `Kbd` chips by `kbd::marked`. `own` distinguishes Views' own columns
 /// from the rest of its dataset's; Groupings' `dimensions` has no catalogue at all
 /// (`groupings.rs`'s own module doc), so only the first arm there is ever reached.
-fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
+/// `key` separates a scope's two lists: only `dimensions` opens a Values stage;
+/// `named` is a plain tick list.
+fn section_header_text(domain: Domain, key: &str, own: bool) -> (&'static str, &'static str) {
     match (domain, own) {
+        (Domain::Scopes, true) if key == "named" => {
+            ("NAMED EXPRESSIONS — `space` ticks", "members")
+        }
+        (Domain::Scopes, false) if key == "named" => ("AVAILABLE — `space` adds", "available"),
         (Domain::Views, true) => (
             "COLUMNS — `space` hides · `shift+j` / `shift+k` reorder · `x` removes",
             "members",
@@ -4141,12 +4275,13 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
         ),
         (Domain::Scopes, true) => ("DIMENSIONS — `enter` opens values · `x` drops", "members"),
         (Domain::Scopes, false) => ("AVAILABLE — `enter` picks values", "available"),
-        // None of Schema, Sources or Colors has an `OrderedList` field
-        // at all (`schema.rs`'s, `sources.rs`'s and `colours.rs`'s own
-        // module docs — every field on any of the three is a plain
-        // scalar), so this arm is unreachable for all three; kept only
-        // to stay exhaustive as domains are added.
-        (Domain::Schema | Domain::Sources | Domain::Colors, _) => ("", "members"),
+        // None of Schema, Sources, Colors or Expressions has an
+        // `OrderedList` field at all (each adapter's own module doc —
+        // every field is a plain scalar), so this arm is unreachable for
+        // all four; kept only to stay exhaustive as domains are added.
+        (Domain::Schema | Domain::Sources | Domain::Colors | Domain::Expressions, _) => {
+            ("", "members")
+        }
     }
 }
 
@@ -4377,6 +4512,7 @@ fn browse_action_bar(
 fn confirm_row(
     confirm: Confirm,
     name: &str,
+    detail: Option<&str>,
     entity: &Entity<ShellView>,
     cx: &mut App,
 ) -> AnyElement {
@@ -4390,7 +4526,16 @@ fn confirm_row(
     let on_no: dialog::ConfirmHandler =
         Rc::new(|shell, _window, cx| answer_confirm(shell, false, cx));
     let selector = format!("objectdialog-confirm-prompt-{name}");
-    div()
+    // Context for the question, not part of it: muted, on its own line under the row.
+    let detail = detail.map(|detail| {
+        div()
+            .debug_selector(|| "objectdialog-confirm-detail".to_string())
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .child(detail.to_string())
+    });
+    v_flex()
+        .gap_1()
         // Names the object the prompt is about, so a test can tell which
         // one the row was painted for — `dialog::confirm_row`'s own
         // selectors are per surface, not per object.
@@ -4404,6 +4549,7 @@ fn confirm_row(
             on_no,
             cx,
         ))
+        .children(detail)
         .into_any_element()
 }
 
@@ -4491,7 +4637,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         return;
     }
     match key {
-        "d" => arm_delete(shell),
+        "d" => arm_delete(shell, cx),
         "r" => arm_revert(shell),
         "i" => open_field(shell),
         "o" => overwrite_scope(shell, cx),

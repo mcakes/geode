@@ -78,7 +78,12 @@ impl Render for ShellView {
         // Hidden-tile focus is reconciled separately by `ensure_occupants`.
         if self.pending_focus_restore {
             self.pending_focus_restore = false;
-            if !self.occupant_holds_insert_focus(window, cx) {
+            // An open dialog owns focus: the flag must not pull it to the shell
+            // root, and a palette dropped over the stack (a reload closing it)
+            // must not leave it on the orphaned palette input either.
+            if self.modal_open() {
+                super::dialog::refocus_top(self, window, cx);
+            } else if !self.occupant_holds_insert_focus(window, cx) {
                 self.focus_handle.focus(window, cx);
             }
         }
@@ -112,7 +117,7 @@ impl Render for ShellView {
         // hides its boundary. Keep and persist resizes already applied.
         if self.divider_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
-                || self.modal.is_some()
+                || self.modal_open()
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
@@ -131,7 +136,7 @@ impl Render for ShellView {
         // change has been applied, so cancellation needs no persistence update.
         if self.tile_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
-                || self.modal.is_some()
+                || self.modal_open()
                 || !self.matcher.pending().is_empty()
                 // Epoch, not index — see `DividerDrag::epoch`.
                 || drag.epoch != self.services.workspaces.switch_epoch()
@@ -227,7 +232,7 @@ impl Render for ShellView {
         // with the same click that dismisses an overlay. An existing divider
         // drag can continue under which-key because its catcher owns the mouse.
         let dividers_active =
-            self.palette.is_none() && self.modal.is_none() && self.matcher.pending().is_empty();
+            self.palette.is_none() && !self.modal_open() && self.matcher.pending().is_empty();
         // Mouse events arrive in window coordinates while the tile
         // geometry lives in surface coordinates (the surface starts below
         // the toolbar, right of the sidebar) — the drag rects captured at
@@ -907,6 +912,18 @@ impl Render for ShellView {
                 });
             });
         };
+        // A named-expression chip's `×` drops that name alone, an undoable
+        // edit like the other chips' `×`. Its body has no click yet.
+        let named_close_entity = cx.entity();
+        let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
+            named_close_entity.update(cx, |view, cx| {
+                view.frame.update(cx, |f, cx| {
+                    if f.drop_named(name) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
         // Whether the grouping picker is up: the readout holds its pressed
         // fill for exactly as long as it is (design guide: a control that
         // owns a popup stays visibly pressed until the popup closes). The
@@ -928,6 +945,7 @@ impl Render for ShellView {
             on_as_of,
             on_term_open,
             on_term_close,
+            on_named_close,
             cx,
         );
 
@@ -951,9 +969,9 @@ impl Render for ShellView {
         let registry = &self.services.registry;
 
         // Clone the modal's shared title and callbacks before building the
-        // element tree, releasing the borrow of `self.modal` before closures
+        // element tree, releasing the borrow of `self.modals` before closures
         // need access to the rest of the view.
-        let modal = self.modal.as_ref().map(|modal| {
+        let modal = self.modals.last().map(|modal| {
             (
                 modal.title.clone(),
                 modal.title_extra.clone(),
@@ -986,7 +1004,7 @@ impl Render for ShellView {
             // cycling so they reach the shell matcher, including module bindings.
             // `GeodeModalOpen` additionally reclaims modal commands while focus is
             // on the shell root; the panel's context is absent in Normal mode.
-            .key_context(if self.modal.is_some() {
+            .key_context(if self.modal_open() {
                 "GeodeShell GeodeModalOpen"
             } else {
                 "GeodeShell"
@@ -1243,6 +1261,22 @@ impl Render for ShellView {
                         })),
                 )
             })
+            // Paint the modal below the palette: a palette opened over the stack
+            // must be visible and take clicks above the dialog it covers.
+            .when_some(modal, |el, (title, title_extra, build)| {
+                let extra = title_extra.map(|f| f(self, cx));
+                let show_back = dialog::back_available(self);
+                let content = build(self, window, cx);
+                el.child(dialog::render_modal(
+                    title,
+                    extra,
+                    show_back,
+                    content,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
+            })
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
@@ -1281,6 +1315,15 @@ impl Render for ShellView {
                 // `palette::render`'s doc comment), so a click landing
                 // anywhere inside it — a row, the query input, empty space
                 // — never also reaches this catcher's handler below.
+                //
+                // gpui fires `on_mouse_down` for every hovered hitbox, not
+                // only the topmost, so without `occlude()` a click over an
+                // open dialog stack would also reach whatever the catcher
+                // covers: `shell-modal-backdrop` (popping the dialog) or a
+                // dialog row (committing or opening it). `occlude()` is
+                // conditioned on a dialog being open because with none the
+                // catcher covers only tiles, which have no click handler this
+                // would wrongly swallow.
                 el.child(
                     div()
                         .id("palette-click-catcher")
@@ -1290,6 +1333,7 @@ impl Render for ShellView {
                         .w(px(width))
                         .h(px(viewport_height))
                         .debug_selector(|| "palette-click-catcher".to_string())
+                        .when(self.modal_open(), |d| d.occlude())
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|view, _event, window, cx| {
@@ -1299,34 +1343,15 @@ impl Render for ShellView {
                         .child(panel),
                 )
             })
-            // Paint modals above the palette layer and below component overlays.
-            // The modal opening path closes the palette, so these are mutually
-            // exclusive in normal operation.
-            .when_some(modal, |el, (title, title_extra, build)| {
-                let extra = title_extra.map(|f| f(self, cx));
-                let show_back = dialog::back_available(self);
-                let content = build(self, window, cx);
-                el.child(dialog::render_modal(
-                    title,
-                    extra,
-                    show_back,
-                    content,
-                    width,
-                    viewport_height,
-                    cx,
-                ))
-            })
-            // Painted after (so above) the modal for the same reason as the
-            // modal-vs-palette ordering above: never both `Some` in the same
-            // frame, but the ordering here is what would govern it if that
-            // ever changed. This one, though, is a real invariant rather
-            // than an incidental one — while the modal is open, `self.
-            // matcher` can never go pending at all: `open_shell_dialog`
+            // Painted after (so above) the modal and the palette. Never
+            // `Some` in the same frame as a modal: while the modal is open,
+            // `self.matcher` can never go pending at all — `open_shell_dialog`
             // cancels it on open, and `handle_key_down`'s modal branch
             // returns before ever reaching `self.matcher.press` for as long
-            // as `self.modal` stays `Some`, so `which_key_continuations`
+            // as `self.modals` stays non-empty, so `which_key_continuations`
             // (computed from `self.matcher.pending()`, just above) is always
-            // `None` whenever `modal` is `Some`.
+            // `None` whenever `modal` is `Some`. Opening the palette cancels
+            // the matcher too.
             .when_some(which_key_continuations, |el, continuations| {
                 el.child(whichkey::render(
                     &continuations,

@@ -73,7 +73,7 @@ fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppC
     let (shell, mut cx) = open_views_dialog(cx);
 
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "config::views should have opened a modal"
     );
     assert_eq!(
@@ -119,7 +119,7 @@ fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppC
         "a bare letter must not be typed into the filter in normal mode"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and must not fall through to the shell underneath the modal"
     );
 }
@@ -207,7 +207,7 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
         "the second escape clears the query"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and does not close"
     );
     assert!(
@@ -217,7 +217,7 @@ fn slash_filters_and_escape_walks_the_ladder(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("escape");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the third closes"
     );
     assert!(
@@ -284,7 +284,7 @@ fn escape_puts_back_the_query_filter_mode_was_entered_with(cx: &mut gpui::TestAp
         "and the row the first search found is on screen again"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "reverting a search never closes the dialog"
     );
 }
@@ -431,7 +431,7 @@ fn presentation_of(
     })
 }
 
-fn edit_draft<T>(
+pub(super) fn edit_draft<T>(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
     f: impl FnOnce(&objectdialog::Draft) -> T,
@@ -1307,7 +1307,7 @@ fn a_write_that_fails_after_the_dialog_closed_still_reports_itself(cx: &mut gpui
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the dialog is closed before the write is even attempted"
     );
 
@@ -1497,7 +1497,7 @@ fn escape_goes_back_a_stage_before_it_closes_the_dialog(cx: &mut gpui::TestAppCo
         "the first escape goes back a stage, not out of the dialog"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "the modal is still open"
     );
     assert!(
@@ -1508,7 +1508,7 @@ fn escape_goes_back_a_stage_before_it_closes_the_dialog(cx: &mut gpui::TestAppCo
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the second closes"
     );
 }
@@ -1575,7 +1575,7 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
         "escape goes back a stage, not out of the dialog"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "the modal is still open"
     );
 }
@@ -1600,7 +1600,7 @@ fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAp
     );
     // Saying so is all it does: the draft is untouched and the modal stays.
     assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
 }
 
 /// A user presentation entry alone is enough for `r` to revert a desk view's
@@ -1970,7 +1970,7 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        shell.read_with(&cx, |s, _| !s.modal_open()),
         "the dialog has to be closed for ctrl+3 to reach frame::slot_3"
     );
 
@@ -2130,7 +2130,7 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
 /// A `scopes` doc with one saved scope, `mine`, selecting `book = BK001`
 /// — deliberately different from whatever a test then puts on the
 /// frame, so an assertion that the doc changed cannot pass by accident.
-fn services_with_a_saved_scope() -> ShellServices {
+pub(super) fn services_with_a_saved_scope() -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -2206,9 +2206,265 @@ fn saved_scope_books(
     })
 }
 
+/// [`services_with_a_saved_scope`] plus an `expressions` doc defining
+/// `liq` and `hedges`, with `mine` naming `named` (a name the doc may
+/// not define).
+fn services_with_named_expressions(named: &str) -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    )
+    .unwrap();
+    let scopes = LayerDoc::builtin(
+        "scopes",
+        &format!("[mine]\nnamed = [\"{named}\"]\n[mine.dimensions]\nbook = [\"BK001\"]\n"),
+    )
+    .unwrap();
+    let expressions = LayerDoc::builtin(
+        "expressions",
+        "[liq]\nexpression = \"npv > 0\"\n[hedges]\nexpression = \"npv < 0\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+            expressions,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// Walk the open scope's edit cursor with `j` to the `named` list's row
+/// for `name` (a ticked item or an available one). Production keys only.
+fn select_named_row(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, name: &str) {
+    for _ in 0..12 {
+        let on_row = edit_draft(shell, cx, |d| match d.selected_row() {
+            Some(
+                row @ (objectdialog::EditRow::Item { field, .. }
+                | objectdialog::EditRow::Available { field, .. }),
+            ) => d.fields[field].key == "named" && d.row_label(row) == name,
+            _ => false,
+        });
+        if on_row {
+            return;
+        }
+        cx.simulate_keystrokes("j");
+        cx.run_until_parked();
+    }
+    panic!("no named row {name}");
+}
+
+/// `mine`'s named-expression items as `(name, ticked)`.
+fn named_items(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Vec<(String, bool)> {
+    edit_draft(shell, cx, |d| {
+        d.list_items("named")
+            .unwrap_or_default()
+            .iter()
+            .map(|i| (i.name.clone(), i.included))
+            .collect()
+    })
+}
+
+/// Opening a scope shows its named expressions: its own reference
+/// ticked under its section header, every other defined name available.
+#[gpui::test]
+fn a_scope_shows_its_named_expressions(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-section-members-named")
+            .is_some(),
+        "the Named expressions section is painted"
+    );
+    assert_eq!(named_items(&shell, &cx), [("liq".to_string(), true)]);
+    let available: Vec<String> = edit_draft(&shell, &cx, |d| {
+        let Some(FieldKind::OrderedList { available, .. }) = d
+            .fields
+            .iter()
+            .find(|f| f.key == "named")
+            .map(|f| f.kind.clone())
+        else {
+            panic!("named is a list");
+        };
+        available
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.name)
+            .collect()
+    });
+    assert_eq!(available, ["hedges"]);
+    assert!(cx.debug_bounds("objectdialog-item-liq").is_some());
+    assert!(cx.debug_bounds("objectdialog-item-hedges").is_some());
+}
+
+/// `space` on an available named expression ticks it, and the write
+/// carries both names in list order.
+#[gpui::test]
+fn space_ticks_an_available_named_expression_into_the_file(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), true), ("hedges".to_string(), true)]
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("named = [\"liq\", \"hedges\"]"),
+        "{written}"
+    );
+}
+
+/// Unticking every named expression is allowed — the list has no
+/// "keep at least one" rule — and the write drops the key.
+#[gpui::test]
+fn unticking_every_named_expression_drops_the_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), false), ("hedges".to_string(), false)],
+        "notice: {:?}",
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(written.contains("[mine"), "{written}");
+    assert!(!written.contains("named"), "{written}");
+}
+
+/// `space` on a named expression ticks it; it never opens the Values
+/// stage, which belongs to the dimensions list alone.
+#[gpui::test]
+fn space_on_a_named_expression_never_opens_values(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("liq"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.values().is_none()));
+    assert_eq!(named_items(&shell, &cx), [("liq".to_string(), false)]);
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.values().is_none()));
+    assert_eq!(
+        named_items(&shell, &cx),
+        [("liq".to_string(), false), ("hedges".to_string(), true)]
+    );
+    select_named_row(&shell, &mut cx, "liq");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.values().is_none()),
+        "enter on a named expression opens nothing either"
+    );
+}
+
+/// A reference to an undefined name paints the warning glyph on its own
+/// row, and a warning never blocks the write.
+#[gpui::test]
+fn a_missing_named_expression_warns_on_its_row_and_still_commits(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("gone"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-gone")
+            .is_some(),
+        "the glyph on gone's row"
+    );
+    select_named_row(&shell, &mut cx, "hedges");
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("named = [\"gone\", \"hedges\"]"),
+        "{written}"
+    );
+}
+
+/// A named reference the expressions doc cannot supply has its `missing`
+/// note painted in danger text; a dimension's values note beside it
+/// stays muted.
+#[gpui::test]
+fn a_missing_named_expressions_note_paints_in_danger_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_named_expressions("gone"),
+        dir.path(),
+        "config::scopes",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-note-danger-gone").is_some(),
+        "gone's missing note is danger text"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-item-book").is_some()
+            && cx.debug_bounds("objectdialog-note-danger-book").is_none(),
+        "a dimension's values note is not"
+    );
+}
+
 /// Walk the Scopes edit cursor to the Expression row with `j` and open it
 /// with `i`. Production keys only.
-fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+pub(super) fn open_expression_field(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
     open_scopes_field(shell, cx, "expression");
 }
 
@@ -3092,7 +3348,7 @@ fn scope_save_current_seeds_naming_from_the_frame_and_creates_it(cx: &mut gpui::
     cx.run_until_parked();
 
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "scope::save_current should have opened a modal"
     );
     assert_eq!(
@@ -3134,7 +3390,7 @@ fn scope_save_current_with_an_empty_frame_scope_opens_browse_with_a_notice(
     dispatch_action(&shell, "scope::save_current", &mut cx);
     cx.run_until_parked();
 
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse,
@@ -5166,7 +5422,7 @@ fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestA
     cx.run_until_parked();
     assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "");
     assert!(
-        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        shell.read_with(&cx, |s, _| s.modal_open()),
         "and the dialog is still open — this was the revert rung, not a close"
     );
 }
@@ -7089,6 +7345,319 @@ fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::Test
     flush_config_write(&mut cx);
     let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
     assert!(written.contains("width = 160"), "{written}");
+}
+
+// Named expressions configuration.
+
+/// The keymap, a `risk` dataset with `book` and `npv`, a user-layer
+/// `expressions` doc defining `liq`, and a builtin saved scope `mine`
+/// that ticks `liq`. `liq` sits on the user layer so `d` may delete it.
+fn services_with_expressions() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    )
+    .unwrap();
+    let scopes = LayerDoc::builtin(
+        "scopes",
+        "[mine]\nnamed = [\"liq\"]\n[mine.dimensions]\nbook = [\"BK001\"]\n",
+    )
+    .unwrap();
+    let expressions = LayerDoc {
+        layer: Layer::User,
+        name: "expressions".to_string(),
+        file: "<test:user>".into(),
+        table: "[liq]\nexpression = \"npv > 0\"\n".parse().unwrap(),
+    };
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+            expressions,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The expression field's text on the open draft.
+fn draft_expression(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    edit_draft(shell, cx, |d| {
+        d.fields.iter().find_map(|f| match (&f.key, &f.kind) {
+            (key, FieldKind::Text(t)) if key == "expression" => Some(t.clone()),
+            _ => None,
+        })
+    })
+}
+
+/// `config::expressions` opens the browse list with each name and its
+/// expression as the preview.
+#[gpui::test]
+fn config_expressions_lists_each_name_with_its_expression(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.domain),
+        objectdialog::Domain::Expressions
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(cx.debug_bounds("objectdialog-row-liq").is_some());
+    let rows = shell.read_with(&cx, |s, _| {
+        objectdialog::Domain::Expressions.objects(&s.services.config)
+    });
+    let liq = rows
+        .iter()
+        .find(|r| r.name == "liq")
+        .expect("liq is listed");
+    assert_eq!(liq.summary, "npv > 0");
+}
+
+/// `n` names a new expression and opens its only field at once, with no
+/// refusal for the still-empty text; the first valid Enter creates the
+/// object in the user file.
+#[gpui::test]
+fn a_new_named_expression_is_written_to_the_user_file(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("hedges");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { ref object } if object == "hedges"
+    ));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "the field is open without `i`"
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.diagnostics.is_empty()));
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+    // An empty Enter is refused with the field kept open.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("expression: a named expression cannot be empty")
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    cx.simulate_input("npv < 0");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        draft_expression(&shell, &cx).as_deref(),
+        Some("npv < 0"),
+        "notice: {:?}",
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[hedges]\nexpression = \"npv < 0\""),
+        "{written}"
+    );
+}
+
+/// Escape out of a fresh expression's open field, before any valid Enter,
+/// writes nothing and shows no error; leaving the edit stage loses only the
+/// unsaved name.
+#[gpui::test]
+fn escaping_a_fresh_named_expression_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("hedges");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
+    assert!(edit_draft(&shell, &cx, |d| d.diagnostics.is_empty()));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    flush_config_write(&mut cx);
+    assert!(!dir.path().join("expressions.toml").exists());
+    assert!(shell.read_with(&cx, |s, _| {
+        s.services
+            .config
+            .doc("expressions")
+            .is_none_or(|d| d.value.get("hedges").is_none())
+    }));
+}
+
+/// Enter on an expression naming a column the schema lacks refuses with
+/// the schema notice and keeps the field open.
+#[gpui::test]
+fn the_expressions_field_refuses_an_unknown_column(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("enter i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace backspace");
+    cx.simulate_input("bokk = 'A'");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "still open"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("expression: unknown column 'bokk'; did you mean 'book'?".to_string())
+    );
+    assert_eq!(draft_expression(&shell, &cx).as_deref(), Some("npv > 0"));
+}
+
+/// The open expression field lists suggestions under it, as the Scopes
+/// field does.
+#[gpui::test]
+fn the_expressions_field_suggests_columns(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("enter i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace backspace");
+    cx.simulate_input("n");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    assert!(
+        cx.debug_bounds("scope-expr-row-npv").is_some(),
+        "columns listed under the field"
+    );
+}
+
+/// `d` on a user-layer expression names every user in the question: the
+/// saved scopes that tick it and the frame. Confirming deletes only the
+/// definition; the scopes keep their references.
+#[gpui::test]
+fn deleting_a_named_expression_names_its_users(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    shell.update(&mut cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(Scope {
+                named: vec!["liq".to_string()],
+                ..Scope::default()
+            });
+        });
+    });
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.confirm),
+        Some(objectdialog::Confirm::Delete)
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.confirm_detail.clone()).as_deref(),
+        Some("Used by mine and the current scope.")
+    );
+    assert!(cx.debug_bounds("objectdialog-confirm-detail").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.confirm_detail.clone()),
+        None
+    );
+    flush_config_write(&mut cx);
+    let (liq, named) = shell.read_with(&cx, |s, _| {
+        let config = &s.services.config;
+        let liq = config
+            .doc("expressions")
+            .and_then(|d| d.value.get("liq"))
+            .cloned();
+        let named = config
+            .doc("scopes")
+            .and_then(|d| d.value.get("mine"))
+            .and_then(|v| v.get("named"))
+            .cloned();
+        (liq, named)
+    });
+    assert_eq!(liq, None, "liq is deleted");
+    assert_eq!(
+        named,
+        Some(toml::Value::Array(vec![toml::Value::String(
+            "liq".to_string()
+        )])),
+        "mine still names liq"
+    );
+}
+
+/// `c` copies an expression under a new name, and the copy opens with
+/// the source's expression.
+#[gpui::test]
+fn c_copies_a_named_expression_with_its_text(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_expressions(),
+        dir.path(),
+        "config::expressions",
+    );
+    cx.simulate_keystrokes("c");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_seed.clone()),
+        objectdialog::NameSeed::CopyOf("liq".to_string())
+    );
+    cx.simulate_input("liq2");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { ref object } if object == "liq2"
+    ));
+    assert_eq!(draft_expression(&shell, &cx).as_deref(), Some("npv > 0"));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("expressions.toml")).unwrap();
+    assert!(
+        written.contains("[liq2]\nexpression = \"npv > 0\""),
+        "{written}"
+    );
 }
 
 // Colour configuration.
@@ -9046,7 +9615,7 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
     // The third element names one row the fixture MUST have opened with,
     // so a case cannot pass vacuously — the subscribed source's four
     // extra rows in particular, which a directory source never paints.
-    let cases: [(&str, Fixture, &str); 7] = [
+    let cases: [(&str, Fixture, &str); 8] = [
         ("config::views", services_with_a_desk_view, "columns"),
         ("config::sources", services_with_sources, "batch_pattern"),
         (
@@ -9061,6 +9630,11 @@ fn every_field_on_every_domain_has_help(cx: &mut gpui::TestAppContext) {
         ),
         ("config::scopes", services_with_a_saved_scope, "dimensions"),
         ("config::colors", services_with_colours, "token"),
+        (
+            "config::expressions",
+            services_with_expressions,
+            "expression",
+        ),
         ("config::schema", services_with_schema, "columns.book"),
     ];
     for (action, services, expected) in cases {
@@ -9259,7 +9833,7 @@ fn the_back_button_is_absent_in_browse(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()));
     assert!(!back_paints(&mut cx), "browse has no parent screen");
 }
 
@@ -9277,7 +9851,7 @@ fn the_back_button_leaves_the_edit_stage_for_browse(cx: &mut gpui::TestAppContex
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse
     );
-    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()), "still open");
+    assert!(shell.read_with(&cx, |s, _| s.modal_open()), "still open");
     assert!(!back_paints(&mut cx), "browse paints no Back button");
     assert!(cx.debug_bounds("objectdialog-row-tree").is_some());
 

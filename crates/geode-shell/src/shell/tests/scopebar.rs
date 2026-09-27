@@ -257,7 +257,7 @@ fn the_save_chip_only_paints_with_a_savable_scope_and_opens_naming(cx: &mut gpui
     vcx.simulate_click(save.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
 
-    assert!(shell.read_with(&vcx, |s, _| s.modal.is_some()));
+    assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
     assert_eq!(
         shell.read_with(&vcx, |s, _| s
             .object_dialog
@@ -349,8 +349,13 @@ const SCOPES_DOC: &str = "[eu]\ntext = \"eu\"\n";
 /// function's own comment on why it still calls `register_scope_actions`
 /// anyway, over nothing).
 fn services_with_saved_scope() -> ShellServices {
+    services_with_builtin_docs(vec![LayerDoc::builtin("scopes", SCOPES_DOC).unwrap()])
+}
+
+/// [`services_with_saved_scope`]'s registration over any builtin docs.
+fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
     let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
-        builtin: vec![LayerDoc::builtin("scopes", SCOPES_DOC).unwrap()],
+        builtin: docs,
         ..ConfigSources::default()
     });
     let mut registry = ActionRegistry::default();
@@ -444,11 +449,11 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
 
     vcx.simulate_keystrokes("ctrl-,");
     assert!(
-        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&vcx, |shell, _| shell.modal_open()),
         "ctrl+, from the focused field must open the settings dialog"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
 
     vcx.simulate_keystrokes("alt-/");
     assert!(filter_is_focused(&shell, &mut vcx));
@@ -597,13 +602,13 @@ fn a_dialog_opened_from_the_field_returns_focus_to_it_when_closed(cx: &mut gpui:
         let _ = window.draw(cx);
     });
     vcx.simulate_keystrokes("ctrl-,");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_some()));
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal_open()));
     assert!(
         !filter_is_focused(&shell, &mut vcx),
         "the open dialog owns the keyboard, not the field"
     );
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "escape must return focus to the field the dialog was opened from"
@@ -659,12 +664,12 @@ fn a_dialog_opened_through_the_palette_from_the_field_returns_focus_to_the_field
     vcx.simulate_keystrokes("enter");
     assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
     assert!(
-        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        shell.read_with(&vcx, |shell, _| shell.modal_open()),
         "the palette must have opened the settings dialog"
     );
     assert!(!filter_is_focused(&shell, &mut vcx));
     vcx.simulate_keystrokes("escape");
-    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(shell.read_with(&vcx, |shell, _| !shell.modal_open()));
     assert!(
         filter_is_focused(&shell, &mut vcx),
         "escape must return focus to the field the whole chain started from"
@@ -851,4 +856,89 @@ fn dragging_from_bare_title_bar_space_moves_the_window(cx: &mut gpui::TestAppCon
     vcx.run_until_parked();
     let bare = bare_title_bar(&mut vcx);
     press_and_drag(&mut vcx, bare);
+}
+
+/// A saved scope `mine` naming `named`, beside an `expressions` doc that
+/// defines `liq` alone.
+fn services_with_a_named_scope(named: &str) -> ShellServices {
+    services_with_builtin_docs(vec![
+        LayerDoc::builtin("scopes", &format!("[mine]\nnamed = [\"{named}\"]\n")).unwrap(),
+        LayerDoc::builtin("expressions", "[liq]\nexpression = \"npv > 0\"\n").unwrap(),
+    ])
+}
+
+fn click_selector(vcx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let bounds = vcx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} paints"));
+    vcx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+}
+
+/// Loading a saved scope that names an expression paints its `≡ liq`
+/// chip, and the scope is savable on that name alone (the save glyph
+/// paints). The narrowing is on screen, not only in the totals.
+#[gpui::test]
+fn a_loaded_scope_paints_a_chip_for_its_named_expression(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("liq"));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-named-chip-liq").is_some(),
+        "the ≡ liq chip paints"
+    );
+    assert!(
+        vcx.debug_bounds("scope-named-chip-broken-liq").is_none(),
+        "a defined name is not painted broken"
+    );
+    assert!(
+        vcx.debug_bounds("scope-save-chip").is_some(),
+        "a scope of one name is savable"
+    );
+}
+
+/// A click on a named chip's `×` drops that name through `set_scope`:
+/// `frame::scope_undo` brings it back.
+#[gpui::test]
+fn a_named_chips_close_glyph_drops_the_name_undoably(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("liq"));
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    let chip = vcx.debug_bounds("scope-named-chip-liq").expect("chip");
+    let close = vcx
+        .debug_bounds("scope-named-chip-close-liq")
+        .expect("× paints");
+    assert!(
+        close.left() >= chip.left() && close.right() <= chip.right(),
+        "the × sits inside its chip: chip {chip:?}, × {close:?}"
+    );
+    click_selector(&mut vcx, "scope-named-chip-close-liq");
+    assert!(frame.read_with(&vcx, |f, _| f.scope().named.is_empty()));
+    assert!(vcx.debug_bounds("scope-named-chip-liq").is_none());
+    dispatch_action(&shell, "frame::scope_undo", &mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.scope().named.clone()),
+        vec!["liq".to_string()],
+        "the drop went through set_scope"
+    );
+}
+
+/// A scope naming an expression that no longer exists paints the
+/// danger-toned `≡ gone · missing` chip, so the trader can see why the
+/// tile refuses and remove the name.
+#[gpui::test]
+fn a_missing_name_paints_the_broken_chip(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_a_named_scope("gone"));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "scope::mine", &mut vcx);
+    vcx.run_until_parked();
+    assert!(
+        vcx.debug_bounds("scope-named-chip-broken-gone").is_some(),
+        "the missing name paints in the danger tone"
+    );
+    assert!(vcx.debug_bounds("scope-named-chip-close-gone").is_some());
 }

@@ -12,10 +12,11 @@
 //! after every edit).
 
 use crate::core::shorthand::{render_line, render_package};
-use crate::core::template::Template;
+use crate::core::template::{Template, TemplateSet};
 use chrono::{DateTime, Utc};
 use geode_core::pricing::{Instrument, MarketOverrides, PriceRequest, PriceResult, Shifts};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Per-sheet, monotonic, never reused (spec §6.1). `u64` so it is the
@@ -149,6 +150,17 @@ pub struct Sheet {
     state: Vec<LineState>,
     priced_at: Vec<Option<DateTime<Utc>>>,
     next_id: u64,
+    /// The template tables `shorthand` prints against; not persisted. The
+    /// builtin set until the tile sets the configured one.
+    templates: Arc<TemplateSet>,
+}
+
+/// One parsed builtin set per thread, shared by every new sheet on it.
+fn builtin_templates() -> Arc<TemplateSet> {
+    thread_local! {
+        static BUILTIN: Arc<TemplateSet> = Arc::new(TemplateSet::builtin());
+    }
+    BUILTIN.with(Arc::clone)
 }
 
 impl Sheet {
@@ -170,7 +182,16 @@ impl Sheet {
             state: Vec::new(),
             priced_at: Vec::new(),
             next_id: 1,
+            templates: builtin_templates(),
         }
+    }
+
+    pub fn set_templates(&mut self, templates: Arc<TemplateSet>) {
+        self.templates = templates;
+    }
+
+    pub fn templates(&self) -> &Arc<TemplateSet> {
+        &self.templates
     }
 
     pub fn len(&self) -> usize {
@@ -494,12 +515,15 @@ impl Sheet {
                     .children(row)
                     .filter_map(|l| self.instrument[l].as_ref().map(|i| (self.qty[l], i)))
                     .collect();
-                render_package(template, &legs).unwrap_or_else(|| {
-                    legs.iter()
-                        .map(|(q, i)| render_line(*q, i))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
+                self.templates
+                    .resolve(template.token())
+                    .and_then(|def| render_package(def, &legs))
+                    .unwrap_or_else(|| {
+                        legs.iter()
+                            .map(|(q, i)| render_line(*q, i))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
             }
         }
     }
@@ -675,7 +699,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn callspread(qty: i64) -> RowSpec {
-        crate::core::shorthand::parse(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap()
+        crate::core::shorthand::parse_builtin(&format!("{qty} SPX Z26 4800/5200 CS")).unwrap()
     }
 
     pub(crate) fn result(price: f64) -> PriceResult {
@@ -742,7 +766,7 @@ pub(crate) mod tests {
         s.apply(Edit::Group {
             first: 0,
             count: 2,
-            template: Template::Custom,
+            template: Template::CUSTOM,
             id: None,
         })
         .unwrap();

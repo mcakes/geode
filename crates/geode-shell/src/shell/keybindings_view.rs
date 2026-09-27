@@ -342,7 +342,7 @@ const WIDTH: f32 = 640.0;
 /// Open a fresh keybinding dialog through the shared modal lifecycle. Leave an
 /// already-open modal intact.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Keybindings) {
         return;
     }
     // Fresh state every open — nothing survives a close/reopen, same
@@ -353,6 +353,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         view,
         window,
         cx,
+        dialog::DialogKind::Keybindings,
         "Keyboard shortcuts",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -426,9 +427,11 @@ fn arm_verb(
 /// Navigation remains bounded by the filtered rows.
 ///
 /// Consume Tab/Shift-Tab so they cannot insert literal tabs into the focused filter.
-/// Other Filter input passes through for text entry; unrecognized Normal commands are
-/// consumed. Re-capturing the effective binding skips persistence. Focus and input text
-/// are reconciled by `sync_dialog_text` after this handler.
+/// Other Filter input passes through for text entry; in Normal mode an unrecognized
+/// bare key is consumed and an unrecognized chord is declined, so a dialog-opening
+/// action stacked over this dialog can still reach the shell. Re-capturing the
+/// effective binding skips persistence. Focus and input text are reconciled by
+/// `sync_dialog_text` after this handler.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -514,10 +517,13 @@ fn handle_key(
             }
         }
         let Some(cmd) = dialogmode::normal_command(ks) else {
-            // Claimed and dropped: in normal mode a key with no meaning
-            // does nothing at all, rather than falling through to the
-            // shell (which is still listening underneath the modal).
-            return true;
+            // A bare key with no meaning is claimed and dropped, same as
+            // browse mode elsewhere. A chord is declined instead: capture
+            // (`state.listening`, above) already claims every key when a
+            // binding is being recorded, so this decline is reached only
+            // outside capture, and is how the shell reaches a
+            // dialog-opening action stacked over this dialog.
+            return !ks.mods.is_chord();
         };
         match cmd {
             NormalCommand::Nav(nav) => {

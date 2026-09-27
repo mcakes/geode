@@ -1,10 +1,11 @@
 //! What the shell hosts (line-pricer spec §8.1): the [`TileContent`]
 //! wrapper over a [`PricerTile`], and the factory that builds them. The
-//! factory carries the data handle, the loaded views, the pricing
-//! settings, the sheet store and the set of sheet names open across its
-//! tiles (spec §7.4) — the shell sees none of them.
+//! factory carries the data handle, the loaded views, the template
+//! tables, the pricing settings, the sheet store and the set of sheet
+//! names open across its tiles (spec §7.4) — the shell sees none of them.
 
 use crate::core::storage::PRICER_SHEETS_DATASET;
+use crate::core::template::TemplateSet;
 use crate::core::views::Views;
 use crate::store::SheetStore;
 use crate::tile::PricerTile;
@@ -23,6 +24,7 @@ use gpui::{App, Entity, SharedString, WeakEntity, Window};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Every action this module registers, with its palette title — one list
@@ -195,6 +197,9 @@ impl Default for PricerSettings {
 /// What the factory shares with every tile it built.
 pub(crate) struct Shared {
     pub(crate) views: RefCell<Views>,
+    /// The `pricer_templates` tables every tile's sheet parses and prints
+    /// against; replaced whole on a reload (`PricerTile::adopt_templates`).
+    pub(crate) templates: RefCell<Arc<TemplateSet>>,
     pub(crate) settings: RefCell<PricerSettings>,
     pub(crate) store: Rc<dyn SheetStore>,
     /// Sheet names open in some tile (spec §7.4): `untitled-N` skips them,
@@ -390,12 +395,14 @@ impl PricerFactory {
         data: DataHandle,
         store: Rc<dyn SheetStore>,
         views: Views,
+        templates: TemplateSet,
         settings: PricerSettings,
     ) -> Self {
         PricerFactory {
             data,
             shared: Rc::new(Shared {
                 views: RefCell::new(views),
+                templates: RefCell::new(Arc::new(templates)),
                 settings: RefCell::new(settings),
                 store,
                 open: RefCell::new(BTreeSet::new()),
@@ -456,18 +463,21 @@ impl PricerFactory {
             .detach();
     }
 
-    /// A reload (planning decision 20): the new views and the live pricing
-    /// settings, then every open tile re-resolves its view and restarts
-    /// its timer. The pricer's name and presence are the running data
-    /// engine's and change only with a restart (`[pricing] adapter`).
+    /// A reload (planning decision 20): the new views, template tables and
+    /// live pricing settings, then every open tile adopts the tables,
+    /// re-resolves its view and restarts its timer. The pricer's name and
+    /// presence are the running data engine's and change only with a
+    /// restart (`[pricing] adapter`).
     pub fn reload(
         &self,
         views: Views,
+        templates: TemplateSet,
         refresh: Option<Duration>,
         stale_after: Duration,
         cx: &mut App,
     ) {
         *self.shared.views.borrow_mut() = views;
+        *self.shared.templates.borrow_mut() = Arc::new(templates);
         {
             let mut s = self.shared.settings.borrow_mut();
             s.refresh = refresh;
@@ -494,8 +504,30 @@ impl PricerFactory {
             .collect()
     }
 
+    /// The loaded template names, in doc order.
+    pub fn template_names(&self) -> Vec<String> {
+        self.shared
+            .templates
+            .borrow()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    /// The running template set: what a reload's bad entries fall back to
+    /// (`TemplateSet::from_doc_over`).
+    pub fn templates(&self) -> Arc<TemplateSet> {
+        self.shared.templates.borrow().clone()
+    }
+
     pub fn settings(&self) -> PricerSettings {
         self.shared.settings.borrow().clone()
+    }
+
+    /// The loaded views, for a test that reloads with them unchanged.
+    #[cfg(test)]
+    pub(crate) fn views_for_tests(&self) -> Views {
+        self.shared.views.borrow().clone()
     }
 
     /// Every live tile this factory built.

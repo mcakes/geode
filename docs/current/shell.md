@@ -154,10 +154,12 @@ modifiers, while the keep-query Enter must be unmodified. Restoring a different
 query resets the list toward the first match; object edit stages then settle
 on an eligible row under their [cursor rules](configuration-dialogs.md#stages-and-ownership).
 Leaving unchanged text keeps selection. In Normal mode, subsequent Escape
-presses clear a query, return from a nested stage, then close the dialog. The
-modal title row's Back button is the pointer route for the return step: one
-click discards what the earlier Escape presses would and leaves the stage (see
-[modal lifetime](input-and-dialogs.md#modal-lifetime-and-focus)).
+presses clear a query, return from a nested stage, then pop this dialog off
+the stack: an entry beneath it, if any, is revealed with its own query, caret,
+mode, and focus restored, rather than the whole stack closing (see
+[modal lifetime](input-and-dialogs.md#modal-lifetime-and-focus)). The modal
+title row's Back button is the pointer route for the return step: one click
+discards what the earlier Escape presses would and leaves the stage.
 
 Naming, open object value fields, Settings typeahead, and keybinding capture
 have their own commit/cancel handling before filter routing. They can focus
@@ -169,9 +171,49 @@ and [keybinding editing](keymaps.md#editing-unbinding-and-reset).
 ## The shared frame
 
 `Frame` is a pure value held in a GPUI entity. It combines the global scope,
-active grouping, as-of value, recent publications, saved scopes, and version
-counters. Every mutation bumps only the counters affected by that change, so
-a tile can cheaply ignore dimensions it does not follow.
+active grouping, as-of value, recent publications, saved scopes, named
+expressions, and version counters. Every mutation bumps only the counters
+affected by that change, so a tile can cheaply ignore dimensions it does not
+follow.
+
+A scope (`geode_core::scope::Scope`) has four parts: dimension selections, a
+list of named-expression references (`named`), a text filter, and an
+expression. A query combines all four with AND. Composing scope layers
+(`Scope::and_then`, the frame scope with a tile's own) treats each part by its
+own rule: dimension selections on the same column intersect, named references
+append in outer-then-inner order without repeating one already present,
+expressions combine with AND, and an inner text filter replaces an outer one.
+A named reference is not itself expression syntax — the grammar has no token
+for it — so it cannot combine with `or` or `not`, and a named expression
+cannot itself reference another one.
+
+`Frame::effective_scope` composes the frame and tile layers and then resolves
+every named reference through `Scope::resolve` against the frame's own
+`NamedExpressions` (read from `expressions.toml`; see
+[configuration](configuration.md#documents)), folding each into `expression`
+in list order, ANDed together and then with whatever expression the scope
+already carried. Resolution runs before every query a scope reaches — a tile's
+own requery and the shell's distinct-value requests (the dimension picker, the
+Scopes dialog's Values stage, and the frame's expression-suggestion lists) all
+resolve the scope they are about to ask for values or rows under. A missing or
+invalid name is that request's error instead: a blotter tile paints it in
+place of a result, keeping whatever snapshot it had already painted rather
+than clearing it, and the other surfaces show it as their own
+values-unavailable text. Nothing is queried in any of these cases — dropping
+the name would widen the scope into a plausible wrong total, which this
+guards against by refusing outright. `geode-data`'s scope compiler refuses a
+scope that still carries `named`, as a safety net behind these call sites: a
+resolution reaching the query layer unresolved is a defect, not a case to
+serve.
+
+Editing a named expression's text, or adding or removing one, reaches every
+scope that ticks it without editing the scope itself: an `expressions`
+(or `datasets`/`dimensions`) reload rebuilds the frame's `NamedExpressions`
+and, when the content actually changed, bumps the frame's config version, so
+every tile whose effective scope depends on it requeries (see
+[hot reload](configuration.md#hot-reload)). A definition that stops parsing,
+or a name a scope ticks that is removed, becomes that scope's resolution
+error the same way a name that was always missing does.
 
 Dataset and document watches narrow publication invalidation to consumers
 that read the affected data. The frame keeps weak watches, allowing closed
@@ -189,7 +231,8 @@ removes the no-op undo entry. Changes made through another surface during the
 session remain distinct.
 
 The toolbar's scope segment paints the dimension chips, then one chip per
-top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
+named-expression reference (`≡ name`, in `Scope.named` order), then one chip
+per top-level `and` term of the expression (`Expr::conjuncts`: nested `and`s
 flatten on both sides; an `or`, a `not`, or a single comparison is one term),
 then the contradiction chip. The frame still holds one `Expr`; the terms are
 a view of it, and an edit rebuilds a left-folded `and` chain from the
@@ -201,6 +244,20 @@ Term chips are addressed by index, which is stable within one scope version;
 the term dialog also carries the term it was seeded with and refuses inline
 unless that term is still at its index at commit time. Every term
 edit, append, and clear goes through undoable `set_scope`.
+
+A named chip's tooltip is the expression text. A name the frame's
+`NamedExpressions` cannot resolve paints as a danger-toned chip,
+`≡ name · missing` or `≡ name · invalid`, whose tooltip is the reason
+`Scope::resolve` gives; every tile that scope reaches refuses to query until
+the name is defined again or removed. The `×` inside a named chip removes that
+name (`Frame::drop_named`, undoable through `set_scope`). Named chips are
+keyed by name, so their element ids survive a neighbour's removal. The chip
+body has no click and no hover fill yet; the Expressions dialog is the
+keyboard route to the definitions. Known limitation: no key removes one name
+from the frame scope. The keyboard reaches that only through
+`frame::scope_clear` (the whole scope), `frame::scope_undo`, or loading a
+saved scope. A scope whose only content is a name is not empty: the chips
+row and the save glyph paint for it.
 
 The `+` verb opens the "Add a filter" menu under itself: "Dimension…"
 dispatches `frame::pick`, "Expression…" dispatches `frame::add_expression`,
@@ -299,7 +356,7 @@ The writer emits `config_version = 1` and these records:
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name and its opaque state table |
-| `frame` | Dimension selections, text/expression scope, grouping slot, and as-of |
+| `frame` | Dimension selections, named-expression references, text/expression scope, grouping slot, and as-of |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
@@ -339,6 +396,10 @@ Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
 and non-array dimension entries warn; some wrong-type fields and non-string
 dimension values are silently ignored. `Scope::impossible` is not persisted.
+`named` restores as an ordered, deduplicated list of strings the same way a
+saved scope's does — a non-array value warns and is dropped, but names are
+kept without checking they are defined; a missing or invalid one becomes the
+frame's resolution error on the next query rather than failing restoration.
 The shell applies scope, slot, and as-of, then clears scope history. Undo/redo
 history and recent publishes start fresh; saved scopes come from config.
 

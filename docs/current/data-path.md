@@ -278,6 +278,14 @@ the grouping cardinality. The result is an immutable columnar `Snapshot`:
 expanding a tree node works on the prepared result rather than issuing another
 database query. User supplied scope values are bound as parameters.
 
+A scope reaching compilation still carrying a named-expression reference
+(`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
+carries unresolved named expressions")`, rather than compiled with that
+reference silently dropped. Resolving a name against `expressions.toml` is
+the shell's job, before a query is ever submitted (see
+[the shared frame](shell.md#the-shared-frame)); this refusal is the safety net
+behind that call site, not a path meant to be exercised in normal use.
+
 The [typed-document reference](typed-documents.md) describes schema and view
 validation, grain meaning, scope composition, and checks deferred to query
 compilation. A typed reader returning a value does not prove every requested

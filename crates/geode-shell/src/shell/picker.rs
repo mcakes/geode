@@ -27,7 +27,7 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
-use geode_core::query::DistinctParams;
+use geode_core::query::{DistinctOutcome, DistinctParams};
 use geode_core::scope::{DimensionSelection, Scope};
 
 use crate::fonts;
@@ -199,7 +199,7 @@ const WIDTH: f32 = 480.0;
 
 /// Open the picker (`frame::pick` with `column: None`, `frame::
 /// pick_<column>` or a chip body click with `column: Some(..)`). A no-op
-/// if a modal is already open, mirroring every other `open` here.
+/// when this kind is already open (see `dialog::can_open`).
 /// `column` names an unrecognised column (stale palette state from before
 /// a reload dropped it, say) falls back to the `Columns` stage rather than
 /// opening on a column that no longer exists.
@@ -209,7 +209,7 @@ pub fn open(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if view.modal.is_some() {
+    if !dialog::can_open(view, dialog::DialogKind::Picker) {
         return;
     }
     let stage = match column {
@@ -236,6 +236,7 @@ pub fn open(
         view,
         window,
         cx,
+        dialog::DialogKind::Picker,
         "Pick",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
@@ -285,6 +286,23 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
     let mut minus_own = scope;
     minus_own.dimensions.retain(|d| d.column != column);
     let tag = p.tag;
+    // An unresolved name is shown in the values area, never sent: the data
+    // layer would refuse it, and dropping it would widen the counts.
+    let minus_own = match minus_own.resolve(view.frame.read(cx).named_expressions()) {
+        Ok(scope) => scope,
+        Err(message) => {
+            view.deliver_distinct(
+                DistinctOutcome {
+                    key: PICKER_KEY,
+                    tag,
+                    column: column.to_string(),
+                    values: Err(message),
+                },
+                cx,
+            );
+            return;
+        }
+    };
     cx.emit(ShellEvent::DistinctRequested(DistinctParams {
         key: PICKER_KEY,
         tag,
