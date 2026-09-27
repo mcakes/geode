@@ -2406,8 +2406,15 @@ impl PricerTile {
                 } else if let Some(why) = self.row_verb_refusal(verb) {
                     self.footer = Some(why.into());
                 } else {
+                    // A live selection names the rows itself, so a count
+                    // is ignored rather than stretching past what was picked.
+                    let selected = self.selection.is_some();
                     let result = match verb {
-                        "delete" if self.selection.is_some() => self.delete_selection(cx),
+                        "delete" if selected => self.delete_selection(cx),
+                        "move_down" if selected => self.move_selection(true, cx),
+                        "move_up" if selected => self.move_selection(false, cx),
+                        "group" if selected => self.group_selection(cx),
+                        "ungroup" if selected => self.ungroup_selection(cx),
                         "delete" => self.delete_row(cx),
                         "undo" => self.history_step(false, cx),
                         "redo" => self.history_step(true, cx),

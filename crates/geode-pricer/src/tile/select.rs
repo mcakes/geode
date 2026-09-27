@@ -5,7 +5,7 @@
 //! with a notice rather than guessing a neighbour.
 
 use super::*;
-use crate::core::select::{RISK, lines_of, risk_totals, top_most};
+use crate::core::select::{RISK, group_plan, lines_of, move_plan, risk_totals, top_most};
 use geode_core::grid::selection::Lost;
 
 /// The refusal for `v`/`V` on a row with no line behind it.
@@ -247,6 +247,74 @@ impl PricerTile {
         let n = specs.len();
         self.register = Some(specs);
         self.notice = Some(format!("deleted {n} row{}", if n == 1 { "" } else { "s" }).into());
+        Ok(())
+    }
+
+    /// `shift+j`/`shift+k` over a `V` selection: the block slides one
+    /// sibling step as a unit, as ONE move of the neighbour across it.
+    /// The selection stays: it is anchored by line id, so the rebuild
+    /// re-resolves it onto the moved lines.
+    pub(crate) fn move_selection(
+        &mut self,
+        down: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        let edit = move_plan(&self.sheet, &top, down)?;
+        self.apply_edit(edit, cx).map_err(|e| e.to_string())
+    }
+
+    /// `g p` over a `V` selection, which it ends: contiguous root lines
+    /// become one custom package, opened, with the cursor on it.
+    pub(crate) fn group_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        let (first, count) = group_plan(&self.sheet, &top)?;
+        // Cleared first: the new package starts closed, so the rebuild
+        // after the edit would otherwise report the anchor line as lost.
+        let kept = self.selection.take();
+        self.clear_selection();
+        let edit = Edit::Group {
+            first,
+            count,
+            template: Template::CUSTOM,
+            id: None,
+        };
+        if let Err(e) = self.apply_edit(edit, cx) {
+            self.selection = kept;
+            return Err(e.to_string());
+        }
+        let id = self.sheet.id(first);
+        self.expansion.set(id, true);
+        self.cursor.line = Some(id);
+        self.rebuild(cx);
+        Ok(())
+    }
+
+    /// `g u` over a `V` selection, which it ends: every top-most selected
+    /// package dissolves as ONE undo entry. The ungroups run bottom-up
+    /// so each earlier package's index is still valid when it is reached.
+    pub(crate) fn ungroup_selection(&mut self, cx: &mut Context<Self>) -> Result<(), String> {
+        let mut packages: Vec<usize> = top_most(&self.sheet, &self.selected_sheet_rows())
+            .into_iter()
+            .filter(|&r| self.sheet.is_package(r))
+            .collect();
+        if packages.is_empty() {
+            return Err("no package selected".into());
+        }
+        packages.sort_unstable_by(|a, b| b.cmp(a));
+        let edits = packages
+            .into_iter()
+            .map(|row| Edit::Ungroup { row })
+            .collect();
+        // Cleared first: an anchor on a package row vanishes with it, and
+        // that is the verb's intent, not a lost selection.
+        let kept = self.selection.take();
+        self.clear_selection();
+        if let Err(e) = self.apply_edits(edits, cx) {
+            // A refused batch leaves the sheet as it was.
+            self.selection = kept;
+            return Err(e.to_string());
+        }
         Ok(())
     }
 

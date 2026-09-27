@@ -312,3 +312,115 @@ fn a_leg_selected_without_its_package_is_deleted_as_a_leg(cx: &mut gpui::TestApp
     h.dispatch(&mut vcx, "undo", None);
     assert_eq!(legs(&h, &vcx), 2, "one undo restores the leg");
 }
+
+#[gpui::test]
+fn shift_j_moves_the_selected_block_as_a_unit_and_keeps_the_selection(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(
+        h.tree(&vcx),
+        vec!["SPX Z26 3000 P", "SPX Z26 5000 C", "SPX Z26 4000 P"]
+    );
+    assert_eq!(
+        resolved(&h, &vcx).map(|r| r.1),
+        Some(1..3),
+        "the selection followed its lines"
+    );
+    h.dispatch(&mut vcx, "move_down", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some("cannot move past the end"));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.tree(&vcx)[0], "SPX Z26 5000 C");
+}
+
+#[gpui::test]
+fn g_p_over_root_lines_groups_them_and_u_restores(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P", "SPX Z26 3000 P"]);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "group", None);
+    assert_eq!(h.tree(&vcx)[0], "CUSTOM SPX Z26");
+    assert_eq!(h.mode(&mut vcx), "normal", "g p ends the selection");
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()), 3);
+}
+
+#[gpui::test]
+fn g_p_names_why_it_refuses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // includes the CS package
+    h.dispatch(&mut vcx, "group", None);
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("can't group: selection includes a package")
+    );
+}
+
+#[gpui::test]
+fn g_u_ungroups_every_selected_package_in_one_undo_entry(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(
+        cx,
+        &[
+            "-5 SPX Z26 4800/5200 CS",
+            "SPX Z26 5000 C",
+            "2 SPX Z26 4000/3800 PS",
+        ],
+    );
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "ungroup", None);
+    assert!(h.tile.read_with(&vcx, |t, _| {
+        (0..t.sheet.len()).all(|r| !t.sheet.is_package(r))
+    }));
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| (0..t.sheet.len())
+            .filter(|&r| t.sheet.is_package(r))
+            .count()),
+        2
+    );
+}
+
+#[gpui::test]
+fn g_u_with_no_package_selected_refuses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "ungroup", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some("no package selected"));
+}
+
+#[gpui::test]
+fn a_count_is_ignored_while_a_selection_is_live(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(
+        cx,
+        &[
+            "SPX Z26 5000 C",
+            "SPX Z26 4000 P",
+            "SPX Z26 3000 P",
+            "SPX Z26 2000 P",
+        ],
+    );
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "move_down", Some(2));
+    assert_eq!(
+        h.tree(&vcx),
+        vec![
+            "SPX Z26 4000 P",
+            "SPX Z26 5000 C",
+            "SPX Z26 3000 P",
+            "SPX Z26 2000 P"
+        ],
+        "one step, not two"
+    );
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "group", Some(3));
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.sheet.roots().count()),
+        3,
+        "the package holds the two selected lines, not three"
+    );
+}
