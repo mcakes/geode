@@ -67,6 +67,13 @@ fn kind_token(kind: OptionKind) -> &'static str {
 
 /// What the editor opens with on (`row`, `kind`), or why it does not open.
 pub fn editor_for(sheet: &Sheet, row: usize, kind: ColumnKind) -> Result<CellEditor, &'static str> {
+    // A package cell may hold a `/` list, which neither a date field nor a
+    // choice list can show: every aggregated column opens a text field.
+    if sheet.is_package(row) {
+        return crate::core::package::editor_text(sheet, row, kind)
+            .map(CellEditor::Text)
+            .ok_or(READ_ONLY);
+    }
     let i = instrument(sheet, row)?;
     Ok(match kind {
         ColumnKind::Qty => CellEditor::Text(sheet.qty(row).to_string()),
@@ -153,12 +160,27 @@ pub fn commit(
     edit_for(sheet, row, kind, text).map(|edit| changed(sheet, row, edit))
 }
 
+/// A committed cell's edits: a package row's through `package::commit`
+/// (one per leg that changes), a line's as zero or one. The tile applies
+/// several as one undo entry.
+pub fn commit_edits(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Vec<Edit>, String> {
+    if sheet.is_package(row) {
+        return crate::core::package::commit(sheet, row, kind, text);
+    }
+    commit(sheet, row, kind, text).map(|e| e.into_iter().collect())
+}
+
 /// `edit` unless it would leave the line exactly as it is. Values are
 /// compared, never text: `5000` and `5000.0` are one strike, and an empty
 /// shift on an inherited one stays inherited — while an explicit value is
 /// a change from inherited to own even when it equals what was inherited.
 /// An unchanged commit is no edit: no undo entry, no reprice, no save.
-fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
+pub(crate) fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
     let same = match &edit {
         Edit::SetQty { qty, .. } => *qty == sheet.qty(row),
         Edit::SetShift { shift, .. } => *shift == sheet.shift(row),
@@ -168,7 +190,12 @@ fn changed(sheet: &Sheet, row: usize, edit: Edit) -> Option<Edit> {
     (!same).then_some(edit)
 }
 
-fn edit_for(sheet: &Sheet, row: usize, kind: ColumnKind, text: &str) -> Result<Edit, String> {
+pub(crate) fn edit_for(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Edit, String> {
     let i = instrument(sheet, row).map_err(String::from)?;
     let t = text.trim();
     match kind {
@@ -275,6 +302,10 @@ pub fn commit_date(sheet: &Sheet, row: usize, date: NaiveDate) -> Result<Option<
 /// nudge either — the two answer the same text the same way.
 pub fn nudge(kind: ColumnKind, text: &str, steps: i64) -> Result<String, String> {
     let t = text.trim();
+    // A package cell's `/` list has no one number to step.
+    if t.contains('/') {
+        return Err("a list does not nudge".into());
+    }
     match kind {
         ColumnKind::Qty => nudge_text(t, ColumnType::I64, None, steps),
         ColumnKind::Strike => match t.strip_suffix('%') {
@@ -405,7 +436,14 @@ mod tests {
         ] {
             assert_eq!(editor_for(&s, 0, kind), Err(READ_ONLY), "{kind:?}");
         }
-        for kind in [ColumnKind::Qty, ColumnKind::Strike, ColumnKind::SpotShift] {
+        // A package's own columns (results, status) stay read-only; its
+        // aggregated columns edit through text.
+        for kind in [
+            ColumnKind::Price,
+            ColumnKind::Delta,
+            ColumnKind::PricedAt,
+            ColumnKind::Status,
+        ] {
             assert_eq!(editor_for(&s, 1, kind), Err(READ_ONLY), "package {kind:?}");
         }
     }
@@ -577,6 +615,40 @@ mod tests {
             panic!("a tenor committed to a date is an edit")
         };
         assert_eq!(instrument.expiry(), &Expiry::Date(ymd(2026, 9, 26)));
+    }
+
+    #[test]
+    fn a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        assert_eq!(
+            editor_for(&s, 0, ColumnKind::Expiry),
+            Ok(CellEditor::Text("Z26".into()))
+        );
+        assert_eq!(
+            editor_for(&s, 0, ColumnKind::Type),
+            Ok(CellEditor::Text("C".into()))
+        );
+        assert_eq!(editor_for(&s, 0, ColumnKind::Price), Err(READ_ONLY));
+        assert_eq!(
+            nudge(ColumnKind::Strike, "4800/5200", 1),
+            Err("a list does not nudge".into())
+        );
+        assert_eq!(nudge(ColumnKind::Strike, "4800", 1).as_deref(), Ok("4801"));
+    }
+
+    #[test]
+    fn commit_edits_routes_a_package_and_wraps_a_line() {
+        let mut s = Sheet::new("t");
+        push(&mut s, vec![callspread(1)]);
+        push(&mut s, vec![line(spx(5000.0, OptionKind::Call), 1)]);
+        let edits = commit_edits(&s, 0, ColumnKind::Strike, "4900/5300").unwrap();
+        assert_eq!(edits.len(), 2, "one edit per leg");
+        assert_eq!(
+            commit_edits(&s, 3, ColumnKind::Qty, "7"),
+            Ok(vec![Edit::SetQty { row: 3, qty: 7 }])
+        );
+        assert_eq!(commit_edits(&s, 3, ColumnKind::Qty, "1"), Ok(vec![]));
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! text, and each part is spelled as a line's cell spells it. Pure: the
 //! grid model prepares these cells outside render, as it does a line's.
 
-use crate::core::columns::{CellState, CellText, ColumnKind, signed};
+use crate::core::columns::{COLUMNS, CellState, CellText, ColumnKind, signed};
+use crate::core::edit::Edit;
 use crate::core::sheet::{OwnShifts, RowKind, Sheet};
 use crate::core::shorthand::{render_barrier_kind, render_expiry, render_package, render_strike};
 use geode_core::pricing::{Instrument, OptionKind, Strike};
@@ -35,10 +36,6 @@ pub fn aggregates(kind: ColumnKind) -> bool {
 /// parses it (an empty part clears that group's shift).
 pub(crate) struct Group {
     pub display: String,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the package cell editor opens on it")
-    )]
     pub edit: String,
     pub legs: Vec<usize>,
 }
@@ -179,6 +176,116 @@ pub(crate) fn groups(
     }
 }
 
+/// The groups joined as a mixed cell paints them: an unset part is
+/// [`UNSET`], so the parts line up with the legs' values. The cell and the
+/// wrong-count refusal both read this, so the refusal quotes what is shown.
+fn painted(gs: &[Group]) -> String {
+    gs.iter()
+        .map(|g| {
+            if g.display.is_empty() {
+                UNSET
+            } else {
+                g.display.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// A column's default format for `kind`. The format only spells the
+/// groups' display (the wrong-count message); edits parse the `edit`
+/// spelling, which no format touches.
+fn format_for(kind: ColumnKind) -> Option<&'static ColumnFormat> {
+    COLUMNS
+        .iter()
+        .find(|c| c.kind == kind)
+        .map(|c| &c.default_format)
+}
+
+/// The text the editor opens on: the package quantity while the legs fit
+/// the template, else the groups in the line editor's spellings joined
+/// with `/`. `None` for a column that does not aggregate.
+pub fn editor_text(sheet: &Sheet, row: usize, kind: ColumnKind) -> Option<String> {
+    if !aggregates(kind) {
+        return None;
+    }
+    if kind == ColumnKind::Qty
+        && let Some((q, _)) = package_qty(sheet, row)
+    {
+        return Some(q.to_string());
+    }
+    Some(
+        groups(sheet, row, kind, format_for(kind)?)
+            .iter()
+            .map(|g| g.edit.as_str())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
+/// The edits a committed package cell means. One part goes to every
+/// group; a `/` list of exactly as many parts as groups maps by position;
+/// any other count is refused quoting the cell as painted. The package
+/// quantity (while the legs fit the template) takes one non-zero integer
+/// and sets each leg to it times the leg's weight. Every part is validated
+/// through the line cell's own `edit_for` before anything is returned, so
+/// a refusal changes nothing; only legs that change produce an edit, and
+/// an empty vector is no change.
+pub fn commit(
+    sheet: &Sheet,
+    row: usize,
+    kind: ColumnKind,
+    text: &str,
+) -> Result<Vec<Edit>, String> {
+    let read_only = || String::from(crate::core::cell::READ_ONLY);
+    if !aggregates(kind) {
+        return Err(read_only());
+    }
+    let t = text.trim();
+    if kind == ColumnKind::Qty
+        && let Some((_, weights)) = package_qty(sheet, row)
+    {
+        if t.contains('/') {
+            return Err("one quantity".into());
+        }
+        let q: i64 = t
+            .parse()
+            .map_err(|_| format!("quantity '{t}' is not a whole number"))?;
+        if q == 0 {
+            return Err("quantity must not be zero".into());
+        }
+        let mut edits = Vec::new();
+        for (leg, w) in sheet.children(row).zip(weights) {
+            let qty = q.checked_mul(w).ok_or("quantity out of range")?;
+            if qty != sheet.qty(leg) {
+                edits.push(Edit::SetQty { row: leg, qty });
+            }
+        }
+        return Ok(edits);
+    }
+    let gs = groups(sheet, row, kind, format_for(kind).ok_or_else(read_only)?);
+    if gs.is_empty() {
+        return Err(read_only());
+    }
+    let parts: Vec<&str> = t.split('/').collect();
+    if parts.len() != 1 && parts.len() != gs.len() {
+        let n = gs.len();
+        let s = if n == 1 { "" } else { "s" };
+        return Err(format!("{n} value{s}: {}", painted(&gs)));
+    }
+    let part = |i: usize| -> &str { if parts.len() == 1 { parts[0] } else { parts[i] } };
+    let mut edits = Vec::new();
+    for (i, g) in gs.iter().enumerate() {
+        for &leg in &g.legs {
+            let edit = crate::core::cell::edit_for(sheet, leg, kind, part(i))?;
+            if let Some(edit) = crate::core::cell::changed(sheet, leg, edit) {
+                edits.push(edit);
+            }
+        }
+    }
+    Ok(edits)
+}
+
 /// A package row's cell for `kind` (see the module doc).
 pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFormat) -> CellText {
     if kind == ColumnKind::Qty
@@ -199,17 +306,7 @@ pub fn aggregate(sheet: &Sheet, row: usize, kind: ColumnKind, format: &ColumnFor
             state: CellState::Blank,
         };
     }
-    let text = gs
-        .iter()
-        .map(|g| {
-            if g.display.is_empty() {
-                UNSET
-            } else {
-                g.display.as_str()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("/");
+    let text = painted(&gs);
     let state = match shift_pick(kind) {
         Some(pick) if sheet.children(row).all(|l| pick(sheet.shift(l)).is_none()) => {
             CellState::Inherited
@@ -419,5 +516,142 @@ mod tests {
         let (t2, state2) = text(&s, 0, "spot_shift");
         assert_eq!(t2, t, "an own 2 and an inherited 2 are one value");
         assert_eq!(state2, CellState::Own, "one leg sets its own");
+    }
+
+    fn apply(s: &mut Sheet, row: usize, name: &str, text: &str) -> Result<usize, String> {
+        let kind = column(name).unwrap().kind;
+        let edits = commit(s, row, kind, text)?;
+        let n = edits.len();
+        for e in edits {
+            s.apply(e).unwrap();
+        }
+        Ok(n)
+    }
+
+    #[test]
+    fn a_single_value_goes_to_every_leg() {
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        assert_eq!(apply(&mut s, 0, "underlying", "sx5e"), Ok(2));
+        assert_eq!(text(&s, 0, "underlying").0, "SX5E");
+        assert_eq!(apply(&mut s, 0, "expiry", "H27"), Ok(2));
+        assert_eq!(text(&s, 0, "expiry").0, "H27");
+        assert_eq!(apply(&mut s, 0, "strike", "7600"), Ok(2));
+        assert_eq!(text(&s, 0, "strike").0, "7600", "both legs on one strike");
+    }
+
+    #[test]
+    fn a_list_maps_by_position_and_a_fly_body_moves_once() {
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        assert_eq!(apply(&mut s, 0, "strike", "7500/7900"), Ok(2));
+        assert_eq!(text(&s, 0, "strike").0, "7500/7900");
+        assert_eq!(s.shorthand(0), "-5 SPX Z26 7500/7900 CS", "still a CS");
+        let mut f = sheet_of(&["SPX Z26 7400/7600/7800 FLY"]);
+        assert_eq!(
+            apply(&mut f, 0, "strike", "7300/7600/7900"),
+            Ok(2),
+            "the body is unchanged: two edits"
+        );
+        assert_eq!(f.shorthand(0), "SPX Z26 7300/7600/7900 FLY");
+        let mut c = sheet_of(&["SPX Z26/H27 7600 CAL"]);
+        let before = text(&c, 0, "expiry").0;
+        let parts: Vec<&str> = before.split('/').collect();
+        assert_eq!(
+            apply(&mut c, 0, "expiry", &format!("{}/{}", parts[0], "M27")),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn a_wrong_count_or_a_bad_part_refuses_and_changes_nothing() {
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        assert_eq!(
+            apply(&mut s, 0, "strike", "7400/7600/7800"),
+            Err("2 values: 7400/7800".into())
+        );
+        assert!(apply(&mut s, 0, "strike", "7500/abc").is_err());
+        assert_eq!(text(&s, 0, "strike").0, "7400/7800", "nothing applied");
+    }
+
+    #[test]
+    fn a_wrong_count_shows_the_painted_cell() {
+        let mut s = sheet_of(&["SPX Z26 7400/7800 CS"]);
+        s.apply(Edit::SetShift {
+            row: 1,
+            shift: OwnShifts {
+                spot_pct: Some(2.0),
+                vol_pts: None,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            apply(&mut s, 0, "spot_shift", "1/2/3"),
+            Err("2 values: +2.0/—".into()),
+            "an unset part reads as the cell paints it"
+        );
+    }
+
+    #[test]
+    fn package_qty_rescales_legs_by_weight() {
+        let mut f = sheet_of(&["SPX Z26 7400/7600/7800 FLY"]);
+        assert_eq!(apply(&mut f, 0, "qty", "10"), Ok(3));
+        assert_eq!(f.shorthand(0), "10 SPX Z26 7400/7600/7800 FLY");
+        let legs: Vec<i64> = f.children(0).map(|l| f.qty(l)).collect();
+        assert_eq!(legs, [10, -20, 10]);
+        assert_eq!(apply(&mut f, 0, "qty", "1/2"), Err("one quantity".into()));
+        assert_eq!(
+            apply(&mut f, 0, "qty", "0"),
+            Err("quantity must not be zero".into())
+        );
+        assert_eq!(
+            apply(&mut f, 0, "qty", &i64::MAX.to_string()),
+            Err("quantity out of range".into())
+        );
+    }
+
+    #[test]
+    fn qty_in_list_form_maps_by_position() {
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        s.apply(Edit::SetQty { row: 2, qty: 3 }).unwrap();
+        assert_eq!(apply(&mut s, 0, "qty", "-4/4"), Ok(2));
+        assert_eq!(text(&s, 0, "qty").0, "-4", "back in CS form");
+    }
+
+    #[test]
+    fn an_unchanged_commit_is_no_edit_and_crossed_strikes_are_allowed() {
+        let mut s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        assert_eq!(apply(&mut s, 0, "strike", "7400/7800"), Ok(0));
+        // Crossed strikes are allowed (the CS table has no strike order, so
+        // it still prints as a CS, now long the higher strike).
+        assert_eq!(apply(&mut s, 0, "strike", "7800/7400"), Ok(2));
+        assert_eq!(s.shorthand(0), "-5 SPX Z26 7800/7400 CS");
+        // A change that breaks the table keeps the name and prints the legs.
+        assert_eq!(
+            apply(&mut s, 0, "type", "P/C"),
+            Err("1 value: C".into()),
+            "one type shown: one value or refused"
+        );
+        assert_eq!(apply(&mut s, 0, "type", "P"), Ok(2));
+        assert!(
+            s.shorthand(0).contains('\n'),
+            "puts no longer fit CS: legs one per line"
+        );
+        assert_eq!(
+            s.kind(0),
+            crate::core::sheet::RowKind::Package {
+                template: Template::CS
+            },
+            "keeps its name"
+        );
+    }
+
+    #[test]
+    fn the_editor_opens_on_the_line_editors_spellings() {
+        let s = sheet_of(&["-5 SPX Z26 7400/7800 CS"]);
+        assert_eq!(
+            editor_text(&s, 0, ColumnKind::Strike).as_deref(),
+            Some("7400/7800")
+        );
+        assert_eq!(editor_text(&s, 0, ColumnKind::Qty).as_deref(), Some("-5"));
+        assert_eq!(editor_text(&s, 0, ColumnKind::Price), None);
     }
 }

@@ -23174,6 +23174,48 @@ run_mutation "pricer package: an unset shift part paints empty" \
   $'                ""\n            } else {' \
   geode-pricer a_group_opens_for_editing_in_the_line_editors_spelling
 
+# A list maps by position onto the groups.
+run_mutation "pricer package: a list edit uses the first part for every group" \
+  crates/geode-pricer/src/core/package.rs \
+  '    let part = |i: usize| -> &str { if parts.len() == 1 { parts[0] } else { parts[i] } };' \
+  '    let part = |_: usize| -> &str { parts[0] };' \
+  geode-pricer a_list_maps_by_position_and_a_fly_body_moves_once
+
+# A list whose count matches neither one nor the groups is refused.
+run_mutation "pricer package: a wrong count is accepted" \
+  crates/geode-pricer/src/core/package.rs \
+  '    if parts.len() != 1 && parts.len() != gs.len() {' \
+  '    if false {' \
+  geode-pricer a_wrong_count_or_a_bad_part_refuses_and_changes_nothing
+
+# The wrong-count refusal quotes the cell as painted: an unset part is a dash.
+run_mutation "pricer package: a wrong count quotes the raw parts" \
+  crates/geode-pricer/src/core/package.rs \
+  '        return Err(format!("{n} value{s}: {}", painted(&gs)));' \
+  '        return Err(format!("{n} value{s}: {}", gs.iter().map(|g| g.display.as_str()).collect::<Vec<_>>().join("/")));' \
+  geode-pricer a_wrong_count_shows_the_painted_cell
+
+# Package qty rescales the legs by weight.
+run_mutation "pricer package: package qty sets every leg to q" \
+  crates/geode-pricer/src/core/package.rs \
+  '            let qty = q.checked_mul(w).ok_or("quantity out of range")?;' \
+  '            let qty = q.checked_mul(w.signum()).ok_or("quantity out of range")?;' \
+  geode-pricer package_qty_rescales_legs_by_weight
+
+# A package cell opens a text editor on its groups, not the line's editor.
+run_mutation "pricer package: a package cell opens no editor" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if sheet.is_package(row) {\n        return crate::core::package::editor_text(sheet, row, kind)' \
+  $'    if false {\n        return crate::core::package::editor_text(sheet, row, kind)' \
+  geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
+
+# A `/` list has no one number to step.
+run_mutation "pricer package: a list nudges its first number" \
+  crates/geode-pricer/src/core/cell.rs \
+  $'    if t.contains(\'/\') {\n        return Err("a list does not nudge".into());' \
+  $'    if false {\n        return Err("a list does not nudge".into());' \
+  geode-pricer a_package_opens_a_text_editor_even_for_expiry_and_type_and_a_list_does_not_nudge
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

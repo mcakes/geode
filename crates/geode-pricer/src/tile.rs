@@ -5525,9 +5525,11 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "edit", None);
         assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
-        h.dispatch(&mut vcx, "first_col", None);
-        h.dispatch(&mut vcx, "down", None); // the package
+        // A package's aggregated columns edit through text; its own result
+        // columns stay read-only.
+        h.dispatch(&mut vcx, "down", None); // the package, still on rho
         h.dispatch(&mut vcx, "edit", None);
+        assert_eq!(h.mode(&mut vcx), "normal");
         assert_eq!(h.footer(&vcx).as_deref(), Some(crate::core::READ_ONLY));
     }
 
