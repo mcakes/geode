@@ -1302,6 +1302,15 @@ impl Render for ShellView {
                 // `palette::render`'s doc comment), so a click landing
                 // anywhere inside it — a row, the query input, empty space
                 // — never also reaches this catcher's handler below.
+                //
+                // gpui fires `on_mouse_down` for every hovered hitbox, not
+                // only the topmost, so without `occlude()` a click over an
+                // open dialog stack would also reach whatever the catcher
+                // covers: `shell-modal-backdrop` (popping the dialog) or a
+                // dialog row (committing or opening it). `occlude()` is
+                // conditioned on a dialog being open because with none the
+                // catcher covers only tiles, which have no click handler this
+                // would wrongly swallow.
                 el.child(
                     div()
                         .id("palette-click-catcher")
@@ -1311,6 +1320,7 @@ impl Render for ShellView {
                         .w(px(width))
                         .h(px(viewport_height))
                         .debug_selector(|| "palette-click-catcher".to_string())
+                        .when(self.modal_open(), |d| d.occlude())
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|view, _event, window, cx| {

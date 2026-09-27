@@ -562,3 +562,80 @@ fn a_focus_moving_palette_action_behind_the_stack_is_refocused_to_the_dialog(
     assert!(!filter_is_focused(&shell, &mut vcx));
     assert!(dialog_filter_is_focused(&shell, &mut vcx));
 }
+
+/// The click-catcher behind the palette panel has no `occlude()`, so
+/// `on_mouse_down` (which gpui fires for every hovered hitbox, not just the
+/// topmost) reaches `shell-modal-backdrop` beneath it as well: a click
+/// outside both panels closes the palette AND pops the dialog underneath.
+/// It must close only the palette.
+#[gpui::test]
+fn a_click_outside_the_palette_over_a_dialog_closes_only_the_palette(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
+    assert!(vcx.debug_bounds("palette-click-catcher").is_some());
+
+    // Top-left corner of the viewport: both the modal panel and the
+    // palette panel are centered with a top margin, so this point is
+    // outside both, but still inside the full-viewport catcher.
+    let outside = gpui::point(px(2.), px(2.));
+    vcx.simulate_click(outside, gpui::Modifiers::default());
+    draw(&mut vcx);
+
+    assert!(
+        shell.read_with(&vcx, |s, _| s.palette.is_none()),
+        "the click outside the palette must close it"
+    );
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object],
+        "the click must not also reach shell-modal-backdrop and pop the dialog beneath"
+    );
+}
+
+/// A click at a dialog row's position is also a click on the catcher (it
+/// covers the full viewport, including wherever the dialog's own rows paint
+/// underneath). Without `occlude()`, the same click also reaches the row's
+/// own handler and opens it.
+#[gpui::test]
+fn a_click_on_a_dialog_row_under_the_palette_does_not_open_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell_with(
+        cx,
+        super::objectdialog::services_with_a_saved_scope(),
+        "config::scopes",
+    );
+    let row = vcx
+        .debug_bounds("objectdialog-row-mine")
+        .expect("the mine row paints");
+    vcx.simulate_keystrokes("ctrl-k");
+    draw(&mut vcx);
+    assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
+    let palette_panel = vcx
+        .debug_bounds("palette-panel")
+        .expect("the palette panel paints");
+
+    // A point in the row's own band but to the left of the (narrower) palette
+    // panel: not a click on the palette's stop-propagation panel, so it is
+    // the catcher, not the panel, that must keep it from also reaching the
+    // row underneath.
+    let outside_the_panel = gpui::point(row.origin.x + px(4.), row.origin.y + row.size.height / 2.);
+    assert!(
+        outside_the_panel.x < palette_panel.origin.x,
+        "the probe point must fall outside the palette panel: {outside_the_panel:?} vs {palette_panel:?}"
+    );
+    vcx.simulate_click(outside_the_panel, gpui::Modifiers::default());
+    draw(&mut vcx);
+
+    assert!(
+        shell.read_with(&vcx, |s, _| s.palette.is_none()),
+        "the click closed the palette"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().unwrap().stage.clone()),
+        crate::shell::objectdialog::Stage::Browse,
+        "the click must not also reach the row and open it"
+    );
+}
