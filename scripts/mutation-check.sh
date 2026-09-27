@@ -5099,8 +5099,8 @@ run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
 # synthetic error outcome is now delivered right at the refusal site.
 run_mutation "bridge: a refused distinct request errors the picker instead of leaving it loading forever" \
   crates/geode-app/src/bridge.rs \
-  '                if !queued {' \
-  '                if false {' \
+  '                if let Err(refusal) = queued {' \
+  '                if let (false, Err(refusal)) = (true, queued) {' \
   geode-app a_refused_distinct_request_errors_the_picker
 
 # ---- Phase 4c Task 3: view presentation (spec §5.6, §4.1) -------------
@@ -17769,10 +17769,8 @@ run_mutation "pricer rm: a modified y confirms" \
 
 run_mutation "pricer rm: y forgets nothing" \
   crates/geode-pricer/src/tile.rs \
-  '        } else if self.shared.store.forget(&pending.sheet).is_ok() {
-            // Reserved until the forget is answered.' \
-  '        } else if false {
-            // Reserved until the forget is answered.' \
+  '            match self.shared.store.forget(&pending.sheet) {' \
+  '            match Err::<(), Refusal>(Refusal::Busy) {' \
   geode-pricer colon_rm_asks_and_y_forgets
 
 run_mutation "pricer rm: the confirm is not insert mode" \
@@ -17875,12 +17873,12 @@ run_mutation "pricer retiring: an answered forget keeps its name reserved" \
 
 run_mutation "pricer retiring: an rm's forget does not reserve its name" \
   crates/geode-pricer/src/tile.rs \
-  '            self.shared
-                .retiring
-                .borrow_mut()
-                .insert(pending.sheet.clone());
-            self.forgetting.push(pending.sheet);' \
-  '            self.forgetting.push(pending.sheet);' \
+  '                    self.shared
+                        .retiring
+                        .borrow_mut()
+                        .insert(pending.sheet.clone());
+                    self.forgetting.push(pending.sheet);' \
+  '                    self.forgetting.push(pending.sheet);' \
   geode-pricer a_name_removed_by_rm_is_reserved_until_answered
 
 run_mutation "pricer deferred load: :e reads past a queued save" \
@@ -20059,8 +20057,8 @@ run_mutation "pricer tile: a batch carries only the lines not in flight" \
 
 run_mutation "pricer tile: a hidden tile still submits" \
   crates/geode-pricer/src/tile.rs \
-  '        if !self.visible || self.loading {' \
-  '        if self.loading {' \
+  '        if !self.visible || self.loading || self.stopped {' \
+  '        if self.loading || self.stopped {' \
   geode-pricer hide_cancels_by_key_and_prices_nothing_until_shown
 
 run_mutation "pricer tile: a hide does not cancel by key" \
@@ -20395,8 +20393,8 @@ run_mutation "pricer tile: a failed load's fallback is saved over the document" 
   '        if self.save_blocked {
             return true;
         }
-        let Some(rows) = to_rows(&self.sheet) else {' \
-  '        let Some(rows) = to_rows(&self.sheet) else {' \
+        // A stopped store refuses every save; asking again on each edit only' \
+  '        // A stopped store refuses every save; asking again on each edit only' \
   geode-pricer a_failed_load_blocks_every_save_and_says_so_past_escape
 
 # After a refused save the idle task has already fired: a close that
@@ -23141,6 +23139,110 @@ run_mutation "bridge: refused submissions are not read" \
   '                        d.note_refused(now_refused);' \
   '                        let _ = now_refused;' \
   geode-app refused_submissions_reach_the_status_summary
+
+run_mutation "blotter: a stopped query refusal reads as something else" \
+  crates/geode-blotter/src/tile.rs \
+  '            self.error = Some((format!("query refused: {refusal}"), Tone::DangerText));' \
+  '            self.error = Some(({ let _ = refusal; "query refused".to_string() }, Tone::DangerText));' \
+  geode-blotter a_refused_query_says_busy_or_stopped
+
+run_mutation "mdtile: a document refusal loses its kind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.notice = Some(format!("document request refused: {refusal}").into());' \
+  '            self.notice = Some({ let _ = refusal; "document request refused".into() });' \
+  geode-marketdata a_busy_document_refusal_says_busy
+
+run_mutation "mdtile: an upload refusal loses its kind" \
+  crates/geode-marketdata/src/tile.rs \
+  '            self.notice = Some(format!("upload refused: {refusal}").into());' \
+  '            self.notice = Some({ let _ = refusal; "upload refused".into() });' \
+  geode-marketdata a_busy_upload_refusal_says_busy_and_clears_in_flight
+
+run_mutation "timeseries: a refused fetch loses its kind" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '                        SlotState::Failed(format!("fetch refused: {refusal}")),' \
+  '                        SlotState::Failed({ let _ = refusal; "fetch refused".to_string() }),' \
+  geode-timeseries a_refused_fetch_fails_the_chip_by_kind
+
+run_mutation "timeseries: a refused series request loses its kind" \
+  crates/geode-timeseries/src/tile/data.rs \
+  '                    self.notice = Some(format!("series request refused: {refusal}").into());' \
+  '                    self.notice = Some({ let _ = refusal; "series request refused".into() });' \
+  geode-timeseries a_refused_submit_notices_and_still_answers_the_barrier
+
+run_mutation "pricer tile: a stopped service still backs off" \
+  crates/geode-pricer/src/tile.rs \
+  '        } else if queued == Err(Refusal::Stopped) {' \
+  '        } else if false {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped service is asked again on a tick" \
+  crates/geode-pricer/src/tile.rs \
+  '        if !self.visible || self.loading || self.stopped {' \
+  '        if !self.visible || self.loading {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped overlay is not shown" \
+  crates/geode-pricer/src/tile.rs \
+  '        let notice = if self.stopped {' \
+  '        let notice = if false {' \
+  geode-pricer a_stopped_service_stops_the_pricing_backoff
+
+run_mutation "pricer tile: a stopped store is asked again on the next edit" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.save_stopped {
+            return false;
+        }' \
+  '' \
+  geode-pricer a_stopped_service_stops_save_retries
+
+run_mutation "pricer tile: a stopped save is not marked stopped" \
+  crates/geode-pricer/src/tile.rs \
+  '            if saved == Err(Refusal::Stopped) {' \
+  '            if false {' \
+  geode-pricer a_stopped_service_stops_save_retries
+
+run_mutation "pricer tile: a refused load loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '    format!("the store refused the load: {refusal}")' \
+  '    { let _ = refusal; "the store refused the load".to_string() }' \
+  geode-pricer a_stopped_load_names_the_stopped_service
+
+run_mutation "pricer tile: a refused remove loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '                        Some(format!("sheet '"'"'{}'"'"' not removed: {refused}", pending.sheet).into());' \
+  '                        Some({ let _ = refused; format!("sheet '"'"'{}'"'"' not removed", pending.sheet).into() });' \
+  geode-pricer a_stopped_remove_names_the_stopped_service
+
+run_mutation "pricer tile: a refused rename forget loses its kind" \
+  crates/geode-pricer/src/tile.rs \
+  '                                    format!("old sheet '"'"'{old}'"'"' not removed: {refused}").into(),' \
+  '                                    { let _ = refused; format!("old sheet '"'"'{old}'"'"' not removed").into() },' \
+  geode-pricer a_stopped_rename_forget_names_the_stopped_service
+
+run_mutation "bridge: a stopped distinct reads as busy" \
+  crates/geode-app/src/bridge.rs \
+  '                            Refusal::Stopped => "the data service has stopped".into(),' \
+  '                            Refusal::Stopped => "the data service is busy — try again".into(),' \
+  geode-app a_refused_distinct_request_errors_the_picker
+
+run_mutation "catalog refresh: a stopped service is retried" \
+  crates/geode-app/src/bridge.rs \
+  '                Err(Refusal::Stopped) => {}' \
+  '                Err(Refusal::Stopped) => refresh.retry(&diagnostics, request, window, cx),' \
+  geode-app a_stopped_service_does_not_retry_the_catalog
+
+run_mutation "bridge: a view hand-off refusal is silent" \
+  crates/geode-app/src/bridge.rs \
+  '                    .chain(handoff)' \
+  '                    .chain({ let _ = handoff; None::<Diagnostic> })' \
+  geode-app a_reload_into_a_stopped_service_is_an_error_diagnostic
+
+run_mutation "bridge: a stopped view hand-off is only a warning" \
+  crates/geode-app/src/bridge.rs \
+  '                            Refusal::Stopped => Severity::Error,' \
+  '                            Refusal::Stopped => Severity::Warning,' \
+  geode-app a_reload_into_a_stopped_service_is_an_error_diagnostic
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
