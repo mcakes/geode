@@ -19,7 +19,7 @@ use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers, gutter_number};
-use geode_shell::shell::aggregates::{AggregateCell, AggregatePart, CellPaint};
+use geode_shell::shell::aggregates::{AggregateCell, CellPaint};
 use geode_shell::shell::colours::{anchors_from_theme, theme_signature, tokens_from_theme};
 use geode_shell::shell::control::{self, PointerStates as _};
 use gpui::prelude::*;
@@ -604,8 +604,7 @@ impl BlotterDelegate {
         let refuses = |mark: char| {
             summaries
                 .iter()
-                .flat_map(|c| &c.parts)
-                .any(|p| p.refused && p.text.contains(mark))
+                .any(|c| c.total.refused && c.total.text.contains(mark))
         };
         self.summary_non_additive = refuses('†');
         self.summary_unsummable = refuses(UNSUMMABLE_MARK);
@@ -614,16 +613,9 @@ impl BlotterDelegate {
             .into_iter()
             .map(|c| AggregateCell {
                 label: c.label.into(),
-                parts: c
-                    .parts
-                    .into_iter()
-                    .map(|p| AggregatePart {
-                        stat: p.stat.symbol(),
-                        text: p.text.into(),
-                        sign: p.sign,
-                        refused: p.refused,
-                    })
-                    .collect(),
+                text: c.total.text.into(),
+                sign: c.total.sign,
+                refused: c.total.refused,
             })
             .collect();
         self.summary_generation = self.summary_generation.wrapping_add(1);

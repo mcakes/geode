@@ -67,28 +67,26 @@ No neighbouring row or column is guessed. A row selection never depends on a
 column, so hiding one leaves it in place.
 
 While a selection is live, the footer leads with its extent (`12 rows × 3
-cols`) and then shows one group per selected measure column, parted by
-hairlines. A group's label takes the column's own color, as its header does;
-its sum and mean are painted the way that column's cells paint the same number
-(bullish or bearish for a `sign` column, the sign variant of a sign-tinted
-named color); counts and extremes stay in the foreground, and statistic names
-and refusal marks are muted. Values use the grid's monospace face. Each
-aggregate is computed over the selection's top-most rows only: a group row
-already carries its children's total, so counting a child as well would double
-it. Each column reports sum, mean, and count, plus min and max when the
-selection spans a single measure column. A column carrying a
-`DeterminedNonAdditive` value anywhere in the selection shows `Σ —†` instead
-of a sum or mean — an explicit refusal rather than a plausible but wrong
-total.
+cols`) and then shows each selected measure column's label and total, parted
+by hairlines. The label takes the column's own color, as its header does; the
+total is painted the way that column's cells paint the same number (bullish or
+bearish for a `sign` column, the sign variant of a sign-tinted named color), in
+the grid's monospace face. The footer shows the total only — no count, mean,
+or extremes. The total is computed over the selection's top-most rows only: a
+group row already carries its children's total, so counting a child as well
+would double it. A column carrying a `DeterminedNonAdditive` value anywhere in
+the selection shows a muted `—†` instead of a total — an explicit refusal
+rather than a plausible but wrong one — and a column with no values in the
+selection shows `—`.
 
 Whether a column adds up at all is a separate fact, decided by the query
 compiler and carried on the snapshot's column metadata (`ColumnMeta::summable`):
 only a plain measure whose schema aggregate is `sum` is summable. A `min`,
 `max`, or `any` measure, a derived expression (a ratio of sums is not a sum),
-a joined column, and anything unmarked are not. Such a column shows `Σ —‡`
-with its count, min, and max, and the footer adds "‡ this column does not add
-up". Attribution alone cannot decide this: a `max` measure's values belong to
-their rows, yet the total of two maxima is meaningless.
+a joined column, and anything unmarked are not. Such a column shows a muted
+`—‡`, and the footer adds "‡ this column does not add up". Attribution alone
+cannot decide this: a `max` measure's values belong to their rows, yet the
+total of two maxima is meaningless.
 
 The mouse reaches the same states the keyboard does. A plain click anywhere
 on a row, including the empty space beside its cells, clears any selection

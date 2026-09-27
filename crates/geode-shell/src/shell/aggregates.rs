@@ -1,10 +1,9 @@
 //! The footer strip a grid tile shows while a selection is live (grid
 //! selection spec §3.3): the selection's extent, then one group per
-//! selected numeric column — its label, then each statistic's name and
-//! value.
+//! selected numeric column — its label and its total.
 //!
 //! A group reads as belonging to its column: the label takes the
-//! column's own color the way its header does, and a total is painted
+//! column's own color the way its header does, and the total is painted
 //! the way the column's cells paint the same number. The tile formats
 //! every string when the selection or the data changes and resolves the
 //! colors once per theme ([`CellPaint`]); this only lays prepared values
@@ -17,23 +16,16 @@ use gpui_component::{Theme, h_flex};
 use crate::fonts;
 use geode_core::format::Sign;
 
-/// One statistic, as the tile formatted it.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AggregatePart {
-    /// The statistic's name (`Σ`, `μ`, `n`, `min`, `max`).
-    pub stat: &'static str,
-    pub text: SharedString,
-    /// Set only on a value painted by sign (a total); `None` paints plain.
-    pub sign: Option<Sign>,
-    /// The text is a refusal mark (`—†`, `—‡`), not a number.
-    pub refused: bool,
-}
-
-/// One selected numeric column's group.
+/// One selected numeric column's group: its label and its total, as the
+/// tile formatted them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AggregateCell {
     pub label: SharedString,
-    pub parts: Vec<AggregatePart>,
+    pub text: SharedString,
+    /// The total's sign; `None` paints plain.
+    pub sign: Option<Sign>,
+    /// The text is a refusal mark (`—†`, `—‡`, `—`), not a number.
+    pub refused: bool,
 }
 
 /// A group's colors, resolved by the tile from its column's format:
@@ -59,13 +51,13 @@ impl CellPaint {
         }
     }
 
-    /// A part's value color: by sign for a total, the foreground for an
-    /// unsigned value, muted for a refusal mark.
-    pub fn value(&self, part: &AggregatePart, theme: &Theme) -> Hsla {
-        if part.refused {
+    /// A total's color: by sign, the foreground when unsigned, muted for
+    /// a refusal mark.
+    pub fn value(&self, cell: &AggregateCell, theme: &Theme) -> Hsla {
+        if cell.refused {
             return theme.muted_foreground;
         }
-        match part.sign {
+        match cell.sign {
             Some(Sign::Positive) => self.positive,
             Some(Sign::Negative) => self.negative,
             Some(Sign::Zero) => self.zero,
@@ -110,22 +102,12 @@ pub fn strip(
                         .text_color(paint.label.unwrap_or(theme.muted_foreground))
                         .child(c.label.clone()),
                 )
-                .children(c.parts.iter().map(|p| {
-                    h_flex()
-                        .gap_1()
-                        .items_baseline()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child(SharedString::new_static(p.stat)),
-                        )
-                        .child(
-                            div()
-                                .font_family(fonts::MONO)
-                                .text_color(paint.value(p, theme))
-                                .child(p.text.clone()),
-                        )
-                }))
+                .child(
+                    div()
+                        .font_family(fonts::MONO)
+                        .text_color(paint.value(c, theme))
+                        .child(c.text.clone()),
+                )
         }))
 }
 
@@ -135,9 +117,9 @@ mod tests {
     use gpui::TestAppContext;
     use gpui_component::ActiveTheme as _;
 
-    fn part(stat: &'static str, text: &str, sign: Option<Sign>) -> AggregatePart {
-        AggregatePart {
-            stat,
+    fn cell(label: &str, text: &str, sign: Option<Sign>) -> AggregateCell {
+        AggregateCell {
+            label: label.to_string().into(),
             text: text.to_string().into(),
             sign,
             refused: false,
@@ -159,17 +141,8 @@ mod tests {
     fn the_extent_and_each_column_group_are_painted(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let cells = vec![
-            AggregateCell {
-                label: "delta".into(),
-                parts: vec![
-                    part("Σ", "3.00", Some(Sign::Positive)),
-                    part("n", "2", None),
-                ],
-            },
-            AggregateCell {
-                label: "gamma".into(),
-                parts: vec![part("n", "0", None)],
-            },
+            cell("delta", "3.00", Some(Sign::Positive)),
+            cell("gamma", "—", None),
         ];
         let extent = Some(SharedString::from("2 rows × 3 cols"));
         let (_view, cx) = cx.add_window_view(|_, _| Host(extent, cells));
@@ -180,7 +153,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_total_takes_its_sign_color_and_other_values_stay_plain(cx: &mut TestAppContext) {
+    fn a_total_takes_its_sign_color_and_a_refusal_is_muted(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         cx.update(|cx| {
             let theme = cx.theme();
@@ -190,16 +163,16 @@ mod tests {
                 negative: theme.chart_bearish,
                 zero: theme.foreground,
             };
-            let neg = part("Σ", "-3.00", Some(Sign::Negative));
-            let pos = part("μ", "1.00", Some(Sign::Positive));
-            let count = part("n", "2", None);
-            let refusal = AggregatePart {
+            let neg = cell("d", "-3.00", Some(Sign::Negative));
+            let pos = cell("d", "1.00", Some(Sign::Positive));
+            let unsigned = cell("d", "1.00", None);
+            let refusal = AggregateCell {
                 refused: true,
-                ..part("Σ", "—‡", None)
+                ..cell("d", "—‡", None)
             };
             assert_eq!(paint.value(&neg, theme), theme.chart_bearish);
             assert_eq!(paint.value(&pos, theme), theme.chart_bullish);
-            assert_eq!(paint.value(&count, theme), theme.foreground);
+            assert_eq!(paint.value(&unsigned, theme), theme.foreground);
             assert_eq!(paint.value(&refusal, theme), theme.muted_foreground);
         });
     }

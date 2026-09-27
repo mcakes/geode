@@ -3120,8 +3120,7 @@ mod tests {
             .iter()
             .find(|c| c.label.as_ref() == "delta01")
             .expect("delta01 summarised");
-        let sum = &delta.parts[0];
-        assert_eq!((sum.stat, sum.text.as_ref()), ("Σ", "5.00"), "{delta:?}");
+        assert_eq!(delta.text.as_ref(), "5.00", "{delta:?}");
     }
 
     #[gpui::test]

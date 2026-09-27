@@ -21189,7 +21189,7 @@ run_mutation "grid selection: an unsummable column never totals" \
   '        let totals = self.count > 0 && !self.non_additive && !self.unsummable;' \
   '        let totals = self.count > 0 && !self.non_additive;' \
   geode-core \
-  an_unsummable_column_never_totals_and_always_shows_extremes
+  an_unsummable_column_never_totals
 
 run_mutation "grid selection: a lost anchor row resolves to Lost::Row" \
   crates/geode-core/src/grid/selection.rs \
@@ -21330,18 +21330,18 @@ run_mutation "blotter selection: a colors reload invalidates the footer paint" \
 # A refusal mark is muted; only a signed total takes a sign color.
 run_mutation "aggregates: a refusal mark paints muted" \
   crates/geode-shell/src/shell/aggregates.rs \
-  '        if part.refused {' \
+  '        if cell.refused {' \
   '        if false {' \
   geode-shell \
-  a_total_takes_its_sign_color_and_other_values_stay_plain
+  a_total_takes_its_sign_color_and_a_refusal_is_muted
 
-# Only a total carries a sign; an extreme paints plain.
-run_mutation "grid selection: only totals carry a sign" \
+# The footer total carries its sign, so it can paint as the cells do.
+run_mutation "grid selection: the footer total carries its sign" \
   crates/geode-core/src/grid/selection.rs \
-  '        parts.push(value(Stat::Min, lo, false));' \
-  '        parts.push(value(Stat::Min, lo, true));' \
+  '            sign: Some(f.sign),' \
+  '            sign: None,' \
   geode-core \
-  only_totals_carry_a_sign_and_a_refusal_is_marked
+  describe_shows_the_sum_in_the_column_format_and_marks_refusals
 
 run_mutation "blotter selection: a shift press starts a selection" \
   crates/geode-blotter/src/tile.rs \
