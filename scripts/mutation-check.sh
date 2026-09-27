@@ -2542,7 +2542,7 @@ run_mutation "dialog stack: render hands focus to the root under a dialog" \
 
 # ---- dialog stack: Normal-mode catch-alls decline an unrecognized chord
 #
-# User ruling 2026-09-26 (Task 3): a Normal-mode surface with a bare-key
+# Ruling 2026-09-26 (Task 3): a Normal-mode surface with a bare-key
 # catch-all must still let an unrecognized ctrl/alt/cmd chord fall through
 # to the shell, or a dialog-opening chord can never reach the shell while
 # that surface is on top. Each site's own claim (a bare key stays claimed)
@@ -2605,6 +2605,40 @@ run_mutation "dialog stack: settings route claims a chord instead of declining i
   '            None if ks.mods.is_chord() => KeyAction::Drop,' \
   geode-shell \
   a_dialog_chord_pushes_over_settings_in_normal_mode
+
+# ---- final review (2026-09-27): the palette catcher over a dialog stack,
+# and palette-run transient chrome refused over a dialog
+#
+# gpui fires `on_mouse_down` for every hovered hitbox, not only the topmost.
+# Without `occlude()`, a click on the full-window palette click-catcher also
+# reaches whatever it covers: the modal backdrop beneath it (popping the
+# dialog) or a dialog row (committing or opening it).
+run_mutation "dialog stack: the palette click-catcher does not occlude an open dialog" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        .when(self.modal_open(), |d| d.occlude())' \
+  '                        .when(false, |d| d.occlude())' \
+  geode-shell \
+  a_click_outside_the_palette_over_a_dialog_closes_only_the_palette
+
+# The palette reaches every action (ruling 5), including three that would
+# open real transient chrome behind the stack; they must be refused rather
+# than left running unreachable behind it.
+run_mutation "dialog stack: transient chrome runs behind the stack instead of being refused" \
+  crates/geode-shell/src/shell/input.rs \
+  '        if self.modal_open()
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  '        if false
+            && matches!(
+                action.0.as_str(),
+                "tile::command_line" | "tile::find" | "stack::pick"
+            )
+        {' \
+  geode-shell \
+  palette_transient_chrome_is_refused_over_a_dialog
 
 # ---- overlays return focus to the field they opened from (ruling 2026-09-12)
 
