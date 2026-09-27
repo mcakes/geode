@@ -4030,16 +4030,20 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
-            let now_dropped = dropped.load(Ordering::Relaxed);' \
+            let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();' \
   '    let shell_direct = shell.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let catalog_window = window;
         let mut last_dropped = 0u64;
+        let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
+            let now_refused = refused_handle.dropped_requests();
             if let DataEvent::Health { source, worst, detail } = &event {
                 shell_direct.update(cx, |s, cx| {
                     s.diagnostics().update(cx, |d, cx| {
@@ -4048,6 +4052,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                     });
                 });
                 last_dropped = now_dropped;
+                last_refused = now_refused;
                 continue;
             }' \
   geode-app \
@@ -6357,14 +6362,14 @@ run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged hist
 
 run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
   crates/geode-shell/src/diagnostics.rs \
-  '        if self.dropped_events > 0 {
-            parts.push(format!("{} dropped", self.dropped_events));
+  '        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
         }
 
         parts.join(" · ")
     }' \
-  '        if self.dropped_events > 0 {
-            parts.push(format!("{} dropped", self.dropped_events));
+  '        if self.refused > 0 {
+            parts.push(format!("{} refused", self.refused));
         }
 
         if let Some(message) = &self.restart_required {
@@ -23076,6 +23081,66 @@ run_mutation "scheduler: a discovery panic drops its payload" \
   '                    "discovery panicked{}",
                     { let _ = payload; "" }' \
   geode-data a_panicking_discovery_poll_names_its_payload
+
+run_mutation "diagnostics: a stopped thread gets no segment" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.stopped_segment = stopped_segment(&self.stopped);' \
+  '        self.stopped_segment = None;' \
+  geode-shell one_stopped_thread_is_named_with_its_reason_in_the_tooltip
+
+run_mutation "diagnostics: the request loop does not outrank" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    if let Some(service) = stopped.iter().find(|t| t.thread == REQUEST_LOOP) {' \
+  '    if let Some(service) = stopped.iter().find(|_| false) {' \
+  geode-shell a_stopped_request_loop_outranks_the_other_threads
+
+run_mutation "diagnostics: several stopped threads are not collapsed" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    if stopped.len() == 1 {' \
+  '    if !stopped.is_empty() {' \
+  geode-shell two_stopped_threads_collapse_to_a_count_listing_each
+
+run_mutation "diagnostics: a thread reported twice is recorded twice" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.stopped.iter().any(|t| t.thread == thread) {' \
+  '        if false {' \
+  geode-shell a_thread_reported_twice_is_recorded_once
+
+run_mutation "diagnostics: refused submissions are not summarised" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.refused > 0 {' \
+  '        if false {' \
+  geode-shell refused_submissions_show_in_the_summary_and_are_omitted_at_zero
+
+run_mutation "status: the stopped segment is not painted" \
+  crates/geode-shell/src/shell/status.rs \
+  '    if let Some(segment) = stopped {' \
+  '    if let Some(segment) = stopped.filter(|_| false) {' \
+  geode-shell a_stopped_thread_paints_the_stopped_segment_first
+
+run_mutation "status: the stopped segment's click does nothing" \
+  crates/geode-shell/src/shell/status.rs \
+  '                    stopped_click(window, cx);' \
+  '                    let _ = (&stopped_click, window, cx);' \
+  geode-shell clicking_the_stopped_segment_opens_the_diagnostics_tile
+
+run_mutation "sections: stopped threads are not listed" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    if !d.stopped.is_empty() {' \
+  '    if false {' \
+  geode-diagnostics stopped_threads_lead_the_sources_section
+
+run_mutation "bridge: a stopped thread never reaches diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '                            d.note_thread_stopped(&thread, reason, SystemTime::now());' \
+  '                            let _ = (&thread, reason);' \
+  geode-app a_thread_stopped_event_reaches_the_status_segment
+
+run_mutation "bridge: refused submissions are not read" \
+  crates/geode-app/src/bridge.rs \
+  '                        d.note_refused(now_refused);' \
+  '                        let _ = now_refused;' \
+  geode-app refused_submissions_reach_the_status_summary
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
