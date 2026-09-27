@@ -25,6 +25,13 @@ pub struct ColumnMeta {
     /// the column totals — a `max` measure is additive in attribution and
     /// still must not be summed. Anything unmarked is not summable.
     pub summable: bool,
+    /// For an ungrouped dimension column (the compiler's unanimity rule),
+    /// the index of its boolean companion column: true on a row whose
+    /// underlying rows disagree. Such a cell is NULL in this column and must
+    /// not be read as blank — blank means no row had a value. `None` for
+    /// every other column; [`Snapshot::from_batches`] refuses an index that
+    /// is out of range, names the column itself, or is not boolean.
+    pub mixed_flag: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,6 +403,24 @@ impl Snapshot {
                 )));
             }
         }
+        // A mixed flag the cell renderer consults must be a boolean column
+        // of this batch other than the value's own; anything else would read
+        // an arbitrary column's truthiness as "the rows disagree".
+        for (i, m) in meta.iter().enumerate() {
+            let Some(flag) = m.mixed_flag else { continue };
+            let ok = flag != i
+                && flag < meta.len()
+                && batch.as_ref().is_none_or(|b| {
+                    b.column(flag).data_type() == &arrow::datatypes::DataType::Boolean
+                });
+            if !ok {
+                return Err(arrow::error::ArrowError::SchemaError(format!(
+                    "column '{}' names mixed flag {flag}, which is not a boolean \
+                     companion column of this snapshot",
+                    m.name
+                )));
+            }
+        }
         let depth_col = batch
             .as_ref()
             .and_then(|b| b.schema().index_of("row_depth").ok());
@@ -605,6 +630,19 @@ impl Snapshot {
         display_in(self.column_at(idx)?, row)
     }
 
+    /// Whether column `idx` is mixed at `row`: an ungrouped dimension whose
+    /// rows under this tree row disagree (see [`ColumnMeta::mixed_flag`]).
+    /// False for a column with no flag, past the end, and for a NULL flag —
+    /// a spine row the column's grain has no rows for is blank, not mixed.
+    pub fn is_mixed_at(&self, idx: usize, row: usize) -> bool {
+        let Some(flag) = self.meta.get(idx).and_then(|m| m.mixed_flag) else {
+            return false;
+        };
+        self.column_at(flag)
+            .and_then(|a| a.as_any().downcast_ref::<arrow::array::BooleanArray>())
+            .is_some_and(|a| row < a.len() && a.is_valid(row) && a.value(row))
+    }
+
     /// How many grouping columns are present on this row — 0 is the grand
     /// total, `grouping_len` a leaf. The compiler emits it directly rather
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
@@ -648,6 +686,8 @@ pub enum TestColumn {
     /// Date32, matching a declared date column. Use this to exercise typed date
     /// cells; `Dict` and `Str` fixtures exercise date labels stored as text.
     Date(Vec<Option<chrono::NaiveDate>>),
+    /// Boolean, matching the compiler's mixed-flag companion columns.
+    Bool(Vec<Option<bool>>),
 }
 
 /// Build a dictionary column the way DuckDB would: distinct values in
@@ -765,6 +805,10 @@ impl Snapshot {
                                 .collect::<Vec<_>>(),
                         )),
                     ),
+                    TestColumn::Bool(v) => (
+                        DataType::Boolean,
+                        Arc::new(arrow::array::BooleanArray::from(v.clone())),
+                    ),
                 };
                 (Field::new(&meta.name, ty, true), array)
             })
@@ -828,6 +872,7 @@ mod tests {
                 attribution_by_depth: vec![Attribution::Additive; 2],
                 scope_semantics: ScopeSemantics::Direct,
                 summable: false,
+                mixed_flag: None,
             })
             .collect()
     }
@@ -879,6 +924,7 @@ mod tests {
                     attribution_by_depth: vec![Attribution::NonAttributable, Attribution::Additive],
                     scope_semantics: ScopeSemantics::Direct,
                     summable: false,
+                    mixed_flag: None,
                 },
                 TestColumn::F64(vec![None, Some(0.0), Some(2.5)]),
             )],
@@ -906,6 +952,7 @@ mod tests {
                     attribution_by_depth: vec![Attribution::NonAttributable],
                     scope_semantics: ScopeSemantics::Direct,
                     summable: false,
+                    mixed_flag: None,
                 },
                 TestColumn::F64(vec![None]),
             )],
@@ -940,6 +987,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         }
     }
 
@@ -1284,6 +1332,54 @@ mod tests {
         assert!(
             matches!(err, Err(arrow::error::ArrowError::SchemaError(_))),
             "misaligned meta must not build a snapshot: {err:?}"
+        );
+    }
+
+    /// A mixed flag must name a boolean companion column: pointing it at a
+    /// value column would read that column's truthiness as "the rows
+    /// disagree". A NULL flag — a spine row the column's grain has no rows
+    /// under — is not mixed.
+    #[test]
+    fn a_mixed_flag_must_name_a_boolean_companion_and_a_null_flag_is_not_mixed() {
+        let mut wrong = meta();
+        wrong[0].mixed_flag = Some(2);
+        let err =
+            Snapshot::from_batches(batches(), wrong, vec!["book".into()], Provenance::default());
+        assert!(
+            matches!(err, Err(arrow::error::ArrowError::SchemaError(_))),
+            "a float column is not a flag: {err:?}"
+        );
+        let mut own = meta();
+        own[0].mixed_flag = Some(0);
+        assert!(
+            Snapshot::from_batches(batches(), own, vec!["book".into()], Provenance::default())
+                .is_err(),
+            "a column is not its own flag"
+        );
+
+        let s = Snapshot::for_tests(
+            vec![
+                (
+                    ColumnMeta {
+                        mixed_flag: Some(1),
+                        ..dim("strike")
+                    },
+                    TestColumn::Str(vec![None, None, Some("1")]),
+                ),
+                (
+                    dim("strike#mixed"),
+                    TestColumn::Bool(vec![Some(true), None, Some(false)]),
+                ),
+            ],
+            0,
+        );
+        assert!(s.is_mixed_at(0, 0));
+        assert!(!s.is_mixed_at(0, 1), "a NULL flag is blank, not mixed");
+        assert!(!s.is_mixed_at(0, 2));
+        assert!(!s.is_mixed_at(0, 9), "past the end");
+        assert!(
+            !s.is_mixed_at(1, 0),
+            "the flag column has no flag of its own"
         );
     }
 

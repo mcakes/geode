@@ -93,6 +93,7 @@ mod tests {
             attribution_by_depth: a,
             scope_semantics: ScopeSemantics::Direct,
             summable: summable(n),
+            mixed_flag: None,
         };
         let add = || vec![Attribution::Additive; 3];
         let snap = Snapshot::for_tests(

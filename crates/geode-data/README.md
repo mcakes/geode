@@ -96,6 +96,11 @@ often tripped:
   grouping key itself is NULL from a separate path. A measure's aggregate comes
   from its declared role with no fallback, so a non-measure column cannot reach
   one.
+- An ungrouped dimension column is computed by the unanimity rule (value, mixed,
+  or blank; never `any_value`) from the grain `ViewSpec::ungrouped_dimensions`
+  names, joined like a measure aggregate but never feeding the spine. A view
+  declaring none compiles to its old statement byte for byte, pinned by
+  `testdata/demo_tree_view.sql`.
 - Health is keyed by source, never by dataset; deciding and emitting a
   transition are one step under the lock.
 - `apply_schema` is `CREATE TABLE IF NOT EXISTS` and publish moves rows

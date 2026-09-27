@@ -1,7 +1,9 @@
 //! Yank as TSV (Phase 3 spec §6.4): a header line of labels, then one
 //! line per selected visible row — tree text indented two spaces per
-//! depth, numbers raw and unscaled, blanks for NULL.
+//! depth, numbers raw and unscaled, blanks for NULL, and the `mixed`
+//! marker for an ungrouped dimension whose rows disagree.
 
+use crate::core::cache::MIXED;
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::snapshot::Snapshot;
 use std::fmt::Write as _;
@@ -44,10 +46,13 @@ pub fn tsv(
                         s
                     })
                     .unwrap_or_default(),
-                ColumnKind::Dimension => column
-                    .index
-                    .and_then(|i| snapshot.display_at(i, row))
-                    .unwrap_or_default(),
+                // A mixed cell yanks its marker, not a blank: pasted as
+                // blank it would claim the rows under it have no value.
+                ColumnKind::Dimension => match column.index {
+                    Some(i) if snapshot.is_mixed_at(i, row) => MIXED.to_string(),
+                    Some(i) => snapshot.display_at(i, row).unwrap_or_default(),
+                    None => String::new(),
+                },
             };
             fields.push(field);
         }
@@ -74,6 +79,7 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 3],
             scope_semantics: ScopeSemantics::Direct,
             summable: false,
+            mixed_flag: None,
         };
         let snap = Snapshot::for_tests(
             vec![
@@ -121,5 +127,53 @@ mod tests {
         let out = tsv(&snap, &plan, &visible, 1..3, 1..2);
         let header = &plan.columns[1].label;
         assert_eq!(out, format!("{header}\n1.5\n\n"));
+    }
+
+    /// Root plus three LHUs whose ungrouped `strike` is a value (A), mixed
+    /// (B, and the root) and blank (C). The value column is NULL wherever
+    /// the flag is set, as the compiler emits it.
+    fn unanimity_fixture() -> (Snapshot, ColumnPlan) {
+        let meta = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+            summable: false,
+            mixed_flag: None,
+        };
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu"),
+                    TestColumn::Str(vec![None, Some("A"), Some("B"), Some("C")]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1, 1])),
+                (
+                    ColumnMeta {
+                        mixed_flag: Some(3),
+                        ..meta("strike")
+                    },
+                    TestColumn::Str(vec![None, Some("100.0"), None, None]),
+                ),
+                (
+                    meta("strike#mixed"),
+                    TestColumn::Bool(vec![Some(true), Some(false), Some(true), Some(false)]),
+                ),
+            ],
+            1,
+        );
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"strike\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        (snap, plan)
+    }
+
+    /// A mixed cell yanks its marker; a blank one yanks nothing, as a NULL
+    /// always has.
+    #[test]
+    fn a_mixed_dimension_yanks_its_marker_and_a_blank_one_yanks_nothing() {
+        let (snap, plan) = unanimity_fixture();
+        let out = tsv(&snap, &plan, &[1, 2, 3], 0..3, 1..2);
+        assert_eq!(out, "strike\n100.0\nmixed\n\n");
     }
 }

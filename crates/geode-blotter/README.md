@@ -30,6 +30,10 @@ cargo bench -p geode-blotter   # the pure core
 - `geode_blotter::init` binds `DataTable`'s key context to `NoAction` and
   the table is never focused, so it cannot swallow the vim keys the
   blotter's own bindings depend on.
+- A mixed dimension cell (`Snapshot::is_mixed_at`) is NULL in the data and
+  must not paint, sort, or yank as blank: `cache::cell` gives it the `MIXED`
+  text with `CachedCell::mixed` (muted by the delegate), the comparator ranks
+  values, then mixed, then blanks, and yank writes the word.
 - A `NonAttributable` cell is NULL. Read numeric columns only through
   `f64_at`/`f64_value`; the format cache is the one place a cell becomes
   text.

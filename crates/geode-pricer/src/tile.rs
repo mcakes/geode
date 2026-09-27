@@ -10,6 +10,7 @@ use crate::core::cell::{self, CellEditor};
 use crate::core::clip::{put_place, spec_of};
 use crate::core::columns::ColumnKind;
 use crate::core::commands::{self, Command, ShiftField};
+use crate::core::complete::{Completion, Inputs, Write};
 use crate::core::edit::{Edit, EditError, Undo};
 use crate::core::entry::{history, next_place, place_for, target_label};
 use crate::core::sheet::{Delivered, LineId, Refresh, Sheet};
@@ -151,6 +152,13 @@ pub(crate) struct Entry {
     history: Vec<String>,
     /// `None`: the trader's own text; `Some(i)`: showing `history[i]`.
     history_ix: Option<usize>,
+    /// The suggestions for the slot at the caret, re-ranked on every
+    /// text change, history step, commit and reload (never in render).
+    pub completion: Completion,
+    /// The text the tile's own last completion write left: that write's
+    /// `Change` is its echo, which the subscriber skips so the cycle it
+    /// just advanced is not reset.
+    echo: Option<String>,
 }
 
 const ENTRY_HINT: &str = "-5 SPX DEC26 95%/105% CS";
@@ -384,6 +392,11 @@ pub struct PricerTile {
     /// press's own `DoubleClickedCell` (every press emits `SelectCell`
     /// first, which overwrites it).
     pressed: Option<Option<LineId>>,
+    /// The entry bar's underlyings as last read from the factory's
+    /// source, and the source revision they were read at (`None`: never
+    /// read). Re-read only when the revision moves.
+    underlyings: Rc<[SharedString]>,
+    underlyings_rev: Option<u64>,
 }
 
 fn app_clock(cx: &App) -> Clock {
@@ -646,6 +659,8 @@ impl PricerTile {
             menu: None,
             click_anchor: None,
             pressed: None,
+            underlyings: Rc::from([]),
+            underlyings_rev: None,
         };
         this.adopt_templates();
         this.resolve_plan();
@@ -925,13 +940,24 @@ impl PricerTile {
             self.expansion.set(self.sheet.id(package), true);
         }
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(ENTRY_HINT));
-        cx.subscribe_in(&input, window, |this, _input, event, _window, cx| {
-            if let InputEvent::Change = event
-                && let Some(entry) = this.entry.as_mut()
-                && entry.error.take().is_some()
-            {
-                cx.notify();
+        cx.subscribe_in(&input, window, |this, input, event, _window, cx| {
+            // A typed edit answers the error under the field (it describes
+            // text no longer there) and re-ranks the list at the caret. The
+            // echo of the tile's own completion write is neither: the
+            // write already placed the cycle, and re-ranking would reset it.
+            let InputEvent::Change = event else {
+                return;
+            };
+            let text = input.read(cx).value();
+            let Some(entry) = this.entry.as_mut() else {
+                return;
+            };
+            if entry.echo.take().is_some_and(|echo| echo == text.as_ref()) {
+                return;
             }
+            entry.error = None;
+            this.refresh_entry_completion(cx);
+            cx.notify();
         })
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -942,8 +968,108 @@ impl PricerTile {
             error: None,
             history: history(&self.sheet),
             history_ix: None,
+            completion: Completion::default(),
+            echo: None,
         });
+        self.refresh_entry_completion(cx);
         self.rebuild(cx);
+    }
+
+    /// Re-read the provider when its revision moved since the last read.
+    fn read_underlyings(&mut self, cx: &App) {
+        let source = self.shared.underlyings.borrow().clone();
+        let rev = source.revision(cx);
+        if self.underlyings_rev != Some(rev) {
+            self.underlyings = source.underlyings(cx);
+            self.underlyings_rev = Some(rev);
+        }
+    }
+
+    /// Re-rank the bar's completion at the field's live text and caret.
+    /// Runs on open, on a typed edit, after a history step, after a
+    /// commit clears the field, on reload, and on a Tab at a moved caret;
+    /// never in render. Does nothing without an open bar.
+    fn refresh_entry_completion(&mut self, cx: &mut Context<Self>) {
+        if self.entry.is_none() {
+            return;
+        }
+        self.read_underlyings(cx);
+        let today = self.clock.today(Utc::now());
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let input = entry.input.read(cx);
+        let (text, caret) = (input.value().to_string(), input.cursor());
+        let inputs = Inputs {
+            templates: self.sheet.templates(),
+            underlyings: &self.underlyings,
+            today,
+        };
+        entry.completion.refresh(&text, caret, &inputs);
+    }
+
+    /// One completion write as one range replace, so undo takes it back
+    /// (`set_value` would drop the field's undo history); the replace's
+    /// own `Change` is recorded as its echo. Focus returns to the field,
+    /// which a row click must not take away.
+    fn write_entry(&mut self, write: Write, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let echo = entry.input.update(cx, |s, cx| {
+            s.set_selected_range(write.range.clone(), cx);
+            s.replace(write.text.clone(), window, cx);
+            s.focus(window, cx);
+            s.value().to_string()
+        });
+        entry.echo = Some(echo);
+        cx.notify();
+    }
+
+    /// The bar's own keys, ahead of the shell: bare `tab` writes the next
+    /// suggestion over the token at the caret and `shift-tab` the
+    /// previous one. Both are consumed while the bar is up, even with
+    /// nothing to offer, so neither moves focus out of the field.
+    pub(crate) fn entry_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let ks = &event.keystroke;
+        let m = &ks.modifiers;
+        if ks.key != "tab" || m.control || m.alt || m.platform || m.function {
+            return false;
+        }
+        let Some(entry) = &self.entry else {
+            return false;
+        };
+        // A caret moved by arrows or a click emits no Change, so a Tab
+        // whose caret is not where the last write left it ranks at the
+        // live caret first; a Tab that continues a cycle keeps the list.
+        if entry.completion.stale_at(entry.input.read(cx).cursor()) {
+            self.refresh_entry_completion(cx);
+        }
+        let Some(entry) = self.entry.as_mut() else {
+            return false;
+        };
+        let text = entry.input.read(cx).value().to_string();
+        if let Some(write) = entry.completion.cycle(&text, !m.shift) {
+            self.write_entry(write, window, cx);
+        }
+        true
+    }
+
+    /// A list row's press: the same write a Tab makes, focus kept in the
+    /// field.
+    pub(crate) fn entry_pick(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let text = entry.input.read(cx).value().to_string();
+        if let Some(write) = entry.completion.pick(&text, i) {
+            self.write_entry(write, window, cx);
+        }
     }
 
     /// `enter`: parse, insert, reprice, and advance the place past what
@@ -986,6 +1112,8 @@ impl PricerTile {
                     entry.error = None;
                     entry.input.update(cx, |s, cx| s.set_value("", window, cx));
                 }
+                // `set_value` emits no Change: rank the empty field here.
+                self.refresh_entry_completion(cx);
                 self.rebuild(cx);
             }
             Err(e) => {
@@ -1039,6 +1167,9 @@ impl PricerTile {
         entry
             .input
             .update(cx, |s, cx| s.set_value(text, window, cx));
+        // `set_value` emits no Change: the recalled line re-ranks here.
+        self.refresh_entry_completion(cx);
+        cx.notify();
     }
 
     // ---- the cell editor (spec §8.4) -----------------------------------
@@ -1995,6 +2126,8 @@ impl PricerTile {
             entry.history = history(&self.sheet);
             entry.history_ix = None;
         }
+        // New templates (the type slot) and a new provider revision.
+        self.refresh_entry_completion(cx);
         self.resolve_plan();
         self.rebuild(cx);
         self.restart_timer(cx);
@@ -3338,10 +3471,16 @@ impl gpui::Render for PricerTile {
                 .bordered(false)
                 .stripe(false),
         );
-        let bar = self
-            .entry
-            .as_ref()
-            .map(|e| header::render_entry_bar(&e.input, &e.label, e.error.as_ref(), theme));
+        let bar = self.entry.as_ref().map(|e| {
+            header::render_entry_bar(
+                &e.input,
+                &e.label,
+                e.error.as_ref(),
+                &e.completion,
+                &tile,
+                cx,
+            )
+        });
         let footer = header::render_footer(self.footer_text.as_ref(), theme);
         // A pointer press anywhere on the tile cancels an armed `:rm`
         // confirm — capture phase, so it runs before the press reaches
@@ -3479,17 +3618,34 @@ pub(crate) mod tests {
         settings: PricerSettings,
         templates: TemplateSet,
     ) -> (Harness, VisualTestContext) {
+        open_configured_with(cx, restored, store, settings, templates, None)
+    }
+
+    /// `open_configured` whose factory reads the entry bar's underlyings
+    /// from `underlyings` (the factory's own empty list when `None`).
+    pub(crate) fn open_configured_with(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<toml::Table>,
+        store: MemorySheetStore,
+        settings: PricerSettings,
+        templates: TemplateSet,
+        underlyings: Option<Rc<dyn crate::content::UnderlyingSource>>,
+    ) -> (Harness, VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
         cx.update(crate::init);
         let (data, rx) = DataHandle::for_tests();
-        let factory = Rc::new(PricerFactory::new(
+        let mut factory = PricerFactory::new(
             data.clone(),
             Rc::new(store.clone()),
             Views::builtin(),
             templates,
             settings,
-        ));
+        );
+        if let Some(source) = underlyings {
+            factory = factory.with_underlyings(source);
+        }
+        let factory = Rc::new(factory);
         let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
@@ -3673,6 +3829,32 @@ pub(crate) mod tests {
                 t.entry
                     .as_ref()
                     .map(|e| e.input.read(cx).value().to_string())
+            })
+        }
+        /// The completion's slot at the caret, `None` without a bar.
+        pub fn entry_slot(&self, vcx: &VisualTestContext) -> Option<crate::core::complete::Slot> {
+            self.tile.read_with(vcx, |t, _| {
+                t.entry.as_ref().and_then(|e| e.completion.slot())
+            })
+        }
+        /// The prepared hint line, `None` without a bar.
+        pub fn entry_hint(&self, vcx: &VisualTestContext) -> Option<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.entry.as_ref().map(|e| e.completion.hint().to_string())
+            })
+        }
+        /// The labels of the rows the list paints.
+        pub fn entry_rows(&self, vcx: &VisualTestContext) -> Vec<String> {
+            self.tile.read_with(vcx, |t, _| {
+                t.entry
+                    .as_ref()
+                    .map(|e| {
+                        e.completion
+                            .painted()
+                            .map(|(_, s)| s.label.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default()
             })
         }
         pub fn entry_label(&self, vcx: &VisualTestContext) -> Option<String> {
@@ -4629,6 +4811,14 @@ pub(crate) mod tests {
         vcx.update(|window, cx| window.focused(cx).is_some())
     }
 
+    /// The completion list hangs over the table's top rows and occludes
+    /// them. A test that clicks the table with the bar open first types a
+    /// whole line and a space, past the last slot, so no list is up.
+    fn past_the_list(h: &Harness, vcx: &mut VisualTestContext) {
+        typed(h, vcx, "SPX Z26 4800/5200 CS ");
+        assert!(!painted(vcx, "pricer-entry-list"), "fixture: no list");
+    }
+
     /// The builtin set plus a desk `CONDOR`, merged as the app merges it.
     fn condor_set() -> TemplateSet {
         let doc = geode_core::config::LayerDoc::builtin(
@@ -4976,6 +5166,7 @@ pub(crate) mod tests {
     ) {
         let (h, mut vcx) = open_seeded(cx, &BOOK);
         h.dispatch(&mut vcx, "add_below", None);
+        past_the_list(&h, &mut vcx);
         let at = centre_of(&mut vcx, "pricer-cell-0-2");
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
@@ -4984,6 +5175,263 @@ pub(crate) mod tests {
         h.dispatch(&mut vcx, "down", None); // from the palette: not an entry verb
         assert_eq!(h.mode(&mut vcx), "normal");
         assert!(!focused(&mut vcx));
+    }
+
+    // ---- entry-bar completion ----
+
+    /// A seeded tile whose factory reads its underlyings from a list set
+    /// to `names`; the list is returned for revision bumps.
+    fn open_with_underlyings(
+        cx: &mut gpui::TestAppContext,
+        names: &[&str],
+    ) -> (
+        Harness,
+        VisualTestContext,
+        Rc<crate::content::UnderlyingList>,
+    ) {
+        let list = Rc::new(crate::content::UnderlyingList::default());
+        list.set(&names.iter().map(|n| n.to_string()).collect::<Vec<_>>());
+        let (store, record) = seeded(&BOOK);
+        let (h, mut vcx) = open_configured_with(
+            cx,
+            Some(record),
+            store,
+            PricerSettings::default(),
+            TemplateSet::builtin(),
+            Some(list.clone()),
+        );
+        h.visible(&mut vcx, true);
+        (h, vcx, list)
+    }
+
+    #[gpui::test]
+    fn tab_writes_the_lit_underlying_and_cycles(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "SX5E", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        // An empty token keeps the provider's order: SPX, SX5E, NDX.
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX"));
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(
+            h.entry_text(&vcx).as_deref(),
+            Some("SX5E"),
+            "the next Tab cycles"
+        );
+        vcx.simulate_keystrokes("shift-tab");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("SPX"));
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert!(focused(&mut vcx), "Tab never moves focus out of the field");
+    }
+
+    #[gpui::test]
+    fn a_first_shift_tab_writes_the_last_suggestion(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "SX5E", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        vcx.simulate_keystrokes("shift-tab");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("NDX"));
+        assert!(focused(&mut vcx));
+    }
+
+    #[gpui::test]
+    fn the_hint_and_list_follow_the_slot(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 4800/5200 ");
+        assert_eq!(
+            h.entry_hint(&vcx).as_deref(),
+            Some("TYPE  C · P · or a template")
+        );
+        assert_eq!(&h.entry_rows(&vcx)[..3], ["C", "P", "CS"]);
+        h.draw(&mut vcx);
+        assert!(vcx.debug_bounds("pricer-entry-hint").is_some());
+        assert!(vcx.debug_bounds("pricer-entry-list").is_some());
+        let height = vcx.debug_bounds("pricer-entry").unwrap().size.height;
+        typed(&h, &mut vcx, "CS ");
+        assert!(h.entry_rows(&vcx).is_empty(), "past the end: no list");
+        assert_eq!(h.entry_hint(&vcx).as_deref(), Some(""));
+        h.draw(&mut vcx);
+        assert!(vcx.debug_bounds("pricer-entry-list").is_none());
+        assert_eq!(
+            vcx.debug_bounds("pricer-entry").unwrap().size.height,
+            height,
+            "an empty hint keeps the bar's height, so the table does not jump"
+        );
+    }
+
+    #[gpui::test]
+    fn a_row_click_writes_and_keeps_typing_in_the_field(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "SX5E", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        let at = centre_of(&mut vcx, "pricer-entry-row-2");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("NDX"));
+        assert_eq!(
+            h.mode(&mut vcx),
+            "insert",
+            "the press never reached the table"
+        );
+        assert!(focused(&mut vcx));
+        typed(&h, &mut vcx, " Z26");
+        assert_eq!(
+            h.entry_text(&vcx).as_deref(),
+            Some("NDX Z26"),
+            "the keyboard stayed in the field"
+        );
+    }
+
+    /// `o` on row 0 lands the line at sheet row 1.
+    #[gpui::test]
+    fn enter_adds_the_line_as_typed_without_expanding(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SP Z26 5000 C");
+        h.dispatch(&mut vcx, "commit", None);
+        assert_eq!(h.entry_error(&vcx), None);
+        let landed = h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(1));
+        assert_eq!(landed, "SP Z26 5000 C");
+        assert_eq!(
+            h.entry_slot(&vcx),
+            Some(crate::core::complete::Slot::Underlying),
+            "the cleared field re-ranks (set_value emits no Change)"
+        );
+    }
+
+    #[gpui::test]
+    fn up_walks_history_with_the_list_open_and_the_list_follows(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        assert!(!h.entry_rows(&vcx).is_empty());
+        h.dispatch(&mut vcx, "insert_up", None);
+        let text = h.entry_text(&vcx).unwrap();
+        assert!(!text.is_empty(), "history recalled a line");
+        assert_eq!(
+            h.entry_slot(&vcx),
+            Some(crate::core::complete::slot_at(&text, text.len()).0),
+            "the list was re-ranked for the recalled line (set_value emits no Change)"
+        );
+    }
+
+    #[gpui::test]
+    fn a_tab_after_the_caret_moved_ranks_at_the_live_caret(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "N Z26");
+        vcx.simulate_keystrokes("home right");
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("NDX Z26"));
+    }
+
+    #[gpui::test]
+    fn a_revision_bump_reaches_an_open_bar(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        list.set(&["SPX".into(), "NKY".into()]);
+        typed(&h, &mut vcx, "N");
+        assert_eq!(h.entry_rows(&vcx), ["NKY"]);
+    }
+
+    #[gpui::test]
+    fn an_empty_provider_says_none_are_configured(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &[]);
+        h.dispatch(&mut vcx, "add_below", None);
+        h.draw(&mut vcx);
+        assert!(vcx.debug_bounds("pricer-entry-none").is_some());
+    }
+
+    /// A reload re-ranks an open bar: a template the reload adds is in the
+    /// type slot's list before another key is pressed.
+    #[gpui::test]
+    fn a_reload_re_ranks_an_open_bar(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX Z26 1/2/3/4 CON");
+        assert!(h.entry_rows(&vcx).is_empty(), "fixture: no CONDOR yet");
+        let (views, settings) = (h.factory.views_for_tests(), h.factory.settings());
+        vcx.update(|_, cx| {
+            h.factory.reload(
+                views,
+                condor_set(),
+                settings.refresh,
+                settings.stale_after,
+                cx,
+            )
+        });
+        assert_eq!(
+            h.entry_rows(&vcx).first().map(String::as_str),
+            Some("CONDOR")
+        );
+    }
+
+    /// A completion is one edit in the field's own history: undo takes it
+    /// back to what was typed.
+    #[gpui::test]
+    fn undo_takes_back_a_completion(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "N");
+        vcx.simulate_keystrokes("tab");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("NDX"));
+        vcx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-z"
+        } else {
+            "ctrl-z"
+        });
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some("N"));
+    }
+
+    /// Twelve expiries (eight monthly, four tenors): the list paints eight
+    /// and its window follows the lit row as Tab cycles past the eighth.
+    #[gpui::test]
+    fn the_list_paints_eight_rows_and_follows_the_lit_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        typed(&h, &mut vcx, "SPX ");
+        let first = h.entry_rows(&vcx);
+        assert_eq!(first.len(), 8);
+        for _ in 0..9 {
+            vcx.simulate_keystrokes("tab");
+        }
+        h.draw(&mut vcx);
+        let rows = h.entry_rows(&vcx);
+        assert_eq!(rows.len(), 8);
+        let text = h.entry_text(&vcx).unwrap();
+        let written = text.strip_prefix("SPX ").expect("the underlying kept");
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some(written),
+            "the lit row"
+        );
+        assert_eq!(rows[..7], first[1..], "the window moved by one");
+        assert!(vcx.debug_bounds("pricer-entry-row-8").is_some());
+        assert!(vcx.debug_bounds("pricer-entry-row-0").is_none());
+    }
+
+    /// The list occludes the table: a press on the list off every row
+    /// (its right padding, level with row 0) never reaches the cell under
+    /// it, which would close the bar.
+    #[gpui::test]
+    fn a_press_on_the_list_never_reaches_the_table(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx, _list) = open_with_underlyings(cx, &["SPX", "SX5E", "NDX"]);
+        h.dispatch(&mut vcx, "add_below", None);
+        h.draw(&mut vcx);
+        let list = vcx.debug_bounds("pricer-entry-list").expect("the list");
+        let row0 = vcx.debug_bounds("pricer-cell-0-2").expect("row 0");
+        let at = gpui::point(list.right() - gpui::px(1.), row0.center().y);
+        let over_a_cell = (0..8).any(|c| {
+            let s: &'static str = Box::leak(format!("pricer-cell-0-{c}").into_boxed_str());
+            vcx.debug_bounds(s).is_some_and(|b| b.contains(&at))
+        });
+        assert!(over_a_cell, "fixture: the press lies over a row-0 cell");
+        let rows_hit = (0..3).any(|i| {
+            let s: &'static str = Box::leak(format!("pricer-entry-row-{i}").into_boxed_str());
+            vcx.debug_bounds(s).is_some_and(|b| b.contains(&at))
+        });
+        assert!(!rows_hit, "fixture: the press is off every list row");
+        click_at(&mut vcx, at, 1);
+        h.draw(&mut vcx);
+        assert_eq!(h.mode(&mut vcx), "insert");
+        assert_eq!(h.entry_text(&vcx).as_deref(), Some(""), "nothing written");
     }
 
     // ---- the cell editor ----
@@ -6689,6 +7137,7 @@ pub(crate) mod tests {
     fn a_double_click_on_a_row_while_the_bar_is_open_edits_that_row(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
         h.dispatch(&mut vcx, "add_below", None);
+        past_the_list(&h, &mut vcx);
         let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
@@ -6713,6 +7162,7 @@ pub(crate) mod tests {
     ) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
         h.dispatch(&mut vcx, "add_below", None);
+        past_the_list(&h, &mut vcx);
         let at = centre_of(&mut vcx, "pricer-cell-0-4"); // A's strike
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
@@ -6763,6 +7213,7 @@ pub(crate) mod tests {
     ) {
         let (h, mut vcx) = open_seeded(cx, &THREE_LINES);
         h.dispatch(&mut vcx, "add_below", None);
+        past_the_list(&h, &mut vcx);
         let at = centre_of(&mut vcx, "pricer-cell-0-0"); // A's shorthand
         click_at(&mut vcx, at, 1);
         h.draw(&mut vcx);
