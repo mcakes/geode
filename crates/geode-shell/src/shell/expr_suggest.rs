@@ -108,6 +108,20 @@ pub(crate) fn refresh(view: &mut ShellView, cx: &mut Context<ShellView>) {
     cx.notify();
 }
 
+/// The top dialog was just revealed. Every expression field shares one pool
+/// key, so a covering dialog's field may have replaced this field's request,
+/// which then never replies; kept `Loading`, the field would say "loading
+/// values…" and `refresh` would never ask again. Values the covering dialog's
+/// actions narrowed differently go too. Drop them all and re-read the field.
+pub(crate) fn revealed(view: &mut ShellView, cx: &mut Context<ShellView>) {
+    let vocab = view.expr_vocab.clone();
+    let Some(c) = completion_mut(view) else {
+        return;
+    };
+    c.forget_values(&vocab);
+    refresh(view, cx);
+}
+
 fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellView>) {
     let Some(scope) = values_scope(view, cx) else {
         return;

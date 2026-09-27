@@ -2924,6 +2924,26 @@ run_mutation "dialog stack: the palette click-catcher does not occlude an open d
   geode-shell \
   a_click_outside_the_palette_over_a_dialog_closes_only_the_palette
 
+# The modal backdrop occludes likewise: without it a click outside the panel
+# pops the dialog and also reaches the chrome beneath (a scope chip's `×`).
+run_mutation "dialog stack: the modal backdrop does not occlude the chrome beneath" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        // and also reaches the chrome beneath (a scope chip'"'"'s `×`, a tile press).
+        .occlude()' \
+  '        // and also reaches the chrome beneath (a scope chip'"'"'s `×`, a tile press).' \
+  geode-shell \
+  a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip
+
+# Every expression field shares one pool key; a covering dialog's request can
+# replace the covered field's, so a revealed field must forget its values and
+# ask again, or it says "loading values…" forever.
+run_mutation "dialog stack: a revealed expression field keeps a request that never replies" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        super::expr_suggest::revealed(view, cx);' \
+  '' \
+  geode-shell \
+  a_revealed_field_asks_again_for_the_values_a_covering_dialog_may_have_replaced
+
 # The palette reaches every action (ruling 5), including three that would
 # open real transient chrome behind the stack; they must be refused rather
 # than left running unreachable behind it.

@@ -856,3 +856,52 @@ fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::Te
          not only from its own next keystroke"
     );
 }
+
+/// gpui fires `on_mouse_down` for every hovered hitbox, so a backdrop without
+/// `occlude()` lets a click outside the panel reach the scope-bar chip beneath it:
+/// the dialog pops AND the chip's `×` drops its dimension. The click must only
+/// close the dialog.
+#[gpui::test]
+fn a_backdrop_click_over_a_scope_chip_closes_the_dialog_and_leaves_the_chip(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        let mut s = f.scope().clone();
+        s.dimensions.push(geode_core::scope::DimensionSelection {
+            column: "book".into(),
+            values: vec!["BK001".into()],
+        });
+        f.set_scope(s);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "settings::open", &mut vcx);
+    draw(&mut vcx);
+    assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Settings]);
+    let close = vcx
+        .debug_bounds("scope-chip-close-book")
+        .expect("chip painted under the backdrop");
+    let panel = vcx
+        .debug_bounds("shell-modal-panel")
+        .expect("panel painted");
+    assert!(
+        !panel.contains(&close.center()),
+        "the chip must sit outside the panel for this click to land on the backdrop"
+    );
+
+    vcx.simulate_click(close.center(), gpui::Modifiers::default());
+    draw(&mut vcx);
+
+    assert!(
+        kinds(&shell, &mut vcx).is_empty(),
+        "the backdrop click closes the dialog"
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.scope().dimensions.len()),
+        1,
+        "the click must not also reach the chip's × beneath the backdrop"
+    );
+}

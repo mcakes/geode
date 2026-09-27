@@ -1080,3 +1080,32 @@ fn mod_s_in_term_mode_shows_the_notice(cx: &mut gpui::TestAppContext) {
     assert_eq!(field(&shell, &vcx), "npv > 5");
     assert!(shell.read_with(&vcx, |s, _| s.modal_open()));
 }
+
+/// Every expression field requests values under one pool key, and the pool keeps
+/// only the newest request per key. A dialog pushed over this one may have
+/// replaced its outstanding request, so the covered field's request never
+/// replies. When the dialog is revealed, its field must ask again rather than
+/// keep showing "loading values…".
+#[gpui::test]
+fn a_revealed_field_asks_again_for_the_values_a_covering_dialog_may_have_replaced(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) =
+        dialog_test_shell_with(cx, services_with_schema(), "frame::scope_expression");
+    let seen = requests(&shell, &mut vcx);
+    vcx.simulate_input("book = ");
+    vcx.run_until_parked();
+    assert_eq!(seen.borrow().len(), 1, "asked once");
+    let first = seen.borrow()[0].tag;
+
+    dispatch_action(&shell, "settings::open", &mut vcx);
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+
+    assert_eq!(field(&shell, &vcx), "book = ");
+    let again = seen.borrow().last().cloned().expect("a request");
+    assert_eq!(seen.borrow().len(), 2, "the revealed field asks again");
+    assert_ne!(again.tag, first);
+    assert_eq!((again.key, again.column.as_str()), (EXPR_KEY, "book"));
+}

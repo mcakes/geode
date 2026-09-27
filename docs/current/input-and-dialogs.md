@@ -58,7 +58,9 @@ lower in the stack does nothing either, and posts "… is already open
 underneath" instead of pushing a duplicate or overwriting that entry's state.
 Closing — Enter commit, Escape, the close button, or a backdrop click — pops
 exactly one level and clears only the popped kind's own state, never a kind
-still lower in the stack.
+still lower in the stack. The backdrop occludes what it covers, so a click
+outside the panel only closes the dialog; it never also reaches a scope-bar
+chip or tile beneath.
 
 Revealing the covered entry restores the shared input's text and caret to
 what they were when it was covered, and gives back its focus: mode dialogs
@@ -477,7 +479,9 @@ opens, and a failed request is not retried again within that opening. Every
 column is requested under one query-pool key, and the pool keeps only the
 newest request per key, so at most one request is outstanding: asking for a
 second column forgets a first that has not answered, and returning to it
-asks again rather than showing `loading values…` for good. The
+asks again rather than showing `loading values…` for good. A dialog pushed
+over an expression field can replace that field's request the same way, so a
+revealed field drops its values and asks again. The
 hint reads `loading values…` while the request is in flight and `values
 unavailable: <reason>` if it fails. A derived dimension lists its configured
 labels with no query, and a bool column lists `true`/`false`. Every other

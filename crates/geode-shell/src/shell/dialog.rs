@@ -485,6 +485,7 @@ pub(crate) fn refocus_top(view: &mut ShellView, window: &mut Window, cx: &mut Co
             i.set_value(saved.text, window, cx);
             i.set_selected_range(saved.cursor..saved.cursor, cx);
         });
+        super::expr_suggest::revealed(view, cx);
     }
     match kind {
         DialogKind::Picker | DialogKind::Choice | DialogKind::ScopeExpr => {
@@ -912,6 +913,10 @@ pub(crate) fn render_modal(
         .pt(px(viewport_height * MODAL_TOP_RATIO))
         .bg(overlay)
         .debug_selector(|| "shell-modal-backdrop".to_string())
+        // gpui fires `on_mouse_down` for every hovered hitbox, not only the
+        // topmost; without `occlude()` a click outside the panel pops the dialog
+        // and also reaches the chrome beneath (a scope chip's `×`, a tile press).
+        .occlude()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {
