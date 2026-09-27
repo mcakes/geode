@@ -109,7 +109,13 @@ pub fn move_plan(sheet: &Sheet, top: &[usize], down: bool) -> Result<Edit, &'sta
 /// a package. A column with any row unpriced or failed is `None`: an
 /// incomplete total would read as a real one. A failed line keeps its
 /// old result, so the state is checked, not only the result.
+///
+/// No rows is `None` too, not zero: a total of nothing reads as a flat
+/// position, which is a claim the selection never made.
 pub fn risk_totals(sheet: &Sheet, top: &[usize]) -> [Option<f64>; 6] {
+    if top.is_empty() {
+        return [None; 6];
+    }
     let mut sums = [Some(0.0f64); 6];
     for &r in top {
         let weight = if sheet.is_package(r) {
@@ -363,6 +369,29 @@ mod tests {
         s.deliver(s.id(0), s.revision(0), Err("boom".into()), at(1));
         assert!(s.result(0).is_some(), "a failure retains the old result");
         assert_eq!(risk_totals(&s, &[0]), [None; 6]);
+    }
+
+    #[test]
+    fn risk_totals_count_a_stale_row_that_still_shows_a_result() {
+        let mut s = sheet(vec![call(5000.0, 1)]);
+        price(&mut s, 0, 1.0);
+        s.apply(Edit::SetQty { row: 0, qty: 3 }).unwrap();
+        // A refresh tick restales every line without dropping its result.
+        s.mark_all_stale();
+        assert_eq!(s.state(0), &LineState::Stale);
+        assert!(s.result(0).is_some(), "the old result is still painted");
+        assert_eq!(
+            risk_totals(&s, &[0])[0],
+            Some(3.0),
+            "what the grid shows counts"
+        );
+    }
+
+    #[test]
+    fn risk_totals_over_no_rows_are_incomplete_not_zero() {
+        let mut s = sheet(vec![call(5000.0, 1)]);
+        price(&mut s, 0, 1.0);
+        assert_eq!(risk_totals(&s, &[]), [None; 6]);
     }
 
     #[test]
