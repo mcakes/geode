@@ -459,3 +459,212 @@ fn a_count_is_ignored_while_a_selection_is_live(cx: &mut gpui::TestAppContext) {
         "the package holds the two selected lines, not three"
     );
 }
+
+fn line_texts(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+    h.tile.read_with(vcx, |t, _| {
+        (0..t.sheet.len())
+            .filter(|&r| t.sheet.is_line(r))
+            .map(|r| t.sheet.shorthand(r))
+            .collect()
+    })
+}
+
+fn notice(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+    h.tile
+        .read_with(vcx, |t, _| t.notice.clone())
+        .map(|s| s.to_string())
+}
+
+#[gpui::test]
+fn i_over_rows_writes_the_cursor_column_on_every_target_line_in_one_undo(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    // 5000 C, both CS legs, 4000 P → all 4500; qty untouched
+    let strikes = line_texts(&h, &vcx);
+    assert_eq!(strikes.len(), 4);
+    assert!(strikes.iter().all(|s| s.contains("4500")), "{strikes:?}");
+    assert_eq!(h.mode(&mut vcx), "visual", "a commit keeps the selection");
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "one undo takes every write back"
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert_eq!(h.cell(&vcx, 2, "strike"), "4000");
+}
+
+#[gpui::test]
+fn a_typed_strike_over_a_package_and_its_leg_writes_each_leg_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "expand", None);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None); // the package + its first leg
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4900");
+    h.dispatch(&mut vcx, "commit", None);
+    assert!(h.footer(&vcx).is_none() || !h.footer(&vcx).unwrap().contains("refused"));
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("set 2 cells"),
+        "each leg counted once"
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    // exactly the two legs changed, once each: undo once restores both
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+}
+
+#[gpui::test]
+fn a_block_commit_skips_read_only_and_inapplicable_cells_and_counts_them(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    // Anchored on the last risk column with the cursor back on strike:
+    // the cursor cell opens the editor, so it must itself be editable.
+    let columns = h.columns(&vcx);
+    let strike = columns.iter().position(|c| c == "strike").unwrap();
+    h.dispatch(&mut vcx, "last_col", None);
+    h.dispatch(&mut vcx, "visual_block", None);
+    let back = (columns.len() - 1 - strike) as u32;
+    h.dispatch(&mut vcx, "left", Some(back)); // strike … the read-only risk columns
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    let notice = notice(&h, &vcx);
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("set ") && n.contains("read-only")),
+        "{notice:?}"
+    );
+    assert_eq!(h.cell(&vcx, 0, "strike"), "4500");
+}
+
+#[gpui::test]
+fn a_barrier_column_over_a_vanilla_line_is_counted_not_applicable(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C DO 4000", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "view barrier").unwrap();
+    goto_column(&h, &mut vcx, "barrier");
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None); // the cursor on the barrier line
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3900");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 n/a)"),
+        "a vanilla line has no barrier: not applicable, not read-only"
+    );
+    assert_eq!(h.cell(&vcx, 0, "barrier"), "3900");
+}
+
+#[gpui::test]
+fn nothing_accepting_refuses_with_the_editor_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "abc");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&mut vcx), "insert");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("no selected cell accepts 'abc', skipped 1 (1 refused)")
+    );
+}
+
+#[gpui::test]
+fn a_zero_qty_over_a_selection_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    let before = line_texts(&h, &vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "0");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&mut vcx), "insert", "the editor stays open");
+    assert_eq!(line_texts(&h, &vcx), before, "no line changed");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    assert!(
+        h.footer(&vcx)
+            .is_some_and(|f| f.starts_with("no selected cell accepts '0'")),
+        "{:?}",
+        h.footer(&vcx)
+    );
+}
+
+#[gpui::test]
+fn an_unchanged_value_over_a_selection_is_no_undo_entry(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 4000 P"]);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "1");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&mut vcx), "visual", "the editor closed");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    assert_eq!(notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+}
+
+#[gpui::test]
+fn a_picked_type_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "type");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "p");
+    h.dispatch(&mut vcx, "commit", None);
+    let lines = line_texts(&h, &vcx);
+    assert!(lines.iter().all(|s| s.ends_with(" P")), "{lines:?}");
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(h.cell(&vcx, 0, "type"), "C");
+}
+
+#[gpui::test]
+fn a_date_commits_to_every_selected_line(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX 3m 100% C"]);
+    goto_column(&h, &mut vcx, "expiry");
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "up", None); // the dated line opens the field
+    h.dispatch(&mut vcx, "edit", None);
+    h.draw(&mut vcx);
+    keys(&h, &mut vcx, "up");
+    keys(&h, &mut vcx, "enter");
+    assert_eq!(h.mode(&mut vcx), "visual", "the field closed");
+    let want = Expiry::Date(ymd(2026, 12, 19));
+    assert_eq!(expiry_of(&h, &vcx, 0), want);
+    assert_eq!(expiry_of(&h, &vcx, 1), want, "the tenor line took the date");
+    h.dispatch(&mut vcx, "escape", None);
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+    assert_ne!(expiry_of(&h, &vcx, 1), want, "one undo took both back");
+}
+
+#[gpui::test]
+fn a_read_only_cursor_cell_refuses_to_open_under_a_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    h.dispatch(&mut vcx, "last_col", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "visual", "no editor opened");
+    assert_eq!(h.footer(&vcx).as_deref(), Some("read-only"));
+}

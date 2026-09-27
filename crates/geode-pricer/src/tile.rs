@@ -1225,6 +1225,11 @@ impl PricerTile {
     /// `i`/`enter`/double-click: a text field on the cell's grammar
     /// spelling, or a typeahead over its vocabulary; a cell that does not
     /// edit says why in the footer.
+    ///
+    /// Under a live selection the editor opens on the cursor cell exactly
+    /// as without one, and that cell must itself be editable: a read-only
+    /// cursor cell refuses with its own reason, rather than opening a
+    /// field whose grammar belongs to some other selected cell.
     fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
@@ -1414,6 +1419,16 @@ impl PricerTile {
             cx.notify();
             return;
         };
+        // A live selection takes the value to every target line, each
+        // judged on its own; the cursor cell is only where it was typed.
+        if self.selection.is_some() {
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&value, None, cx) {
+                self.close_editor(window, cx);
+            }
+            return;
+        }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
@@ -1493,6 +1508,16 @@ impl PricerTile {
         row
     }
 
+    /// Whether the cursor still sits on the cell the editor opened on. A
+    /// `V` selection writes the cursor's column, so a commit after the
+    /// cursor left the editor's column would write the typed text into
+    /// a column it was never typed for.
+    fn cursor_on_editor(&self, line: LineId, kind: ColumnKind) -> bool {
+        let row_line = self.cursor_sheet_row().map(|r| self.sheet.id(r));
+        let col_kind = self.plan.columns.get(self.cursor.col).map(|c| c.def.kind);
+        row_line == Some(line) && col_kind == Some(kind)
+    }
+
     /// Close the editor with `MOVED`: its commit no longer means what the
     /// trader saw when it opened.
     fn refuse_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1529,6 +1554,16 @@ impl PricerTile {
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
+            return;
+        }
+        // A live selection takes the date to every target line.
+        if self.selection.is_some() {
+            let text = date.format("%Y-%m-%d").to_string();
+            if !self.cursor_on_editor(line, kind) {
+                self.refuse_moved(window, cx);
+            } else if self.commit_selection(&text, Some(date), cx) {
+                self.close_editor(window, cx);
+            }
             return;
         }
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {

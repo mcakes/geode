@@ -5,8 +5,12 @@
 //! with a notice rather than guessing a neighbour.
 
 use super::*;
-use crate::core::select::{RISK, group_plan, lines_of, move_plan, risk_totals, top_most};
+use crate::core::cell::READ_ONLY;
+use crate::core::select::{
+    RISK, Skip, Skips, group_plan, lines_of, move_plan, risk_totals, set_notice, top_most,
+};
 use geode_core::grid::selection::Lost;
+use geode_core::pricing::Instrument;
 
 /// The refusal for `v`/`V` on a row with no line behind it.
 const NO_ANCHOR: &str = "select from a line or package row";
@@ -141,8 +145,6 @@ impl PricerTile {
     /// stands for its legs) and the plan columns — the cursor's alone
     /// under `V`, whose columns span every column including read-only
     /// ones, and the block's under `v`.
-    // Its readers are the bulk edit verbs.
-    #[allow(dead_code)]
     pub(crate) fn selection_targets(&self) -> (Vec<usize>, Vec<usize>) {
         let Some(r) = &self.resolved else {
             return (Vec::new(), Vec::new());
@@ -153,6 +155,94 @@ impl PricerTile {
             SelectKind::Block => r.cols.clone().collect(),
         };
         (lines, cols)
+    }
+
+    /// A typed value committed over a live selection: every target cell
+    /// that takes it is written, as ONE undo entry; the rest are skipped
+    /// and counted in the notice. Answers whether the editor closes — it
+    /// stays open when no cell accepts the value or the sheet refuses the
+    /// batch, and then nothing was written. `date` is the date field's
+    /// value, which an expiry cell takes as a date rather than as text.
+    ///
+    /// Each cell is judged on its own line's instrument, never on the
+    /// cursor cell's: a value one line refuses must not reach it as some
+    /// other line's reading of the text.
+    pub(crate) fn commit_selection(
+        &mut self,
+        text: &str,
+        date: Option<chrono::NaiveDate>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.loading {
+            self.footer = Some("the sheet is still loading".into());
+            self.rebuild_chrome();
+            cx.notify();
+            return false;
+        }
+        let (lines, cols) = self.selection_targets();
+        let mut edits = Vec::new();
+        let mut set = 0usize;
+        let mut skips = Skips::default();
+        for &line in &lines {
+            for &col in &cols {
+                let Some(planned) = self.plan.columns.get(col) else {
+                    continue;
+                };
+                let (kind, editable) = (planned.def.kind, planned.def.editable);
+                if !editable {
+                    skips.add(Skip::ReadOnly);
+                    continue;
+                }
+                // `cell` answers `READ_ONLY` for a barrier cell on a vanilla
+                // line too; the notice tells the two apart, since the cell
+                // is not read-only on the lines it applies to.
+                let barrier_col = matches!(kind, ColumnKind::Barrier | ColumnKind::BarrierType);
+                if barrier_col
+                    && matches!(self.sheet.instrument(line), Some(Instrument::Vanilla(_)))
+                {
+                    skips.add(Skip::NotApplicable);
+                    continue;
+                }
+                let answer = match (kind, date) {
+                    (ColumnKind::Expiry, Some(d)) => cell::commit_date(&self.sheet, line, d),
+                    _ => cell::commit(&self.sheet, line, kind, text),
+                };
+                match answer {
+                    Ok(Some(edit)) => {
+                        edits.push(edit);
+                        set += 1;
+                    }
+                    // Already that value: it counts as set, with no edit.
+                    Ok(None) => set += 1,
+                    Err(why) if why == READ_ONLY => skips.add(Skip::ReadOnly),
+                    Err(_) => skips.add(Skip::Refused),
+                }
+            }
+        }
+        if set == 0 {
+            self.footer =
+                Some(format!("no selected cell accepts '{text}'{}", skips.describe()).into());
+            self.sync_editor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return false;
+        }
+        // Every edit is a `Set*` on its own line, so no edit shifts
+        // another's row index; one batch makes one undo entry and a
+        // refusal rolls the whole batch back.
+        if !edits.is_empty()
+            && let Err(e) = self.apply_edits(edits, cx)
+        {
+            self.footer = Some(e.to_string().into());
+            self.sync_editor(cx);
+            self.rebuild_chrome();
+            cx.notify();
+            return false;
+        }
+        self.notice = Some(set_notice(set, &skips).into());
+        self.rebuild_chrome();
+        cx.notify();
+        true
     }
 
     /// A row verb's refusal under a `v` block, whose cells are not a set
