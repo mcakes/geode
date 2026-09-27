@@ -38,4 +38,11 @@ pub fn init(cx: &mut gpui::App) {
         .into_iter()
         .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, CONTEXT)),
     );
+    // The entry bar's completion owns tab/shift-tab: gpui-component's Root
+    // binds both to focus cycling, and a matched action runs before the
+    // bar's key listener (the timeseries expression field's reason).
+    cx.bind_keys(
+        ["tab", "shift-tab"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),
+    );
 }

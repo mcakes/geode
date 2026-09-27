@@ -527,6 +527,23 @@ parse error or a refused insert keeps the text and shows the reason under
 the field in danger text; any edit clears it. "Add lines…" from the palette
 while the bar is open keeps its text and place and focuses its field again.
 
+As you type, the bar suggests the part of the line under the caret and a
+hint line names what goes there: underlyings from `[pricing] underlyings`,
+the next eight monthly expiries and common tenors, `C`, `P` and every
+template with how many strikes and expiries it takes, and the four barrier
+kinds after a single leg. Tab writes the lit suggestion over the token (only
+the `/`-separated part for expiries and strikes) and repeated Tab cycles;
+Shift+Tab cycles back; a click writes a suggestion and keeps typing in the
+field. `enter` adds the line exactly as typed. `up`/`down` still walk
+history.
+
+The list hangs from the bar over the table's top rows, at most eight rows at
+a time, and scrolls with the lit row. Each write is one edit in the field's
+undo history. With no underlyings configured, the underlying slot's list
+says `no underlyings configured ([pricing] underlyings)`. The list covers
+the rows under it: a press there never reaches the table, so a click that
+closes the bar has to land on a row the list does not cover.
+
 `[ui] line_numbers` adds a gutter beside the tree column, before the depth
 indent, so numbers share one lane; the tree column widens by the gutter.
 Lines, packages, and an open package's legs are numbered in painted order —
@@ -561,7 +578,7 @@ Normal-mode keys:
 
 | Keys | Effect |
 |---|---|
-| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `escape` closes it |
+| `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `i`, `enter`, double-click | Edit the cell in place; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |

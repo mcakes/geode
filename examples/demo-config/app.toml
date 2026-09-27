@@ -10,3 +10,8 @@ stale_after = "15m"
 # `:add SPX.close` reads `SPX.close@demo_kdb`.
 [timeseries]
 default_source = "demo_kdb"
+
+# The pricer entry bar's underlying suggestions: the demo generator's own
+# vocabulary, so `--demo` completes the names its risk and market data use.
+[pricing]
+underlyings = ["SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2"]

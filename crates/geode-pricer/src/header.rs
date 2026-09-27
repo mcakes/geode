@@ -5,7 +5,9 @@
 
 use crate::content::PricerSettings;
 use crate::core::columns::{SHIFT, signed};
+use crate::core::complete::Completion;
 use crate::core::sheet::{LineState, Sheet};
+use crate::popup;
 use crate::tile::{LOADING, PricerTile};
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
@@ -19,12 +21,15 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{
-    ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div, relative,
+    App, ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div, relative,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
+/// The entry bar's key context: `lib::init` reclaims `tab`/`shift-tab`
+/// in it from gpui-component's focus cycling, for completion.
+pub const ENTRY_CONTEXT: &str = "PricerEntry";
 pub(crate) const FOOTER_HEIGHT: f32 = 20.0;
 /// Labels preceding the active view and pricer names in the header.
 pub(crate) const VIEW_LABEL: &str = "view";
@@ -360,10 +365,16 @@ pub(crate) fn render_entry_bar(
     input: &Entity<InputState>,
     label: &SharedString,
     error: Option<&SharedString>,
-    theme: &Theme,
+    completion: &Completion,
+    tile: &Entity<PricerTile>,
+    cx: &App,
 ) -> impl IntoElement {
+    let theme = cx.theme();
     let danger = chip_paint(theme, Tone::DangerText).text;
+    let hint = completion.hint();
+    let list = popup::render_entry_list(completion, tile, cx);
     v_flex()
+        .relative()
         .w_full()
         .px_2()
         .py_1()
@@ -371,6 +382,15 @@ pub(crate) fn render_entry_bar(
         .border_b_1()
         .border_color(theme.border)
         .debug_selector(|| "pricer-entry".into())
+        .key_context(ENTRY_CONTEXT)
+        .on_key_down({
+            let tile = tile.clone();
+            move |event: &gpui::KeyDownEvent, window, cx| {
+                if tile.update(cx, |t, cx| t.entry_key(event, window, cx)) {
+                    cx.stop_propagation();
+                }
+            }
+        })
         .child(
             h_flex()
                 .w_full()
@@ -397,6 +417,21 @@ pub(crate) fn render_entry_bar(
                         .child(Input::new(input).appearance(false).w_full()),
                 ),
         )
+        // Always painted, a no-break space when there is no hint, so the
+        // bar keeps its height and the table under it never jumps as the
+        // caret crosses into the last slot.
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())
+                .child(if hint.is_empty() {
+                    SharedString::new_static("\u{a0}")
+                } else {
+                    hint.clone()
+                }),
+        )
         .when_some(error.cloned(), |el, e| {
             el.child(
                 div()
@@ -405,6 +440,10 @@ pub(crate) fn render_entry_bar(
                     .debug_selector(|| "pricer-entry-error".into())
                     .child(e),
             )
+        })
+        // Hangs from the bar's bottom edge over the table.
+        .when_some(list, |el, list| {
+            el.child(div().absolute().left_0().bottom_0().child(list))
         })
 }
 

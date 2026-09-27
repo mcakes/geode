@@ -335,7 +335,8 @@ fn number(
 /// The text and state of one cell (spec §6.5, §8.2). `clock` is the
 /// trader's configured clock (`[time] zone`, as-of dialog Part 2) — Part
 /// 3's tile reads it off the `AppClock` global and hands it in here,
-/// since this crate is pure core with no gpui and no global of its own.
+/// since the core reads no global (its one gpui type is `SharedString`,
+/// in `complete`).
 pub fn cell_text(
     sheet: &Sheet,
     row: usize,

@@ -194,6 +194,54 @@ impl Default for PricerSettings {
     }
 }
 
+/// Where the entry bar's underlying suggestions come from. The app backs
+/// it with `[pricing] underlyings` today and with the active watchlist
+/// later; the pricer reads it, never writes it.
+pub trait UnderlyingSource {
+    /// In the provider's own order.
+    fn underlyings(&self, cx: &App) -> Rc<[SharedString]>;
+    /// Bumped whenever the list changes; a tile re-reads on a change.
+    fn revision(&self, cx: &App) -> u64;
+}
+
+/// A list set from outside, e.g. from config.
+#[derive(Default)]
+pub struct UnderlyingList {
+    list: RefCell<Rc<[SharedString]>>,
+    revision: Cell<u64>,
+}
+
+impl UnderlyingList {
+    /// Upper-cases, drops blanks and repeats (first wins), and bumps the
+    /// revision only when the list actually changed — an unrelated reload
+    /// sets the same list again, and a bump would make every tile re-read.
+    pub fn set(&self, names: &[String]) {
+        let mut next: Vec<SharedString> = Vec::with_capacity(names.len());
+        for name in names {
+            let name = name.trim().to_uppercase();
+            if name.is_empty() || next.iter().any(|n| n.as_ref() == name) {
+                continue;
+            }
+            next.push(name.into());
+        }
+        if *self.list.borrow().as_ref() == next[..] {
+            return;
+        }
+        *self.list.borrow_mut() = next.into();
+        self.revision.set(self.revision.get() + 1);
+    }
+}
+
+impl UnderlyingSource for UnderlyingList {
+    fn underlyings(&self, _cx: &App) -> Rc<[SharedString]> {
+        self.list.borrow().clone()
+    }
+
+    fn revision(&self, _cx: &App) -> u64 {
+        self.revision.get()
+    }
+}
+
 /// What the factory shares with every tile it built.
 pub(crate) struct Shared {
     pub(crate) views: RefCell<Views>,
@@ -234,6 +282,16 @@ pub(crate) struct Shared {
     pub(crate) retiring: RefCell<BTreeSet<String>>,
     /// So a reload reaches every open tile (planning decision 20).
     pub(crate) tiles: RefCell<Vec<WeakEntity<PricerTile>>>,
+    /// The entry bar's underlying suggestions; an empty list until the
+    /// app hands one over (`PricerFactory::with_underlyings`).
+    pub(crate) underlyings: RefCell<Rc<dyn UnderlyingSource>>,
+}
+
+impl Shared {
+    /// The source the entry bar reads its underlyings from.
+    pub(crate) fn underlying_source(&self) -> Rc<dyn UnderlyingSource> {
+        self.underlyings.borrow().clone()
+    }
 }
 
 pub struct PricerContent {
@@ -410,9 +468,22 @@ impl PricerFactory {
                 save_origins: RefCell::new(BTreeMap::new()),
                 retiring: RefCell::new(BTreeSet::new()),
                 tiles: RefCell::new(Vec::new()),
+                underlyings: RefCell::new(Rc::new(UnderlyingList::default())),
             }),
             catalog_watched: Cell::new(false),
         }
+    }
+
+    /// The entry bar's underlying suggestions. Without this the list is
+    /// empty and the bar says so.
+    pub fn with_underlyings(self, source: Rc<dyn UnderlyingSource>) -> Self {
+        *self.shared.underlyings.borrow_mut() = source;
+        self
+    }
+
+    /// The source every tile's entry bar reads its underlyings from.
+    pub fn underlying_source(&self) -> Rc<dyn UnderlyingSource> {
+        self.shared.underlying_source()
     }
 
     /// Seed the store's known names from `diagnostics`' catalog now and on
@@ -669,6 +740,23 @@ mod tests {
     use geode_shell::defaults::default_mod;
     use geode_shell::keymap::fragments::{check_fragment, fragment_doc};
     use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
+
+    #[test]
+    fn an_underlying_list_normalises_and_bumps_only_on_change() {
+        let l = UnderlyingList::default();
+        let cx_free = |l: &UnderlyingList| (l.list.borrow().clone(), l.revision.get());
+        l.set(&["spx".into(), "SX5E".into(), "SPX".into(), "  ".into()]);
+        let (list, rev) = cx_free(&l);
+        assert_eq!(
+            list.iter().map(|s| s.as_ref()).collect::<Vec<_>>(),
+            ["SPX", "SX5E"]
+        );
+        assert_eq!(rev, 1);
+        l.set(&["SPX".into(), "sx5e".into()]);
+        assert_eq!(cx_free(&l).1, 1, "the same list after normalising: no bump");
+        l.set(&["NDX".into()]);
+        assert_eq!(cx_free(&l).1, 2);
+    }
 
     fn registry() -> ActionRegistry {
         let mut r = ActionRegistry::default();

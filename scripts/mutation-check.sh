@@ -17225,8 +17225,8 @@ run_mutation "pricer templates: a reload leaves the open bar's history stale" \
             entry.history = history(&self.sheet);
             entry.history_ix = None;
         }
-        self.resolve_plan();' \
-  '        self.resolve_plan();' \
+        // New templates (the type slot) and a new provider revision.' \
+  '        // New templates (the type slot) and a new provider revision.' \
   geode-pricer a_reload_with_the_bar_open_reprints_its_history
 
 # The reload observer must hand the factory the configured set.
@@ -20131,6 +20131,47 @@ run_mutation "pricer core: a tick stales no line" \
                 self.state[row] = LineState::Stale;' \
   geode-pricer mark_all_stale_stales_every_line_and_bumps_no_revision
 
+# Only a single C or P leg takes a barrier; a package's fifth token is
+# past the end.
+run_mutation "pricer complete: a package offers barrier kinds" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        4 if type_tok.is_some_and(|t| is_single_leg(text(t))) => Slot::BarrierKind,' \
+  '        4 => Slot::BarrierKind,' \
+  geode-pricer barrier_kinds_follow_only_a_single_leg
+
+# Expiries and strikes write only the `/` part at the caret.
+run_mutation "pricer complete: a write replaces the whole slash token" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        Slot::Expiry | Slot::Strikes if !range.is_empty() => slash_part(line, range, caret),' \
+  '        Slot::Expiry | Slot::Strikes if false => slash_part(line, range, caret),' \
+  geode-pricer tab_writes_cycles_and_shift_tab_goes_back_over_the_slash_part
+
+# A leading quantity shifts every later slot by one.
+run_mutation "pricer complete: a leading qty is not skipped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    let index = k - usize::from(qty);' \
+  '    let index = k;' \
+  geode-pricer the_slot_follows_parse_order_with_an_optional_qty
+
+# A range cached against other text is refused, never sliced.
+run_mutation "pricer complete: a stale range is sliced" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        if !fits(line, &token) {' \
+  '        if false {' \
+  geode-pricer a_range_that_does_not_fit_the_line_writes_nothing
+
+# A caret inside a character clamps back to a boundary before a slash
+# token is sliced at it; unclamped, the slice panics.
+run_mutation "pricer complete: a caret inside a character is not clamped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    while !line.is_char_boundary(caret) {
+        caret -= 1;
+    }' \
+  '    while false {
+        caret -= 1;
+    }' \
+  geode-pricer a_caret_inside_a_character_clamps_back
+
 run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
@@ -20156,8 +20197,9 @@ run_mutation "pricer entry: the label names a leg for a root place" \
 # clear it, or the bar blames text that is no longer there.
 run_mutation "pricer entry bar: an edit keeps a stale error" \
   crates/geode-pricer/src/tile.rs \
-  '                && entry.error.take().is_some()' \
-  '                && entry.error.clone().is_some()' \
+  '            entry.error = None;
+            this.refresh_entry_completion(cx);' \
+  '            this.refresh_entry_completion(cx);' \
   geode-pricer a_parse_error_shows_under_the_field_keeps_the_text_and_typing_clears_it
 
 # A refused insert must put the place back, or the next enter lands
@@ -21219,13 +21261,51 @@ run_mutation "pricer rm: a key under the confirm reaches the tile too" \
   geode-app a_key_answering_the_rm_confirm_reaches_nothing_else
 
 # The table's own escape would clear its selection and stop the key before
-# the tile's cancel closes the entry field.
+# the tile's cancel closes the cell editor, which lives inside the table.
+# (The entry bar sits outside the table, so it no longer sees this.)
 run_mutation "pricer init: DataTable keeps its own escape" \
   crates/geode-pricer/src/lib.rs \
   '            "escape",
 ' \
   '' \
-  geode-app escape_after_a_committed_line_closes_the_entry_field
+  geode-app escape_closes_the_cell_editor_inside_the_table
+
+# gpui-component's Root binds tab to focus cycling, and a matched action
+# runs before the bar's key listener: without the reclaim, Tab leaves the
+# field instead of completing.
+run_mutation "pricer init: the entry bar does not reclaim tab" \
+  crates/geode-pricer/src/lib.rs \
+  '        ["tab", "shift-tab"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  '        ["f24"]
+            .map(|key| gpui::KeyBinding::new(key, gpui::NoAction, Some(header::ENTRY_CONTEXT))),' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# An empty hint must keep its row, or the table jumps as the caret enters
+# the last slot.
+run_mutation "pricer entry bar: an empty hint drops its row" \
+  crates/geode-pricer/src/header.rs \
+  '            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  '            div()
+                .when(hint.is_empty(), |d| d.hidden())
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .font_family(fonts::MONO)
+                .debug_selector(|| "pricer-entry-hint".into())' \
+  geode-pricer the_hint_and_list_follow_the_slot
+
+# A malformed [pricing] underlyings on reload keeps the last list.
+run_mutation "pricer app: a malformed underlyings reload empties the list" \
+  crates/geode-app/src/bridge.rs \
+  '                if let Some(names) = names {
+                    underlyings.set(&names);
+                }' \
+  '                underlyings.set(&names.unwrap_or_default());' \
+  geode-app a_malformed_underlyings_reload_keeps_the_last_list
 
 run_mutation "pricer retiring: a restore opens a sheet being removed" \
   crates/geode-pricer/src/tile.rs \
@@ -22526,6 +22606,51 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
   '        (**self).accepts()' \
   '        &[]' \
   geode-app the_production_roster_opens_market_data_on_an_underlying
+
+# A reload must reach the underlying list, or a desk edit to it waits for
+# a restart.
+run_mutation "pricer app: a reload leaves the underlying list stale" \
+  crates/geode-app/src/bridge.rs \
+  '                underlyings.set(&names);' \
+  '' \
+  geode-app a_config_reload_hands_the_pricer_factory_its_underlyings
+
+# The revision moves only on a real change; a bump on every set makes
+# every tile re-rank on every unrelated reload.
+run_mutation "pricer underlyings: an unchanged set bumps the revision" \
+  crates/geode-pricer/src/content.rs \
+  '        if *self.list.borrow().as_ref() == next[..] {' \
+  '        if false {' \
+  geode-pricer an_underlying_list_normalises_and_bumps_only_on_change
+
+# The echo of the tile's own write must not reset the cycle, or a second
+# Tab writes the first suggestion again.
+run_mutation "pricer entry bar: the write's echo resets the cycle" \
+  crates/geode-pricer/src/tile.rs \
+  '            if entry.echo.take().is_some_and(|echo| echo == text.as_ref()) {' \
+  '            if entry.echo.take().is_some_and(|_| false) {' \
+  geode-pricer tab_writes_the_lit_underlying_and_cycles
+
+# A Tab at a caret moved without typing must re-rank there first.
+run_mutation "pricer entry bar: a Tab at a moved caret uses the old range" \
+  crates/geode-pricer/src/tile.rs \
+  '        if entry.completion.stale_at(entry.input.read(cx).cursor()) {' \
+  '        if false {' \
+  geode-pricer a_tab_after_the_caret_moved_ranks_at_the_live_caret
+
+# A provider change must reach an open bar on the next keystroke.
+run_mutation "pricer entry bar: the provider is read once" \
+  crates/geode-pricer/src/tile.rs \
+  '        if self.underlyings_rev != Some(rev) {' \
+  '        if self.underlyings_rev.is_none() {' \
+  geode-pricer a_revision_bump_reaches_an_open_bar
+
+# A history step sets the text without a Change; it must re-rank itself.
+run_mutation "pricer entry bar: a history step leaves the list stale" \
+  crates/geode-pricer/src/tile.rs \
+  $'        // `set_value` emits no Change: the recalled line re-ranks here.\n        self.refresh_entry_completion(cx);' \
+  '' \
+  geode-pricer up_walks_history_with_the_list_open_and_the_list_follows
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
