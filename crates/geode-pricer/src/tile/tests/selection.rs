@@ -95,6 +95,28 @@ fn the_footer_totals_position_risk_over_top_most_rows(cx: &mut gpui::TestAppCont
     );
 }
 
+/// An open package selected with its legs: the package's folded sum
+/// already carries them, so the legs are not counted again.
+#[gpui::test]
+fn the_footer_totals_count_an_open_packages_legs_once(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    answer_all(&h, &mut vcx, 1.0);
+    h.dispatch(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "expand", None);
+    assert_eq!(h.tree(&vcx).len(), 5, "fixture: the package is open");
+    h.dispatch(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.dispatch(&mut vcx, "bottom", None);
+    let price = h.tile.read_with(&vcx, |t, _| {
+        t.totals
+            .iter()
+            .find(|c| c.label.as_ref() == "price")
+            .map(|c| c.text.to_string())
+    });
+    let package: f64 = h.cell(&vcx, 1, "price").parse().unwrap();
+    assert_eq!(price, Some(format!("{:.2}", 1.0 + 1.0 + package)));
+}
+
 #[gpui::test]
 fn an_unpriced_row_turns_its_total_into_a_dash(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK); // no answers: nothing priced
@@ -113,6 +135,11 @@ fn a_new_sheet_clears_the_selection(cx: &mut gpui::TestAppContext) {
     h.dispatch(&mut vcx, "visual_rows", None);
     h.command(&mut vcx, "new").unwrap();
     assert_eq!(resolved(&h, &vcx), None);
+    assert_eq!(
+        h.footer(&vcx),
+        None,
+        "a deliberate replace is no lost anchor"
+    );
 }
 
 #[gpui::test]
@@ -1494,4 +1521,62 @@ fn a_chevron_click_toggles_the_package_and_never_starts_a_selection(cx: &mut gpu
         "shift on a chevron starts nothing"
     );
     assert_eq!(h.mode(&mut vcx), "normal");
+}
+
+/// The date field's separators are not segments, so a press on one is
+/// caught by no segment and reaches the cell: the editor-cell guard must
+/// still treat it as the editor's, not as a cancel.
+#[gpui::test]
+fn a_press_on_the_date_fields_separator_keeps_the_editor_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &DATED);
+    open_expiry(&h, &mut vcx, 0);
+    let _ = centre_of(&mut vcx, "pricer-date-seg-5-0");
+    let year = vcx.debug_bounds("pricer-date-seg-5-0").expect("year");
+    let month = vcx.debug_bounds("pricer-date-seg-5-1").expect("month");
+    assert!(year.right() < month.left(), "fixture: a separator between");
+    let gap = gpui::point((year.right() + month.left()) / 2.0, year.center().y);
+    click_at(&mut vcx, gap, 1);
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&mut vcx), "insert", "the press did not cancel");
+    assert!(
+        date_field(&h, &vcx).is_some(),
+        "the date field is still open"
+    );
+    assert_eq!(expiry_of(&h, &vcx, 0), Expiry::Date(ymd(2026, 12, 18)));
+}
+
+/// A shift press with the entry bar open: the bar closes on the click
+/// (its `SelectCell`), the selection the press started is live, and the
+/// keyboard is the tile's again — no field holds focus, so the shell
+/// routes keys to the selection's verbs.
+#[gpui::test]
+fn a_shift_press_with_the_entry_bar_open_closes_it_and_selects(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    goto_column(&h, &mut vcx, "strike");
+    let s = plan_col(&h, &vcx, "strike");
+    h.dispatch(&mut vcx, "add_below", None);
+    assert_eq!(h.mode(&mut vcx), "insert", "fixture: the bar is open");
+    assert!(vcx.update(|window, cx| h.content.holds_focus(window, cx)));
+    shift_press(&mut vcx, &format!("pricer-cell-2-{}", s + 1));
+    h.draw(&mut vcx);
+    assert_eq!(
+        h.mode(&mut vcx),
+        "visual",
+        "the bar closed, the selection is live"
+    );
+    assert_eq!(
+        resolved(&h, &vcx),
+        Some((SelectKind::Block, 0..3, s..s + 1))
+    );
+    assert!(
+        !vcx.update(|window, cx| h.content.holds_focus(window, cx)),
+        "no field holds the keyboard"
+    );
+    h.dispatch(&mut vcx, "yank", None);
+    let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(
+        clip.map(|t| t.lines().count()),
+        Some(4),
+        "y acts on the block"
+    );
 }
