@@ -19833,6 +19833,35 @@ run_mutation "pricer core: a tick stales no line" \
                 self.state[row] = LineState::Stale;' \
   geode-pricer mark_all_stale_stales_every_line_and_bumps_no_revision
 
+# Only a single C or P leg takes a barrier; a package's fifth token is
+# past the end.
+run_mutation "pricer complete: a package offers barrier kinds" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        4 if type_tok.is_some_and(|t| is_single_leg(text(t))) => Slot::BarrierKind,' \
+  '        4 => Slot::BarrierKind,' \
+  geode-pricer barrier_kinds_follow_only_a_single_leg
+
+# Expiries and strikes write only the `/` part at the caret.
+run_mutation "pricer complete: a write replaces the whole slash token" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        Slot::Expiry | Slot::Strikes if !range.is_empty() => slash_part(line, range, caret),' \
+  '        Slot::Expiry | Slot::Strikes if false => slash_part(line, range, caret),' \
+  geode-pricer tab_writes_cycles_and_shift_tab_goes_back_over_the_slash_part
+
+# A leading quantity shifts every later slot by one.
+run_mutation "pricer complete: a leading qty is not skipped" \
+  crates/geode-pricer/src/core/complete.rs \
+  '    let index = k - usize::from(qty);' \
+  '    let index = k;' \
+  geode-pricer the_slot_follows_parse_order_with_an_optional_qty
+
+# A range cached against other text is refused, never sliced.
+run_mutation "pricer complete: a stale range is sliced" \
+  crates/geode-pricer/src/core/complete.rs \
+  '        if !fits(line, &token) {' \
+  '        if false {' \
+  geode-pricer a_range_that_does_not_fit_the_line_writes_nothing
+
 run_mutation "pricer entry: o below a leg lands before it" \
   crates/geode-pricer/src/core/entry.rs \
   '            leg: if below { leg + 1 } else { leg },' \
