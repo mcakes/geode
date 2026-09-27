@@ -1931,9 +1931,15 @@ impl PricerTile {
     /// holding a `Context` rebuilds the grid off the rolled-back sheet.
     pub(crate) fn flush_save(&mut self, cx: &mut App) -> bool {
         let mut closed = false;
-        if let Some(bulk) = self.take_bulk()
-            && !bulk.undo.inverse.is_empty()
-        {
+        // Tested before it is taken: an unstepped bulk stays with its
+        // open editor. Dropping it would leave the editor open without
+        // one, and a later untouched `enter` would write the cursor's
+        // value across the whole selection.
+        let stepped = matches!(
+            &self.editor,
+            Some(Editor::Text { bulk: Some(b), .. }) if !b.undo.inverse.is_empty()
+        );
+        if stepped && let Some(bulk) = self.take_bulk() {
             if self.take_back_steps(bulk) {
                 self.dirty = true;
             }

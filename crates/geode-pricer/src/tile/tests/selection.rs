@@ -1189,3 +1189,25 @@ fn a_flush_mid_step_closes_the_editor_on_the_rolled_back_sheet(cx: &mut gpui::Te
     assert_eq!(h.cell(&vcx, 0, "strike"), "5000");
     assert!(!can_undo(&h, &vcx));
 }
+
+#[gpui::test]
+fn a_flush_before_any_step_keeps_the_open_editors_live_step(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &BOOK);
+    step_setup(&h, &mut vcx); // the cursor on the 4000 P
+    h.prices(); // drains the opening requests
+    vcx.update(|_, cx| h.factory.flush_all(cx));
+    assert_eq!(
+        editor_text(&h, &vcx).as_deref(),
+        Some("4000"),
+        "an unstepped editor stays open"
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(editor_text(&h, &vcx), None, "enter closes the editor");
+    assert_eq!(
+        h.cell(&vcx, 0, "strike"),
+        "5000",
+        "an untouched enter still writes nothing, not the cursor's 4000"
+    );
+    assert_eq!(h.cell(&vcx, 1, "strike"), "4800/5200");
+    assert!(!can_undo(&h, &vcx), "no undo entry");
+}
