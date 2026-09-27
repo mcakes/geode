@@ -11,7 +11,7 @@ use super::ShellView;
 
 impl ShellView {
     /// Capture the shared lane's `[frame]` record for periodic and shutdown
-    /// saves. Pinned lanes are workspace-owned and never written here.
+    /// saves. Pinned lanes are workspace-owned and written by `pinned_records`.
     fn frame_record(&self, cx: &App) -> FrameRecord {
         let frame = self.frame.read(cx).shared();
         FrameRecord {
@@ -19,6 +19,27 @@ impl ShellView {
             active_slot: frame.active_slot(),
             as_of: frame.as_of().clone(),
         }
+    }
+
+    /// Capture each pinned workspace's own lane for `workspaces.N.frame`.
+    /// Pin, unpin, and lane edits advance the frame generation, so the
+    /// periodic dirty check already covers changes here.
+    fn pinned_records(&self, cx: &App) -> session::PinnedRecords {
+        let frame = self.frame.read(cx);
+        frame
+            .pinned_workspaces()
+            .map(|ws| {
+                let lane = frame.view(ws);
+                (
+                    ws,
+                    FrameRecord {
+                        scope: lane.scope().clone(),
+                        active_slot: lane.active_slot(),
+                        as_of: lane.as_of().clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     /// Extract a snapshot when layout dirt, serialized tile state, frame
@@ -48,6 +69,7 @@ impl ShellView {
             &self.services.workspaces,
             &tiles,
             Some(&record),
+            &self.pinned_records(cx),
             &self.palette_usage,
         ) {
             Ok(text) => {
@@ -77,6 +99,7 @@ impl ShellView {
             &self.services.workspaces,
             &self.current_tiles(cx),
             Some(&record),
+            &self.pinned_records(cx),
             &self.palette_usage,
         ) {
             tracing::warn!(target: "geode::session", "failed to save session: {e}");

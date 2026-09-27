@@ -1422,6 +1422,7 @@ role = "key"
             roster: ModuleRoster::default(),
             restored_tiles: TileRecords::new(),
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1462,6 +1463,7 @@ role = "key"
             roster,
             restored_tiles: TileRecords::new(),
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
@@ -2137,6 +2139,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"
@@ -2521,6 +2524,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = format!(
@@ -2639,6 +2643,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"
@@ -3579,6 +3584,7 @@ role = "key"
             &Workspaces::new(),
             &TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = r#"

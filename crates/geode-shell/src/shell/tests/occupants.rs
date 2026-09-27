@@ -180,6 +180,7 @@ fn services_with_an_unknown_restored_kind() -> (
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
     );
     let ws1: toml::Table = r#"
@@ -298,6 +299,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
     );
     // Workspace 1 (the default active one) stays empty. Workspace 2
@@ -1742,6 +1744,7 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
     );
     let ws2: toml::Table = r#"

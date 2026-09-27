@@ -205,6 +205,7 @@ fn main() {
                 services.workspaces = restored.workspaces;
                 services.restored_tiles = restored.tiles;
                 services.restored_frame = restored.frame;
+                services.restored_pinned = restored.pinned;
                 services.restored_palette_usage = restored.palette_usage;
             }
 
@@ -560,6 +561,7 @@ fn build_shell_services(
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
         restored_frame: None,
+        restored_pinned: Default::default(),
         restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
         log: Some(LogServices {
             ring: log_ring,

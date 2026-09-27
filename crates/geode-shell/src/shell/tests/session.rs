@@ -351,6 +351,7 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
         &Workspaces::new(),
         &session::TileRecords::new(),
         None,
+        &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
     );
     let ws1: toml::Table = r#"

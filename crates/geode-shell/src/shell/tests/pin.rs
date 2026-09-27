@@ -315,7 +315,7 @@ fn a_lane_changed_while_hidden_promotes_without_waiting(cx: &mut gpui::TestAppCo
 /// Escape restores the pre-focus text and leaves no undo entry behind.
 #[gpui::test]
 fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::TestAppContext) {
-    let (window, mut vcx, _shell, frame) = open_pinnable(cx);
+    let (window, mut vcx, shell, frame) = open_pinnable(cx);
     vcx.update(|window, _| window.activate_window());
     let _ = window;
     vcx.run_until_parked();
@@ -328,6 +328,11 @@ fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::T
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.active_ix()),
+        ws(3),
+        "the chord switched workspaces, so the kept session is not vacuous"
+    );
     vcx.simulate_input("c");
     assert_eq!(
         frame
@@ -346,5 +351,100 @@ fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::T
     assert!(
         !frame.update(&mut vcx, |f, _| f.shared_mut().undo_scope()),
         "the whole session left no undo entry"
+    );
+}
+
+/// A workspace restored with its own `workspaces.N.frame` record starts
+/// pinned with that lane, leaves the shared lane untouched, and offers no
+/// undo back to the empty scope.
+#[gpui::test]
+fn a_restored_pinned_workspace_is_pinned_with_its_record(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let mut record = crate::session::FrameRecord {
+        scope: geode_core::scope::Scope::default(),
+        active_slot: None,
+        as_of: geode_core::query::AsOf::Live,
+    };
+    record.scope.text = Some("spx".into());
+    services.restored_pinned.insert(ws(1), record);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws(1))));
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.view(ws(1)).scope().text.clone())
+            .as_deref(),
+        Some("spx")
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.shared().scope().text.clone()),
+        None
+    );
+    assert!(
+        !frame.update(&mut vcx, |f, _| f.view_mut(ws(1)).undo_scope()),
+        "restore leaves no undo entry"
+    );
+}
+
+/// Pinning, a pinned lane's edits, and unpinning each reach the next session
+/// snapshot: the periodic write and the quit save both carry
+/// `workspaces.N.frame` while pinned, and an unpin drops it so the workspace
+/// restores shared.
+#[gpui::test]
+fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.toml");
+    let services = super::session::test_services_with_session(session_path.clone());
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        f.replace_slots(slots());
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    // Baseline: whatever startup left dirty is written first.
+    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+
+    dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
+    vcx.simulate_keystrokes("ctrl-1");
+    vcx.run_until_parked();
+    frame.update(&mut vcx, |f, _| {
+        let mut s = f.view(ws(2)).scope().clone();
+        s.text = Some("spx".into());
+        f.view_mut(ws(2)).set_scope(s);
+    });
+
+    let (_, text) = shell
+        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .expect("a pin and a pinned-lane edit dirty the session");
+    let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
+    let record = restored
+        .pinned
+        .get(&ws(2))
+        .expect("the periodic write carries workspace 2's lane");
+    assert_eq!(record.scope.text.as_deref(), Some("spx"));
+    assert_eq!(record.active_slot, Some(1));
+    assert!(!restored.pinned.contains_key(&ws(1)));
+    assert_eq!(
+        restored.frame.as_ref().and_then(|r| r.scope.text.clone()),
+        None,
+        "the pinned lane's scope is not the shared record's"
+    );
+
+    shell.read_with(&vcx, |s, cx| s.save_session(cx));
+    let saved = crate::session::load(&session_path);
+    assert_eq!(saved.pinned.get(&ws(2)), Some(record), "the quit save too");
+
+    dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
+    let (_, text) = shell
+        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .expect("an unpin dirties the session");
+    let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
+    assert!(
+        restored.pinned.is_empty(),
+        "an unpinned workspace writes no frame"
     );
 }

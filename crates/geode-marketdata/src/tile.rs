@@ -14179,6 +14179,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &geode_shell::tiling::Workspaces::new(),
             &geode_shell::session::TileRecords::new(),
             None,
+            &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
         );
         let ws1: toml::Table = format!(
@@ -14217,6 +14218,7 @@ edits = [["2026-11-20", "-1", 9.5]]
             roster,
             restored_tiles: restored.tiles,
             restored_frame: None,
+            restored_pinned: Default::default(),
             restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
             log: None,
             action_tail: Arc::new(std::sync::Mutex::new(

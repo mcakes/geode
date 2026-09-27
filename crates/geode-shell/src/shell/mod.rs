@@ -104,6 +104,10 @@ pub struct ShellServices {
     /// Optional scope, grouping slot, and as-of from `[frame]`.
     /// `ShellView::new` applies them and clears scope undo/redo history.
     pub restored_frame: Option<crate::session::FrameRecord>,
+    /// Pinned workspace lanes from `session.toml`'s `workspaces.N.frame`;
+    /// `ShellView::new` pins each workspace and fills its lane with clean
+    /// scope history.
+    pub restored_pinned: crate::session::PinnedRecords,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
     /// table — empty for a fresh session and in every test setup that
     /// doesn't opt in. `ShellView::new` takes it as the live history.
@@ -1172,6 +1176,20 @@ impl ShellView {
                 s.set_active_slot(record.active_slot);
                 s.set_as_of(record.as_of);
                 s.clear_history();
+            });
+        }
+        // Each restored pinned workspace gets its own lane. Clearing history
+        // keeps startup from offering an undo back to the empty scope; this
+        // runs before the flip seed below so a restored lane never reads as
+        // "just changed".
+        for (ws, record) in services.restored_pinned.clone() {
+            frame.update(cx, |f, _| {
+                f.pin(ws);
+                let mut lane = f.view_mut(ws);
+                lane.set_scope(record.scope);
+                lane.set_active_slot(record.active_slot);
+                lane.set_as_of(record.as_of);
+                lane.clear_history();
             });
         }
         // Seeded from the just-built frame (see the field's own doc

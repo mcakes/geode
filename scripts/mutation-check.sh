@@ -24014,6 +24014,56 @@ run_mutation "pin: the action reaches the toggle" \
   '        } else if action.0 == "palette::toggle" {' \
   geode-shell the_pin_action_toggles_the_active_workspace
 
+# `workspaces.N.frame` present means pinned: a pinned lane that is not
+# written restores shared, silently losing the workspace's own frame.
+run_mutation "session: a pinned lane is written under its workspace" \
+  crates/geode-shell/src/session.rs \
+  'ws_table.insert("frame".to_string(), toml::Value::Table(record.to_toml()));' \
+  '{}' \
+  geode-shell a_pinned_lane_round_trips_under_its_workspace
+
+run_mutation "session: a workspace frame table restores pinned" \
+  crates/geode-shell/src/session.rs \
+  'pinned.insert(w, FrameRecord::from_toml(t, &mut warnings));' \
+  '{}' \
+  geode-shell a_pinned_lane_round_trips_under_its_workspace
+
+# A restored lane written without pinning lands in the shared lane.
+run_mutation "shell: restored pinned lanes are pinned" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                f.pin(ws);
+                let mut lane = f.view_mut(ws);' \
+  '                let mut lane = f.view_mut(ws);' \
+  geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
+
+run_mutation "shell: a restored pinned lane has no undo back to empty" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                lane.clear_history();' \
+  '' \
+  geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
+
+# Both session writes carry the pinned lanes; dropping them from either loses
+# the pin at the next restart.
+run_mutation "session_io: the periodic write carries pinned lanes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            &tiles,
+            Some(&record),
+            &self.pinned_records(cx),' \
+  '            &tiles,
+            Some(&record),
+            &session::PinnedRecords::new(),' \
+  geode-shell a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it
+
+run_mutation "session_io: the quit save carries pinned lanes" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '            &self.current_tiles(cx),
+            Some(&record),
+            &self.pinned_records(cx),' \
+  '            &self.current_tiles(cx),
+            Some(&record),
+            &session::PinnedRecords::new(),' \
+  geode-shell a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
