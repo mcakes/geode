@@ -43,9 +43,14 @@
 # A mutation that does not compile is reported as BUILD, not caught: cargo
 # failed before any test ran, so the entry defends nothing. BUILD is an error
 # and makes the run exit 1. --build-check applies each selected mutation and
-# compiles it with `cargo check --tests` without running tests. It audits for
-# replacements left stale by signature changes, which --anchors-only cannot
-# see because it never compiles anything. Repeating a deterministic fixture
+# compiles it with `cargo check --profile test` on the target a mutation run
+# tests (the lib, or geode-app's bins, with their unit tests; not integration
+# tests) without running tests. It audits for replacements left stale by
+# signature changes, which --anchors-only cannot see because it never
+# compiles anything. A mutation run or build check that selects no entry
+# prints "ran 0 entries (nothing selected)" and exits 1, so a mistyped
+# substring does not read as a pass; --changed skipping every candidate
+# because no anchored file changed exits 0. Repeating a deterministic fixture
 # does not add coverage; the fixture must exercise the behavior the mutation
 # changes.
 set -e
@@ -151,6 +156,8 @@ if (( $# > 1 )); then
   exit 2
 fi
 skipped=0
+# Entries past the substring and --changed filters, whatever their verdict.
+selected=0
 build_failures=0
 built=0
 changed_files=""
@@ -196,6 +203,7 @@ run_mutation() {
     skipped=$((skipped + 1))
     return 0
   fi
+  selected=$((selected + 1))
   # geode-app is bin-only (no [lib] target — see its Cargo.toml), so
   # `--lib` fails outright with "no library targets found"; `--bins`
   # is the equivalent for it. Every other package here is lib-only, so
@@ -250,10 +258,13 @@ p = pathlib.Path(sys.argv[1]); s = p.read_text(encoding="utf-8")
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
   if (( build_only )); then
-    # --tests builds the lib and bin unit-test targets under cfg(test), the
-    # same code cargo test compiles, without linking or running it.
+    # The same target a mutation run tests ($target_flag) under the test
+    # profile, i.e. with cfg(test) and its unit tests, and nothing more.
+    # Integration tests are excluded because a mutation run never builds
+    # them: a replacement that broke only one would read BUILD here but
+    # compile and be tested in a real run.
     built=$((built + 1))
-    if ! cargo check -p "$pkg" --tests >"$log" 2>&1; then
+    if ! cargo check -p "$pkg" $target_flag --profile test >"$log" 2>&1; then
       echo "BUILD     $name  <-- mutation does not compile; no test ran"
       build_failures=$((build_failures + 1))
     fi
@@ -21982,8 +21993,23 @@ run_mutation "launch: a shared factory stops forwarding accepts" \
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
+if (( ! anchors_only && selected == 0 )); then
+  # A mistyped substring selects nothing, and a run that checked nothing
+  # must not read as a pass. --changed skipping every candidate is the one
+  # legitimate empty run: nothing anchored changed, and the skipped line
+  # above says so.
+  if [[ -n "$changed_ref" ]] && (( skipped > 0 )); then
+    exit 0
+  fi
+  echo "ran 0 entries (nothing selected)" >&2
+  exit 1
+fi
 if (( build_only )); then
-  echo "build-checked $built mutations: $build_failures do not compile"
+  noun="mutations"
+  verb="do"
+  (( built == 1 )) && noun="mutation"
+  (( build_failures == 1 )) && verb="does"
+  echo "build-checked $built $noun: $build_failures $verb not compile"
 fi
 if (( build_failures )); then
   exit 1
