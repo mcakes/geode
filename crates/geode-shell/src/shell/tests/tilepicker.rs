@@ -53,7 +53,61 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
 ) {
     let (mut cx, shell, tile) = shell_with_a_placeholder(cx);
     let at = main_tile_point(&mut cx, &shell, tile, 0.5, 0.5);
-    double_click(&mut cx, at, gpui::Modifiers::none());
+    // Drive the two presses of the double-click by hand (rather than the
+    // shared `double_click` helper) so `session_dirty` can be reset
+    // between them. The first press is an ordinary click (click_count 1):
+    // it does not match the door, falls through to the normal tail, and
+    // legitimately marks the session dirty by focusing the (already
+    // focused) tile. Only the *second* press's tail-skip is under test.
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 1,
+            }),
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    cx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.dispatch_event(
+            gpui::PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: at,
+                modifiers: gpui::Modifiers::none(),
+                click_count: 2,
+            }),
+            cx,
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
     cx.run_until_parked();
 
     assert!(is_tile_picker(&shell, &cx), "the tile picker opened");
@@ -67,6 +121,17 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
     assert!(
         dialog_filter_is_focused(&shell, &mut cx),
         "the field keeps focus through the rest of the double-click"
+    );
+    // The door's early return must skip the click-to-focus tail entirely,
+    // not just leave focus looking right: falling through still calls
+    // `focus_main_tile`, which marks the session dirty even though the
+    // tile was already focused. A dialog-aware `pending_focus_restore`
+    // (see `dialog::refocus_top`) now re-focuses this same field either
+    // way, so the focus assertion above no longer catches a skipped
+    // early return on its own — this does.
+    assert!(
+        !shell.read_with(&cx, |s, _| s.session_dirty),
+        "opening the picker is not a workspace-mutating dispatch"
     );
 
     cx.simulate_input("re");
