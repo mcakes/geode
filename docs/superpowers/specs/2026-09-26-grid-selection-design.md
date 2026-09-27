@@ -237,6 +237,17 @@ itself; its hidden children are not visited.
 - A date or choice cursor cell keeps its own editor behaviour, and its
   commit is absolute.
 
+**Typed value and package qty** (ruling 2026-09-27, execution). A typed
+absolute value writes the cursor's column only under `v` as well as `V`:
+one text parsed into several column grammars (qty `5` and strike `5`, a type
+in the underlying) is a plausible wrong value, so a `v` typed commit no
+longer fills the block's other columns. The relative live step still spans
+the block's columns under `v`. The qty of a selected package, committed or
+stepped, goes through the package's template weights (`package::commit`)
+rather than leg by leg, which would flatten a spread into same-signed legs;
+its legs are left out of the per-line targets, and a package in list form
+is refused. This amends "Columns" and "Typed value" above.
+
 **Footer** (ruling 2026-09-27). While a selection is live the footer shows
 the extent. Beside it are totals of `price`, `delta`, `gamma`, `vega`,
 `theta` and `rho` over the **top-most** selected rows (§1 ruling 2). A

@@ -821,6 +821,7 @@ Normal-mode keys:
 | `g p` / `g u` | Group the cursor row and the next `count − 1` roots into a custom package / ungroup |
 | `g m` | Open a panel on the cursor row's underlying |
 | `.` | Open the action menu |
+| `shift+v` / `v` | Select rows / a block of cells from the cursor (see [Selection](#selection-2)) |
 
 `g m` opens a panel on the cursor row's underlying: a line's or leg's own, a
 package's when its legs share one; otherwise the plain tile picker.
@@ -971,6 +972,157 @@ confirmed: the catalog the diagnostics entity holds is refreshed only while
 a diagnostics tile is visible, so it can predate the removal. A name whose save is
 queued but not yet confirmed counts as taken: a new tile's `untitled-N` and
 `:name` skip it.
+
+### Selection
+
+The sheet's grid selection follows the [blotter's](#selection): `V`
+(`pricer::visual_rows`) selects whole rows and `v` (`pricer::visual_block`) a
+rectangle of cells; the other key switches kind at the same anchor and the
+same key again clears. With no row under the cursor (an empty sheet) both
+refuse with `select from a line or package row`. While a selection is live
+the tile reports `mode == visual` with a `select == rows|block` pair (see
+[context predicates](keymaps.md#context-predicates)); motions extend it and
+the first `escape` clears it alone.
+
+The anchor is the row's line id and the column's name, so a repricing, an
+edit elsewhere, a move or a view reload keeps the same cells selected. An
+anchor no longer painted — its package collapsed, its column dropped from the
+view — clears the selection with `selection cleared: anchor row no longer
+shown` (or `anchor column`); no neighbour is guessed. `:e` and `:new` clear
+it without a notice, because line ids restart per sheet and the anchor would
+name an unrelated line of the next one. `:name` keeps it: a rename changes no
+line id.
+
+The tint, the theme's selection color, overlays each cell under its text, so
+a package row's ground and a stale or failed cell's text color still show;
+the cursor keeps its border over it. A row selection also tints the tree
+column as each row's handle.
+
+**Verbs.** In visual mode the verbs are single keys; the doubled normal-mode
+forms are not bound there, nor are `p`, `shift+p`, `u`, `ctrl+r`, `o`, the
+folds and `.` (the palette still reaches them). A verb that refuses keeps the
+selection and says why in the footer; a success notice goes to the header.
+
+- `y` ends the selection. Under `V` it copies the shorthand of the top-most
+  selected rows (a package, not also its selected legs, since the package's
+  shorthand already carries them), one per line, and remembers their rows, so
+  a following `p` or `shift+p` puts them all back at once — a package always
+  at a root boundary. Under `v` it copies the block as TSV under its column
+  labels and leaves the remembered row as it was: a block is not rows.
+- `d` under `V` deletes the top-most selected rows as one undo entry,
+  remembers them for `p`, ends the selection, and notices `deleted N rows`. A
+  leg selected without its package is deleted as a leg.
+- `shift+j`/`shift+k` under `V` slide the selected rows one sibling step as a
+  unit — one move of the neighbouring row across the block — and keep the
+  selection on the moved lines. Rows under different parents refuse (`can't
+  move: selection spans packages`), as does the end of the parent (`cannot
+  move past the end`).
+- `g p` under `V` groups the selected root lines into one custom package,
+  opens it and puts the cursor on it, ending the selection. It refuses a
+  selection that includes a package, lines inside a package, or lines that
+  are not contiguous — `Group` takes a run, so a gap would sweep an unselected
+  line into the package.
+- `g u` under `V` dissolves every top-most selected package as one undo
+  entry and ends the selection; with no package selected it refuses with `no
+  package selected`.
+- Under `v` the row verbs refuse and name `V` (`d deletes rows — use V`,
+  `shift+j/k move rows — use V`, `g p groups rows — use V`, `g u ungroups
+  rows — use V`): a block's cells are not a set of rows, and acting on its
+  rows would edit rows never picked as rows.
+
+A count is ignored while a selection is live: the selection names the rows.
+Every row verb refuses while the sheet is loading.
+
+**Edits act on lines.** `i`, `enter` or a double-click opens the editor on the
+cursor cell, which must itself be editable: a read-only cursor cell refuses
+with its own reason. An edit then reaches each selected line; a selected
+package stands for its legs whether it is open or not, and a package selected
+with one of its own legs writes that leg once.
+
+**One typed value.** Committing typed text, a choice picked from a list, or a
+date writes it to the cursor's column on every selected line — under `v`
+too, however many columns the block spans: one text parsed into several
+column grammars (qty `5` and strike `5`, a type in the underlying) would be a
+plausible wrong value. Each line is judged on its own instrument. A package
+quantity goes through the package's template weights, as its own cell's edit
+does, so a `-5/+5` spread typed `3` becomes `3/-3` rather than `3/3`; a
+package whose legs no longer fit its template (the list form) is refused and
+none of its legs written. The writes are one undo entry and one reprice; a
+cell already holding the value counts as set with no edit, and a commit that
+changes nothing records no entry. The header notices `set 5 cells, skipped 3 (2 read-only, 1 n/a)`, counting
+read-only cells, barrier cells on a vanilla line (`n/a`), and refused values.
+When no selected cell accepts the value, nothing is written and the editor
+stays open with `no selected cell accepts '<text>'` in the footer. The
+selection stays after a commit. Because the cursor's column is what a commit
+writes, `enter` re-checks that the cursor still sits on the editor's cell;
+if it does not, nothing is written and the editor closes with `the cell
+moved; edit refused`.
+
+**Live steps.** On a qty, strike, barrier, spot shift or vol shift cursor
+cell with its text untouched, the editor's `up`/`down` (`shift`: ten) step
+every target cell in the sheet at once: the cursor's column under `V`, every
+block column under `v`. Each cell steps by the precision its own text
+carries, and a selected package's quantity steps as the package quantity
+through the template weights. Each press reprices through the ordinary path,
+so the grid shows the block and its prices as they move; the editor follows
+its own cell and the header reads `stepped N cells +S` with the running
+total. Cells that cannot step (read-only, not a number, a barrier on a
+vanilla, a list-form package quantity) are skipped and counted. A press is
+all-or-nothing: if the sheet refuses any stepped value (a quantity stepping
+to zero), the press writes nothing and the footer says why.
+
+- `enter` on the untouched text keeps the steps as one undo entry; steps that
+  net to nothing leave no entry. With no step taken, it writes nothing.
+- `escape` takes the steps back out of the sheet, provided they are still its
+  last change: no other recorded edit since and every stepped line as the
+  last step left it. Otherwise the steps are kept as one undo entry, since
+  replaying their inverses would undo the other write. A click elsewhere, a
+  verb, the menu, `:` and `/` cancel the same way. The rollback re-arms the
+  save, replacing any save taken mid-step.
+- Closing the tile or quitting mid-step rolls the steps back first and closes
+  the editor, so the final save never stores steps that were not kept.
+- Typing makes the edit absolute: on `enter` the steps come out, by
+  `escape`'s rule, and the typed value replaces them as one entry. From then
+  on the arrows nudge the editor's text alone.
+
+A cursor cell that does not step has no live step, and an untouched `enter`
+there commits the shown value across the selection as a typed one would: the
+date field's date, a type or barrier-type list's highlighted current value, or
+a package's expiry or type cell (which opens as text). An underlying list with
+nothing typed keeps every cell as it is.
+
+**Footer totals.** While a selection is live the footer leads with its extent
+(`3 rows × 12 cols`), then one position total for each risk column the view
+shows (price, delta, gamma, vega, theta, rho), painted as that column paints
+its numbers. A line counts `qty × value`; a package counts its own folded sum,
+which is already weighted by its legs' quantities. Totals are over the
+top-most selected rows, so an open package selected with its legs is not
+counted twice. A column with any selected row unpriced or failed shows a muted
+`—` rather than a partial sum — a failed line keeps its old result, so the
+state is checked, not only the value. A stale line still showing a result
+counts. A footer refusal or a line failure takes the footer while it stands.
+
+**Mouse.** A plain press anywhere on a row, including beside its cells,
+clears the selection and moves the cursor. A shift press starts a selection
+at the cursor as it was before the press — a block from a value cell, rows
+from the tree cell or the line-number gutter — and extends it to the pressed
+cell; with a selection live, shift+press extends it. A drag selects
+continuously from the cell it started on, its kind decided where the press
+landed; a drag whose press no cell caught (the header, a scrollbar, a
+divider) selects nothing. A chevron press is a plain press: it toggles its
+package and clears a live selection, and never starts one, even with shift.
+A press inside the open editor's own cell (caret, text selection, a date
+segment or separator) belongs to the editor: it neither cancels the edit nor
+takes a live step back. Any other gesture closes an open editor first, as a
+cancel. A shift press with the entry bar open closes the bar on the click and
+leaves the selection live, the keyboard back with the tile.
+
+Limitations: a selection is one contiguous row range or rectangle; `p` puts
+only rows a `V` yank remembered, so a copied TSV block cannot be pasted; a
+count is ignored on `shift+j`/`shift+k`, `g p` and `g u` while selecting; a
+package quantity in list form cannot be bulk-set or stepped, and its skip
+reads only `refused`; a typed value under `v` fills one column, not the
+block.
 
 ### Repricing
 

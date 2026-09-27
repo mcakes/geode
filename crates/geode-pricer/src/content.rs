@@ -48,7 +48,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::visual_block", "Select cells"),
     ("pricer::find_next", "Find next"),
     ("pricer::find_prev", "Find previous"),
-    ("pricer::escape", "Clear find and dismissible notice"),
+    ("pricer::escape", "Clear selection, else find and notice"),
     ("pricer::add_below", "Add lines…"),
     ("pricer::edit", "Edit cell…"),
     ("pricer::delete", "Delete row"),

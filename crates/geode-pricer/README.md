@@ -28,6 +28,7 @@ The pure core (`core`, no element, entity, window, or data service):
 | `tree` | Package expansion and the visible-row walk. |
 | `commands` | The `:` vocabulary (including `:autosize [reset]`): parse and completions. |
 | `storage` | The frozen `pricer_sheets` declaration; conversion between sheets, document rows, and a document answer. |
+| `select` | What a grid selection reaches on the sheet: the leaf lines an edit writes (`lines_of`), the top-most rows a verb or total acts on (`top_most`), the `g p` and `shift+j`/`shift+k` plans with their refusals, position risk totals (`risk_totals`), and the bulk notices' skip counts. |
 
 The tile:
 
@@ -42,6 +43,7 @@ The tile:
 | `session` | The tile's session record, including `:autosize`'s fitted widths (`column_widths`, read leniently). |
 | `content` | The factory, keymap fragment, actions, settings, and the read-only `UnderlyingSource` seam. |
 | `tile` | `PricerTile`: modes, verbs, repricing, write-behind, load. |
+| `tile::select` | The `V`/`v` selection's state doors (start, clear, re-resolve, footer extent and totals), the selection verbs, the one-typed-value commit, and the live step (`bulk_step`, `settle_bulk`, `take_back_steps`). |
 
 The application uses `DuckSheetStore`: sheets are `pricer_sheets` documents in
 DuckDB and survive a restart. Session records retain sheet names and UI state;
@@ -279,6 +281,46 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   These samples are not numeric limits: an overflowing right-aligned value
   can still lose leading digits.
 
+- A selection is anchored by `LineId` and the plan column's vocabulary
+  name and re-resolved in `sync_cursor`, which every cursor move and every
+  model install (a delivery, an edit, a reload) runs; render and the delegate only read the prepared `resolved`,
+  extent and totals. A lost anchor clears it with a footer notice; a sheet
+  replace (`:e`, `:new`, a load) clears it first, silently, since line ids
+  restart per sheet and would re-resolve onto unrelated lines. A verb that
+  ends the selection clears it before its edit, and restores and
+  re-resolves it when the edit is refused.
+- Edits act on lines (`lines_of`, deduplicated, so a package selected with
+  its own leg writes the leg once); verbs and totals act on top-most rows
+  (`top_most`), since a package already carries its legs. Totals are
+  `qty × value` per line and the folded sum per package, and a column with
+  any unpriced or failed row is `None` (painted `—`), never a partial sum.
+- A typed commit writes the cursor's column only, under `V` and `v`, each
+  line judged on its own instrument, as one `apply_edits` batch. A selected
+  package's qty (commit or step) goes through `package::commit`, so the legs
+  move by the template's weights; its legs are dropped from the per-line
+  targets, and a list-form package is refused.
+- The live step (`Editor::Text::bulk`, opened only on a steppable column with
+  a selection live) applies each press through `apply_batch` without
+  recording it: all or nothing, a refusal from any cell refusing the press.
+  The press's inverse joins the bulk before the rebuild, so a rebuild that
+  drops the editor records it. `enter` untouched records the steps as one
+  entry (none when they net to zero, nothing written when none was taken);
+  every other close (`close_editor`) rolls them back only while they are the
+  sheet's last change — `edit_seq`, bumped by every `after_edit`, unchanged
+  and every stepped line's qty, instrument and shift as the last step left
+  them — and otherwise records them. `flush_save` (close, quit) rolls back a
+  stepped bulk and closes its editor before the final save; an unstepped one
+  stays with its open editor. A sheet replace drops the bulk unrecorded
+  (`forget_steps`).
+- Pointer selection goes through the same `start_selection`/`clear_selection`
+  doors as the keys (`PricerTile::pointer`, fed `CellPointer` by the
+  delegate on mouse-down). The delegate's `drag_origin` is set only by a
+  press a cell, the tree cell or the gutter caught and cleared by any
+  release, so a button held from elsewhere never drags a selection. A press
+  in the open editor's own cell, or on a chevron, sets `inner_press` so the
+  row's bubbling handler does not report it; the editor's press reports
+  nothing and the chevron's reports a plain press.
+
 ## Known limitations
 
 - The action menu's key hints are the default bindings, written into the
@@ -293,3 +335,8 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   vocabulary name (`__tree` for the tree) in the session record. A font
   change does not rescale fitted widths; run `:autosize` again. A fitted
   width also overrides a view width changed later, until `:autosize reset`.
+- Grid selections are one contiguous row range or rectangle. There is no
+  paste of a yanked TSV block (`p` puts only rows a `V` yank remembered), a
+  count is ignored by `shift+j`/`shift+k`, `g p` and `g u` while selecting,
+  a typed value under `v` fills one column, and a list-form package's qty
+  cannot be bulk-set or stepped (its skip reads only `refused`).
