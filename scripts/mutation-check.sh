@@ -2663,7 +2663,7 @@ run_mutation "field chords: a dispatched chord reflects the frame's text back in
 run_mutation "dialog stack: close clears the whole stack instead of the top" \
   crates/geode-shell/src/shell/mod.rs \
   '        if let Some(top) = self.modals.pop() {' \
-  '        if let Some(top) = self.modals.drain(..).next() {' \
+  '        if let Some(top) = std::mem::take(&mut self.modals).pop() {' \
   geode-shell \
   a_pushed_dialog_owns_the_shared_input_until_it_pops
 
