@@ -427,9 +427,11 @@ fn arm_verb(
 /// Navigation remains bounded by the filtered rows.
 ///
 /// Consume Tab/Shift-Tab so they cannot insert literal tabs into the focused filter.
-/// Other Filter input passes through for text entry; unrecognized Normal commands are
-/// consumed. Re-capturing the effective binding skips persistence. Focus and input text
-/// are reconciled by `sync_dialog_text` after this handler.
+/// Other Filter input passes through for text entry; in Normal mode an unrecognized
+/// bare key is consumed and an unrecognized chord is declined, so a dialog-opening
+/// action stacked over this dialog can still reach the shell. Re-capturing the
+/// effective binding skips persistence. Focus and input text are reconciled by
+/// `sync_dialog_text` after this handler.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,

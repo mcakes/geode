@@ -1,11 +1,10 @@
 //! Shared shell modal lifecycle, focus synchronization, and rendering helpers.
 //!
 //! `ShellView` owns a stack of [`ShellModal`]s and renders the top one's chrome without
-//! animation. Open
-//! through [`open_shell_dialog`] or [`open_shell_dialog_with_key`] so pending key
-//! sequences, competing overlays, the retained input, and focus are reconciled. Dialog
-//! state must be installed before opening; `sync_dialog_text` reads that state to
-//! choose the shared input's text and focus.
+//! animation. Open through [`open_shell_dialog`] or [`open_shell_dialog_with_key`] so
+//! pending key sequences, competing overlays, the retained input, and focus are
+//! reconciled. Dialog state must be installed before opening; `sync_dialog_text` reads
+//! that state to choose the shared input's text and focus.
 //!
 //! Content and key handlers receive the shell's existing borrow. They must not
 //! synchronously read or update its entity again. Pointer callbacks may capture the

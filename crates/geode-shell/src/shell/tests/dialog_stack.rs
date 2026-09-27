@@ -308,6 +308,12 @@ fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
                     "Base",
                     |_, _, _| gpui::div().into_any_element(),
                 );
+                assert_eq!(
+                    s.modal_depth(),
+                    1,
+                    "the Plain base itself must land on the stack, or every \
+                     `pushed` reading below is measuring against nothing"
+                );
                 s.dispatch(&id, None, window, cx);
             });
         });
@@ -333,6 +339,44 @@ fn a_dialog_chord_pushes_over_settings_in_normal_mode(cx: &mut gpui::TestAppCont
     assert_eq!(
         kinds(&shell, &mut vcx),
         vec![DialogKind::Settings, DialogKind::AsOf]
+    );
+}
+
+/// The object dialog's edit stage is a second Normal-mode catch-all beside
+/// browse: `a_dialog_chord_pushes_over_an_open_dialog` only reaches the
+/// browse-stage decline, so this pushes over `mine`'s open edit stage.
+#[gpui::test]
+fn a_dialog_chord_pushes_over_the_object_edit_stage(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell_with(
+        cx,
+        super::objectdialog::services_with_a_saved_scope(),
+        "config::scopes",
+    );
+    vcx.simulate_keystrokes("enter"); // open `mine`'s edit stage
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.object_dialog.as_ref().unwrap().stage.clone()),
+        crate::shell::objectdialog::Stage::Edit {
+            object: "mine".to_string()
+        }
+    );
+    vcx.simulate_keystrokes("alt-t");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Object, DialogKind::AsOf]
+    );
+}
+
+/// Keybindings in Normal mode (not capturing a keystroke) is a fourth
+/// Normal-mode catch-all: `capture_records_a_dialog_opening_chord_instead_of_pushing_over_it`
+/// covers capture, which claims every key including chords, so this covers
+/// the decline outside capture.
+#[gpui::test]
+fn a_dialog_chord_pushes_over_keybindings_in_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = dialog_test_shell(cx, "keybindings::open");
+    vcx.simulate_keystrokes("alt-t");
+    assert_eq!(
+        kinds(&shell, &mut vcx),
+        vec![DialogKind::Keybindings, DialogKind::AsOf]
     );
 }
 
@@ -410,7 +454,8 @@ fn a_palette_dialog_entry_pushes(cx: &mut gpui::TestAppContext) {
 }
 
 /// A non-dialog palette action runs behind the stack. The stack stays, and the
-/// top dialog keeps focus even though the action armed a tile focus restore.
+/// top dialog keeps focus because closing the palette already restored it
+/// before dispatch runs, not because the action itself arms a focus restore.
 #[gpui::test]
 fn a_palette_action_behind_the_stack_leaves_focus_on_the_top_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
