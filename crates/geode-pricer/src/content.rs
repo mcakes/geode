@@ -64,6 +64,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("pricer::expand_all", "Expand all packages"),
     ("pricer::collapse_all", "Collapse all packages"),
     ("pricer::price", "Reprice all lines"),
+    ("pricer::open_sheet", "Open sheet…"),
+    ("pricer::rename_sheet", "Rename sheet…"),
+    ("pricer::new_sheet", "New sheet"),
+    ("pricer::remove_sheet", "Remove sheet…"),
     ("pricer::commit", "Commit edit"),
     ("pricer::cancel", "Cancel edit"),
     ("pricer::insert_up", "Insert: up"),
@@ -85,8 +89,16 @@ pub(crate) fn action_title(id: &'static str) -> &'static str {
         .map_or(id, |(_, title)| title)
 }
 
-/// Registered but deliberately unbound: `:price` and the menu reach it.
-pub const NO_DEFAULT_KEY: &[&str] = &["pricer::price"];
+/// Registered but deliberately unbound: `:price` and the menu reach
+/// repricing; the sheet verbs are the `:e`/`:name`/`:new`/`:rm` commands'
+/// pointer and palette forms (the header's sheet name, the menu).
+pub const NO_DEFAULT_KEY: &[&str] = &[
+    "pricer::price",
+    "pricer::open_sheet",
+    "pricer::rename_sheet",
+    "pricer::new_sheet",
+    "pricer::remove_sheet",
+];
 
 /// The module's keymap fragment. Every predicate is a
 /// plain conjunction whose first identifier is `pricer`. Both text fields

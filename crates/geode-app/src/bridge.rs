@@ -2192,6 +2192,110 @@ role = "key"
         );
     }
 
+    /// The sheet picker's filter and the rename field, both opened by the
+    /// pointer on the header's sheet name, are insert focus for the shell
+    /// too: a shifted letter typed after the click is text, never a shell
+    /// binding (`shift+d` is `workspace::duplicate_horizontal`). The keys
+    /// are typed AFTER the click, the way a mouse-opened field is used.
+    #[gpui::test]
+    fn typing_into_the_pricer_sheet_picker_and_rename_field_fires_no_shell_binding(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::diagnostics::fnv1a;
+        let (handle, _rx) = DataHandle::for_tests();
+        let services = test_shell_services();
+        let tail = services.action_tail.clone();
+        let (services, tiles) = with_a_pricer_tile_on(services, test_pricer(&handle), "a");
+        let window = open_pricer_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            })
+        };
+        draw(&mut vcx);
+        let tile = tiles.borrow()[0].clone();
+        let dispatched = |id: &str| {
+            let h = fnv1a(id);
+            tail.lock().unwrap().recent().any(|x| x == h)
+        };
+        let field =
+            |vcx: &mut gpui::VisualTestContext| tile.read_with(vcx, |t, cx| t.sheet_field_text(cx));
+        let name = vcx
+            .debug_bounds("pricer-sheet-name")
+            .expect("the sheet name is painted")
+            .center();
+        let press = |vcx: &mut gpui::VisualTestContext, click_count: usize| {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: name,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Left,
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: name,
+                modifiers: gpui::Modifiers::default(),
+                button: gpui::MouseButton::Left,
+                click_count,
+            });
+            vcx.run_until_parked();
+            draw(vcx);
+        };
+
+        press(&mut vcx, 1);
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some(""),
+            "fixture: the picker opened"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ec");
+        vcx.run_until_parked();
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the sheet picker ran a shell binding"
+        );
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("Dec"),
+            "the picker took the text"
+        );
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert!(dispatched("pricer::cancel"), "escape reached the pricer");
+        assert_eq!(field(&mut vcx), None, "fixture: escape closed the picker");
+
+        press(&mut vcx, 1);
+        press(&mut vcx, 2);
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("a"),
+            "fixture: the rename field opened"
+        );
+        vcx.simulate_keystrokes("shift-d");
+        vcx.simulate_input("ay");
+        vcx.run_until_parked();
+        assert!(
+            !dispatched("workspace::duplicate_horizontal"),
+            "a capital typed into the rename field ran a shell binding"
+        );
+        assert_eq!(
+            field(&mut vcx).as_deref(),
+            Some("Day"),
+            "the rename field took the text over its selected name"
+        );
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert!(dispatched("pricer::commit"), "enter reached the pricer");
+        assert_eq!(field(&mut vcx), None, "enter renamed and closed the field");
+        assert_eq!(
+            tile.read_with(&vcx, |t, _| t.title().to_string()),
+            "Pricer · Day"
+        );
+    }
+
     /// "Add lines…" committed from the shell palette while the bar is open
     /// leaves the bar, its text, and focus in its field. The palette's
     /// commit returns focus to the shell root before it dispatches, so an

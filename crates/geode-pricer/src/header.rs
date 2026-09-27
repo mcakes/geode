@@ -22,10 +22,12 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{
-    App, ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString, div, relative,
+    AnyElement, App, ElementId, Entity, FocusHandle, FontWeight, Hsla, IntoElement, SharedString,
+    div, relative,
 };
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, Theme, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 
 pub(crate) const HEADER_HEIGHT: f32 = 22.0;
 /// The entry bar's key context: `lib::init` reclaims `tab`/`shift-tab`
@@ -188,9 +190,80 @@ pub(crate) struct HeaderChrome<'a> {
     pub menu_tip: SharedString,
     /// The armed `:rm` confirm's focus handle: the prompt tracks it.
     pub confirm: Option<&'a FocusHandle>,
+    /// The sheet name's tooltip selector, built once with the tile.
+    pub name_tip: SharedString,
+    /// The open rename field, painted in the sheet name's place.
+    pub rename: Option<&'a Entity<InputState>>,
+    /// The open sheet picker, rendered by the tile, hung from the name.
+    pub picker: Option<AnyElement>,
 }
 
-pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl IntoElement {
+/// The rename field's width: room for a long sheet name in the header's
+/// text size without pushing the rest of the header about as it grows.
+const RENAME_WIDTH: f32 = 160.0;
+
+/// The sheet's name: a control whose single click toggles the sheet
+/// picker and whose double-click opens the rename field
+/// (`PricerTile::name_pressed`), or the rename field itself while it is
+/// open. A press outside the field cancels it, never commits. The picker
+/// hangs from the name's bottom-left edge.
+fn sheet_name(name: SharedString, c: &mut HeaderChrome, tile_id: u64, theme: &Theme) -> AnyElement {
+    let label: AnyElement = match c.rename {
+        Some(input) => div()
+            .w(scale::design(RENAME_WIDTH))
+            .font_weight(FontWeight::BOLD)
+            .text_color(theme.foreground)
+            .debug_selector(|| "pricer-rename-field".into())
+            .on_mouse_down_out({
+                let tile = c.tile.clone();
+                move |_, window, cx| tile.update(cx, |t, cx| t.close_rename_field(window, cx))
+            })
+            .child(Input::new(input).appearance(false).xsmall().w_full())
+            .into_any_element(),
+        None => div()
+            .id(ElementId::NamedInteger(
+                SharedString::new_static("pricer-sheet-name"),
+                tile_id,
+            ))
+            .px_1()
+            .rounded(theme.radius_tokens().sm)
+            .font_weight(FontWeight::BOLD)
+            .text_color(theme.foreground)
+            .pointer_states(control::paint(
+                theme,
+                control::Rest::Bare,
+                theme.background,
+                theme.foreground,
+            ))
+            .debug_selector(|| "pricer-sheet-name".into())
+            .capture_any_mouse_down({
+                let tile = c.tile.clone();
+                move |event, window, cx| {
+                    if event.button != gpui::MouseButton::Left {
+                        return;
+                    }
+                    tile.update(cx, |t, cx| t.name_pressed(event.click_count, window, cx));
+                }
+            })
+            .tooltip(tips::tip_with(
+                c.name_tip.clone(),
+                SharedString::new_static("Sheets"),
+                Some("pricer::open_sheet"),
+                Some(SharedString::new_static("Double-click to rename")),
+            ))
+            .child(name)
+            .into_any_element(),
+    };
+    div()
+        .relative()
+        .child(label)
+        .when_some(c.picker.take(), |el, p| {
+            el.child(div().absolute().left_0().bottom_0().child(p))
+        })
+        .into_any_element()
+}
+
+pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> impl IntoElement {
     let muted = theme.muted_foreground;
     let warn = chip_paint(theme, Tone::WarningText).text;
     let danger = chip_paint(theme, Tone::DangerText).text;
@@ -202,6 +275,7 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
     };
     let stale = c.stale;
     let tile_id = c.tile_id.0;
+    let name = sheet_name(h.name.clone(), &mut c, tile_id, theme);
     h_flex()
         .w_full()
         .h(scale::design(HEADER_HEIGHT))
@@ -215,17 +289,12 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
         .children(c.stack.and_then(|s| s.marker(theme, c.tile_id)))
         // The sheet's identity: its name and the view it is shown
         // through, one group (closer than the groups around it).
-        .child(
-            h_flex()
-                .gap_1p5()
-                .child(
-                    div()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(theme.foreground)
-                        .child(h.name.clone()),
-                )
-                .child(pair(VIEW_LABEL, h.view.clone(), muted, theme.foreground)),
-        )
+        .child(h_flex().gap_1p5().child(name).child(pair(
+            VIEW_LABEL,
+            h.view.clone(),
+            muted,
+            theme.foreground,
+        )))
         .children(h.shifts.iter().map(|s| {
             div()
                 .px_1()
@@ -255,19 +324,75 @@ pub(crate) fn render(h: &HeaderModel, c: HeaderChrome, theme: &Theme) -> impl In
         // the shell root: bare `y` submits removal and every other key cancels.
         // Stop propagation while the confirmation is armed so that key cannot
         // also invoke a shell or tile action.
+        //
+        // Its Yes/No buttons are the pointer's `y` and "anything else". A
+        // press anywhere but on them cancels, in the capture phase ahead
+        // of whatever the press was aimed at (the question text included).
+        // A press on a button neither cancels nor moves focus: gpui's
+        // `Button` stops its own press and prevents the focus change, so
+        // the prompt keeps the keyboard until the click lands.
         .when_some(h.prompt.clone().zip(c.confirm), |el, (p, focus)| {
             let tile = c.tile.clone();
+            let answer = |yes: bool| {
+                let tile = c.tile.clone();
+                move |_: &gpui::ClickEvent, window: &mut gpui::Window, cx: &mut App| {
+                    tile.update(cx, |t, cx| t.confirm_clicked(yes, window, cx))
+                }
+            };
             el.child(
-                div()
-                    .track_focus(focus)
-                    .debug_selector(move || format!("pricer-remove-confirm-{tile_id}"))
-                    .text_color(theme.foreground)
-                    .child(p)
-                    .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
-                        if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
-                            cx.stop_propagation();
-                        }
-                    }),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .track_focus(focus)
+                            .debug_selector(move || format!("pricer-remove-confirm-{tile_id}"))
+                            .text_color(theme.foreground)
+                            .child(p)
+                            .on_key_down(move |event: &gpui::KeyDownEvent, window, cx| {
+                                if tile.update(cx, |t, cx| t.confirm_key(event, window, cx)) {
+                                    cx.stop_propagation();
+                                }
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .on_mouse_down_out({
+                                let tile = c.tile.clone();
+                                move |_, window, cx| {
+                                    tile.update(cx, |t, cx| t.cancel_remove_on_pointer(window, cx))
+                                }
+                            })
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("pricer-remove-yes-{tile_id}"))
+                                    .child(
+                                        Button::new(ElementId::NamedInteger(
+                                            SharedString::new_static("pricer-remove-yes"),
+                                            tile_id,
+                                        ))
+                                        .xsmall()
+                                        .danger()
+                                        .label("Yes")
+                                        .on_click(answer(true)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("pricer-remove-no-{tile_id}"))
+                                    .child(
+                                        Button::new(ElementId::NamedInteger(
+                                            SharedString::new_static("pricer-remove-no"),
+                                            tile_id,
+                                        ))
+                                        .xsmall()
+                                        .ghost()
+                                        .label("No")
+                                        .on_click(answer(false)),
+                                    ),
+                            ),
+                    ),
             )
         })
         .when_some(h.pricing.clone(), |el, p| el.child(p))
