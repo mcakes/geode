@@ -1643,10 +1643,10 @@ run_mutation "pool: the tag is echoed, not regenerated" \
 # covered by `a_distinct_query_returns_value_counts_on_the_distinct_event`.
 run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
-  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: r.key,' \
-  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
-                    key: QueryKey(0),' \
+  '        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: r.key,' \
+  '        RequestKind::Query => DataEvent::Query(QueryOutcome {
+            key: QueryKey(0),' \
   geode-data \
   an_outcome_is_addressed_to_the_key_that_asked
 
@@ -4415,16 +4415,19 @@ run_mutation "distinct: a derived dimension groups by its own labels, not the so
 # payload actually looks like.
 run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
   crates/geode-data/src/service.rs \
-  '                    values: r.payload.and_then(view_snapshot).map(|s| {
-                        let v = s.column_index("value").expect("distinct selects value");
-                        let n = s.column_index("n").expect("distinct selects n");
-                        (0..s.rows())
-                            .filter_map(|row| {
-                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
-                            })
-                            .collect()
-                    }),' \
-  '                    values: Ok(Vec::new()),' \
+  '            values: r.payload.and_then(view_snapshot).and_then(|s| {
+                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {
+                    return Err(
+                        "internal: a distinct answer without its value and n columns".to_string(),
+                    );
+                };
+                Ok((0..s.rows())
+                    .filter_map(|row| {
+                        Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                    })
+                    .collect())
+            }),' \
+  '            values: Ok(Vec::new()),' \
   geode-data a_distinct_query_returns_value_counts_on_the_distinct_event
 
 # --- Phase 4a Task 3: frame undo/redo, previous as-of, recent
@@ -18202,8 +18205,8 @@ run_mutation "series query: the cap is never checked" \
 # nothing on the chart says why.
 run_mutation "series query: the pair's health is not attached" \
   crates/geode-data/src/service.rs \
-  '                                    s.provenance.health = health_tracker.load_lane(source, &key);' \
-  '                                    let _ = (&key, &health_tracker, &mut s.provenance);' \
+  '                            s.provenance.health = health_tracker.load_lane(source, &key);' \
+  '                            let _ = (&key, &health_tracker, &mut s.provenance);' \
   geode-data \
   a_failed_pairs_health_rides_its_slot
 
@@ -18215,12 +18218,12 @@ run_mutation "series query: the pair's health is not attached" \
 # stays green through it.
 run_mutation "series query: health is filed by position, not slot" \
   crates/geode-data/src/service.rs \
-  '                            for (slot, source, identity) in &pairs {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
-  '                            for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
-                                let key = format!("{identity}@{source}");
-                                if let Some(s) = res.slots.iter_mut().nth(i) {' \
+  '                    for (slot, source, identity) in &pairs {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().find(|s| s.slot == *slot) {' \
+  '                    for (i, (_slot, source, identity)) in pairs.iter().enumerate() {
+                        let key = format!("{identity}@{source}");
+                        if let Some(s) = res.slots.iter_mut().nth(i) {' \
   geode-data \
   health_is_attached_by_slot_number_not_position
 
@@ -21144,7 +21147,7 @@ run_mutation "runner: every local save sweeps" \
 
 run_mutation "runner: a local sweep leaves evicted provenance" \
   crates/geode-data/src/ingest/runner.rs \
-  '            prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
+  '    prune_orphan_provenance(store, dataset).map_err(|e| e.to_string())?;' \
   '' \
   geode-data a_local_sweep_runs_only_past_the_bound_and_prunes_provenance
 
@@ -22993,6 +22996,86 @@ run_mutation "service: the pricing worker's stop sink is unwatched" \
   '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, Arc::clone(&sink));' \
   '        let pricing = PricingWorker::spawn(config.pricer.clone(), price_sink, crate::supervise::unwatched());' \
   geode-data a_supervised_worker_death_reaches_the_services_own_sink
+
+# A distinct snapshot missing its columns is that key's Err. An `.expect`
+# here panics on a query worker, outside the pool's boundary.
+run_mutation "service: a distinct answer without its columns panics" \
+  crates/geode-data/src/service.rs \
+  '                let (Some(v), Some(n)) = (s.column_index("value"), s.column_index("n")) else {' \
+  '                let (Some(v), Some(n)) = (Some(s.column_index("value").expect("value")), Some(s.column_index("n").expect("n"))) else {' \
+  geode-data a_distinct_answer_without_its_columns_is_an_err_for_its_key
+
+# The event is built inside its own boundary; without it a build panic
+# propagates to the pool worker and its key is never answered.
+run_mutation "service: a panic building a result event ends its worker" \
+  crates/geode-data/src/service.rs \
+  '    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| build(r))
+    })) {' \
+  '    match Ok::<_, Box<dyn std::any::Any + Send>>(build(r)) {' \
+  geode-data a_panic_building_a_result_event_answers_its_key_with_an_error
+
+# A listing panic has no identity to fail, so without its own outcome it is
+# only a log line.
+run_mutation "fetch: a panicking identity listing is only logged" \
+  crates/geode-data/src/ingest/fetch.rs \
+  '                    sink(FetchOutcome::IdentitiesPanicked(message));' \
+  '                    let _ = message;' \
+  geode-data a_panicking_identity_listing_is_an_outcome_not_a_log_line
+
+run_mutation "service: a panicking identity listing reaches no one" \
+  crates/geode-data/src/service.rs \
+  '                                let _ = sink(identity_listing_panicked(&source, &payload));' \
+  '                                let _ = (&sink, &source, &payload);' \
+  geode-data a_panicking_identity_listing_is_an_error_diagnostic_naming_the_source
+
+# The stale check fails open; the report is the only trace the load went
+# unchecked.
+run_mutation "runner: a failed stale check is silent" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+        severity: Severity::Error,' \
+  '    let delivered = true || sink(IngestEvent::Diagnostic(Diagnostic {
+        severity: Severity::Error,' \
+  geode-data a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner
+
+# An unreadable catalog row is corruption: an error, counted in the status
+# bar's `data N errors`, not a warning the summary ignores.
+run_mutation "runner: a failed stale check is only a warning" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message: format!(
+            "the stale check for {} could not read the catalog ({what}); loading it anyway",' \
+  '        severity: Severity::Warning,
+        layer: None,
+        file: None,
+        message: format!(
+            "the stale check for {} could not read the catalog ({what}); loading it anyway",' \
+  geode-data a_failed_stale_check_is_an_error_diagnostic_through_the_service
+
+run_mutation "service: a runner diagnostic reaches no one" \
+  crates/geode-data/src/service.rs \
+  '                IngestEvent::Diagnostic(d) => sink(DataEvent::Diagnostics(vec![d])),' \
+  '                IngestEvent::Diagnostic(_) => true,' \
+  geode-data a_failed_stale_check_is_an_error_diagnostic_through_the_service
+
+run_mutation "runner: a panicking local sweep is only logged" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            let delivered = sink(IngestEvent::Diagnostic(Diagnostic {
+                severity: Severity::Error,' \
+  '            let delivered = true || sink(IngestEvent::Diagnostic(Diagnostic {
+                severity: Severity::Error,' \
+  geode-data a_panicking_local_sweep_is_an_error_diagnostic
+
+run_mutation "scheduler: a discovery panic drops its payload" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                    "discovery panicked: {}",
+                    crate::ingest::runner::panic_payload_message(payload.as_ref())' \
+  '                    "discovery panicked{}",
+                    { let _ = payload; "" }' \
+  geode-data a_panicking_discovery_poll_names_its_payload
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
