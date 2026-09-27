@@ -84,6 +84,28 @@ impl DialogKind {
             DialogKind::Plain => "a dialog is already open underneath",
         }
     }
+
+    /// Every kind, for [`is_already_open_notice`].
+    const ALL: [DialogKind; 8] = [
+        DialogKind::Settings,
+        DialogKind::Keybindings,
+        DialogKind::Picker,
+        DialogKind::AsOf,
+        DialogKind::ScopeExpr,
+        DialogKind::Choice,
+        DialogKind::Object,
+        DialogKind::Plain,
+    ];
+}
+
+/// Whether `notice` is one of [`DialogKind::already_open_notice`]'s strings.
+/// `close_modal` uses this to drop a refusal notice once the stack it named
+/// is empty: the kind it referred to no longer exists, so the notice would
+/// otherwise sit in the status bar describing a dialog nothing points to.
+pub(crate) fn is_already_open_notice(notice: &str) -> bool {
+    DialogKind::ALL
+        .iter()
+        .any(|kind| kind.already_open_notice() == notice)
 }
 
 /// Whether a dialog of `kind` may be pushed now. Openers call this before

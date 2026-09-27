@@ -1271,6 +1271,12 @@ impl ShellView {
             self.clear_dialog_state(top.kind);
         }
         if self.modals.is_empty() {
+            // A same-kind refusal's notice names a kind lower in the stack; once
+            // the stack is empty that kind no longer exists, so the notice must
+            // not linger describing a dialog nothing points to.
+            if self.notice.is_some_and(dialog::is_already_open_notice) {
+                self.notice = None;
+            }
             self.return_focus_from_overlay(window, cx);
         } else {
             dialog::refocus_top(self, window, cx);

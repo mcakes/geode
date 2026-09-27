@@ -83,10 +83,12 @@ fn a_pushed_dialog_owns_the_shared_input_until_it_pops(cx: &mut gpui::TestAppCon
 }
 
 /// Enter commits the top dialog (as-of: the highlighted preset) and pops
-/// exactly one level.
+/// exactly one level, restoring the revealed Views dialog's input text,
+/// caret and focus rather than merely leaving its state field populated.
 #[gpui::test]
 fn a_commit_pops_one_level(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
+    vcx.simulate_keystrokes("/ a b");
     dispatch_action(&shell, "frame::as_of", &mut vcx);
     assert_eq!(
         kinds(&shell, &mut vcx),
@@ -100,6 +102,21 @@ fn a_commit_pops_one_level(cx: &mut gpui::TestAppContext) {
     assert!(
         vcx.debug_bounds("shell-modal-panel").is_some(),
         "Views paints again"
+    );
+    assert_eq!(input_text(&shell, &mut vcx), "ab");
+    assert_eq!(input_cursor(&shell, &mut vcx), 2);
+    assert!(dialog_filter_is_focused(&shell, &mut vcx));
+
+    // Typing one more key filters Views, not a stale snapshot.
+    vcx.simulate_keystrokes("c");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s
+            .object_dialog
+            .as_ref()
+            .unwrap()
+            .effective_query()
+            .to_string()),
+        "abc"
     );
 }
 
@@ -136,6 +153,20 @@ fn a_kind_already_in_the_stack_is_refused(cx: &mut gpui::TestAppContext) {
             .to_string()),
         "ab",
         "the refused request must not reinstall the live object dialog's state"
+    );
+
+    // Closing the whole stack must not leave the refusal's notice behind:
+    // it named a kind that no longer exists once the stack is empty.
+    vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            while s.modal_open() {
+                s.close_modal(window, cx);
+            }
+        });
+    });
+    assert!(
+        shell.read_with(&vcx, |s, _| s.notice.is_none()),
+        "the already-open notice must not outlive the stack it referred to"
     );
 }
 
