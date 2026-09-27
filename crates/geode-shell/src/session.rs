@@ -216,6 +216,7 @@ impl FrameRecord {
                 text,
                 expression,
                 impossible: false,
+                named: Vec::new(),
             },
             active_slot,
             as_of,
@@ -2263,6 +2264,7 @@ members = [1, -4]
                 text: Some("spx".into()),
                 expression: Some(parse_expr("delta01 > 100").unwrap()),
                 impossible: false,
+                named: Vec::new(),
             },
             active_slot: Some(3),
             as_of: AsOf::At(

@@ -21737,6 +21737,22 @@ run_mutation "named expr: the user layer replaces an object whole" \
   geode-core \
   the_user_layer_replaces_a_desk_object_whole
 
+# A missing name must fail resolution; skipping it would widen the scope.
+run_mutation "named expr: a missing name fails resolution" \
+  crates/geode-core/src/scope/mod.rs \
+  "                None => return Err(format!(\"named expression '{name}' is missing\"))," \
+  "                None => continue," \
+  geode-core \
+  resolve_names_the_first_bad_reference
+
+# Composition never repeats an outer name.
+run_mutation "named expr: and_then skips a duplicate inner name" \
+  crates/geode-core/src/scope/mod.rs \
+  '.filter(|n| !self.named.contains(n))' \
+  '.filter(|_n| true)' \
+  geode-core \
+  and_then_keeps_outer_names_first_without_duplicates
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -27,6 +27,11 @@ pub const RESERVED_NAMES: [&str; 1] = ["save_current"];
 /// selections, and mixed arrays keep only strings. These silent fallbacks
 /// can remove constraints from the loaded scope.
 ///
+/// `named` is read as an ordered, deduplicated list of strings; a non-array
+/// value warns and is ignored, but the scope is kept. Names are not checked
+/// against the named-expressions document here — [`crate::scope::Scope::resolve`]
+/// reports a missing or invalid name when the scope is used.
+///
 /// This reader does not reject reserved scope names; creation and action
 /// registration enforce action-name conflicts separately.
 pub fn saved_scopes_from_doc(
@@ -95,6 +100,21 @@ pub fn saved_scopes_from_doc(
                 }
             }
         }
+        if let Some(v) = table.get("named") {
+            match v.as_array() {
+                Some(a) => {
+                    for s in a.iter().filter_map(|v| v.as_str()) {
+                        if !scope.named.iter().any(|n| n == s) {
+                            scope.named.push(s.to_string());
+                        }
+                    }
+                }
+                None => diags.push(warn(
+                    format!("scopes.{name}.named"),
+                    format!("scopes: '{name}': named must be an array of strings; ignored"),
+                )),
+            }
+        }
         // Accept when one dataset validates the whole scope; otherwise report
         // the smallest diagnostic set. An empty schema supplies no checks.
         let bad: Vec<Diagnostic> = schema
@@ -132,9 +152,10 @@ pub fn saved_scopes_from_doc(
     (out, diags)
 }
 
-/// Serialize selections, text, and expression in the saved-scope table shape.
-/// Empty selections are omitted. The `impossible` flag is not persisted, so
-/// this is not a lossless serialization of an arbitrary composed scope.
+/// Serialize selections, text, expression, and named-expression references in
+/// the saved-scope table shape. Empty selections and an empty `named` list
+/// are omitted. The `impossible` flag is not persisted, so this is not a
+/// lossless serialization of an arbitrary composed scope.
 pub fn scope_to_table(scope: &Scope) -> toml_edit::Table {
     let mut t = toml_edit::Table::new();
     let mut dims = toml_edit::Table::new();
@@ -157,6 +178,13 @@ pub fn scope_to_table(scope: &Scope) -> toml_edit::Table {
             .map(|e| e.to_string())
             .unwrap_or_default(),
     );
+    if !scope.named.is_empty() {
+        let mut a = toml_edit::Array::new();
+        for n in &scope.named {
+            a.push(n.as_str());
+        }
+        t["named"] = toml_edit::value(a);
+    }
     t
 }
 
@@ -294,5 +322,45 @@ role = "key"
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(saved["eu"].dimensions[0].values, vec!["BK099".to_string()]);
         assert_eq!(saved["us"].dimensions[0].values, vec!["BK002".to_string()]);
+    }
+
+    #[test]
+    fn named_round_trips_and_a_missing_name_never_drops_the_scope() {
+        let schema = schema();
+        let dims = DerivedDimensions::default();
+        let doc =
+            scope_doc("[s]\nnamed = [\"liq\", \"hedges\"]\n[s.dimensions]\nbook = [\"BK001\"]\n");
+        let (saved, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = saved
+            .get("s")
+            .expect("kept although 'liq' is not defined anywhere");
+        assert_eq!(s.named, ["liq", "hedges"]);
+        let table = scope_to_table(s);
+        assert_eq!(
+            table
+                .get("named")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2)
+        );
+        assert!(
+            scope_to_table(&Scope::default()).get("named").is_none(),
+            "empty list omitted"
+        );
+    }
+
+    #[test]
+    fn a_non_array_named_warns_and_is_ignored() {
+        let schema = schema();
+        let dims = DerivedDimensions::default();
+        let doc = scope_doc("[s]\nnamed = \"liq\"\n[s.dimensions]\nbook = [\"BK001\"]\n");
+        let (saved, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+        assert!(saved.get("s").unwrap().named.is_empty());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("scopes.s.named"))
+        );
     }
 }
