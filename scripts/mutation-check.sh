@@ -6844,7 +6844,8 @@ run_mutation "expr-dialog: an empty commit clears the expression" \
 # assertion (the expression never lands), not by its later undo check.
 run_mutation "expr-dialog: enter commits the parsed expression to the frame" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '            Ok(frame.set_scope(scope))' \
+  '            scope.expression = parsed;
+            Ok(frame.set_scope(scope))' \
   '            Ok(frame.clear_scope())' \
   geode-shell \
   typing_an_expression_and_enter_sets_it_through_set_scope
@@ -6916,12 +6917,8 @@ run_mutation "expr-chips: append joins the existing expression with and" \
 # The dialog's add mode appends; committing as whole mode replaces.
 run_mutation "expr-chips: the add dialog appends rather than replaces" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '        Mode::Add => Ok(parsed.is_some_and(|e| frame.append_expression(e))),' \
-  '        Mode::Add => {
-            let mut scope = frame.scope().clone();
-            scope.expression = parsed;
-            Ok(frame.set_scope(scope))
-        }' \
+  '                    Some(existing) => Expr::And(Box::new(existing), Box::new(term)),' \
+  '                    Some(_) => term,' \
   geode-shell \
   the_plus_menus_expression_row_appends_with_and
 
