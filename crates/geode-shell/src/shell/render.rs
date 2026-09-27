@@ -948,30 +948,63 @@ impl Render for ShellView {
             self.choice_dialog.as_ref().map(|d| &d.target),
             Some(choicedialog::Target::Grouping { .. })
         );
-        let toolbar = toolbar::toolbar(
-            &self.filter_input,
-            &bar_model,
-            grouping_open,
-            add_menu,
-            on_chip_close,
-            on_chip_open,
-            on_add,
-            on_save,
-            on_grouping,
-            on_as_of,
-            on_term_open,
-            on_term_close,
-            on_named_open,
-            on_named_close,
-            cx,
-        );
+        // An open page replaces the workspace: toolbar, stripe, and tile
+        // surface are neither built nor painted; the sidebar and status bar
+        // stay. The page must be in the element tree while it holds focus:
+        // gpui dispatches keys for an unrendered focus handle from the window
+        // root, above this view's key listener.
+        let page_open = self.page_open();
+        let page_view = self
+            .page
+            .as_ref()
+            .filter(|p| p.open)
+            .map(|p| p.occupant.view.clone());
+        let toolbar = if page_open {
+            None
+        } else {
+            Some(toolbar::toolbar(
+                &self.filter_input,
+                &bar_model,
+                grouping_open,
+                add_menu,
+                on_chip_close,
+                on_chip_open,
+                on_add,
+                on_save,
+                on_grouping,
+                on_as_of,
+                on_term_open,
+                on_term_close,
+                on_named_open,
+                on_named_close,
+                cx,
+            ))
+        };
 
-        let body = h_flex()
-            .w_full()
-            .h(px(content_height))
-            .flex_none()
-            .child(sidebar)
-            .child(surface);
+        let body = match page_view {
+            Some(view) => h_flex()
+                .w_full()
+                .h(px(content_height + toolbar_height + stripe_height))
+                .flex_none()
+                .child(sidebar)
+                .child(
+                    div()
+                        .id("shell-page")
+                        .debug_selector(|| "shell-page".to_string())
+                        .w(px(tile_width))
+                        .h(px(content_height + toolbar_height + stripe_height))
+                        .flex_none()
+                        .overflow_hidden()
+                        .bg(cx.theme().background)
+                        .child(view),
+                ),
+            None => h_flex()
+                .w_full()
+                .h(px(content_height))
+                .flex_none()
+                .child(sidebar)
+                .child(surface),
+        };
 
         let width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
@@ -1044,10 +1077,10 @@ impl Render for ShellView {
             )
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(toolbar)
-            // Paint the warning stripe only for `AsOf::At`. Its height was
-            // already subtracted from the tile surface.
-            .when(is_historical, |el| {
+            .when_some(toolbar, |el, toolbar| el.child(toolbar))
+            // Paint the warning stripe only for `AsOf::At` and no page. Its
+            // height was already subtracted from the tile surface.
+            .when(is_historical && !page_open, |el| {
                 el.child(
                     div()
                         .w_full()

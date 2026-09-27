@@ -8,6 +8,7 @@ use crate::defaults::{
     register_scope_actions,
 };
 use crate::keymap::build_keymap;
+use crate::module::recording::RecordingPageFactory;
 use crate::tiling::{DockSide, Rect};
 use geode_core::config::{ConfigSources, Layer, LayerDoc};
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, div, px};
@@ -242,7 +243,54 @@ pub(super) fn services_with_recorders(
         keymap_diagnostics: Vec::new(),
         keymap_fragments,
         keymap_fragment_diagnostics,
+        pages: crate::module::PageRoster::new(),
+        restored_pages: std::collections::BTreeMap::new(),
     }
+}
+
+/// A shell with one registered page over the standard "rec" roster. The
+/// roster is not empty because [`TEST_ADD_KEYMAP`] binds the recorder's
+/// add actions in every fixture keymap; a fresh session still opens with
+/// no tile, so the page tests never see a recorder occupant.
+pub(super) fn services_with_page(page: RecordingPageFactory) -> ShellServices {
+    with_page(
+        services_with_recorders(vec![crate::module::recording::RecordingFactory::new("rec")]),
+        page,
+    )
+}
+
+/// `services` plus one registered page, its actions and fragments folded
+/// into the registry and keymap in `main.rs`'s order: page toggle actions
+/// after the module roster's own, page fragments after the module
+/// fragments.
+pub(super) fn with_page(mut services: ShellServices, page: RecordingPageFactory) -> ShellServices {
+    use crate::module::PageFactory as _;
+    let mut registry = ActionRegistry::default();
+    register_builtin_actions(&mut registry);
+    register_pick_actions(
+        &mut registry,
+        &crate::shell::pickable_columns(&services.config),
+    );
+    register_scope_actions(
+        &mut registry,
+        &crate::shell::saved_scopes(&services.config, false),
+    );
+    crate::defaults::register_add_actions(&mut registry, &services.roster.kinds());
+    services.roster.register_actions(&mut registry);
+    crate::defaults::register_page_actions(&mut registry, &[(page.kind(), page.title())]);
+    let mut pages = crate::module::PageRoster::new();
+    pages.add(Box::new(page));
+    pages.register_actions(&mut registry);
+    let (mut fragments, mut diags) = services.roster.keymap_fragments();
+    let (page_fragments, page_diags) = pages.keymap_fragments();
+    fragments.extend(page_fragments);
+    diags.extend(page_diags);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = test_keymap_with_fragments(&registry, &fragments, &[]);
+    services.registry = registry;
+    services.keymap_fragments = fragments;
+    services.pages = pages;
+    services
 }
 
 fn services_with_rec_roster_shipping(
@@ -601,6 +649,7 @@ mod keybindings_dialog;
 mod launch;
 mod objectdialog;
 mod occupants;
+mod pages;
 mod palette;
 mod perf;
 mod picker;

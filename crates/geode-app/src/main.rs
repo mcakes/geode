@@ -28,7 +28,7 @@ use geode_shell::diagnostics::ActionTail;
 use geode_shell::fonts;
 use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
-use geode_shell::module::ModuleRoster;
+use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
 use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
 use geode_shell::theme;
@@ -579,6 +579,8 @@ fn build_shell_services(
         // doc comment for why they are carried rather than recomputed.
         keymap_fragments: fragments,
         keymap_fragment_diagnostics: frag_diags,
+        pages: PageRoster::new(),
+        restored_pages: std::collections::BTreeMap::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }

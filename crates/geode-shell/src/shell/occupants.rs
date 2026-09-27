@@ -498,6 +498,15 @@ impl ShellView {
         cx: &App,
     ) -> Option<Vec<crate::keymap::KeyContext>> {
         window.focused(cx)?;
+        if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+            // The full stack, unfiltered: `insert_contexts` applies the
+            // `mode == insert` filter to bare keys itself, so a page whose
+            // context carries no `mode` lets bare keys reach its input.
+            if !page.occupant.content.holds_focus(window, cx) {
+                return None;
+            }
+            return Some(self.context_stack(cx));
+        }
         let tile = self.services.workspaces.active().focused_tile()?;
         if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;

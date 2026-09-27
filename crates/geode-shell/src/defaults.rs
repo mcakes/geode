@@ -68,6 +68,12 @@ context = "workspace"
 "ctrl+{" = "dock::move_left"
 "ctrl+}" = "dock::move_right"
 "ctrl+?" = "dock::move_bottom"
+
+# Context-free: a workspace switch is application navigation, reachable
+# from a page (whose context stack carries no `workspace`) as well as
+# from the tile surface.
+[[bindings]]
+[bindings.keys]
 "mod+1" = "workspace::switch_1"
 "mod+2" = "workspace::switch_2"
 "mod+3" = "workspace::switch_3"
@@ -77,9 +83,6 @@ context = "workspace"
 "mod+7" = "workspace::switch_7"
 "mod+8" = "workspace::switch_8"
 "mod+9" = "workspace::switch_9"
-
-[[bindings]]
-[bindings.keys]
 "ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
 "ctrl+," = "settings::open"

@@ -1430,6 +1430,8 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1470,6 +1472,8 @@ role = "key"
             keymap_diagnostics: Vec::new(),
             keymap_fragments: Vec::new(),
             keymap_fragment_diagnostics: Vec::new(),
+            pages: geode_shell::module::PageRoster::new(),
+            restored_pages: std::collections::BTreeMap::new(),
         };
         (services, log)
     }

@@ -47,14 +47,32 @@ fn pull_direction(id: &str) -> Option<Direction> {
 /// (the command line, find, or the stack list) while a dialog is open.
 pub(super) const CLOSE_DIALOG_FIRST: &str = "close the dialog first";
 
+/// The notice when an action wants transient tile chrome, or would add,
+/// duplicate, or resize a tile, while a page covers the tile surface.
+pub(super) const CLOSE_PAGE_FIRST: &str = "close the page first (esc)";
+
 /// The notice when no registered kind accepts the focused tile's context.
 pub(crate) const NO_MODULE_OPENS: &str = "no module opens on the context at the cursor";
 
 impl ShellView {
     /// Active contexts, outermost first: workspace, then tile and occupant when
-    /// an occupant is focused, then palette while open. Used for ordinary matching
-    /// and the palette toggle; exclusive input owners bypass ordinary matching.
+    /// an occupant is focused, then palette while open. While a page is open
+    /// it is `page`, then the page's own context, then palette: no workspace,
+    /// no tile. Used for ordinary matching and the palette toggle; exclusive
+    /// input owners bypass ordinary matching.
     pub(super) fn context_stack(&self, cx: &App) -> Vec<KeyContext> {
+        if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+            // A page replaces the workspace: no `workspace`, no `tile`, so
+            // tile and workspace bindings stay inert until it closes.
+            let mut stack = vec![
+                KeyContext::new("page"),
+                page.occupant.content.key_context(cx),
+            ];
+            if self.palette.is_some() {
+                stack.push(KeyContext::new("palette"));
+            }
+            return stack;
+        }
         let mut stack = vec![KeyContext::new("workspace")];
         if let Some(tile) = self.services.workspaces.active().focused_tile()
             && let Some(o) = self.occupants.get(&tile)
@@ -139,6 +157,54 @@ impl ShellView {
         {
             self.notice = Some(CLOSE_DIALOG_FIRST);
             return;
+        }
+        // A page covers the tile surface: it cannot host a `:` line, find,
+        // or stack list, and nothing may add, duplicate, or resize a tile
+        // the trader cannot see. The palette reaches these ids over a page
+        // as the keymap does, so the refusal lives here, not in a context.
+        if self.page_open()
+            && (matches!(
+                action.0.as_str(),
+                "tile::command_line"
+                    | "tile::find"
+                    | "stack::pick"
+                    | "tile::add"
+                    | "tile::open_with"
+                    | "tile::autosize_columns"
+                    | "workspace::duplicate_horizontal"
+                    | "workspace::duplicate_vertical"
+            ) || crate::defaults::parse_add_action(&action.0).is_some())
+        {
+            self.notice = Some(CLOSE_PAGE_FIRST);
+            return;
+        }
+        if let Some(kind) = action.0.strip_prefix("page::toggle_") {
+            if self.modal_open() {
+                self.notice = Some(CLOSE_DIALOG_FIRST);
+                return;
+            }
+            let kind = kind.to_string();
+            self.toggle_page(&kind, window, cx);
+            return;
+        }
+        if action.0 == "page::close" {
+            if self.page_open() {
+                // The page sees the close first: `true` means it dismissed
+                // something of its own and stays open.
+                let consumed = self
+                    .page
+                    .as_ref()
+                    .map(|p| p.occupant.content.dispatch(action, count, window, cx))
+                    .unwrap_or(false);
+                if !consumed {
+                    self.close_page(window, cx);
+                }
+            }
+            return;
+        }
+        // A workspace switch is a route home from any page.
+        if self.page_open() && action.0.starts_with("workspace::switch_") {
+            self.close_page(window, cx);
         }
 
         if action.0 == "stack::next" || action.0 == "stack::prev" {
@@ -261,7 +327,8 @@ impl ShellView {
             self.set_line_numbers(self.line_numbers.next(), cx);
         } else if action.0 == "perf::toggle_overlay" {
             // Toggle the readout only; frame-time recording continues while hidden.
-            self.perf_overlay = !self.perf_overlay;
+            let next = !self.perf_overlay;
+            self.set_perf_overlay(next, cx);
             cx.notify();
         } else if action.0 == "tile::command_line" {
             self.open_command_line(Prompt::Command, window, cx);
@@ -463,8 +530,11 @@ impl ShellView {
             if profiling_hook::dispatch(self, action, window, cx) {
                 return;
             }
-            // Offer remaining ids to the focused occupant. Unhandled ids have no effect.
-            if let Some(tile) = self.services.workspaces.active().focused_tile()
+            // Offer remaining ids to the open page, else the focused
+            // occupant. Unhandled ids have no effect.
+            if let Some(page) = self.page.as_ref().filter(|p| p.open) {
+                page.occupant.content.dispatch(action, count, window, cx);
+            } else if let Some(tile) = self.services.workspaces.active().focused_tile()
                 && let Some(o) = self.occupants.get(&tile)
             {
                 o.content.dispatch(action, count, window, cx);

@@ -110,6 +110,11 @@ fn stopped_segment(stopped: &[StoppedThread]) -> Option<StoppedSegment> {
     })
 }
 
+/// The kind under which the diagnostics page registers. The shell's status
+/// bar summary click dispatches `page::toggle_<this>`; the feature crate's
+/// factory returns it from `kind()`.
+pub const DIAGNOSTICS_PAGE_KIND: &str = "diagnostics";
+
 /// Why the bridge should read the catalog. Explicit requests (for example an
 /// identity picker) remain valid without a visible diagnostics tile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +284,9 @@ pub struct Diagnostics {
     versions: DiagVersions,
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
+    /// The shell's `perf_overlay` as of its last toggle, mirrored by
+    /// [`Self::set_overlay_visible`]; see that method.
+    overlay_visible: bool,
     pending_catalog_request: bool,
     pending_explicit_catalog: bool,
     /// Status summary cached by combined version. A cache hit shares the
@@ -308,6 +316,7 @@ impl Diagnostics {
             versions: DiagVersions::default(),
             pending_level: None,
             pending_overlay_toggle: false,
+            overlay_visible: false,
             pending_catalog_request: false,
             pending_explicit_catalog: false,
             summary_cache: RefCell::new((u64::MAX, Rc::from(""))),
@@ -644,6 +653,24 @@ impl Diagnostics {
 
     pub fn take_pending_overlay_toggle(&mut self) -> bool {
         std::mem::take(&mut self.pending_overlay_toggle)
+    }
+
+    /// Whether the performance overlay is showing, mirrored here by the
+    /// shell on every toggle so a page can paint a controlled switch. Bumps
+    /// the perf counter so a perf-section observer repaints. Returns whether
+    /// the value changed.
+    pub fn set_overlay_visible(&mut self, visible: bool) -> bool {
+        if self.overlay_visible == visible {
+            return false;
+        }
+        self.overlay_visible = visible;
+        self.version += 1;
+        self.versions.perf += 1;
+        true
+    }
+
+    pub fn overlay_visible(&self) -> bool {
+        self.overlay_visible
     }
 
     /// Consume queued demand, preserving explicit consumers when diagnostics hides.

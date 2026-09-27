@@ -25,6 +25,7 @@ pub mod keys;
 pub mod listrow;
 pub mod objectdialog;
 mod occupants;
+mod page;
 mod palette_ctl;
 pub mod perf_overlay;
 pub mod picker;
@@ -61,7 +62,7 @@ use crate::fontsize::FontSize;
 use crate::frame::{Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::log_persist;
-use crate::module::{ModuleRoster, TileOccupant};
+use crate::module::{ModuleRoster, PageRoster, TileOccupant};
 use crate::palette::PaletteState;
 use crate::perf::FrameHistogram;
 use crate::reload;
@@ -136,6 +137,12 @@ pub struct ShellServices {
     /// again by `build_keymap`. Startup also includes this list in
     /// [`Self::keymap_diagnostics`].
     pub keymap_fragment_diagnostics: Vec<Diagnostic>,
+    /// The app's registered pages, in sidebar order. Empty in tests that
+    /// build no page.
+    pub pages: PageRoster,
+    /// `[pages.<kind>]` tables from the loaded session, consumed by the
+    /// page's first open. Unmatched tables are carried to the next save.
+    pub restored_pages: std::collections::BTreeMap<String, toml::Table>,
 }
 
 /// Runtime logging services: the diagnostics ring, the palette's level
@@ -528,6 +535,10 @@ pub struct ShellView {
     /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
     /// changes nothing about recording, which always runs.
     perf_overlay: bool,
+    /// The one page this window has created, open or not. Created on its
+    /// first `page::toggle_<kind>` and retained so a round trip keeps its
+    /// state; `open` is the only flag a toggle changes. `None` until then.
+    page: Option<page::OpenPage>,
     /// The shared frame, created here so every occupant can hold it.
     frame: Entity<Frame>,
     /// Shared diagnostics state, fed by the app bridge and config load/reload.
@@ -1224,6 +1235,7 @@ impl ShellView {
             perf: FrameHistogram::new(),
             last_render_started: None,
             perf_overlay: false,
+            page: None,
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
@@ -1464,9 +1476,22 @@ impl ShellView {
             }
         }
         if pending_overlay {
-            self.perf_overlay = !self.perf_overlay;
+            let next = !self.perf_overlay;
+            self.set_perf_overlay(next, cx);
         }
         cx.notify();
+    }
+
+    /// Set the overlay and mirror it into `Diagnostics` in one place. Both
+    /// the keyboard action and the entity's toggle channel come through here
+    /// so the page's switch and the readout can never disagree.
+    pub(super) fn set_perf_overlay(&mut self, visible: bool, cx: &mut Context<Self>) {
+        self.perf_overlay = visible;
+        self.diagnostics.update(cx, |d, cx| {
+            if d.set_overlay_visible(visible) {
+                cx.notify();
+            }
+        });
     }
 
     /// Set a grouping slot in memory and notify the frame observer, which
