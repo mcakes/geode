@@ -36,8 +36,9 @@ pub fn health_tone(health: Option<&Health>) -> Tone {
 }
 
 /// The health column's spelling: a title-case word, unlike the snake-case
-/// `Health::label` the status summary and the session file use.
-fn health_title(health: &Health) -> &'static str {
+/// `Health::label` the status summary and the session file use. The
+/// history line in the detail strip spells its entries the same way.
+pub fn health_title(health: &Health) -> &'static str {
     match health {
         Health::Ok => "Ok",
         Health::Pending => "Pending",

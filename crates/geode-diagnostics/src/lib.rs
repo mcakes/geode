@@ -5,8 +5,10 @@
 pub mod commands;
 pub mod log;
 pub mod model;
+pub mod prepared;
 pub mod section;
 pub mod sections;
+pub mod table;
 mod tile;
 
 use std::cell::RefCell;
